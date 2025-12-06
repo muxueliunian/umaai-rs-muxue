@@ -191,7 +191,9 @@ pub struct SupportCard {
     /// 支援卡基础属性
     pub effect: CardTrainingEffect,
     /// 固有状态
-    pub effect_state: HashMap<String, u32>
+    pub effect_state: HashMap<String, u32>,
+    /// 已经获得的Hint等级
+    pub total_hints: i32
 }
 
 impl SupportCard {
@@ -248,7 +250,8 @@ impl SupportCard {
             friendship,
             is_link_card: false,
             is_locked: false,
-            effect_state: HashMap::new()
+            effect_state: HashMap::new(),
+            total_hints: 0
         })
     }
     /// 计算当前卡在指定位置时, 考虑固有的实际面板  

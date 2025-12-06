@@ -17,7 +17,7 @@ pub type Array6 = [i32; 6];
 pub fn init_logger(level: &str) -> Result<()> {
     let filter = match level.to_lowercase().as_str() {
         "off" => log::LevelFilter::Off,
-        _ => log::LevelFilter::Debug, // 默认显示全部日志
+        _ => log::LevelFilter::Debug // 默认显示全部日志
     };
 
     let mut builder = Builder::new();

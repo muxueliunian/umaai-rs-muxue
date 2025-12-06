@@ -3,7 +3,8 @@
     "pt_score_rate": 2.0,
     "hint_pt_rate": 6.5,
     "base_hint_rate": 7.5,
-    "group_buff_end_prob": [ 0, 0, 0.3, 0.3, 0.3, 1.0 ],
+    "group_buff_end_prob": [ 0, 0, 0, 0.3, 0.3, 0.3, 1.0 ],
+    "max_hint_per_card": 50,
     "event_probs": {
         "card_event": 0.35,
         "uma_event": 0.25,

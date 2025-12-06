@@ -368,7 +368,9 @@ pub struct GameConstants {
     /// 休息结果分布 +30=18%,+50=57%,+70=25%
     pub rest_probs: Vec<i32>,
     /// 红点属性
-    pub hint_event_value: Vec<Array6>
+    pub hint_event_value: Vec<Array6>,
+    /// 每张卡最大提供Hint等级
+    pub max_hint_per_card: i32
 }
 
 impl GameConstants {
