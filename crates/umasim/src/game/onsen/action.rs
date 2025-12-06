@@ -2,13 +2,14 @@ use std::fmt::Display;
 
 use anyhow::Result;
 use colored::Colorize;
-use rand::rngs::StdRng;
 use log::info;
+use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     game::{base::*, onsen::game::OnsenGame, *},
-    gamedata::{GAMECONSTANTS, onsen::ONSENDATA}, utils::system_event
+    gamedata::{GAMECONSTANTS, onsen::ONSENDATA},
+    utils::system_event
 };
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -89,15 +90,20 @@ impl ActionEnum for OnsenAction {
                 let race_bonus = (100 + game.uma.race_bonus) as f32 / 100.0;
                 if game.uma.is_race_turn(game.turn)? {
                     let mut scenario_bonus = if game.turn < 72 {
-                        global!(ONSENDATA).career_race_multiplier * 
-                        (100 + game.scenario_buff.onsen.career_race_bonus) as f32 / 100.0 }
-                    else {
+                        global!(ONSENDATA).career_race_multiplier
+                            * (100 + game.scenario_buff.onsen.career_race_bonus) as f32
+                            / 100.0
+                    } else {
                         1.0
                     };
-                    if game.uma.chara_id() == 1063 {    // 狄杜斯：再增加50%
+                    if game.uma.chara_id() == 1063 {
+                        // 狄杜斯：再增加50%
                         scenario_bonus *= 1.5;
                     }
-                    info!(">> 生涯比赛 - 比赛加成: {}, 剧本加成: {scenario_bonus}x", game.uma.race_bonus);
+                    info!(
+                        ">> 生涯比赛 - 比赛加成: {}, 剧本加成: {scenario_bonus}x",
+                        game.uma.race_bonus
+                    );
                     let mut event = system_event("race_career")?.clone();
                     // 事件面板乘算比赛加成
                     event.choices[0].map_status(|x| (x as f32 * race_bonus * scenario_bonus).round() as i32);
@@ -158,13 +164,9 @@ impl ActionEnum for OnsenAction {
                 Ok(())
             }
             // ========== 挖掘动作（选择温泉） ==========
-            OnsenAction::Dig(onsen_index) => {
-                game.do_select_dig(*onsen_index as usize)
-            }
+            OnsenAction::Dig(onsen_index) => game.do_select_dig(*onsen_index as usize),
             // ========== 升级工具动作 ==========
-            OnsenAction::Upgrade(tool) => {
-                game.do_upgrade_equipment(*tool as usize)
-            }
+            OnsenAction::Upgrade(tool) => game.do_upgrade_equipment(*tool as usize)
         }
     }
 

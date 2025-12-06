@@ -16,6 +16,7 @@ hashbrown.workspace = true
 indicatif.workspace = true
 inquire.workspace = true
 log.workspace = true
+notify.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
 ratatui.workspace = true

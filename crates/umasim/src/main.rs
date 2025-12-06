@@ -17,16 +17,13 @@ use crate::{
 pub mod explain;
 pub mod game;
 pub mod gamedata;
+pub mod protocol;
 pub mod trainer;
 pub mod utils;
 
 /// 运行 OnsenGame
 fn run_onsen<T: crate::game::Trainer<OnsenGame>>(
-    trainer: &T,
-    uma: u32,
-    cards: &[u32; 6],
-    inherit: InheritInfo,
-    rng: &mut StdRng
+    trainer: &T, uma: u32, cards: &[u32; 6], inherit: InheritInfo, rng: &mut StdRng
 ) -> Result<()> {
     let mut game = OnsenGame::newgame(uma, cards, inherit)?;
     println!("{}", game.explain()?);
@@ -48,11 +45,7 @@ fn run_onsen<T: crate::game::Trainer<OnsenGame>>(
 
 /// 运行 BasicGame
 fn run_basic<T: crate::game::Trainer<BasicGame>>(
-    trainer: &T,
-    uma: u32,
-    cards: &[u32; 6],
-    inherit: InheritInfo,
-    rng: &mut StdRng
+    trainer: &T, uma: u32, cards: &[u32; 6], inherit: InheritInfo, rng: &mut StdRng
 ) -> Result<()> {
     let mut game = BasicGame::newgame(uma, cards, inherit)?;
     println!("{}", game.explain()?);

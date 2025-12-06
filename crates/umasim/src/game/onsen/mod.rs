@@ -45,10 +45,7 @@ impl BathingInfo {
         } else {
             "普通".bright_black()
         };
-        format!(
-            "温泉券: {}, {}, {}",
-            self.ticket_num, buff_text, super_text
-        )
+        format!("温泉券: {}, {}, {}", self.ticket_num, buff_text, super_text)
     }
 }
 
