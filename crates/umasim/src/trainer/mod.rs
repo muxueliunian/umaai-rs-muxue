@@ -8,6 +8,15 @@ use crate::{
     gamedata::ActionValue
 };
 
+// 导出手写策略训练员和 MCTS 训练员
+pub mod handwritten_trainer;
+pub mod mcts_trainer;
+pub mod collector_trainer;
+
+pub use handwritten_trainer::HandwrittenTrainer;
+pub use mcts_trainer::MctsTrainer;
+pub use collector_trainer::CollectorTrainer;
+
 /// 猴子训练师
 pub struct RandomTrainer;
 

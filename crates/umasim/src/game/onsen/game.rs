@@ -79,6 +79,309 @@ impl DerefMut for OnsenGame {
 }
 
 impl OnsenGame {
+    /// 提取神经网络输入特征（500 维）
+    ///
+    /// # 参数
+    /// - `pending_choices`: 可选的事件选项列表（用于提取事件选项特征）
+    ///
+    /// # 返回
+    /// 590 维 f32 向量：
+    /// - 全局信息（410 维）
+    ///   - 搜索参数（6 维）
+    ///   - 回合信息（78 维）
+    ///   - 马娘属性（15 维）
+    ///   - 体力与干劲（5 维）
+    ///   - 训练数值（30 维）
+    ///   - 失败率（5 维）
+    ///   - **温泉剧本特定（140 维）** - 支持温泉选择学习
+    ///   - 其他信息（61 维）
+    ///   - 事件选项特征（70 维）
+    /// - 支援卡信息（30 维 × 6 张 = 180 维）
+    pub fn extract_nn_features(&self, pending_choices: Option<&[ActionValue]>) -> Vec<f32> {
+        let mut features = vec![0.0_f32; 590];
+        let mut idx = 0;
+
+        // ========== 全局信息（320 维） ==========
+
+        // 1. 搜索参数（6 维）- 预留，当前填充 0
+        idx += 6;
+
+        // 2. 回合信息（78 维）- One-Hot 编码
+        if (self.turn as usize) < 78 {
+            features[idx + self.turn as usize] = 1.0;
+        }
+        idx += 78;
+
+        // 3. 马娘属性（15 维）
+        // 五维属性（归一化到 0-1）
+        for i in 0..5 {
+            features[idx + i] = self.uma.five_status[i] as f32 / 50.0;
+        }
+        // 五维属性上限
+        for i in 0..5 {
+            features[idx + 5 + i] = self.uma.five_status_limit[i] as f32 / 50.0;
+        }
+        // 剩余空间（limit - current）
+        for i in 0..5 {
+            let remain = self.uma.five_status_limit[i] - self.uma.five_status[i];
+            features[idx + 10 + i] = remain as f32 / 50.0;
+        }
+        idx += 15;
+
+        // 4. 体力与干劲（5 维）
+        features[idx] = self.uma.vital as f32 / 100.0;
+        features[idx + 1] = self.uma.max_vital as f32 / 100.0;
+        features[idx + 2] = self.uma.motivation as f32 / 4.0;
+        // 3-4: 预留
+        idx += 5;
+
+        // 5. 训练数值（30 维）- 5种训练 × 6维收益
+        for train in 0..5 {
+            if let Ok(buffs) = self.calc_training_buff(train) {
+                if let Ok(gain) = self.calc_training_value(&buffs, train) {
+                    features[idx + train * 6 + 0] = gain.status_pt[0] as f32 / 10.0; // 速度
+                    features[idx + train * 6 + 1] = gain.status_pt[1] as f32 / 10.0; // 耐力
+                    features[idx + train * 6 + 2] = gain.status_pt[2] as f32 / 10.0; // 力量
+                    features[idx + train * 6 + 3] = gain.status_pt[3] as f32 / 10.0; // 根性
+                    features[idx + train * 6 + 4] = gain.status_pt[4] as f32 / 10.0; // 智力
+                    features[idx + train * 6 + 5] = gain.status_pt[5] as f32 / 10.0; // 技能点
+                }
+            }
+        }
+        idx += 30;
+
+        // 6. 失败率（5 维）
+        for train in 0..5 {
+            if let Ok(buffs) = self.calc_training_buff(train) {
+                let fail_rate = self.calc_training_failure_rate(&buffs, train);
+                features[idx + train] = fail_rate / 100.0;
+            }
+        }
+        idx += 5;
+
+        // 7. 温泉剧本特定（140 维）- 支持温泉选择学习
+        // 获取温泉静态数据
+        let onsen_data = crate::gamedata::onsen::ONSENDATA.get();
+
+        // ========== 7.1 全局温泉状态（20 维） ==========
+
+        // 当前温泉索引 One-Hot（10 维）
+        if self.current_onsen < 10 {
+            features[idx + self.current_onsen] = 1.0;
+        }
+
+        // 已完成温泉数量（1 维）
+        let completed_count = self.onsen_state.iter().filter(|&&x| x).count();
+        features[idx + 10] = completed_count as f32 / 10.0;
+
+        // 装备等级 [砂/土/岩]（3 维）
+        features[idx + 11] = self.dig_level[0] as f32 / 6.0;
+        features[idx + 12] = self.dig_level[1] as f32 / 6.0;
+        features[idx + 13] = self.dig_level[2] as f32 / 6.0;
+
+        // 挖掘力加成（3 维）- 根据五维属性计算
+        // 参考 dig_stat_bonus_types: [[1,5,2], [4,1,3], [3,5,2]]
+        // 砂层: 耐力(1) + 技能(5) + 力量(2)
+        // 土层: 根性(4) + 耐力(1) + 根性(3)
+        // 岩层: 根性(3) + 技能(5) + 力量(2)
+        features[idx + 14] = self.dig_power[0] as f32 / 100.0;
+        features[idx + 15] = self.dig_power[1] as f32 / 100.0;
+        features[idx + 16] = self.dig_power[2] as f32 / 100.0;
+
+        // 温泉券数量（1 维）
+        features[idx + 17] = self.bathing.ticket_num as f32 / 5.0;
+
+        // 超回复状态（1 维）
+        features[idx + 18] = if self.bathing.is_super { 1.0 } else { 0.0 };
+
+        // 累计体力消耗（1 维）- 用于超回复判断
+        features[idx + 19] = self.dig_vital_cost as f32 / 200.0;
+
+        idx += 20;
+
+        // ========== 7.2 每个温泉的详细状态（12 维 × 10 = 120 维） ==========
+
+        for i in 0..10 {
+            let base = idx + i * 12;
+
+            // 获取静态数据（如果可用）
+            let (unlock_turn, dig_volume, effect_value, main_effect_type) =
+                if let Some(data) = onsen_data {
+                    if let Some(info) = data.onsen_info.get(i) {
+                        // 计算主效果类型（友情加成最高的属性）
+                        let youqing = &info.effect.youqing;
+                        let main_type = youqing.iter()
+                            .enumerate()
+                            .max_by_key(|&(_, v)| *v)
+                            .map(|(idx, _)| idx)
+                            .unwrap_or(0);
+
+                        // 计算效果价值（综合评估）
+                        let value = info.effect.vital as f32 * 2.0
+                            + youqing.iter().sum::<i32>() as f32
+                            + info.effect.career_race_bonus as f32 * 0.5
+                            + info.effect.hint_bonus as f32 * 0.3
+                            + info.effect.split as f32 * 20.0;
+
+                        (
+                            info.unlock_turn,
+                            info.dig_volume.clone(),
+                            value,
+                            main_type
+                        )
+                    } else {
+                        (0, vec![0, 0, 0], 0.0, 0)
+                    }
+                } else {
+                    (0, vec![0, 0, 0], 0.0, 0)
+                };
+
+            // 1. 是否已解锁（1 维）
+            features[base] = if self.turn >= unlock_turn { 1.0 } else { 0.0 };
+
+            // 2. 是否已完成（1 维）
+            features[base + 1] = if self.onsen_state[i] { 1.0 } else { 0.0 };
+
+            // 3. 当前挖掘进度 [砂/土/岩]（3 维）- 归一化到 0-1
+            let progress = &self.dig_progress[i];
+            for j in 0..3 {
+                let vol = dig_volume.get(j).copied().unwrap_or(0);
+                if vol > 0 {
+                    features[base + 2 + j] = (progress[j] as f32 / vol as f32).min(1.0);
+                } else {
+                    features[base + 2 + j] = 1.0; // 无需挖掘视为已完成
+                }
+            }
+
+            // 4. 剩余挖掘量 [砂/土/岩]（3 维）- 归一化
+            for j in 0..3 {
+                let vol = dig_volume.get(j).copied().unwrap_or(0);
+                let remain = (vol - progress[j]).max(0);
+                features[base + 5 + j] = remain as f32 / 500.0;
+            }
+
+            // 5. 主效果类型（1 维）- 归一化到 0-1
+            features[base + 8] = main_effect_type as f32 / 5.0;
+
+            // 6. 效果价值评估（1 维）- 归一化
+            features[base + 9] = effect_value / 200.0;
+
+            // 7. 挖掘难度评估（1 维）- 根据当前装备等级和挖掘量计算
+            let total_vol: i32 = dig_volume.iter().sum();
+            let avg_dig_power = (self.dig_power[0] + self.dig_power[1] + self.dig_power[2]) / 3;
+            let difficulty = if avg_dig_power > 0 {
+                total_vol as f32 / avg_dig_power as f32 / 20.0
+            } else {
+                1.0
+            };
+            features[base + 10] = difficulty.min(1.0);
+
+            // 8. 预计完成回合数（1 维）- 根据当前挖掘力估算
+            let total_remain: i32 = (0..3).map(|j| {
+                let vol = dig_volume.get(j).copied().unwrap_or(0);
+                (vol - progress[j]).max(0)
+            }).sum();
+            let est_turns = if avg_dig_power > 0 {
+                total_remain as f32 / avg_dig_power as f32
+            } else {
+                20.0
+            };
+            features[base + 11] = (est_turns / 20.0).min(1.0);
+        }
+
+        idx += 120;
+
+        // 8. 其他全局信息（61 维）
+        // 技能点
+        features[idx] = self.uma.skill_pt as f32 / 100.0;
+        // 干劲等级
+        features[idx + 1] = self.uma.motivation as f32 / 4.0;
+        // 挖掘数量
+        features[idx + 2] = self.dig_count as f32 / 10.0;
+        // 友人外出状态
+        let friend_available = matches!(self.friend.out_state, crate::game::FriendOutState::AfterUnlock);
+        features[idx + 3] = if friend_available { 1.0 } else { 0.0 };
+        features[idx + 4] = self.friend.vital_bonus as f32 / 100.0;
+        // 超回复准备状态
+        features[idx + 5] = if self.bathing.is_super_ready { 1.0 } else { 0.0 };
+        // Buff 剩余回合
+        features[idx + 6] = self.bathing.buff_remain_turn as f32 / 10.0;
+        // 预留 (7-60)
+        idx += 61;
+
+        // 9. 事件选项特征（70 维）
+        if let Some(choices) = pending_choices {
+            features[idx] = choices.len() as f32 / 5.0;
+
+            for (i, choice) in choices.iter().take(5).enumerate() {
+                let base = idx + 1 + i * 14;
+
+                // 五维属性收益
+                for j in 0..5 {
+                    features[base + j] = choice.status_pt[j] as f32 / 10.0;
+                }
+                // 技能点收益
+                features[base + 5] = choice.status_pt[5] as f32 / 10.0;
+                // 体力变化
+                features[base + 6] = choice.vital as f32 / 50.0;
+                // 最大体力变化
+                features[base + 7] = choice.max_vital as f32 / 10.0;
+                // 干劲变化
+                features[base + 8] = choice.motivation as f32 / 2.0;
+                // 羁绊变化
+                features[base + 9] = choice.friendship as f32 / 10.0;
+                // Hint 等级变化
+                features[base + 10] = choice.hint_level as f32 / 5.0;
+                // 是否有属性收益
+                let has_status = choice.status_pt.iter().take(5).any(|&x| x != 0);
+                features[base + 11] = if has_status { 1.0 } else { 0.0 };
+                // 是否有体力收益
+                features[base + 12] = if choice.vital > 0 { 1.0 } else { 0.0 };
+                // 预留
+                features[base + 13] = 0.0;
+            }
+        }
+        idx += 70;
+
+        // ========== 支援卡信息（30 维 × 6 张 = 180 维） ==========
+
+        for card_idx in 0..6 {
+            let base = idx + card_idx * 30;
+
+            if let Some(person) = self.persons.get(card_idx) {
+                // 羁绊状态（10 维）
+                features[base] = person.friendship as f32 / 100.0;
+                features[base + 1] = if person.friendship >= 60 { 1.0 } else { 0.0 };
+                features[base + 2] = if person.friendship >= 80 { 1.0 } else { 0.0 };
+                features[base + 3] = if person.friendship >= 100 { 1.0 } else { 0.0 };
+                features[base + 4] = if person.is_hint { 1.0 } else { 0.0 };
+                features[base + 5] = if self.is_shining_at(card_idx, 0) { 1.0 } else { 0.0 }; // 简化：只检查速度训练
+                // 6-9: 预留
+
+                // 位置信息（5 维）- 在哪个训练
+                for train in 0..5 {
+                    if self.distribution()[train].contains(&(card_idx as i32)) {
+                        features[base + 10 + train] = 1.0;
+                    }
+                }
+
+                // 卡片参数（15 维）- 简化处理
+                if let Some(card) = self.deck.get(card_idx) {
+                    // 卡片类型 One-Hot（6 维：速耐力根智友人）
+                    if let Ok(data) = card.get_data() {
+                        let card_type = data.card_type as usize;
+                        if card_type < 6 {
+                            features[base + 15 + card_type] = 1.0;
+                        }
+                    }
+                    // 21-29: 预留（友情加成、干劲加成等）
+                }
+            }
+        }
+
+        features
+    }
+
     pub fn explain(&self) -> Result<String> {
         let mut lines = vec![];
         lines.push(format!(
@@ -1361,3 +1664,5 @@ impl Game for OnsenGame {
         Ok(())
     }
 }
+
+

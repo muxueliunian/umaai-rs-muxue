@@ -3,8 +3,17 @@ name = "umasim"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "umasim"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate_training_data"
+path = "src/bin/generate_training_data.rs"
+
 [dependencies]
 anyhow.workspace = true
+bincode.workspace = true
 chrono.workspace = true
 clap.workspace = true
 colored.workspace = true

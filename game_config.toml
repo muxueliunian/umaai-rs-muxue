@@ -1,21 +1,45 @@
 # 剧本类型: "basic" (无剧本) | "onsen" (温泉剧本)
 scenario = "onsen"
 
-# 日志级别: "debug" (完整显示) | "off" (全部关闭)
-log_level = "info"
+# 日志级别: "debug" (完整显示) | "off" (全部关闭) | "info" (简要显示) | "trace" (详细显示)
+log_level = "off"
 
-# 训练员类型: "manual" (手动选择) | "random" (猴子训练员)
-trainer = "manual"
+# 训练员类型:
+#   "manual"      - 手动选择（交互式，不支持多次模拟）
+#   "random"      - 猴子训练员（随机选择，用于基准测试）
+#   "mcts"        - 蒙特卡洛搜索（最强，但速度较慢）
+#   "handwritten" - 手写策略（快速，使用启发式规则）
+#   "collector"   - 样本收集器（用于生成神经网络训练数据）
+#
+# 【样本收集模式说明】
+# 当 trainer = "collector" 时，程序会：
+#   1. 运行 simulation_count 次模拟
+#   2. 使用 handwritten 策略进行决策
+#   3. 收集每回合的游戏状态（590维特征）和决策
+#   4. 按最终分数排序，筛选 Top 1% 精英样本
+#   5. 保存到 training_data.bin 文件
+#
+# 推荐配置（用于生成训练数据）：
+#   trainer = "collector"
+#   simulation_count = 1000000  # 100万次模拟
+#   log_level = "off"           # 关闭日志加速
+#
+# 运行命令: cargo run --release --bin umasim
+trainer = "collector"
+
+# 模拟次数（默认1次，大于1时显示最高分/最低分面板和平均分）
+# collector 模式下，建议设置为 100000 ~ 1000000
+simulation_count = 1000
 
 # 马娘ID
-uma = 106301
+uma = 111601
 
 # 卡组(ID, 突破等级)
 # 温泉剧本需要包含友人卡 (chara_id = 9050)
 cards = [302754, 302654, 302744, 302644, 302774, 302764]
 
 # 种马蓝因子个数 [速度, 耐力, 力量, 根性, 智力]
-blue_count = [12, 0, 6, 0, 0]
+blue_count = [15, 3, 0, 0, 0]
 
 # 种马额外属性 [速度, 耐力, 力量, 根性, 智力, 技能点]
 extra_count = [0, 30, 0, 0, 30, 30]
