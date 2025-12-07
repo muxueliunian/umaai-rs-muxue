@@ -6,23 +6,16 @@ use std::time::Instant;
 use anyhow::Result;
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
-
-use crate::{
-    game::{Game, InheritInfo, basic::BasicGame, onsen::game::OnsenGame},
+use umasim::{
+    game::{Game, InheritInfo, Trainer, basic::BasicGame, onsen::game::OnsenGame},
     gamedata::{GAMECONSTANTS, GameConfig, init_global},
+    global,
     trainer::*,
     utils::init_logger
 };
 
-pub mod explain;
-pub mod game;
-pub mod gamedata;
-pub mod protocol;
-pub mod trainer;
-pub mod utils;
-
 /// 运行 OnsenGame
-fn run_onsen<T: crate::game::Trainer<OnsenGame>>(
+fn run_onsen<T: Trainer<OnsenGame>>(
     trainer: &T, uma: u32, cards: &[u32; 6], inherit: InheritInfo, rng: &mut StdRng
 ) -> Result<()> {
     let mut game = OnsenGame::newgame(uma, cards, inherit)?;
@@ -44,7 +37,7 @@ fn run_onsen<T: crate::game::Trainer<OnsenGame>>(
 }
 
 /// 运行 BasicGame
-fn run_basic<T: crate::game::Trainer<BasicGame>>(
+fn run_basic<T: Trainer<BasicGame>>(
     trainer: &T, uma: u32, cards: &[u32; 6], inherit: InheritInfo, rng: &mut StdRng
 ) -> Result<()> {
     let mut game = BasicGame::newgame(uma, cards, inherit)?;

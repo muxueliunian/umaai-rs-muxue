@@ -1,8 +1,9 @@
 [workspace]
-members = ["crates/umasim"]
+members = ["crates/umasim", "crates/umaai"]
 resolver = "2"
 
 [workspace.dependencies]
+umasim = { path = "crates/umasim" }
 anyhow = "1.0.100"
 chrono = "0.4.42"
 clap = { version = "4.5.50", features = ["derive"] }

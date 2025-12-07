@@ -162,7 +162,7 @@ impl FriendState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{gamedata::init_global, init_logger};
+    use crate::{gamedata::init_global, utils::init_logger};
 
     #[test]
     fn test_friend() -> Result<()> {
