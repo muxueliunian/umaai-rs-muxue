@@ -25,10 +25,7 @@ mod tests {
     use colored::Colorize;
     use notify::{Event, RecursiveMode, Watcher};
 
-    use crate::protocol::{
-        GameStatusOnsen,
-        urafile::{UraFileWatcher, format_err}
-    };
+    use crate::protocol::{GameStatusOnsen, urafile::UraFileWatcher};
 
     #[tokio::test]
     async fn test_watch() -> Result<()> {

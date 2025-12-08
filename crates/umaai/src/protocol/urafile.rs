@@ -8,6 +8,9 @@ use std::{
 use anyhow::{Result, anyhow};
 use colored::Colorize;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event::ModifyKind};
+use serde_json::Value;
+
+use crate::protocol::GameStatus;
 
 pub fn format_err<E: Debug>(text: String, cause: E) -> anyhow::Error {
     anyhow!("{} ->\n{cause:?}", text.red())
@@ -76,4 +79,29 @@ impl UraFileWatcher {
             }
         }
     }
+}
+
+/// 载入小黑板数据并提供详细错误信息
+pub fn deserialize_game<S: GameStatus>(contents: &str) -> Result<S::Game> {
+    // 先解析json
+    let value: Value = serde_json::from_str(contents).map_err(|e| format_err("Json格式错误".to_string(), e))?;
+    // 解析baseGame.scenarioId
+    if let Some(base) = value.get("baseGame") {
+        let scenario = base.get("scenarioId").and_then(|x| x.as_i64());
+        if scenario != Some(S::scenario_id() as i64) {
+            return Err(anyhow!(
+                "{}",
+                format!("剧本错误: {scenario:?} != {}", S::scenario_id()).red()
+            ));
+        }
+    } else {
+        return Err(anyhow!(
+            "{}",
+            "缺少baseGame.scenarioId，请使用和AI配套发布的小黑板".red()
+        ));
+    }
+    let status: S = serde_json::from_value(value).map_err(|e| format_err("回合数据出错".to_string(), e))?;
+    status
+        .into_game()
+        .map_err(|e| format_err("载入回合出错".to_string(), e))
 }

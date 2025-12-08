@@ -26,7 +26,7 @@ trainer = "neuralnet"
 simulation_count = 100
 
 # 马娘ID
-uma = 111601
+uma = 106301
 
 # 卡组(ID, 突破等级)
 # 温泉剧本需要包含友人卡 (chara_id = 9050)

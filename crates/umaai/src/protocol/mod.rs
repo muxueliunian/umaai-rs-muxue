@@ -1,9 +1,38 @@
-use std::ops::Deref;
+use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
-use umasim::utils::Array5;
+use anyhow::Result;
+use log::warn;
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use umasim::{
+    game::{
+        BaseGame,
+        FriendCardState,
+        FriendOutState,
+        FriendState,
+        Game,
+        InheritInfo,
+        SupportCard,
+        TurnStage,
+        Uma,
+        UmaFlags
+    },
+    gamedata::{GAMEDATA, GameConfig},
+    global,
+    utils::Array5
+};
 
+pub mod onsen;
 pub mod urafile;
+pub use onsen::*;
+
+/// 描述不同剧本的通信状态，需要能转为对应的Game结构
+pub trait GameStatus: DeserializeOwned {
+    type Game;
+
+    fn scenario_id() -> u32;
+
+    fn into_game(self) -> Result<Self::Game>;
+}
 
 /// 从小黑板接收的基础人头信息
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -64,7 +93,7 @@ pub struct GameStatusBase {
     /// 种马蓝因子数量
     #[serde(rename = "zhongMaBlueCount")]
     pub zhongma_blue_count: Array5,
-    /// 是否比赛状态
+    /// 是否生涯比赛状态
     pub is_racing: bool,
     /// 卡组
     pub card_id: Vec<u32>,
@@ -91,16 +120,90 @@ pub struct GameStatusBase {
     pub playing_state: i32
 }
 
-/// 从小黑板接收的数据
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct GameStatusOnsen {
-    pub base_game: GameStatusBase
-}
+impl GameStatusBase {
+    pub fn parse_uma(&self) -> Result<Uma> {
+        let data = global!(GAMEDATA).get_uma(self.uma_id)?;
+        let flags = UmaFlags {
+            qiezhe: self.is_qiezhe,
+            aijiao: self.is_aijiao,
+            good_trainer: self.failure_rate_bias > 0,
+            bad_trainer: self.failure_rate_bias < 0,
+            positive_thinking: self.is_positive_thinking,
+            refresh_mind: self.is_refresh_mind as i32,
+            ..Default::default()
+        };
+        // TODO 幸运体质, total_hints
+        Ok(Uma {
+            uma_id: self.uma_id,
+            vital: self.vital,
+            max_vital: self.max_vital,
+            motivation: self.motivation,
+            five_status: self.five_status.clone(),
+            five_status_bonus: data.five_status_bonus.clone(),
+            five_status_limit: self.five_status_limit,
+            skill_pt: self.skill_pt,
+            skill_score: self.skill_score,
+            total_hints: 0,
+            race_bonus: 0,
+            flags
+        })
+    }
 
-impl Deref for GameStatusOnsen {
-    type Target = GameStatusBase;
-    fn deref(&self) -> &Self::Target {
-        &self.base_game
+    pub fn parse_friend(&self, scenario_friend_chara_id: u32) -> Result<FriendState> {
+        for (index, id) in self.card_id.iter().enumerate() {
+            let card = SupportCard::new(*id)?;
+            if card.card_type >= 5 && card.get_data()?.chara_id == scenario_friend_chara_id {
+                let friend_id = Some(*id);
+                let friend_index = index;
+                let mut friend = FriendState::new(friend_id, friend_index)?;
+                friend.out_state = match self.friend_stage {
+                    0 => FriendOutState::UnClicked,
+                    1 => FriendOutState::BeforeUnlock,
+                    2 => FriendOutState::AfterUnlock,
+                    _ => FriendOutState::Away
+                };
+                for i in 0..self.friend_outgoing_used {
+                    friend.out_used[i as usize] = true;
+                }
+                return Ok(friend);
+            }
+        }
+        // 如果没找到友人
+        warn!("没带剧本友人?");
+        Ok(FriendState::default())
+    }
+
+    pub fn parse_inherit(&self) -> Result<InheritInfo> {
+        // 1. 先读取配置文件
+        let config_file = fs_err::read_to_string("game_config.toml")?;
+        let game_config: GameConfig = toml::from_str(&config_file)?;
+        Ok(InheritInfo {
+            blue_count: self.zhongma_blue_count.clone(),
+            extra_count: game_config.extra_count.clone()
+        })
+    }
+
+    pub fn parse_basegame(&self, scenario_friend_chara_id: u32) -> Result<BaseGame> {
+        let inherit = self.parse_inherit()?;
+        let mut uma = self.parse_uma()?;
+        let friend = self.parse_friend(scenario_friend_chara_id)?;
+        let mut deck = vec![];
+        for (index, id) in self.card_id.iter().enumerate() {
+            let mut card = SupportCard::new(*id)?;
+            card.friendship = self.persons[index].friendship;
+            uma.race_bonus += card.effect.saihou;
+            deck.push(card);
+        }
+        Ok(BaseGame {
+            turn: self.turn,
+            stage: TurnStage::Train, // 随便列一个
+            uma,
+            deck,
+            inherit: Arc::new(inherit),
+            friend,
+            train_level_count: self.train_level_count.clone(),
+            distribution: self.person_distribution.clone(),
+            ..Default::default()
+        })
     }
 }
