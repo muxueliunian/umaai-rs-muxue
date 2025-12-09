@@ -414,6 +414,9 @@ pub struct GameConfig {
     /// 训练员类型: "manual" (手动选择) | "random" (猴子训练员)
     #[serde(default = "default_trainer")]
     pub trainer: String,
+    /// 模拟次数（默认1次，设置大于1可多次模拟并统计）
+    #[serde(default = "default_simulation_count")]
+    pub simulation_count: usize,
     /// 马娘ID
     pub uma: u32,
     /// 卡组（ID，突破等级）
@@ -434,6 +437,10 @@ fn default_log_level() -> String {
 
 fn default_trainer() -> String {
     "manual".to_string()
+}
+
+fn default_simulation_count() -> usize {
+    1
 }
 
 #[cfg(test)]

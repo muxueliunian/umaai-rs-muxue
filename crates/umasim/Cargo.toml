@@ -3,8 +3,17 @@ name = "umasim"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "umasim"
+path = "src/main.rs"
+
+[[bin]]
+name = "generate_training_data"
+path = "src/bin/generate_training_data.rs"
+
 [dependencies]
 anyhow.workspace = true
+bincode.workspace = true
 chrono.workspace = true
 clap.workspace = true
 colored.workspace = true
@@ -27,3 +36,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true
+
+# ONNX 推理
+tract-onnx.workspace = true
+ndarray.workspace = true
