@@ -6,10 +6,8 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use umasim::{
     game::{
         BaseGame,
-        FriendCardState,
         FriendOutState,
         FriendState,
-        Game,
         InheritInfo,
         SupportCard,
         TurnStage,
@@ -74,12 +72,16 @@ pub struct GameStatusBase {
     pub skill_pt: i32,
     /// 已学习技能分数
     pub skill_score: i32,
+    /// 总Hint等级
+    pub total_hints: i32,
     /// 训练设施等级
     pub train_level_count: Array5,
     /// PT系数
     pub pt_score_rate: f32,
     /// 失败率修正值
     pub failure_rate_bias: i32,
+    /// 是否生病
+    pub is_ill: bool,
     /// 是否切者
     #[serde(rename = "isQieZhe")]
     pub is_qiezhe: bool,
@@ -90,6 +92,8 @@ pub struct GameStatusBase {
     pub is_positive_thinking: bool,
     /// 是否有休息心得
     pub is_refresh_mind: bool,
+    /// 是否有幸运体质
+    pub is_lucky: bool,
     /// 种马蓝因子数量
     #[serde(rename = "zhongMaBlueCount")]
     pub zhongma_blue_count: Array5,
@@ -124,6 +128,8 @@ impl GameStatusBase {
     pub fn parse_uma(&self) -> Result<Uma> {
         let data = global!(GAMEDATA).get_uma(self.uma_id)?;
         let flags = UmaFlags {
+            ill: self.is_ill,
+            lucky: self.is_lucky,
             qiezhe: self.is_qiezhe,
             aijiao: self.is_aijiao,
             good_trainer: self.failure_rate_bias > 0,
@@ -143,7 +149,7 @@ impl GameStatusBase {
             five_status_limit: self.five_status_limit,
             skill_pt: self.skill_pt,
             skill_score: self.skill_score,
-            total_hints: 0,
+            total_hints: self.total_hints,
             race_bonus: 0,
             flags
         })

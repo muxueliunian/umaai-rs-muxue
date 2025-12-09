@@ -2,7 +2,7 @@
 scenario = "onsen"
 
 # 日志级别: "debug" (完整显示) | "off" (全部关闭) | "info" (简要显示) | "trace" (详细显示) 
-log_level = "off"
+log_level = "info"
 
 # 训练员类型:
 #   "manual"      - 手动选择（交互式，不支持多次模拟）

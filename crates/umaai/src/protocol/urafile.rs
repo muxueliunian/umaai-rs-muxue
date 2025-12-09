@@ -82,7 +82,7 @@ impl UraFileWatcher {
 }
 
 /// 载入小黑板数据并提供详细错误信息
-pub fn deserialize_game<S: GameStatus>(contents: &str) -> Result<S::Game> {
+pub fn parse_game<S: GameStatus>(contents: &str) -> Result<S::Game> {
     // 先解析json
     let value: Value = serde_json::from_str(contents).map_err(|e| format_err("Json格式错误".to_string(), e))?;
     // 解析baseGame.scenarioId

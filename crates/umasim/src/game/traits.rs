@@ -313,7 +313,7 @@ pub trait Game: Clone {
             return Err(anyhow!("训练类型错误: {train}"));
         }
         for index in &self.distribution()[train] {
-            if *index < 6 {
+            if *index >= 0 && *index < 6 {
                 let card = &self.deck()[*index as usize];
                 let (mut effect, _) = card.calc_training_effect(self, train as i32)?;
                 if !self.is_shining_at(*index as usize, train) {
@@ -339,7 +339,7 @@ pub trait Game: Clone {
         // 人数, 排除掉理事长和记者
         let person_count = self.distribution()[train]
             .iter()
-            .filter(|p| **p != 6 && **p != 7)
+            .filter(|p| **p >= 0 && **p != 6 && **p != 7)
             .count();
         // 基础值
         let basic_value = &cons.training_basic_value[train][train_level];

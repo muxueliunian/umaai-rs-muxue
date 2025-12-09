@@ -3,6 +3,7 @@ use std::io::Write;
 use anyhow::{Result, anyhow};
 use comfy_table::Table;
 use env_logger::Builder;
+use log::LevelFilter;
 use serde::Serialize;
 
 use crate::gamedata::{EventCollection, EventData, GAMECONSTANTS, GAMEDATA};
@@ -16,8 +17,9 @@ pub type Array6 = [i32; 6];
 /// - `level`: 日志级别，"debug" (完整显示) | "off" (全部关闭)
 pub fn init_logger(level: &str) -> Result<()> {
     let filter = match level.to_lowercase().as_str() {
-        "off" => log::LevelFilter::Off,
-        _ => log::LevelFilter::Debug // 默认显示全部日志
+        "off" => LevelFilter::Off,
+        "info" => LevelFilter::Info,
+        _ => LevelFilter::Debug // 默认显示全部日志
     };
 
     let mut builder = Builder::new();
