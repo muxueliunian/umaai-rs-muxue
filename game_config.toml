@@ -2,7 +2,7 @@
 scenario = "onsen"
 
 # 日志级别: "debug" (完整显示) | "off" (全部关闭) | "info" (简要显示) | "trace" (详细显示) 
-log_level = "info"
+log_level = "off"
 
 # 训练员类型:
 #   "manual"      - 手动选择（交互式，不支持多次模拟）
@@ -19,21 +19,21 @@ log_level = "info"
 #   4. 按最终分数排序，筛选 Top 1% 最强赛马娘精英样本
 #   5. 保存到 training_data.bin 文件
 # 运行命令: cargo run --release --bin umasim
-trainer = "neuralnet"
+trainer = "handwritten"
 
 # 模拟次数（默认1次，大于1时显示最高分/最低分面板和平均分）
 
-simulation_count = 100
+simulation_count = 10000
 
 # 马娘ID
-uma = 106301
+uma = 101901
 
 # 卡组(ID, 突破等级)
 # 温泉剧本需要包含友人卡 (chara_id = 9050)
 cards = [302754, 302654, 302744, 302644, 302774, 302764]
 
 # 种马蓝因子个数 [速度, 耐力, 力量, 根性, 智力]
-blue_count = [12, 0, 6, 0, 0]
+blue_count = [12, 0, 0, 0, 6]
 
 # 种马额外属性 [速度, 耐力, 力量, 根性, 智力, 技能点]
 extra_count = [10, 40, 0, 0, 40, 50]

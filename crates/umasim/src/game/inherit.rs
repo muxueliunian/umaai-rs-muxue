@@ -50,16 +50,17 @@ impl InheritInfo {
     pub fn inherit_limit_newgame(&self) -> Array5 {
         let mut ret = self.blue_count.clone();
         for i in 0..5 {
-            ret[i] *= 2;
+            ret[i] = (ret[i] as f32 * 5.33) as i32; // 3星蓝因子提供16上限
         }
         ret
     }
 
     /// 获取局中继承上限 0-8
     pub fn inherit_limit(&self, rng: &mut StdRng) -> Array5 {
-        let mut ret = Array5::default();
+        let mut ret = self.blue_count.clone();
         for i in 0..5 {
-            ret[i] = rng.random_range(0..8);
+            let limit = (ret[i] as f32 * 5.33) as i32;
+            ret[i] = rng.random_range(0..=limit);
         }
         ret
     }

@@ -321,7 +321,7 @@ impl GameData {
     pub fn get_card(&self, id: u32) -> Result<&SupportCardData> {
         self.card
             .get(&id.to_string())
-            .ok_or(anyhow!("未找到 id={id} 的支援卡，需要更新数据"))
+            .ok_or_else(|| anyhow!("未找到 id={id} 的支援卡，需要更新数据"))
     }
 
     pub fn get_chara_name(&self, chara_id: u32) -> &str {

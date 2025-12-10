@@ -87,9 +87,10 @@ impl BaseGame {
         }
         // 继承
         let newgame_inherit = inherit.inherit_newgame();
+        let newgame_limit_inherit = inherit.inherit_limit_newgame();
         info!("+继承: {newgame_inherit:?}");
         uma.five_status.add_eq(&newgame_inherit);
-
+        uma.five_status_limit.add_eq(&newgame_limit_inherit);
         Ok(Self {
             turn: 0,
             stage: TurnStage::Begin,

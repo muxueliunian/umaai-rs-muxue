@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{Result, anyhow};
 use colored::Colorize;
-use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher, event::ModifyKind};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use serde_json::Value;
 
 use crate::protocol::GameStatus;

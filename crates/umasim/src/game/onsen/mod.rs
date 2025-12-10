@@ -1,12 +1,7 @@
 use colored::Colorize;
 use enum_iterator::Sequence;
 use serde::{Deserialize, Serialize};
-
-use crate::{
-    game::CardTrainingEffect,
-    gamedata::onsen::{HotelEffect, OnsenEffect},
-    utils::Array5
-};
+use crate::gamedata::onsen::{HotelEffect, OnsenEffect};
 
 pub mod action;
 pub mod game;

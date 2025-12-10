@@ -1,14 +1,11 @@
-use std::{collections::BTreeMap, fmt::Display, sync::OnceLock};
-
+use std::sync::OnceLock;
 use anyhow::Result;
 use hashbrown::HashMap;
-use log::info;
 use serde::{Deserialize, Serialize};
 
 use crate::{
     game::CardTrainingEffect,
     gamedata::{ActionValue, EventData, load_json},
-    global,
     utils::{Array5, AttributeArray}
 };
 
@@ -19,7 +16,7 @@ pub struct OnsenScenarioData {
     /// 链接角色ID
     pub link_chara_id: Vec<i32>,
     /// 链接角色对应哪种挖掘加成
-    pub link_effect: HashMap<String, i32>,
+    pub link_effect: HashMap<u32, u32>,
     /// pr训练基础值
     pub pr_base_value: ActionValue,
     /// 生涯比赛倍率

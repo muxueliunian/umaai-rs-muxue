@@ -194,16 +194,18 @@ pub trait Game: Clone {
             absent_rate = 0;
         }
         // 计算得意率权重
-        let mut weights = vec![100, 100, 100, 100, 100, absent_rate];
+        let mut weights = [100, 100, 100, 100, 100, absent_rate];
+        let mut real_deyilv = 0;
         if train_type <= 4 {
-            weights[train_type] += self.deyilv(person_index)? as i32;
+            real_deyilv = self.deyilv(person_index)? as i32;
+            weights[train_type] += real_deyilv;
         }
-        let dist_absent = WeightedIndex::new(&weights)?;
-        let dist = WeightedIndex::new(&weights[0..5])?;
+        let weights_sum = 500 + absent_rate + real_deyilv;
         // 先判断是否不在
-        if dist_absent.sample(rng) == 5 {
+        if rng.random_bool(absent_rate as f64 / weights_sum as f64) {
             Ok(-1)
         } else {
+            let dist = WeightedIndex::new(&weights[0..5])?;
             // 尝试分配
             let d = self.distribution();
             let mut ok = false;
@@ -345,8 +347,10 @@ pub trait Game: Clone {
         let basic_value = &cons.training_basic_value[train][train_level];
         let basic_motivation = ((self.uma().motivation - 3) * 10) as f32;
         // 成长率
-        let mut status_bonus = self.uma().five_status_bonus.to_vec();
-        status_bonus.push(0); // pt增长率为0
+        let b = &self.uma().five_status_bonus;
+        let status_bonus = [
+            b[0], b[1], b[2], b[3], b[4], 0
+        ];
         let mut ret = ActionValue::default();
         // 副属性
         for i in 0..6 {

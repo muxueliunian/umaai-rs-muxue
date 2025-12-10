@@ -1,9 +1,9 @@
 use std::ops::Deref;
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use log::warn;
 use serde::{Deserialize, Serialize};
-use umasim::{game::{BasePerson, PersonType, onsen::{BathingInfo, OnsenBuff, OnsenTurnStage, game::OnsenGame}}, gamedata::onsen::ONSENDATA, global, utils::Array5};
+use umasim::{game::{BasePerson, PersonType, onsen::{BathingInfo, OnsenBuff, OnsenTurnStage, game::OnsenGame}}, gamedata::onsen::ONSENDATA, global};
 
 use crate::protocol::{GameStatus, GameStatusBase};
 

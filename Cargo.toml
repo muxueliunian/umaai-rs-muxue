@@ -2,6 +2,12 @@
 members = ["crates/umasim", "crates/umaai"]
 resolver = "2"
 
+[profile.release]
+opt-level = 'z'
+debug = true
+codegen-units = 16
+lto = false
+
 [workspace.dependencies]
 umasim = { path = "crates/umasim" }
 anyhow = "1.0.100"
@@ -29,6 +35,7 @@ toml = "0.9.8"
 inquire = "0.9.1"
 ratatui = { version = "0.29.0", features = ["all-widgets", "macros", "palette", "serde"] }
 text-to-ascii-art = "0.1.10"
+
 # ONNX 推理
 tract-onnx = "0.22.0"
 ndarray = "0.17.1"

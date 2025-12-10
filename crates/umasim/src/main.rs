@@ -7,6 +7,7 @@ use anyhow::Result;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
+use rayon::prelude::*;
 use umasim::{
     game::{Game, InheritInfo, Trainer, basic::BasicGame, onsen::game::OnsenGame},
     gamedata::{GAMECONSTANTS, GameConfig, init_global},
@@ -213,7 +214,7 @@ fn print_simulation_stats(results: &[SimulationResult], elapsed: std::time::Dura
     // 打印统计摘要
     println!("\n{}", "-".repeat(60));
     println!(
-        "平均评分: {} {:.0}, 平均PT: {:.0}",
+        "平均评分: {} {:.0}, 平均PT+Hint: {:.0}",
         global!(GAMECONSTANTS).get_rank_name(avg_score as i32),
         avg_score,
         avg_pt
@@ -235,105 +236,108 @@ async fn main() -> Result<()> {
     init_global()?;
 
     let simulation_count = game_config.simulation_count.max(1);
-    let mut rng = StdRng::from_os_rng();
+    
 
     // 开始计时
     let start = Instant::now();
 
+    let inherit = InheritInfo {
+        blue_count: game_config.blue_count.clone(),
+        extra_count: game_config.extra_count.clone()
+    };
+
     // 收集模拟结果
-    let mut results: Vec<SimulationResult> = Vec::with_capacity(simulation_count);
-
-    for sim_idx in 0..simulation_count {
-        if simulation_count > 1 {
-            println!("\n--- 第 {}/{} 次模拟 ---", sim_idx + 1, simulation_count);
-        }
-
-        let inherit = InheritInfo {
-            blue_count: game_config.blue_count.clone(),
-            extra_count: game_config.extra_count.clone()
-        };
-
-        // 根据 trainer 和 scenario 配置选择训练员和剧本
-        let result = match game_config.trainer.as_str() {
-            "random" => {
-                let trainer = RandomTrainer;
-                match game_config.scenario.as_str() {
-                    "onsen" => run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit, &mut rng)?,
-                    _ => run_basic_once(&trainer, game_config.uma, &game_config.cards, inherit, &mut rng)?
-                }
-            }
-            "handwritten" => {
-                let trainer = HandwrittenTrainer::new().verbose(simulation_count == 1);
-                match game_config.scenario.as_str() {
-                    "onsen" => run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit, &mut rng)?,
-                    _ => {
-                        println!("警告: 手写策略训练员仅支持 onsen 剧本，使用 random 训练员");
-                        let trainer = RandomTrainer;
-                        run_basic_once(&trainer, game_config.uma, &game_config.cards, inherit, &mut rng)?
+    let sim_results: Vec<Result<SimulationResult>> = (0..simulation_count)
+        .into_par_iter()
+        .map(|_| {
+            // 执行具体的模拟过程
+            let mut rng = StdRng::from_os_rng();
+            match game_config.trainer.as_str() {
+                "random" => {
+                    let trainer = RandomTrainer;
+                    match game_config.scenario.as_str() {
+                        "onsen" => run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng),
+                        _ => run_basic_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
                     }
                 }
-            }
-            "collector" => {
-                // 样本收集模式：收集训练数据
-                return run_collector_mode(&game_config, simulation_count, &mut rng);
-            }
-            "neuralnet" | "nn" => {
-                // 神经网络训练员
-                let model_path = "saved_models/onsen_v1/model.onnx";
-                match NeuralNetTrainer::load(model_path) {
-                    Ok(trainer) => {
-                        let trainer = trainer.verbose(simulation_count == 1);
-                        match game_config.scenario.as_str() {
-                            "onsen" => run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit, &mut rng)?,
-                            _ => {
-                                println!("警告: 神经网络训练员仅支持 onsen 剧本，使用 random 训练员");
-                                let trainer = RandomTrainer;
-                                run_basic_once(&trainer, game_config.uma, &game_config.cards, inherit, &mut rng)?
-                            }
+                "handwritten" => {
+                    let trainer = HandwrittenTrainer::new().verbose(simulation_count == 1);
+                    match game_config.scenario.as_str() {
+                        "onsen" => run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng),
+                        _ => {
+                            println!("警告: 手写策略训练员仅支持 onsen 剧本，使用 random 训练员");
+                            let trainer = RandomTrainer;
+                            run_basic_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
                         }
                     }
-                    Err(e) => {
-                        println!("错误: 无法加载神经网络模型 '{}': {}", model_path, e);
-                        println!("请确保模型文件存在，或使用其他训练员");
-                        return Err(e);
+                }
+                "collector" => {
+                    // 样本收集模式：收集训练数据
+                    unimplemented!()
+                    //run_collector_mode(&game_config, simulation_count, &mut rng)
+                }
+                "neuralnet" | "nn" => {
+                    // 神经网络训练员
+                    let model_path = "saved_models/onsen_v1/model.onnx";
+                    match NeuralNetTrainer::load(model_path) {
+                        Ok(trainer) => {
+                            let trainer = trainer.verbose(simulation_count == 1);
+                            match game_config.scenario.as_str() {
+                                "onsen" => run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng),
+                                _ => {
+                                    println!("警告: 神经网络训练员仅支持 onsen 剧本，使用 random 训练员");
+                                    let trainer = RandomTrainer;
+                                    run_basic_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            println!("错误: 无法加载神经网络模型 '{}': {}", model_path, e);
+                            println!("请确保模型文件存在，或使用其他训练员");
+                            Err(e)
+                        }
                     }
                 }
-            }
-            _ => {
-                // 默认使用手动训练员（不支持多次模拟）
-                if simulation_count > 1 {
-                    println!("警告: 手动训练员不支持多次模拟，仅运行1次");
+                _ => {
+                    // 默认使用手动训练员（不支持多次模拟）
+                    if simulation_count > 1 {
+                        println!("警告: 手动训练员不支持多次模拟，仅运行1次");
+                    }
+                    let trainer = ManualTrainer;
+                    let result = match game_config.scenario.as_str() {
+                        "onsen" => run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng),
+                        _ => run_basic_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
+                    }?;
+                    // 单次模拟直接打印结果
+                    println!("{}", result.explain);
+                    println!(
+                        "评分: {} {}, PT: {}",
+                        global!(GAMECONSTANTS).get_rank_name(result.score),
+                        result.score,
+                        result.pt
+                    );
+                    println!("耗时: {:?}", start.elapsed());
+                    Ok(result)
                 }
-                let trainer = ManualTrainer;
-                let result = match game_config.scenario.as_str() {
-                    "onsen" => run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit, &mut rng)?,
-                    _ => run_basic_once(&trainer, game_config.uma, &game_config.cards, inherit, &mut rng)?
-                };
-                // 单次模拟直接打印结果
-                println!("{}", result.explain);
-                println!(
-                    "评分: {} {}, PT: {}",
-                    global!(GAMECONSTANTS).get_rank_name(result.score),
-                    result.score,
-                    result.pt
-                );
-                println!("耗时: {:?}", start.elapsed());
-                return Ok(());
             }
-        };
+        }).collect();
+
+    let mut results = vec![];
+    for result in sim_results {
+        // 根据 trainer 和 scenario 配置选择训练员和剧本
+        let r = result?;
 
         // 单次模拟时打印每次结果
-        if simulation_count == 1 {
-            println!("{}", result.explain);
+        if simulation_count < 100 {
+            println!("{}", r.explain);
             println!(
                 "评分: {} {}, PT: {}",
-                global!(GAMECONSTANTS).get_rank_name(result.score),
-                result.score,
-                result.pt
+                global!(GAMECONSTANTS).get_rank_name(r.score),
+                r.score,
+                r.pt
             );
         }
-
-        results.push(result);
+        results.push(r);
     }
 
     // 多次模拟时打印统计结果

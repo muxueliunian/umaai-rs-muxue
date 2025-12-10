@@ -9,8 +9,10 @@
 //! 2. 体力分段评估 - 更精细的体力管理
 //! 3. 羁绊价值提升 - 前期更重视羁绊
 
+use log::info;
 use rand::rngs::StdRng;
 use rand::seq::IndexedRandom;
+use colored::Colorize;
 
 use crate::game::{
     Game, PersonType,
@@ -24,17 +26,14 @@ use super::{Evaluator, ValueOutput};
 // ============================================================================
 
 /// 属性权重 [速度, 耐力, 力量, 根性, 智力]
-/// 速耐优先：速度 = 耐力 >> 力量 = 根性 >> 智力
-/// 大幅提高速耐权重，确保优先练满
-const STATUS_WEIGHTS: [f64; 5] = [12.0, 12.0, 5.0, 5.0, 5.0];
+/// 速力优先：速度 > 力量 > 耐根 > 智力 （没带智卡） 
+const STATUS_WEIGHTS: [f64; 5] = [8.0, 8.0, 8.0, 8.0, 5.0];
 
 /// 训练类型权重调整 [速度训练, 耐力训练, 力量训练, 根性训练, 智力训练]
 /// 用于额外偏好某些训练类型
-/// 速耐训练有大额加成，智力训练有大额惩罚
-const TRAIN_TYPE_BONUS: [f64; 5] = [80.0, 70.0, 10.0, 10.0, 10.0];
+const TRAIN_TYPE_BONUS: [f64; 5] = [20.0, 10.0, 30.0, 30.0, 0.0];
 
-/// 智力训练人头阈值：智力训练人头数超过此值时才考虑选择
-/// 提高到2，只有3人头以上才解锁智力训练
+/// 智力训练人头阈值：智力训练人头数>此值时才考虑选择
 const WISDOM_HEAD_THRESHOLD: usize = 2;
 
 /// 智力训练彩圈阈值：智力训练彩圈数超过此值时额外加成
@@ -52,16 +51,16 @@ const RESERVE_STATUS_FACTOR: f64 = 40.0;
 const JIBAN_VALUE: f64 = 12.0;
 
 /// 体力价值因子（游戏开始时）
-const VITAL_FACTOR_START: f64 = 3.5;
+const VITAL_FACTOR_START: f64 = 7.0;
 
 /// 体力价值因子（游戏结束时）
-const VITAL_FACTOR_END: f64 = 7.0;
+const VITAL_FACTOR_END: f64 = 3.5;
 
 /// 小失败惩罚值
-const SMALL_FAIL_VALUE: f64 = -150.0;
+const SMALL_FAIL_VALUE: f64 = -1000.0;
 
 /// 大失败惩罚值
-const BIG_FAIL_VALUE: f64 = -500.0;
+const BIG_FAIL_VALUE: f64 = -1200.0;
 
 /// 外出加成（干劲不满时）
 const OUTGOING_BONUS_IF_NOT_FULL_MOTIVATION: f64 = 200.0;
@@ -74,7 +73,7 @@ const FINAL_BONUS: i32 = 45 + 30 + 20 + 20; // URA3 + 最终事件 + URA2 + URA1
 // ============================================================================
 
 /// 完成一个温泉的奖励（获得温泉券 + 装备升级 + 源泉选择）
-const DIG_COMPLETE_BONUS: f64 = 300.0;
+const DIG_COMPLETE_BONUS: f64 = 800.0;
 
 /// 挖掘量基础价值系数（每点挖掘量的价值）
 const DIG_BASE_VALUE: f64 = 0.5;
@@ -84,7 +83,7 @@ const DIG_BASE_VALUE: f64 = 0.5;
 // ============================================================================
 
 /// 目标比赛基础价值（参考 C++ raceBonus = 150）
-const RACE_BASE_BONUS: f64 = 150.0;
+const RACE_BASE_BONUS: f64 = 250.0;
 
 /// 非目标比赛基础价值
 const NON_TARGET_RACE_BONUS: f64 = 80.0;
@@ -103,20 +102,10 @@ const FRIEND_OUTING_BASE_VALUE: f64 = 400.0;
 const SUPER_RECOVERY_VITAL_COST_HIGH: i32 = 200;
 
 /// 中累计体力阈值
-const SUPER_RECOVERY_VITAL_COST_MID: i32 = 150;
+const SUPER_RECOVERY_VITAL_COST_MID: i32 = 100;
 
 /// 低累计体力阈值（友人外出可快速获得超回复）
-const SUPER_RECOVERY_VITAL_COST_LOW: i32 = 100;
-
-/// 超回复紧急使用的体力阈值
-const SUPER_USE_VITAL_THRESHOLD: i32 = 40;
-
-/// 后期保底使用超回复的回合数
-const SUPER_USE_LATE_TURN: i32 = 70;
-
-/// 已挖掘温泉数量阈值（达到此数量后移除体力评估惩罚）
-/// 原因：挖掘完成 8 个温泉后，超回复温泉的回复可以覆盖所有体力消耗
-const ONSEN_COMPLETED_THRESHOLD: usize = 8;
+const SUPER_RECOVERY_VITAL_COST_LOW: i32 = 60;
 
 /// 友人外出在低累计体力时的额外收益（快速获得超回复）
 const FRIEND_OUTING_SUPER_BONUS: f64 = 200.0;
@@ -127,41 +116,56 @@ const FRIEND_OUTING_HIGH_COST_PENALTY: f64 = 300.0;
 /// 友人外出在中累计体力时的惩罚
 const FRIEND_OUTING_MID_COST_PENALTY: f64 = 150.0;
 
+/// 友人外出在特定回合区间时的收益，每8回合一组
+const FRIEND_OUTING_TURN_MODIFIER: [f64; 10] = [
+    -400.0, -400.0, -400.0,
+    200.0, 0.0, 200.0,
+    400.0, -400.0, 200.0,
+    -400.0
+];
+
 // ============================================================================
 // 温泉选择顺序（主流攻略）
 // ============================================================================
 
-/// 推荐温泉选择顺序（索引对应 onsen_info 数组）
+/// 推荐温泉选择顺序（索引对应 onsen_info 数组）这个要做到配置文件里
 ///
 /// 基础温泉(index=0)自动获得，不需要挖掘
 ///
 /// 顺序说明：
-/// 1. 疾驰之泉(1) - 速度/力量友情
-/// 2. 坚忍之泉(2) - 耐力/根性友情
-/// 3. 明晰之泉(3) - 比赛+30%
-/// 4. 健壮古泉(6) - 体力消耗-10%
-/// 5. 刚足古泉(5) - 力量/根性友情
-/// 6. 秘汤汤驹(8) - 分身效果
-/// 7. 骏闪古泉(4) - Hint+100%
-/// 8. 传说秘泉(9) - 比赛+80%（⭐特殊：第三年9月强制选择）
-/// 9. 天翔古泉(7) - 比赛+60%
-const RECOMMENDED_ONSEN_ORDER: &[usize] = &[
-    1,  // 疾驰之泉
-    2,  // 坚忍之泉
-    3,  // 明晰之泉
-    6,  // 健壮古泉
-    5,  // 刚足古泉
-    8,  // 秘汤汤驹
-    4,  // 骏闪古泉
-    9,  // 传说秘泉
-    7,  // 天翔古泉
+/// 疾驰之泉(1) - 速度/力量友情
+/// 明晰之泉(3) - 比赛+30%
+/// 坚忍之泉(2) - 耐力/根性友情
+/// 刚足古泉(5) - 力量/根性友情\
+/// 天翔古泉(7) - 比赛+60%
+/// 骏闪古泉(4) - Hint+100%
+/// 秘汤汤驹(8) - 分身效果
+/// 传说秘泉(9) - 比赛+80%（⭐特殊：第三年9月强制选择）
+/// 坚忍之泉 - 继续挖完
+/// 健壮古泉 - 耐力狗都不点
+const RECOMMENDED_ONSEN_ORDER: [usize; 11] = [
+    1, 3, 2,    // 第一年
+    5, 7, 4,    // 第二年
+    8, 9,    // 第三年
+    4, 2, 6        // 冗余
 ];
 
-/// 传说秘泉的强制选择回合（第三年9月 = 回合65）
-const LEGEND_ONSEN_FORCE_TURN: i32 = 65;
+/// 设施升级对应温泉
+/// 1. 疾驰 - 砂
+/// 2. 坚忍 - 土
+/// 3. 明晰 - 岩
+/// 4. 骏闪 - 砂
+/// 5. 刚足 - 砂
+/// 6. 健壮 - 土
+/// 7. 天翔 - 土
+/// 8. 秘汤 - 岩
+/// 9. 传说 - 岩
+const RECOMMENDED_TOOL_TYPE: [usize; 9] = [
+    0, 1, 2, 0, 0, 1, 1, 2, 2
+];
 
-/// 传说秘泉的索引
-const LEGEND_ONSEN_INDEX: usize = 9;
+/// 挖完秘汤汤驹后，忽略体力计算（后面可以全覆盖）
+const SECRET_ONSEN_INDEX: usize = 8;
 
 // ============================================================================
 // 辅助函数
@@ -209,10 +213,10 @@ fn count_completed_onsen(game: &OnsenGame) -> usize {
 /// 判断是否应该跳过体力评估惩罚
 ///
 /// # 策略说明
-/// 当已挖掘温泉数量 >= 7 时，超回复温泉的回复可以覆盖所有体力消耗
+/// 挖完秘汤汤驹后，温泉的回复可以覆盖所有体力消耗
 /// 此时体力管理变得不那么重要，可以移除体力评估的惩罚性因素
 fn should_skip_vital_penalty(game: &OnsenGame) -> bool {
-    count_completed_onsen(game) >= ONSEN_COMPLETED_THRESHOLD
+    game.onsen_state[SECRET_ONSEN_INDEX]
 }
 
 /// 手写启发式评估器
@@ -239,9 +243,9 @@ impl HandwrittenEvaluator {
     pub fn new() -> Self {
         Self {
             weights: [1.0, 1.0, 1.0, 1.0, 1.0],
-            skill_weight: 0.3,
+            skill_weight: 0.5,
             vital_threshold: 55,
-            shining_bonus: 15.0,
+            shining_bonus: 35.0,
         }
     }
 
@@ -249,9 +253,9 @@ impl HandwrittenEvaluator {
     pub fn speed_build() -> Self {
         Self {
             weights: [1.2, 0.9, 1.0, 0.8, 0.8],
-            skill_weight: 0.25,
+            skill_weight: 0.5,
             vital_threshold: 55,
-            shining_bonus: 15.0,
+            shining_bonus: 35.0,
         }
     }
 
@@ -259,56 +263,32 @@ impl HandwrittenEvaluator {
     pub fn stamina_build() -> Self {
         Self {
             weights: [0.9, 1.2, 1.0, 0.9, 0.8],
-            skill_weight: 0.25,
+            skill_weight: 0.5,
             vital_threshold: 55,
-            shining_bonus: 15.0,
+            shining_bonus: 35.0,
         }
     }
 
     /// 判断是否应该使用温泉券
     ///
-    /// # 超回复策略优化
-    ///
-    /// 不再"超回复准备好就立即使用"，而是等待合适时机：
-    /// 1. 体力 < 40：体力过低，必须使用，不然无法训练
-    /// 2. 回合 >= 70 且有温泉券：后期保底，避免浪费
-    /// 3. 传说秘泉挖完后超回复状态不消失，可以一直使用
-    ///
     /// # 普通温泉券使用
-    /// 体力 < vital_threshold（默认55）时使用
+    /// 温泉券>=2，或者体力低于阈值55，或者挖了秘汤
     fn should_use_ticket(&self, game: &OnsenGame) -> bool {
         // 基础检查：没有温泉券或正在buff中
         if game.bathing.ticket_num == 0 || game.bathing.buff_remain_turn > 0 {
             return false;
         }
 
-        // 超回复使用策略
+        // 超回复: 有就立即用
         if game.bathing.is_super_ready {
-            // 传说秘泉挖完后，超回复状态不会消失，可以更激进使用
-            let has_legend_onsen = game.onsen_state[9];
-
-            // 紧急恢复：体力极低时必须使用
-            if game.uma.vital < SUPER_USE_VITAL_THRESHOLD {
-                return true;
-            }
-
-            // 后期保底：避免游戏结束时浪费超回复
-            if game.turn >= SUPER_USE_LATE_TURN {
-                return true;
-            }
-
-            // 传说秘泉效果：超回复状态不消失，可以在体力较低时就使用
-            if has_legend_onsen && game.uma.vital < self.vital_threshold {
-                return true;
-            }
-
-            // 其他情况：等待更好的使用时机（高收益训练机会）
-            // 注：这里暂不实现彩圈判断，因为需要额外的训练状态信息
-            return false;
+            return true;
         }
 
-        // 普通温泉券使用：体力低于阈值
-        if game.uma.vital < self.vital_threshold {
+        // 普通温泉券使用：温泉券>=2，或者体力低于阈值，或者挖了秘汤
+        if game.bathing.ticket_num >= 2 ||
+            game.uma.vital < self.vital_threshold || 
+            game.onsen_state[SECRET_ONSEN_INDEX] {
+            //println!("{} {}", game.uma.vital, self.vital_threshold);
             return true;
         }
 
@@ -358,17 +338,18 @@ impl HandwrittenEvaluator {
         }
     }
 
-    /// 按主流攻略顺序选择温泉
+    /// 选择温泉
     ///
     /// # 选择逻辑
-    /// 1. 特殊处理：第三年9月（回合65+）强制选择传说秘泉（如果可选）
-    /// 2. 按推荐顺序遍历，选择第一个未挖掘且已解锁的温泉
+    /// 基础：按推荐顺序选择没挖完的
+    /// 根据年份决定推荐表的起始位置。第一年>=0, 第2年>=3，第3年>=6。表后面追加了第三年的冗余选项（挖前面没挖完的2和6泉
+    /// 根据设定的优先级，第三年9月会优先选择传说秘泉
     fn select_onsen_by_order(&self, game: &OnsenGame, actions: &[OnsenAction]) -> Option<OnsenAction> {
         // 检查是否有 Dig 动作
         let dig_actions: Vec<_> = actions.iter()
             .filter_map(|a| {
                 if let OnsenAction::Dig(idx) = a {
-                    Some((*idx as usize, a.clone()))
+                    Some(*idx as usize)
                 } else {
                     None
                 }
@@ -378,23 +359,16 @@ impl HandwrittenEvaluator {
         if dig_actions.is_empty() {
             return None;
         }
-
-        // 特殊处理：第三年9月强制选择传说秘泉
-        if game.turn >= LEGEND_ONSEN_FORCE_TURN {
-            if let Some((_, action)) = dig_actions.iter().find(|(idx, _)| *idx == LEGEND_ONSEN_INDEX) {
-                return Some(action.clone());
+        let mut pos = game.turn as usize / 24 * 3;
+        while pos < RECOMMENDED_ONSEN_ORDER.len() {
+            let idx = RECOMMENDED_ONSEN_ORDER[pos];
+            if dig_actions.contains(&idx) {
+                return Some(OnsenAction::Dig(idx as i32));
             }
+            pos += 1;
         }
-
-        // 按推荐顺序选择
-        for &recommended_idx in RECOMMENDED_ONSEN_ORDER {
-            if let Some((_, action)) = dig_actions.iter().find(|(idx, _)| *idx == recommended_idx) {
-                return Some(action.clone());
-            }
-        }
-
         // 如果推荐列表都不可选，选择第一个可选的
-        dig_actions.first().map(|(_, a)| a.clone())
+        actions.first().cloned()
     }
 
     /// 按主流攻略顺序选择温泉（返回索引）
@@ -408,38 +382,10 @@ impl HandwrittenEvaluator {
     /// # 返回
     /// 选择的动作在 actions 中的索引
     pub fn select_onsen_index(&self, game: &OnsenGame, actions: &[OnsenAction]) -> usize {
-        // 构建 (温泉索引, 动作列表索引) 的映射
-        let dig_indices: Vec<_> = actions.iter()
-            .enumerate()
-            .filter_map(|(action_idx, a)| {
-                if let OnsenAction::Dig(onsen_idx) = a {
-                    Some((*onsen_idx as usize, action_idx))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if dig_indices.is_empty() {
-            return 0;
-        }
-
-        // 特殊处理：第三年9月强制选择传说秘泉
-        if game.turn >= LEGEND_ONSEN_FORCE_TURN {
-            if let Some((_, action_idx)) = dig_indices.iter().find(|(onsen_idx, _)| *onsen_idx == LEGEND_ONSEN_INDEX) {
-                return *action_idx;
-            }
-        }
-
-        // 按推荐顺序选择
-        for &recommended_onsen in RECOMMENDED_ONSEN_ORDER {
-            if let Some((_, action_idx)) = dig_indices.iter().find(|(onsen_idx, _)| *onsen_idx == recommended_onsen) {
-                return *action_idx;
-            }
-        }
-
-        // 如果推荐列表都不可选，选择第一个
-        0
+        if let Some(act) = self.select_onsen_by_order(game, actions) {
+            return actions.iter().position(|a| *a == act)
+                .expect("action must contain selected act");
+        } else { 0 }
     }
 
     /// 计算属性收益（带上限软约束）
@@ -508,8 +454,8 @@ impl HandwrittenEvaluator {
     /// 2. 智力训练特殊处理：只有在人头多、彩圈多或前期时才倾向选择
     ///
     /// # 体力惩罚豁免机制
-    /// 当已挖掘温泉数量 >= 7 时，超回复温泉的回复可以覆盖所有体力消耗
-    /// 此时跳过体力评估惩罚和失败率惩罚，让AI更激进地训练
+    /// 当挖掘秘汤后，温泉券的回复可以覆盖所有体力消耗
+    /// 此时跳过体力评估惩罚，让AI更激进地训练
     fn evaluate_training(&self, game: &OnsenGame, train: usize) -> f64 {
         let mut score = 0.0;
         let skip_vital_penalty = should_skip_vital_penalty(game);
@@ -535,12 +481,11 @@ impl HandwrittenEvaluator {
         }
 
         // 失败率惩罚（挖掘完成 7 个温泉后跳过）
-        if !skip_vital_penalty && fail_rate > 0.0 {
-            let big_fail_prob = if fail_rate < 20.0 { 0.0 } else { fail_rate };
-            let fail_value_avg = 0.01 * big_fail_prob * BIG_FAIL_VALUE
-                + (1.0 - 0.01 * big_fail_prob) * SMALL_FAIL_VALUE;
-            score = 0.01 * fail_rate * fail_value_avg + (1.0 - 0.01 * fail_rate) * score;
-        }
+        let big_fail_prob = if fail_rate < 20.0 { 0.0 } else { fail_rate };
+        let fail_value_avg = 0.01 * big_fail_prob * BIG_FAIL_VALUE
+            + (1.0 - 0.01 * big_fail_prob) * SMALL_FAIL_VALUE;
+        score = 0.01 * fail_rate * fail_value_avg + (1.0 - 0.01 * fail_rate) * score;
+    
 
         // 彩圈加成
         let shining_count = game.shining_count(train);
@@ -634,75 +579,13 @@ impl HandwrittenEvaluator {
         score
     }
 
-    /// 选择装备升级（接口兼容方法）
-    ///
-    /// 根据 `OnsenAction::Upgrade(i32)` 动作列表选择最优装备升级
-    /// 
-    ///
-    /// # 参数
-    /// - `game`: 当前游戏状态
-    /// - `upgrade_actions`: 装备升级动作列表（OnsenAction::Upgrade(dig_type)）
-    ///
-    /// # 返回
-    /// 最优装备升级动作在列表中的索引
+    /// 根据当前挖掘的温泉选择装备升级
     pub fn select_upgrade_action(&self, game: &OnsenGame, upgrade_actions: &[OnsenAction]) -> usize {
         if upgrade_actions.is_empty() {
             return 0;
+        } else {
+            RECOMMENDED_TOOL_TYPE[game.current_onsen-1]
         }
-
-        // 装备等级对应的挖掘力加成 [0, 0, 30, 50, 70, 100, 130]
-        let dig_tool_level: [i32; 7] = [0, 0, 30, 50, 70, 100, 130];
-
-        // 获取当前装备等级 [砂, 土, 岩]
-        let dig_levels = &game.dig_level;
-
-        // 计算未来挖掘需求（排除天翔古泉索引7）
-        let mut future_demand = [0i32; 3];
-        for (onsen_idx, remain) in game.dig_remain.iter().enumerate() {
-            if game.onsen_state[onsen_idx] || onsen_idx == 7 {
-                continue;
-            }
-            for i in 0..3 {
-                future_demand[i] += remain[i];
-            }
-        }
-
-        // 计算三种装备的升级优先级
-        let mut priorities = [f64::NEG_INFINITY; 3];
-        for i in 0..3 {
-            let level = dig_levels[i] as usize;
-            if level >= 6 {
-                continue;
-            }
-            let current_bonus = dig_tool_level[level];
-            let next_bonus = dig_tool_level[level + 1];
-            let bonus_gain = (next_bonus - current_bonus) as f64;
-            let demand_weight = future_demand[i] as f64 / 100.0;
-            let base_priority = if bonus_gain > 0.0 { bonus_gain } else { 1.0 };
-            priorities[i] = base_priority * demand_weight.max(0.1);
-        }
-
-        // 找到优先级最高的装备类型
-        let mut best_type = 0;
-        let mut best_priority = f64::NEG_INFINITY;
-        for (i, &p) in priorities.iter().enumerate() {
-            if p > best_priority {
-                best_priority = p;
-                best_type = i;
-            }
-        }
-
-        // 在 upgrade_actions 中找到对应的装备
-        for (idx, action) in upgrade_actions.iter().enumerate() {
-            if let OnsenAction::Upgrade(dig_type) = action {
-                if *dig_type as usize == best_type {
-                    return idx;
-                }
-            }
-        }
-
-        // 默认选择第一个
-        0
     }
 }
 
@@ -729,10 +612,8 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
         }
 
         // 硬编码规则：温泉券使用
-        if self.should_use_ticket(game) {
-            if let Some(a) = actions.iter().find(|a| matches!(a, OnsenAction::UseTicket(true))) {
-                return Some(a.clone());
-            }
+        if actions.iter().any(|a| matches!(a, OnsenAction::UseTicket(true))) {
+                return Some(OnsenAction::UseTicket(self.should_use_ticket(game)));
         }
 
         // 硬编码规则：温泉选择（按主流攻略顺序）
@@ -746,6 +627,7 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
         let vital_before = vital_evaluation(game.uma.vital, game.uma.max_vital);
         let mut best_action: Option<OnsenAction> = None;
         let mut best_value = f64::NEG_INFINITY;
+     //   let mut debug_line = String::new();
 
         for action in &actions {
             let value = match action {
@@ -790,12 +672,8 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
                 }
 
                 OnsenAction::FriendOuting => {
-                    // 友人外出基础价值（挖掘完成8个温泉后降低，但仍保留部分价值）
-                    let mut value = if skip_vital_penalty {
-                        FRIEND_OUTING_BASE_VALUE * 0.5 // 后期友人外出价值减半
-                    } else {
-                        FRIEND_OUTING_BASE_VALUE
-                    };
+                    // 友人外出基础价值，根据回合数计算
+                    let mut value = FRIEND_OUTING_BASE_VALUE + FRIEND_OUTING_TURN_MODIFIER[(game.turn / 8) as usize];
 
                     // 干劲不满时额外加成
                     if game.uma.motivation < 5 {
@@ -838,6 +716,15 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
                     value
                 }
 
+                OnsenAction::PR => {
+                    // 写死
+                    let mut value = if game.turn < 24 && game.uma.vital < self.vital_threshold {
+                        120.0
+                    } else { -1000.0 };
+                    value += self.evaluate_dig_value(game, action);
+                    value
+                }
+
                 _ => -1000.0,
             };
 
@@ -845,8 +732,9 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
                 best_value = value;
                 best_action = Some(action.clone());
             }
+           // debug_line += &format!("{action}: {value:.1} ");
         }
-
+      //  info!("{}", debug_line.cyan());
         best_action.or_else(|| actions.choose(rng).cloned())
     }
 

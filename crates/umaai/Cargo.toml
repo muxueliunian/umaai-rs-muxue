@@ -3,6 +3,9 @@ name = "umaai"
 version = "0.1.0"
 edition = "2024"
 
+[build-dependencies]
+winres = "0.1.12"
+
 [dependencies]
 umasim.workspace = true
 anyhow.workspace = true

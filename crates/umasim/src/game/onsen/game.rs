@@ -120,6 +120,10 @@ impl OnsenGame {
             dig_level: [1, 1, 1],
             ..Default::default()
         };
+        // 上限规范化
+        for i in 0..5 {
+            ret.uma.five_status_limit[i] = ret.uma.five_status_limit[i].min(2800);
+        }
         // 蓝因子
         for i in 0..5 {
             ret.dig_blue_count[i] = (ret.inherit.blue_count[i] as f32 / 3.0).ceil() as i32;
@@ -239,17 +243,23 @@ impl OnsenGame {
         None
     }
 
-    /// 计算剧本Buff
-    pub fn update_scenario_buff(&mut self) {
+    /// 计算剧本Buff use_ticket为false时不更新温泉券buff(锁面板)
+    pub fn update_scenario_buff(&mut self, use_ticket: bool) {
         let onsen_data = global!(ONSENDATA);
-        let mut onsen_buff = OnsenBuff::default();
-        self.dig_count = 0;
-        for i in 0..self.onsen_state.len() {
-            if self.onsen_state[i] {
-                onsen_buff.onsen.add_eq(&onsen_data.onsen_info[i].effect);
-                self.dig_count += 1;
+        let onsen_buff = &mut self.scenario_buff;
+        // use_ticket=True 或者vital=0（没计算）时更新温泉券buff
+        if use_ticket || onsen_buff.onsen.vital == 0 {
+            onsen_buff.onsen = OnsenEffect::default();
+            for i in 0..self.onsen_state.len() {
+                if self.onsen_state[i] {
+                    onsen_buff.onsen.add_eq(&onsen_data.onsen_info[i].effect);
+                }
             }
         }
+        self.dig_count = self.onsen_state.iter()
+            .filter(|x| **x)
+            .count() as i32;
+        
         // 旅馆加成
         let hotel_effect = &onsen_data.hotel_effect;
         let mut j = hotel_effect.len() - 1;
@@ -295,7 +305,6 @@ impl OnsenGame {
         for i in 0..3 {
             self.dig_power[i] = dig_blue_bonus[i] + dig_stat_bonus[i] + dig_tool_bonus[i];
         }
-        self.scenario_buff = onsen_buff;
     }
 
     /// 计算不同指令的挖掘量
@@ -304,13 +313,13 @@ impl OnsenGame {
         let mut link_bonus = [0, 0, 0];
         let link_effect = &global!(ONSENDATA).link_effect;
         // Link角色加成（马娘）
-        if let Some(ty) = link_effect.get(&self.uma.chara_id().to_string()) {
+        if let Some(ty) = link_effect.get(&self.uma.chara_id()) {
             link_bonus[(*ty - 1) as usize] += 10;
         }
         // Link支援卡加成（全局，只要携带就生效）
         for i in 0..6 {
             if i < self.persons.len() {
-                if let Some(ty) = link_effect.get(&self.persons[i].chara_id.to_string()) {
+                if let Some(ty) = link_effect.get(&self.persons[i].chara_id) {
                     link_bonus[(*ty - 1) as usize] += 10;
                 }
             }
@@ -475,7 +484,7 @@ impl OnsenGame {
             self.deck[person_index].total_hints += hint_level;
             EventData::hint_skill_event(hint_level, person_index)
         };
-        hint_event.name = format!("{} - {}", hint_event.name, self.deck[person_index].short_name()?);
+        //hint_event.name = format!("{} - {}", hint_event.name, self.deck[person_index].short_name()?); // short_name is slow
         if !has_friendship {
             hint_event.choices[0].friendship = 0;
         }
@@ -678,6 +687,8 @@ impl OnsenGame {
         }
 
         info!(">> 使用温泉券");
+        // 更新温泉Buff
+        self.update_scenario_buff(true);
         // 1. 取羁绊最低的3人羁绊各+10
         let mut cards = self.persons[..6].to_vec();
         cards.sort_by_key(|x| x.friendship);
@@ -1369,6 +1380,10 @@ impl Game for OnsenGame {
                 let inherit_limit = self.inherit.inherit_limit(rng);
                 self.uma.add_value(&inherit_value);
                 self.uma.five_status_limit.add_eq(&inherit_limit);
+                info!("当前 limit: {:?}", self.uma.five_status_limit);
+                for i in 0..5 {
+                    self.uma.five_status_limit[i] = self.uma.five_status_limit[i].min(2800);
+                }
             }
             5007 => {
                 // 大成功事件
@@ -1502,10 +1517,12 @@ impl Game for OnsenGame {
                 upper_value[i] = (total_value.status_pt[i] - base_value.status_pt[i]).min(100);
                 total_value.status_pt[i] = base_value.status_pt[i] + upper_value[i];
             }
+            /*
             info!(
                 "训练: {train}, 下层: {:?}, 上层: {:?}",
                 base_value.status_pt, upper_value
             );
+            */
             Ok(total_value)
         } else {
             Ok(base_value)
@@ -1516,7 +1533,7 @@ impl Game for OnsenGame {
         info!("-- 回合 {}-{:?} --", self.turn + 1, self.stage);
         match self.stage {
             OnsenTurnStage::Begin => {
-                println!("-----------------------------------------");
+                //println!("-----------------------------------------");
                 //info!("{}", self.explain()?);
                 // 处理上一回合挖掘完成后的选择（装备升级+源泉选择）
                 if self.pending_selection && self.turn < 72 {
@@ -1571,7 +1588,7 @@ impl Game for OnsenGame {
                 }
             }
             OnsenTurnStage::Distribute => {
-                self.update_scenario_buff();
+                self.update_scenario_buff(false);
                 if self.is_race_turn()? {
                     self.reset_distribution();
                 } else {

@@ -99,9 +99,11 @@ impl ActionEnum for OnsenAction {
                     } else {
                         1.0
                     };
+                    let mut pt_rate = 1.0;
                     if game.uma.chara_id() == 1063 && game.turn > 12 {
-                        // 狄杜斯出道赛后：再增加50%
-                        scenario_bonus *= 1.5;
+                        // 狄杜斯出道赛后：属性再增加170%，PT增加30%
+                        scenario_bonus *= 2.7;
+                        pt_rate = 0.45;
                     }
                     info!(
                         ">> 生涯比赛 - 比赛加成: {}, 剧本加成: {scenario_bonus}x",
@@ -110,6 +112,7 @@ impl ActionEnum for OnsenAction {
                     let mut event = system_event("race_career")?.clone();
                     // 事件面板乘算比赛加成
                     event.choices[0].map_status(|x| (x as f32 * race_bonus * scenario_bonus).round() as i32);
+                    event.choices[0].status_pt[5] = (event.choices[0].status_pt[5] as f32 * pt_rate).round() as i32;
                     game.unresolved_events.push(event);
                 } else {
                     let grade = global!(GAMECONSTANTS).race_grades[game.turn as usize];

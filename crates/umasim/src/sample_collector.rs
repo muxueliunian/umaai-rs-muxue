@@ -38,8 +38,7 @@ pub fn action_to_global_index(action: &OnsenAction) -> Option<usize> {
         OnsenAction::PR => Some(10),
         OnsenAction::Dig(idx) => Some(11 + *idx as usize),
         OnsenAction::Upgrade(idx) => Some(21 + *idx as usize),
-        OnsenAction::UseTicket(is_super) => Some(if *is_super { 25 } else { 24 }),
-        _ => None,
+        OnsenAction::UseTicket(is_super) => Some(if *is_super { 25 } else { 24 })
     }
 }
 
