@@ -49,6 +49,15 @@ impl UmaData {
     pub fn short_name(&self) -> &str {
         self.name.split("]").last().unwrap_or(&self.name)
     }
+
+    /// 把比赛回合压缩进u64位段 对应11-71回合
+    pub fn zip_races(&self) -> u64 {
+        let mut ret = 0;
+        for race in &self.races {
+            ret |= 1 << (race - 11);
+        }
+        ret
+    }
 }
 /// 支援卡数据 CardDB.json
 /// 支援卡具体数值

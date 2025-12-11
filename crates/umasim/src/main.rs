@@ -330,7 +330,7 @@ async fn main() -> Result<()> {
                         .with_search_cpuct(game_config.mcts.search_cpuct)
                         .with_expected_search_stdev(game_config.mcts.expected_search_stdev)
                         .with_adjust_radical_by_turn(game_config.mcts.adjust_radical_by_turn);
-                    let trainer = MctsTrainer::new(search_config).verbose(simulation_count == 1);
+                    let trainer = MctsTrainer::new(search_config).verbose(false);
                     match game_config.scenario.as_str() {
                         "onsen" => run_onsen_once(
                             &trainer,

@@ -224,8 +224,8 @@
         {
             "id": 400012021,
             "name": "ぴょいや！大宴会！",
-            "start_turn": 78,
-            "end_turn": 78,
+            "start_turn": 77,
+            "end_turn": 77,
             "prob": 100,
             "max_trigger_time": 1,
             "choices": [{

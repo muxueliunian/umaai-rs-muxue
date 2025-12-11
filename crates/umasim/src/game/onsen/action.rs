@@ -93,7 +93,7 @@ impl ActionEnum for OnsenAction {
                 } else {
                     1.0
                 };
-                if game.uma.is_race_turn(game.turn)? {
+                if game.uma.is_race_turn(game.turn) {
                     let mut scenario_bonus = if game.turn < 72 {
                         global!(ONSENDATA).career_race_multiplier * buff_bonus
                     } else {

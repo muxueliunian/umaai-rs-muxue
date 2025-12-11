@@ -36,7 +36,7 @@ trainer = "mcts"
 #   adjust_radical_by_turn - 激进度随回合递减，后期更稳（默认 true）
 #
 #   ⬇️🐧⭐ toml 的内联表{ ..... }不支持换行 ，换行会报错。
-mcts = { search_n = 1024, radical_factor_max = 50.0, max_depth = 0, policy_delta = 100.0, adjust_radical_by_turn = true, use_ucb = true, search_group_size = 256 }
+mcts = { search_n = 1024, radical_factor_max = 50.0, max_depth = 0, policy_delta = 100.0, adjust_radical_by_turn = true, use_ucb = true, search_group_size = 1024 }
 
 # 模拟次数（默认1次，大于1时显示最高分/最低分面板和平均分）
 

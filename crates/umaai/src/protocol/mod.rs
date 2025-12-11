@@ -142,14 +142,15 @@ impl GameStatusBase {
             skill_score: self.skill_score,
             total_hints: self.total_hints,
             race_bonus: 0,
-            flags
+            flags,
+            career_races: data.zip_races()
         })
     }
 
     pub fn parse_friend(&self, scenario_friend_chara_id: u32) -> Result<FriendState> {
         for (index, id) in self.card_id.iter().enumerate() {
             let card = SupportCard::new(*id)?;
-            if card.card_type >= 5 && card.get_data()?.chara_id == scenario_friend_chara_id {
+            if card.card_type >= 5 && card.data.chara_id == scenario_friend_chara_id {
                 let friend_id = Some(*id);
                 let friend_index = index;
                 let mut friend = FriendState::new(friend_id, friend_index)?;

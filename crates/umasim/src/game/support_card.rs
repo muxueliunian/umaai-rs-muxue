@@ -3,6 +3,7 @@ use std::{collections::HashMap, default::Default};
 use anyhow::{Result, anyhow};
 use log::{debug, warn};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 
 use crate::{
     explain::Explain,
@@ -174,8 +175,10 @@ impl From<&CardValue> for CardTrainingEffect {
 }
 
 /// 局中的支援卡信息，剧本通用
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SupportCard {
+    /// 面板数据，避免查表
+    pub data: Arc<SupportCardData>,
     /// 支援卡ID(5位)
     pub card_id: u32,
     /// 突破等级
@@ -197,20 +200,13 @@ pub struct SupportCard {
 }
 
 impl SupportCard {
-    pub fn ensure_valid_rank(rank: u32) -> Result<()> {
-        if rank > 4 {
-            Err(anyhow!("rank {rank} > 4"))
-        } else {
-            Ok(())
-        }
-    }
 
-    pub fn short_name(&self) -> Result<String> {
-        Ok(format!("{}◆ {}", self.get_data()?.short_name(), self.rank))
+    pub fn short_name(&self) -> String {
+        format!("{}◆ {}", self.data.short_name(), self.rank)
     }
 
     pub fn explain(&self) -> Result<String> {
-        let mut ret = format!("{} 绊{} {}", self.short_name()?, self.friendship, self.effect.explain());
+        let mut ret = format!("{} 绊{} {}", self.short_name(), self.friendship, self.effect.explain());
         if !self.effect_state.is_empty() {
             ret += &format!(" {:?}", self.effect_state);
         }
@@ -219,30 +215,29 @@ impl SupportCard {
         }
         Ok(ret)
     }
-    pub fn get_data(&self) -> Result<&SupportCardData> {
-        let gamedata = GAMEDATA.get().expect("global gamedata");
-        gamedata.get_card(self.card_id)
-    }
 
-    pub fn card_value(&self) -> Result<&CardValue> {
-        let data = self.get_data()?;
-        Self::ensure_valid_rank(self.rank)?;
-        Ok(&data.card_value[self.rank as usize])
+    /// 高频调用路径允许panic
+    #[inline]
+    pub fn card_value(&self) -> &CardValue {
+        &self.data.card_value[self.rank as usize]
     }
 
     /// 初始属性加成
-    pub fn initial_bonus(&self) -> Result<&Array6> {
-        self.card_value().map(|v| &v.initial_bonus)
+    pub fn initial_bonus(&self) -> &Array6 {
+        &self.card_value().initial_bonus
     }
     /// idrank: 卡ID+突破等级，形如 301614
     pub fn new(idrank: u32) -> Result<Self> {
         let (id, rank) = (idrank / 10, idrank % 10);
         let gamedata = global!(GAMEDATA);
         let data = gamedata.get_card(id)?;
-        Self::ensure_valid_rank(rank)?;
+        if rank > 4 {
+            return Err(anyhow!("Rank超出范围: {}", idrank));
+        }
         let effect = CardTrainingEffect::from(&data.card_value[rank as usize]);
         let friendship = data.card_value[rank as usize].initial_jiban;
         Ok(Self {
+            data: Arc::new(data.clone()),
             card_id: id,
             rank,
             card_type: data.card_type,
@@ -261,16 +256,15 @@ impl SupportCard {
         let mut locking = false;
         if !self.is_locked {
             // locked就不计算，节省时间
-            let data = self.get_data()?;
-            let param = &data.unique_effect_param;
-            match data.unique_effect_type {
+            let param = &self.data.unique_effect_param;
+            match self.data.unique_effect_type {
                 0 => {
                     locking = true;
                 }
                 1 | 2 => {
                     // 羁绊>args[1]时触发词条args[2] = args[3]
                     if self.friendship >= param[1] {
-                        debug!("{} 羁绊>{}, 触发固有: {:?}", data.short_name(), param[1], param);
+                        debug!("{} 羁绊>{}, 触发固有: {:?}", self.data.short_name(), param[1], param);
                         if param[2] > 0 {
                             ret.add_effect_line(param[2], param[3]);
                         }
@@ -299,7 +293,7 @@ impl SupportCard {
                         }
                         debug!(
                             "{} 羁绊>{}, 副属性加成(最大+2): {:?}",
-                            data.short_name(),
+                            self.data.short_name(),
                             param[2],
                             card_type_count
                         );
@@ -316,7 +310,7 @@ impl SupportCard {
                     }
                 }
                 _ => {
-                    warn!("未实现固有逻辑: {}", data.unique_effect_type);
+                    warn!("未实现固有逻辑: {}", self.data.unique_effect_type);
                     locking = true;
                 }
             } // match unique_effect_type

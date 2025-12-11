@@ -67,12 +67,12 @@ impl BaseGame {
         for (index, id) in deck_ids.iter().enumerate() {
             let card = SupportCard::new(*id)?;
             // 初始属性
-            let initial = card.initial_bonus()?;
+            let initial = card.initial_bonus();
             let race_bonus = card.effect.saihou;
             if !initial.is_default() {
-                info!("{} +初始属性 {initial:?} 赛后{race_bonus}", card.short_name()?);
+                info!("{} +初始属性 {initial:?} 赛后{race_bonus}", card.short_name());
             } else {
-                info!("{} 赛后{race_bonus}", card.short_name()?);
+                info!("{} 赛后{race_bonus}", card.short_name());
             }
             let (initial, pt) = split_status(initial)?;
             uma.five_status.add_eq(initial);

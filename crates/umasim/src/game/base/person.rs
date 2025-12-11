@@ -114,7 +114,7 @@ impl TryFrom<&SupportCard> for BasePerson {
             person_index: 0,
             person_type,
             train_type: card.card_type,
-            chara_id: card.get_data()?.chara_id,
+            chara_id: card.data.chara_id,
             friendship: card.friendship,
             is_hint: false,
             card_id: Some(card.card_id)

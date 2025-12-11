@@ -10,8 +10,6 @@
 //! 3. 羁绊价值提升 - 前期更重视羁绊
 
 use anyhow::Result;
-use colored::Colorize;
-use log::info;
 use rand::{rngs::StdRng, seq::IndexedRandom};
 
 use super::{Evaluator, ValueOutput};
@@ -598,7 +596,7 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
         }
 
         // 硬编码规则：目标比赛
-        if game.is_race_turn().unwrap_or(false) {
+        if game.is_race_turn() {
             if let Some(a) = actions.iter().find(|a| matches!(a, OnsenAction::Race)) {
                 return Some(a.clone());
             }
@@ -620,7 +618,7 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
         let vital_before = vital_evaluation(game.uma.vital, game.uma.max_vital);
         let mut best_action: Option<OnsenAction> = None;
         let mut best_value = f64::NEG_INFINITY;
-        let mut debug_line = String::new();
+        //Flet mut debug_line = String::new();
 
         for action in &actions {
             let value = match action {
@@ -690,7 +688,7 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
 
                 OnsenAction::Race => {
                     // 比赛价值评估（参考 action.rs 的实际执行逻辑）
-                    let mut value = if game.is_race_turn().unwrap_or(false) {
+                    let mut value = if game.is_race_turn() {
                         // 目标比赛：使用剧本比赛倍率
                         let career_multiplier = ONSENDATA.get().map(|d| d.career_race_multiplier).unwrap_or(1.5);
                         let career_bonus = (100 + game.scenario_buff.onsen.career_race_bonus) as f64 / 100.0;
@@ -734,9 +732,9 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
                 best_value = value;
                 best_action = Some(action.clone());
             }
-            debug_line += &format!("{action}: {value:.1} ");
+            //debug_line += &format!("{action}: {value:.1} ");
         }
-        info!("{}", debug_line.cyan());
+        //info!("{}", debug_line.cyan());
         best_action.or_else(|| actions.choose(rng).cloned())
     }
 

@@ -95,7 +95,9 @@ pub struct Uma {
     /// 比赛加成
     pub race_bonus: i32,
     /// Buff状态
-    pub flags: UmaFlags
+    pub flags: UmaFlags,
+    /// 生涯比赛bitset 低到高位对应11-71回合
+    pub career_races: u64
 }
 
 impl Uma {
@@ -139,12 +141,14 @@ impl Uma {
             five_status_limit: cons.five_status_limit_base.clone(),
             skill_score: 510, // 固有按5星计算,
             total_hints: 21,  // 按全部初始技能3级打折计算
+            career_races: data.zip_races(),
             ..Default::default()
         })
     }
 
-    pub fn is_race_turn(&self, turn: i32) -> Result<bool> {
-        Ok(self.get_data()?.races.contains(&turn) || vec![73, 75, 77].contains(&turn))
+    pub fn is_race_turn(&self, turn: i32) -> bool {
+        turn == 73 || turn == 75 || turn == 77 ||
+        turn >= 11 && ((1u64 << (turn-11)) & self.career_races != 0)
     }
 
     /// 计算技能点和总Hint等级换算得到的总pt数，不包括已学习的技能

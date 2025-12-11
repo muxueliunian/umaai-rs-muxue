@@ -259,7 +259,7 @@ pub trait Game: Clone {
         let hint_probs: Vec<_> = self
             .deck()
             .iter()
-            .map(|card| card.card_value().expect("card_value").hint_prob_increase)
+            .map(|card| card.card_value().hint_prob_increase)
             .collect();
         for person in self.persons_mut() {
             if person.person_type() == PersonType::Card {

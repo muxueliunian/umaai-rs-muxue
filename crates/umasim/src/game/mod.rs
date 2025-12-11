@@ -132,7 +132,9 @@ impl FriendState {
         ret.out_used = vec![false, false, false, false, false];
         if let Some(i) = idrank {
             let (id, rank) = (i / 10, i % 10);
-            SupportCard::ensure_valid_rank(rank)?;
+            if rank > 4 {
+                return Err(anyhow::anyhow!("idrank {} 非法", i));
+            }
             let card = data.get_card(id)?;
             ret.card_state = match card.rarity {
                 3 => FriendCardState::SSR,

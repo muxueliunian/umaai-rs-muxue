@@ -117,7 +117,7 @@ impl BasicAction {
             if let Some(p) = hint_persons.choose(rng) {
                 let attr_prob = system_event_prob("hint_attr")?;
                 let hint_level = if *p < 6 {
-                    1 + game.deck[*p as usize].card_value()?.hint_level
+                    1 + game.deck[*p as usize].card_value().hint_level
                 } else {
                     1
                 };
@@ -128,7 +128,7 @@ impl BasicAction {
                     // 红点提供技能
                     EventData::hint_skill_event(hint_level, *p as usize)
                 };
-                hint_event.name = format!("{} - {}", hint_event.name, game.deck[*p as usize].short_name()?);
+                hint_event.name = format!("{} - {}", hint_event.name, game.deck[*p as usize].short_name());
                 game.unresolved_events.push(hint_event);
             }
             let extra_train_prob = system_event_prob("extra_train")?;
@@ -190,7 +190,7 @@ impl BasicGame {
         self.persons.push(person);
     }
 
-    pub fn is_race_turn(&self) -> Result<bool> {
+    pub fn is_race_turn(&self) -> bool {
         self.uma.is_race_turn(self.turn)
     }
 
@@ -252,7 +252,7 @@ impl Game for BasicGame {
 
     fn list_actions(&self) -> Result<Vec<Self::Action>> {
         let mut actions = vec![];
-        if self.is_race_turn()? {
+        if self.is_race_turn() {
             Ok(vec![BasicAction(Race)])
         } else {
             actions = vec![
@@ -401,7 +401,7 @@ impl Game for BasicGame {
                 }
             }
             TurnStage::Distribute => {
-                if self.is_race_turn()? {
+                if self.is_race_turn() {
                     self.reset_distribution();
                 } else {
                     self.distribute_all(rng)?;

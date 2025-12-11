@@ -526,6 +526,48 @@
     ],
     "star": 5
   },
+  "100603": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      8,
+      0,
+      8,
+      14,
+      0
+    ],
+    "fiveStatusInitial": [
+      101,
+      118,
+      101,
+      124,
+      106
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 23,
+        "count": 1
+      },
+      {
+        "startTurn": 48,
+        "endTurn": 59,
+        "count": 2
+      }
+    ],
+    "gameId": 100603,
+    "name": "[シンデレラグレイ]小栗帽",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      32,
+      45,
+      47,
+      67,
+      71
+    ],
+    "star": 5
+  },
   "100701": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -4060,6 +4102,39 @@
     "freeRaces": [],
     "gameId": 104901,
     "name": "[死中求活]中山庆典",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      24,
+      30,
+      33,
+      43,
+      46,
+      59,
+      69
+    ],
+    "star": 5
+  },
+  "104902": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      10,
+      0,
+      10,
+      10,
+      0
+    ],
+    "fiveStatusInitial": [
+      121,
+      95,
+      100,
+      113,
+      121
+    ],
+    "freeRaces": [],
+    "gameId": 104902,
+    "name": "[祝祭遊戯]中山庆典",
     "preferRaces": [],
     "preferReds": [],
     "races": [
@@ -8262,6 +8337,41 @@
     "freeRaces": [],
     "gameId": 111901,
     "name": "[梦境的尽头]梦之旅",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      22,
+      30,
+      33,
+      43,
+      53,
+      55,
+      59,
+      65,
+      71
+    ],
+    "star": 5
+  },
+  "111902": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      20,
+      10,
+      0,
+      0,
+      0
+    ],
+    "fiveStatusInitial": [
+      103,
+      111,
+      112,
+      110,
+      114
+    ],
+    "freeRaces": [],
+    "gameId": 111902,
+    "name": "[雪白の夢路]梦之旅",
     "preferRaces": [],
     "preferReds": [],
     "races": [

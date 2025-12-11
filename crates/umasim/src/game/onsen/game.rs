@@ -107,7 +107,7 @@ impl OnsenGame {
         self.persons.push(person);
     }
 
-    pub fn is_race_turn(&self) -> Result<bool> {
+    pub fn is_race_turn(&self) -> bool {
         self.uma.is_race_turn(self.turn)
     }
 
@@ -336,7 +336,7 @@ impl OnsenGame {
             }
             OnsenAction::PR => Some(10 + 1), // 以1个人头计算
             OnsenAction::Race => {
-                if self.uma.is_race_turn(self.turn).unwrap_or(false) {
+                if self.uma.is_race_turn(self.turn) {
                     Some(25)
                 } else {
                     Some(15)
@@ -467,7 +467,7 @@ impl OnsenGame {
         let attr_prob = system_event_prob("hint_attr")?;
         let max_hint_per_card = global!(GAMECONSTANTS).max_hint_per_card;
         let hint_level = if person_index < 6 {
-            (1 + self.deck[person_index].card_value()?.hint_level)
+            (1 + self.deck[person_index].card_value().hint_level)
                 .min(5) // <= 5
                 .min(max_hint_per_card - self.deck[person_index].total_hints) // 单卡最大hint等级限制
         } else {
@@ -645,7 +645,7 @@ impl OnsenGame {
         let hint_probs: Vec<_> = self
             .deck()
             .iter()
-            .map(|card| card.card_value().expect("card_value").hint_prob_increase + self.scenario_buff.onsen.hint_bonus)
+            .map(|card| card.card_value().hint_prob_increase + self.scenario_buff.onsen.hint_bonus)
             .collect();
         for person in self.persons_mut() {
             if person.person_type == PersonType::Card && !person.is_hint {
@@ -1185,11 +1185,9 @@ impl OnsenGame {
                 // 卡片参数（15 维）- 简化处理
                 if let Some(card) = self.deck.get(card_idx) {
                     // 卡片类型 One-Hot（6 维：速耐力根智友人）
-                    if let Ok(data) = card.get_data() {
-                        let card_type = data.card_type as usize;
-                        if card_type < 6 {
-                            features[base + 15 + card_type] = 1.0;
-                        }
+                    let card_type = card.data.card_type as usize;
+                    if card_type < 6 {
+                        features[base + 15 + card_type] = 1.0;
                     }
                     // 21-29: 预留（友情加成、干劲加成等）
                 }
@@ -1214,7 +1212,7 @@ impl Game for OnsenGame {
             // 对默认转换再过滤一下非剧本友人
             if person.person_type == PersonType::ScenarioCard {
                 if person.chara_id == 9050 {
-                    friend_state = match card.get_data()?.rarity {
+                    friend_state = match card.data.rarity {
                         1 => FriendCardState::R,
                         3 => FriendCardState::SSR,
                         _ => return Err(anyhow!("invalid friend rarity"))
@@ -1265,7 +1263,7 @@ impl Game for OnsenGame {
                 }
             }
             OnsenTurnStage::Train => {
-                if self.is_race_turn()? {
+                if self.is_race_turn() {
                     Ok(vec![OnsenAction::Race])
                 } else {
                     let mut actions = vec![
@@ -1589,7 +1587,7 @@ impl Game for OnsenGame {
             }
             OnsenTurnStage::Distribute => {
                 self.update_scenario_buff(false);
-                if self.is_race_turn()? {
+                if self.is_race_turn() {
                     self.reset_distribution();
                 } else {
                     self.distribute_all(rng)?;
@@ -1670,7 +1668,7 @@ impl Game for OnsenGame {
 
     fn on_simulation_end<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
         info!(">> 育成结束，触发最终奖励事件");
-
+        /*
         // 查找回合78事件 (ぴょいや！大宴会！)
         let onsen_data = global!(ONSENDATA);
         if let Some(event) = onsen_data.scenario_events.iter().find(|e| e.id == 400012021) {
@@ -1678,7 +1676,7 @@ impl Game for OnsenGame {
         } else {
             warn!("未找到育成结束事件 (id=400012021)");
         }
-
+        */
         Ok(())
     }
 }
