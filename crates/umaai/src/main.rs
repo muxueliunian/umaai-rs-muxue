@@ -100,15 +100,32 @@ async fn main() -> Result<()> {
                         println!("{}", format!("蒙特卡洛：{}", actions[upgrade]).magenta());
                     }
                 } else {
+                    // 如果被解析成 Bathing 但没有温泉券合buff，就直接跳过到 Train
+                    if game.stage == OnsenTurnStage::Bathing
+                        && game.bathing.ticket_num == 0
+                        && game.bathing.buff_remain_turn == 0
+                    {
+                        game.next();
+                    }
+
                     let actions = game.list_actions()?;
-                    let action = trainer.select_action(&game, &actions, &mut rng)?;
-                    println!("{}", format!("蒙特卡洛: {}", actions[action]).bright_green());
-                    // 如果是不使用温泉券，则前进一步选择训练
-                    if actions[action] == OnsenAction::UseTicket(false) {
-                        game.apply_action(&actions[action], &mut rng)?;
+                    if actions.is_empty() {
+                        continue;
+                    }
+
+                    let action_idx = trainer.select_action(&game, &actions, &mut rng)?;
+                    let action = actions[action_idx].clone();
+                    println!("{}", format!("蒙特卡洛: {action}").bright_green());
+
+                    // 当 mcts 建议 UseTicket(false) 时，直接跳过 Bathing 阶段，继续给出训练推荐。
+                    if action == OnsenAction::UseTicket(false) && game.stage == OnsenTurnStage::Bathing {
+                        game.next();
                         let actions = game.list_actions()?;
-                        let action = trainer.select_action(&game, &actions, &mut rng)?;
-                        println!("{}", format!("蒙特卡洛: {}", actions[action]).bright_green());
+                        if !actions.is_empty() {
+                            let action_idx = trainer.select_action(&game, &actions, &mut rng)?;
+                            let action = actions[action_idx].clone();
+                            println!("{}", format!("蒙特卡洛: {action}").bright_green());
+                        }
                     }
                 }
             }
