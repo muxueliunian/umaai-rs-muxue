@@ -32,5 +32,12 @@ mod value_output;
 // 公开导出
 pub use evaluator::{Evaluator, RandomEvaluator};
 pub use handwritten_evaluator::HandwrittenEvaluator;
-pub use neural_net_evaluator::NeuralNetEvaluator;
+pub use neural_net_evaluator::{
+    NeuralNetEvaluator,
+    ThreadLocalNeuralNetLeafEvaluator,
+    ThreadLocalNeuralNetLeafStatsSnapshot,
+    ThreadLocalNeuralNetRolloutPolicy,
+    ThreadLocalNeuralNetRolloutPolicyMode,
+    ThreadLocalNeuralNetRolloutStatsSnapshot,
+};
 pub use value_output::ValueOutput;
