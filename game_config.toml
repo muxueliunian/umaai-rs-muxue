@@ -32,12 +32,12 @@ mcts_selection = "pt"
 mcts = { search_n = 10240, radical_factor_max = 1.5 }
 
 # 日志级别: "debug" (完整显示) | "off" (全部关闭) | "info" (简要显示) | "trace" (详细显示) 
-log_level = "off"
+log_level = "info"
 
 # ---- 以下参数仅模拟中生效 ----
 # 模拟次数（默认1次，大于1时显示最高分/最低分面板和平均分）
 
-simulation_count = 300
+simulation_count = 1
 
 # 马娘ID 参考umaDB.json
 uma = 106301
@@ -66,7 +66,7 @@ scenario = "onsen"
 #   "collector"   - 样本收集器（用于生成神经网络训练数据）
 #   "neuralnet"   - 神经网络训练员（使用 ONNX 模型进行决策）
 #   "mcts"        - 蒙特卡洛训练员（使用手写逻辑+mcts进行决策）
-trainer = "neuralnet"
+trainer = "mcts"
 
 # neuralnet ONNX 模型路径
 neuralnet_model_path = "saved_models/onsen_v15/model.onnx"

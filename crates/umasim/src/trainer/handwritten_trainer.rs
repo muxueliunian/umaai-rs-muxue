@@ -9,9 +9,9 @@
 //! - 调试和验证策略逻辑
 
 use anyhow::Result;
+use colored::Colorize;
 use log::info;
 use rand::prelude::StdRng;
-
 use crate::{
     game::{Trainer, onsen::game::OnsenGame},
     gamedata::ActionValue,
@@ -23,8 +23,9 @@ use crate::{
 /// 直接使用 HandwrittenEvaluator 的 select_action 逻辑，
 /// 不经过 MCTS 搜索，执行速度快。
 pub struct HandwrittenTrainer {
-    evaluator: HandwrittenEvaluator,
-    verbose: bool
+    pub evaluator: HandwrittenEvaluator,
+    pub verbose: bool,
+    pub record: bool
 }
 
 impl HandwrittenTrainer {
@@ -32,7 +33,8 @@ impl HandwrittenTrainer {
     pub fn new() -> Self {
         Self {
             evaluator: HandwrittenEvaluator::new(),
-            verbose: false
+            verbose: false,
+            record: false
         }
     }
 
@@ -42,11 +44,17 @@ impl HandwrittenTrainer {
         self
     }
 
+    pub fn record(mut self, record: bool) -> Self {
+        self.record = record;
+        self
+    }
+
     /// 使用速度型配置
     pub fn speed_build() -> Self {
         Self {
             evaluator: HandwrittenEvaluator::speed_build(),
-            verbose: false
+            verbose: false,
+            record: false
         }
     }
 
@@ -54,7 +62,8 @@ impl HandwrittenTrainer {
     pub fn stamina_build() -> Self {
         Self {
             evaluator: HandwrittenEvaluator::stamina_build(),
-            verbose: false
+            verbose: false,
+            record: false
         }
     }
 }
@@ -82,7 +91,7 @@ impl Trainer<OnsenGame> for HandwrittenTrainer {
             // 温泉选择：使用硬编码顺序
             let idx = self.evaluator.select_onsen_index(game, actions);
             if self.verbose {
-                info!("[回合 {}] 手写策略选择温泉: {}", game.turn + 1, actions[idx]);
+                info!("[回合 {}] {} {}", game.turn + 1, "手写策略选择温泉:".cyan(), actions[idx].to_string().green());
             }
             return Ok(idx);
         }
@@ -93,7 +102,7 @@ impl Trainer<OnsenGame> for HandwrittenTrainer {
             // 装备升级：使用智能升级策略
             let idx = self.evaluator.select_upgrade_action(game, actions);
             if self.verbose {
-                info!("[回合 {}] 手写策略选择装备升级: {}", game.turn + 1, actions[idx]);
+                info!("[回合 {}] {} {}", game.turn + 1, "手写策略选择装备升级:".cyan(), actions[idx].to_string().green());
             }
             return Ok(idx);
         }
@@ -103,12 +112,12 @@ impl Trainer<OnsenGame> for HandwrittenTrainer {
 
         // 找到选中动作在列表中的索引
         let idx = match &selected_action {
-            Some(action) => actions.iter().position(|a| a == action).unwrap_or(0),
+            Some(action) => actions.iter().position(|a| *a == action.selection).unwrap_or(0),
             None => 0
         };
 
         if self.verbose {
-            info!("[回合 {}] 手写策略选择: {}", game.turn + 1, actions[idx]);
+            info!("[回合 {}] {}: {}", game.turn + 1, "手写策略选择".cyan(), actions[idx].to_string().green());
         }
 
         Ok(idx)
@@ -130,7 +139,7 @@ impl Trainer<OnsenGame> for HandwrittenTrainer {
         if self.verbose {
             info!(
                 "[回合 {}] 手写策略选择事件选项: {} (索引 {})",
-                game.turn, choices[best_idx], best_idx
+                game.turn, choices[best_idx].to_string().green(), best_idx.to_string().green()
             );
         }
 

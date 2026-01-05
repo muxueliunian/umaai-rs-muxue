@@ -3,7 +3,7 @@ use std::fmt::Display;
 use anyhow::{Result, anyhow};
 use rand::{Rng, rngs::StdRng};
 use rand_distr::{Distribution, weighted::WeightedIndex};
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
     game::{base::*, *},
@@ -152,5 +152,24 @@ impl ActionEnum for BaseAction {
 
     fn as_base_action(&self) -> Option<BaseAction> {
         Some(self.clone())
+    }
+}
+
+/// 用于保存动作和得分
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ActionScore<A: ActionEnum + Serialize> {
+    pub selection: A,
+    pub actions: Vec<A>,
+    pub score: Vec<f64>
+}
+
+impl <A: ActionEnum + Serialize> ActionScore<A> {
+    pub fn new(selection: A, actions: Vec<A>, score: Vec<f64>) -> Self {
+        if score.is_empty() && !actions.is_empty() {
+            let default_score = vec![0.0; actions.len()];
+            Self { selection, actions, score: default_score }
+        } else {
+            Self { selection, actions, score }
+        }
     }
 }

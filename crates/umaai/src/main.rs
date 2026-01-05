@@ -7,6 +7,7 @@ use anyhow::{Result, anyhow};
 use colored::Colorize;
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
+use serde::Serialize;
 use text_to_ascii_art::to_art;
 use umasim::{
     game::{
@@ -31,7 +32,8 @@ pub mod protocol;
 
 pub fn run_evaluate<G, E>(game: &G, evaluator: &E, rng: &mut StdRng) -> Result<()>
 where
-    G: Game,
+    G: Game + Serialize,
+    G::Action: Serialize,
     E: Evaluator<G>
 {
     let t = Instant::now();
@@ -40,7 +42,7 @@ where
         info!(
             "{}",
             format!(
-                "AI选择: {action}, 均分: {}, 标准差: {}, Time: {:?}",
+                "AI选择: {action:?}, 均分: {}, 标准差: {}, Time: {:?}",
                 score.score_mean as i64,
                 score.score_stdev as i64,
                 t.elapsed()

@@ -64,7 +64,7 @@ impl Trainer<OnsenGame> for NeuralNetTrainer {
         if let Some(selected_action) = self.evaluator.select_action(game, rng) {
             // 在动作列表中找到选中的动作
             for (idx, action) in actions.iter().enumerate() {
-                if *action == selected_action {
+                if *action == selected_action.selection {
                     if self.verbose {
                         info!("神经网络选择动作 {}: {}", idx, action);
                     }

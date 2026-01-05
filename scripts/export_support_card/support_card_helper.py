@@ -79,6 +79,7 @@ _support_card_effect_name_mapping = {
     SupportCardEffectType.SkillTipsEventRateUp.value : "hintProbIncrease",
     SupportCardEffectType.GoodTrainingRateUp.value : "deYiLv",
     32: "初期PTアップ",
+    33: "Hint数量提升",
     41: "全属性Bonus"
 }
 

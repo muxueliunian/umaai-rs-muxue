@@ -19,8 +19,7 @@ use tract_onnx::prelude::*;
 
 use super::{Evaluator, ValueOutput};
 use crate::game::{
-    Game,
-    onsen::{action::OnsenAction, game::OnsenGame}
+    ActionScore, Game, onsen::{action::OnsenAction, game::OnsenGame}
 };
 
 // ============================================================================
@@ -212,7 +211,7 @@ impl NeuralNetEvaluator {
 // ============================================================================
 
 impl Evaluator<OnsenGame> for NeuralNetEvaluator {
-    fn select_action(&self, game: &OnsenGame, rng: &mut StdRng) -> Option<OnsenAction> {
+    fn select_action(&self, game: &OnsenGame, rng: &mut StdRng) -> Option<ActionScore<OnsenAction>> {
         // 获取可选动作列表
         let actions = game.list_actions().ok()?;
         if actions.is_empty() {
@@ -228,7 +227,7 @@ impl Evaluator<OnsenGame> for NeuralNetEvaluator {
             Err(e) => {
                 log::warn!("神经网络推理失败: {}", e);
                 // 回退到随机选择
-                return actions.first().cloned();
+                return Some(ActionScore::new(actions[0].clone(), actions, vec![]));
             }
         };
 
@@ -252,13 +251,13 @@ impl Evaluator<OnsenGame> for NeuralNetEvaluator {
         for action in &actions {
             if let Some(idx) = Self::action_to_global_index(action) {
                 if idx == global_idx {
-                    return Some(action.clone());
+                    return Some(ActionScore::new(action.clone(), actions, vec![]));
                 }
             }
         }
 
         // 如果没找到，返回第一个动作
-        actions.first().cloned()
+        Some(ActionScore::new(actions[0].clone(), actions, vec![]))
     }
 
     fn evaluate(&self, game: &OnsenGame) -> ValueOutput {

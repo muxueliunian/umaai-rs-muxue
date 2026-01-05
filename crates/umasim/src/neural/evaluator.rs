@@ -6,9 +6,10 @@
 //! - 神经网络评估器（正在实现）
 
 use rand::rngs::StdRng;
+use serde::Serialize;
 
 use super::ValueOutput;
-use crate::game::Game;
+use crate::game::{ActionScore, Game};
 
 /// 评估器 Trait
 ///
@@ -18,7 +19,8 @@ use crate::game::Game;
 ///
 /// # 类型参数
 /// - `G`: 游戏类型，必须实现 `Game` trait
-pub trait Evaluator<G: Game>: Send + Sync {
+pub trait Evaluator<G: Game>: Send + Sync 
+where G::Action: Serialize {
     /// 选择动作（策略）
     ///
     /// 在模拟过程中选择下一步动作。
@@ -31,7 +33,7 @@ pub trait Evaluator<G: Game>: Send + Sync {
     /// # 返回
     /// - `Some(action)`: 选择的动作
     /// - `None`: 无可选动作（游戏结束或异常）
-    fn select_action(&self, game: &G, rng: &mut StdRng) -> Option<G::Action>;
+    fn select_action(&self, game: &G, rng: &mut StdRng) -> Option<ActionScore<G::Action>>;
 
     /// 评估局面（价值）
     ///
@@ -76,16 +78,20 @@ pub struct RandomEvaluator;
 
 impl<G: Game> Evaluator<G> for RandomEvaluator
 where
-    G::Action: Clone
+    G::Action: Clone + Serialize + PartialEq
 {
-    fn select_action(&self, game: &G, rng: &mut StdRng) -> Option<G::Action> {
+    fn select_action(&self, game: &G, rng: &mut StdRng) -> Option<ActionScore<G::Action>> {
         use rand::seq::IndexedRandom;
 
         let actions = game.list_actions().ok()?;
         if actions.is_empty() {
             return None;
         }
-        actions.choose(rng).cloned()
+        if let Some(a) = actions.choose(rng) {
+            Some(ActionScore::new(a.clone(), actions, vec![]))
+        } else {
+            None
+        }
     }
 
     fn evaluate(&self, game: &G) -> ValueOutput {

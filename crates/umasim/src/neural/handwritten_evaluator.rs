@@ -13,13 +13,12 @@ use anyhow::Result;
 use log::info;
 use colored::Colorize;
 use rand::{rngs::StdRng, seq::IndexedRandom};
+use serde::Serialize;
 
 use super::{Evaluator, ValueOutput};
 use crate::{
     game::{
-        Game,
-        PersonType,
-        onsen::{action::OnsenAction, game::OnsenGame}
+        ActionScore, Game, PersonType, onsen::{action::OnsenAction, game::OnsenGame}
     },
     gamedata::{GAMECONSTANTS, GameConfig, onsen::ONSENDATA}, global
 };
@@ -586,7 +585,7 @@ impl HandwrittenEvaluator {
 }
 
 impl Evaluator<OnsenGame> for HandwrittenEvaluator {
-    fn select_action(&self, game: &OnsenGame, rng: &mut StdRng) -> Option<OnsenAction> {
+    fn select_action(&self, game: &OnsenGame, rng: &mut StdRng) -> Option<ActionScore<OnsenAction>> {
         let actions = game.list_actions().ok()?;
         if actions.is_empty() {
             return None;
@@ -595,25 +594,29 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
         // 硬编码规则：生病必须治病
         if game.uma.flags.ill {
             if let Some(a) = actions.iter().find(|a| matches!(a, OnsenAction::Clinic)) {
-                return Some(a.clone());
+                return Some(ActionScore::new(a.clone(), actions, vec![]));
             }
         }
 
         // 硬编码规则：目标比赛
         if game.is_race_turn() {
             if let Some(a) = actions.iter().find(|a| matches!(a, OnsenAction::Race)) {
-                return Some(a.clone());
+                return Some(ActionScore::new(a.clone(), actions, vec![]));
             }
         }
 
         // 硬编码规则：温泉券使用
         if actions.iter().any(|a| matches!(a, OnsenAction::UseTicket(true))) {
-            return Some(OnsenAction::UseTicket(self.should_use_ticket(game)));
+            return Some(ActionScore::new(
+                OnsenAction::UseTicket(self.should_use_ticket(game)),
+                actions,
+                vec![]
+            ));
         }
 
         // 硬编码规则：温泉选择（按主流攻略顺序）
         if let Some(dig_action) = self.select_onsen_by_order(game, &actions) {
-            return Some(dig_action);
+            return Some(ActionScore::new(dig_action, actions, vec![]));
         }
 
         // 评估所有动作，选择价值最高的
@@ -622,6 +625,7 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
         let vital_before = vital_evaluation(game.uma.vital, game.uma.max_vital);
         let mut best_action: Option<OnsenAction> = None;
         let mut best_value = f64::NEG_INFINITY;
+        let mut scores = vec![];
         //let mut debug_line = String::new();
         for action in &actions {
             let value = match action {
@@ -753,6 +757,8 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
                 _ => -1000.0
             };
 
+            scores.push(value);
+
             if value > best_value {
                 best_value = value;
                 best_action = Some(action.clone());
@@ -760,7 +766,10 @@ impl Evaluator<OnsenGame> for HandwrittenEvaluator {
             //debug_line += &format!("{action}: {value:.1} ");
         }
         //info!("{}", debug_line.cyan());
-        best_action.or_else(|| actions.choose(rng).cloned())
+        if best_action.is_none() {
+            best_action = actions.choose(rng).cloned();
+        }
+        Some(ActionScore::new(best_action.expect("best_action"), actions, scores))
     }
 
     fn evaluate(&self, game: &OnsenGame) -> ValueOutput {

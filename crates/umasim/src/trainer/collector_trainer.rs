@@ -205,7 +205,7 @@ impl Trainer<OnsenGame> for CollectorTrainer {
         // 使用 HandwrittenEvaluator 的 select_action 逻辑
         let selected_action = self.evaluator.select_action(game, rng);
         let idx = match &selected_action {
-            Some(action) => actions.iter().position(|a| a == action).unwrap_or(0),
+            Some(action) => actions.iter().position(|a| *a == action.selection).unwrap_or(0),
             None => 0
         };
 

@@ -36,7 +36,9 @@ pub struct CardTrainingEffect {
     /// 事件效果提高，乘算
     pub event_effect_up: i32,
     /// 事件回复量提高，乘算
-    pub event_recovery_amount_up: i32
+    pub event_recovery_amount_up: i32,
+    /// Hint数量(由固有改变)
+    pub hint_count_bonus: i32
 }
 
 impl CardTrainingEffect {
@@ -93,7 +95,8 @@ impl CardTrainingEffect {
             fail_rate_drop: 100.0 - (100.0 - self.fail_rate_drop) * (100.0 - other.fail_rate_drop) / 100.0,
             vital_cost_drop: 100.0 - (100.0 - self.vital_cost_drop) * (100.0 - other.vital_cost_drop) / 100.0,
             event_effect_up: self.event_effect_up + other.event_effect_up,
-            event_recovery_amount_up: self.event_recovery_amount_up + other.event_recovery_amount_up
+            event_recovery_amount_up: self.event_recovery_amount_up + other.event_recovery_amount_up,
+            hint_count_bonus: self.hint_count_bonus // 不叠加，单独计算
         }
     }
 
@@ -141,6 +144,10 @@ impl CardTrainingEffect {
                 // 智力回体
                 self.wiz_vital_bonus += value;
             }
+            33 => {
+                // Hint数量增加
+                self.hint_count_bonus += value;
+            }
             41 => {
                 // ALL
                 for i in 0..5 {
@@ -168,7 +175,8 @@ impl From<&CardValue> for CardTrainingEffect {
             fail_rate_drop: v.fail_rate_drop,
             vital_cost_drop: v.vital_cost_drop,
             event_effect_up: v.event_effect_up,
-            event_recovery_amount_up: v.event_recovery_amount_up
+            event_recovery_amount_up: v.event_recovery_amount_up,
+            hint_count_bonus: 0 // 面板中没有此词条
         }
     }
 }
