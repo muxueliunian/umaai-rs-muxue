@@ -157,17 +157,20 @@ impl OnsenGame {
 
     pub fn add_friendship(&mut self, person_index: usize, value: i32) {
         if person_index < self.persons.len() {
+            let old_value = self.persons[person_index].friendship;
             let new_value = (self.persons[person_index].friendship + value).min(100);
             self.persons[person_index].friendship = new_value;
             if person_index < 6 {
                 self.deck[person_index].friendship = new_value;
             }
-            info!(
-                "{} 羁绊+{} (={})",
-                self.persons[person_index].short_name(),
-                value,
-                new_value
-            );
+            if old_value < 100 {
+                info!(
+                    "{} 羁绊+{} (={})",
+                    self.persons[person_index].short_name(),
+                    value,
+                    new_value
+                );
+            }
         }
     }
 
@@ -490,6 +493,10 @@ impl OnsenGame {
         } else {
             1
         };
+        // sanity check
+        if hint_count > 1 {
+            info!("{}: hint_count = {hint_count}", self.deck[person_index].short_name());
+        }
         for _i in 0..hint_count {
             let mut hint_event = if rng.random_bool(attr_prob as f64) || hint_level == 0 {
                 // 红点提供属性. 超过最大Hint等级限制时只能提供属性

@@ -205,17 +205,20 @@ impl BasicGame {
 
     pub fn add_friendship(&mut self, person_index: usize, value: i32) {
         if person_index < self.persons.len() {
+            let old_value = self.persons[person_index].friendship;
             let new_value = (self.persons[person_index].friendship + value).min(100);
             self.persons[person_index].friendship = new_value;
             if person_index < 6 {
                 self.deck[person_index].friendship = new_value;
             }
-            info!(
-                "{} 羁绊+{} (={})",
-                self.persons[person_index].short_name(),
-                value,
-                new_value
-            );
+            if old_value < 100 {
+                info!(
+                    "{} 羁绊+{} (={})",
+                    self.persons[person_index].short_name(),
+                    value,
+                    new_value
+                );
+            }
         }
     }
 }
