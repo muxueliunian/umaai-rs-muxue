@@ -61,3 +61,27 @@ pub enum OnsenTurnStage {
     /// 5. 回合后事件
     AfterTrain
 }
+
+/// 配置文件中的手写逻辑温泉顺序
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+pub struct OnsenOrder {
+    /// 第1年
+    pub year1: Vec<i32>,
+    /// 第2年
+    pub year2: Vec<i32>,
+    /// 第3年
+    pub year3: Vec<i32>
+}
+
+impl OnsenOrder {
+    /// 返回指定年份的温泉优先顺序
+    pub fn year(&self, y: i32) -> &Vec<i32> {
+        match y {
+            1 => &self.year1,
+            2 => &self.year2,
+            3 => &self.year3,
+            _ => panic!("year must between 1..3")
+        }
+
+    }
+}

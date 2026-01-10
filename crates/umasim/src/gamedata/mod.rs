@@ -11,9 +11,7 @@ use log::info;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    explain::Explain,
-    global,
-    utils::{Array5, Array6}
+    explain::Explain, game::onsen::OnsenOrder, global, utils::{Array5, Array6}
 };
 
 pub mod onsen;
@@ -854,7 +852,7 @@ pub struct GameConfig {
     /// 种马额外属性
     pub extra_count: Array6,
     /// 温泉顺序
-    pub onsen_order: Vec<u32>,
+    pub onsen_order: OnsenOrder,
     /// collector 配置（用于训练数据生成工具）
     #[serde(default)]
     pub collector: CollectorConfig,

@@ -18,7 +18,7 @@ use crate::{
         ActionScore,
         Game,
         PersonType,
-        onsen::{action::OnsenAction, game::OnsenGame}
+        onsen::{OnsenOrder, action::OnsenAction, game::OnsenGame}
     },
     gamedata::{GAMECONSTANTS, GameConfig, onsen::ONSENDATA},
     global
@@ -131,12 +131,6 @@ const PR_SCORE: f64 = 100.0;
 /// 第一年无券且有超回复时的PR分数
 const PR_SCORE_SUPER: f64 = 300.0;
 
-/// 速度Build温泉顺序
-const ONSEN_ORDER_SPEED: [u32; 11] = [1, 3, 2, 5, 7, 4, 8, 9, 4, 2, 6];
-
-/// 耐力Build温泉顺序
-const ONSEN_ORDER_STAMINA: [u32; 11] = [1, 3, 2, 5, 6, 4, 8, 9, 4, 2, 7];
-
 /// 设施升级对应温泉
 /// 1. 疾驰 - 砂
 /// 2. 坚忍 - 土
@@ -206,7 +200,7 @@ fn should_skip_vital_penalty(game: &OnsenGame) -> bool {
     game.onsen_state[SECRET_ONSEN_INDEX]
 }
 
-pub fn load_onsen_order() -> Result<Vec<u32>> {
+pub fn load_onsen_order() -> Result<OnsenOrder> {
     // 1. 先读取配置文件
     let config_file = fs_err::read_to_string("game_config.toml")?;
     let game_config: GameConfig = toml::from_str(&config_file)?;
@@ -225,7 +219,7 @@ pub struct HandwrittenEvaluator {
     /// 彩圈加成系数
     pub shining_bonus: f64,
     /// 温泉顺序
-    pub onsen_order: Vec<u32>
+    pub onsen_order: OnsenOrder
 }
 
 impl HandwrittenEvaluator {
@@ -247,7 +241,11 @@ impl HandwrittenEvaluator {
             skill_weight: 0.5,
             vital_threshold: 55,
             shining_bonus: 35.0,
-            onsen_order: ONSEN_ORDER_SPEED.to_vec()
+            onsen_order: OnsenOrder {
+                year1: vec![1, 3, 2],
+                year2: vec![7, 5, 4, 2],
+                year3: vec![8, 9, 4, 2, 6]
+            }
         }
     }
 
@@ -258,7 +256,11 @@ impl HandwrittenEvaluator {
             skill_weight: 0.5,
             vital_threshold: 55,
             shining_bonus: 35.0,
-            onsen_order: ONSEN_ORDER_STAMINA.to_vec()
+            onsen_order: OnsenOrder {
+                year1: vec![1, 2, 3],
+                year2: vec![6, 7, 4, 2],
+                year3: vec![8, 9, 4, 2, 5]
+            }
         }
     }
 
@@ -352,16 +354,12 @@ impl HandwrittenEvaluator {
         if dig_actions.is_empty() {
             return None;
         }
-        let mut pos = game.turn as usize / 24 * 3;
-        while pos < self.onsen_order.len() {
-            let idx = self.onsen_order[pos] as usize;
-            if dig_actions.contains(&idx) {
-                return Some(OnsenAction::Dig(idx as i32));
-            }
-            pos += 1;
-        }
-        // 如果推荐列表都不可选，选择第一个可选的
-        actions.first().cloned()
+        let year = (game.turn / 24 + 1).min(3);
+        let onsens = self.onsen_order.year(year);
+        let ret = onsens.iter()
+            .find(|x| dig_actions.contains(&(**x as usize)))
+            .unwrap_or(&0);
+            Some(OnsenAction::Dig(*ret))
     }
 
     /// 按主流攻略顺序选择温泉（返回索引）

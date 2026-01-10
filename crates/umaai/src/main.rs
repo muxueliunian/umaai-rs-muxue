@@ -55,7 +55,7 @@ where
 
 /// 实际的主函数
 async fn main_guard() -> Result<()> {
-    println!("{}", to_art("UMAAI 0.21".to_string(), "small", 0, 1, 0).expect("here"));
+    println!("{}", to_art("UMAAI 0.23".to_string(), "small", 0, 1, 0).expect("here"));
     // 0. 运行前检查
     check_windows_terminal()?;
     if !fs_err::exists("game_config.toml")? {
