@@ -114,7 +114,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "toml 0.9.10+spec-1.1.0",
+ "toml",
  "tract-onnx",
  "umaai",
  "umasim",
@@ -3924,15 +3924,6 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.5.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f4f7f0dd8d50a853a531c426359045b1998f04219d88799810762cd4ad314234"
-dependencies = [
- "serde",
-]
-
-[[package]]
-name = "toml"
 version = "0.9.10+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0825052159284a1a8b4d6c0c86cbc801f2da5afd2b225fa548c72f2e74002f48"
@@ -4257,9 +4248,9 @@ dependencies = [
  "text-to-ascii-art",
  "thiserror",
  "tokio",
- "toml 0.9.10+spec-1.1.0",
+ "toml",
  "umasim",
- "winres",
+ "winscribe",
 ]
 
 [[package]]
@@ -4291,7 +4282,7 @@ dependencies = [
  "serde_json",
  "thiserror",
  "tokio",
- "toml 0.9.10+spec-1.1.0",
+ "toml",
  "tract-onnx",
 ]
 
@@ -4807,12 +4798,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "winres"
-version = "0.1.12"
+name = "winscribe"
+version = "0.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b68db261ef59e9e52806f688020631e987592bd83619edccda9c47d42cde4f6c"
+checksum = "d5e2eb497fca95a5eccd32f74e152992dbbf6f4121f091162b9233cae8096f89"
 dependencies = [
- "toml 0.5.11",
+ "windows-registry",
 ]
 
 [[package]]

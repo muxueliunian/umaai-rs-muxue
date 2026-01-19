@@ -98,6 +98,10 @@ impl GameStatus for GameStatusOnsen {
             // 不能用温泉券时，不进入Bathing状态
             stage = OnsenTurnStage::Train;
         }
+        if self.story.is_some() {
+            // 选择事件暂时都假设为Begin状态
+            stage = OnsenTurnStage::Begin;
+        }
         if self.playing_state == 36 {
             // 温泉选择状态
             stage = OnsenTurnStage::Begin;
@@ -179,6 +183,7 @@ impl GameStatus for GameStatusOnsen {
 impl From<&OnsenGame> for GameStatusOnsen {
     fn from(game: &OnsenGame) -> Self {
         let mut base = GameStatusBase::from(&game.base);
+        base.scenario_id = 12;
         // 补充人头信息
         base.persons = game.persons.iter().map(BasePersonStatus::from).collect();
         base.friendship_noncard_yayoi = game.persons[6].friendship;

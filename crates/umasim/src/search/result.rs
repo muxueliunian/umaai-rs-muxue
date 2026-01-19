@@ -3,11 +3,10 @@
 //! 定义分数分布统计和搜索输出结构。
 
 use std::cell::Cell;
-use anyhow::{anyhow, Result};
 use serde::{Serialize, Deserialize};
 use super::SearchConfig;
 use crate::{
-    game::{ActionEnum, onsen::{action::OnsenAction, game::OnsenGame}},
+    game::onsen::{action::OnsenAction, game::OnsenGame},
     sample_collector::action_to_global_index,
     training_sample::{CHOICE_DIM, TrainingSample}
 };

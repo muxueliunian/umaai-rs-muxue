@@ -6,7 +6,7 @@
 //! - UCB 分配：根据 UCB 公式动态分配搜索资源（C++ UmaAi 风格）
 
 use anyhow::Result;
-use log::{debug, info};
+use log::debug;
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 

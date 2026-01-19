@@ -2,7 +2,7 @@ use std::{sync::{Mutex, OnceLock}, time::Duration};
 use anyhow::Result;
 use ratatui::crossterm::{self, event::{self, Event, KeyCode, KeyEventKind}};
 use log::warn;
-use umasim::{game::onsen::game::OnsenGame, global};
+use umasim::game::onsen::game::OnsenGame;
 
 use crate::protocol::GameStatusOnsen;
 

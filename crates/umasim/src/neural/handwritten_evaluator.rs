@@ -10,6 +10,7 @@
 //! 3. 羁绊价值提升 - 前期更重视羁绊
 
 use anyhow::Result;
+//use log::{error, info};
 use rand::{rngs::StdRng, seq::IndexedRandom};
 
 use super::{Evaluator, ValueOutput};
@@ -20,7 +21,7 @@ use crate::{
         PersonType,
         onsen::{OnsenOrder, action::OnsenAction, game::OnsenGame}
     },
-    gamedata::{GAMECONSTANTS, GameConfig, onsen::ONSENDATA},
+    gamedata::{GAMECONSTANTS, onsen::ONSENDATA},
     global, utils::load_game_config
 };
 
@@ -357,8 +358,13 @@ impl HandwrittenEvaluator {
         let onsens = self.onsen_order.year(year);
         let ret = onsens.iter()
             .find(|x| dig_actions.contains(&(**x as usize)))
-            .unwrap_or(&0);
-            Some(OnsenAction::Dig(*ret))
+            .cloned()
+            .unwrap_or_else(|| {
+                //println!("remaining onsens: {dig_actions:?}");
+                // AI没有按照设定顺序挖，此时直接选列表中第一个
+                dig_actions[0] as i32
+            });
+            Some(OnsenAction::Dig(ret))
     }
 
     /// 按主流攻略顺序选择温泉（返回索引）
@@ -376,7 +382,10 @@ impl HandwrittenEvaluator {
             return actions
                 .iter()
                 .position(|a| *a == act)
-                .expect("action must contain selected act");
+                .unwrap_or_else(|| {
+                    println!("actions: {actions:?}, act: {act}");
+                    panic!("选择的温泉不在允许范围");
+                })
         } else {
             0
         }

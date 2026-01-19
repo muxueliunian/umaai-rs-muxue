@@ -642,7 +642,10 @@ impl OnsenGame {
     /// 执行选择温泉
     pub fn do_select_onsen<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
         let actions = self.list_actions_onsen_select();
-        info!("选择要挖掘的温泉:");
+        if actions.is_empty() {
+            return Err(anyhow!("没有可选温泉，可能是数据或程序错误. 当前回合: {}", self.turn));
+        }
+        //info!("选择要挖掘的温泉:");
         let selection = trainer.select_action(self, &actions, rng)?;
         self.apply_action(&actions[selection], rng)
     }

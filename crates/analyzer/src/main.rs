@@ -9,7 +9,7 @@ use rand::{SeedableRng, rngs::StdRng};
 use umaai::protocol::{GameStatus, GameStatusOnsen, onsen::serialize_game};
 use umasim::{
     game::{Game, InheritInfo, onsen::game::OnsenGame},
-    gamedata::{GAMECONSTANTS, GameConfig, init_global},
+    gamedata::{GAMECONSTANTS, init_global},
     global,
     search::SearchConfig,
     trainer::*,

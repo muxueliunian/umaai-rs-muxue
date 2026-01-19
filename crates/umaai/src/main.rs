@@ -1,7 +1,7 @@
 //! umaai-rs - Rewrite UmaAI in Rust
 //!
 //! author: curran
-use std::{path::Path, sync::Mutex, time::{Duration, Instant}};
+use std::{path::Path, sync::Mutex, time::Instant};
 
 use anyhow::{Result, anyhow};
 use colored::Colorize;
@@ -16,7 +16,7 @@ use umasim::{
         InheritInfo,
         Trainer,
         onsen::{OnsenTurnStage, action::OnsenAction}
-    }, gamedata::{GameConfig, init_global}, global, neural::{Evaluator, NeuralNetEvaluator}, search::SearchConfig, trainer::MctsTrainer, utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause}
+    }, gamedata::init_global, neural::{Evaluator, NeuralNetEvaluator}, search::SearchConfig, trainer::MctsTrainer, utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause}
 };
 
 use crate::{protocol::{
@@ -188,7 +188,7 @@ async fn main_guard() -> Result<()> {
                         game.next();
                         let actions = game.list_actions()?;
                         if !actions.is_empty() {
-                            let action_idx = trainer.select_action(&game, &actions, &mut rng)?;
+                            let _action_idx = trainer.select_action(&game, &actions, &mut rng)?;
                             //let action = actions[action_idx].clone();
                         }
                     }

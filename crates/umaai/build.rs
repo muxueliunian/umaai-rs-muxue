@@ -1,7 +1,10 @@
-extern crate winres;
+extern crate winscribe;
 
+use winscribe::{ResBuilder, icon::Icon};
 fn main() {
-    let mut manifest = winres::WindowsResource::new();
-    manifest.set_icon("res/umaai-sm.ico");
-    manifest.compile().unwrap();
+    ResBuilder::from_env()
+        .unwrap()
+        .push(Icon::app("res/umaai-sm.ico"))
+        .compile()
+        .unwrap()
 }

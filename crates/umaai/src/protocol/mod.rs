@@ -5,14 +5,16 @@ use log::warn;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use umasim::{
     game::{BaseGame, BasePerson, FriendOutState, FriendState, InheritInfo, SupportCard, TurnStage, Uma, UmaFlags},
-    gamedata::{GAMEDATA, GameConfig},
+    gamedata::GAMEDATA,
     global,
     utils::{Array5, load_game_config}
 };
 
 pub mod onsen;
 pub mod urafile;
+pub mod story;
 pub use onsen::*;
+pub use story::*;
 
 /// 描述不同剧本的通信状态，需要能转为对应的Game结构
 pub trait GameStatus: DeserializeOwned {
@@ -115,7 +117,9 @@ pub struct GameStatusBase {
     pub playing_state: i32,
     /// 胜场信息
     #[serde(default)]
-    pub race_history: Vec<i32>
+    pub race_history: Vec<i32>,
+    /// 事件信息
+    pub story: Option<StoryStatus>
 }
 
 impl GameStatusBase {
@@ -283,7 +287,8 @@ impl From<&BaseGame> for GameStatusBase {
             friend_stage: game.friend.out_state.to_int(),
             friend_outgoing_used,
             playing_state: 1,
-            race_history: game.uma.list_races()
+            race_history: game.uma.list_races(),
+            story: None
         }
     }
 }
