@@ -5,7 +5,7 @@ use std::{
     sync::mpsc::{self, Receiver}
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, bail};
 use colored::Colorize;
 use log::{info, warn};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -26,18 +26,35 @@ pub struct UraFileWatcher {
 }
 
 impl UraFileWatcher {
-    pub fn ura_dir() -> Result<String> {
-        let local_app_path = env::var("LOCALAPPDATA")?;
+    /// 定位小黑板数据目录，可能在当前目录下的 .portable 或者 appdata 下
+    pub fn ura_root() -> Result<String> {
+        // 先检查.portable
+        if Path::new("./.portable").is_dir() {
+            Ok(".portable".to_string())
+        } else {
+            let local_app_path = env::var("LOCALAPPDATA")?;
+            let local_app_ura = format!("{local_app_path}/UmamusumeResponseAnalyzer");
+            if Path::new(&local_app_ura).is_dir() {
+                Ok(local_app_ura)
+            } else {
+                bail!("没有找到小黑板数据目录，请检查小黑板安装情况")
+            }
+        }
+    }
+    /// 定位 SendGameStatusPlugin 输出数据的目录
+    pub fn plugin_dir() -> Result<String> {
+        let ura_root = Self::ura_root()?;
         Ok(format!(
-            "{local_app_path}/UmamusumeResponseAnalyzer/PluginData/SendGameStatusPlugin"
+            "{ura_root}/PluginData/SendGameStatusPlugin"
         ))
     }
 
     pub fn init() -> Result<Self> {
-        let ura_dir = Self::ura_dir()?;
+        let ura_dir = Self::plugin_dir()?;
+        info!("小黑板数据目录: {}", ura_dir.cyan());
         // 确保这个目录存在
         if !fs_err::exists(&ura_dir)? {
-            warn!("小黑板输出目录不存在，请检查小黑板 SendGameStatusPlugin 插件是否正常工作");
+            warn!("回合数据目录不存在，请检查小黑板 SendGameStatusPlugin 插件是否正常工作");
             fs_err::create_dir_all(&ura_dir)?;
             pause()?;
         }
@@ -59,7 +76,7 @@ impl UraFileWatcher {
 
     /// 捕获指定文件修改时的内容
     pub fn do_poll(&mut self, filename: &str) -> Result<String> {
-        let full_path = Path::new(&Self::ura_dir()?).join(filename);
+        let full_path = Path::new(&Self::plugin_dir()?).join(filename);
         loop {
             let event = self.rx.recv()??;
             if event.paths.contains(&full_path) && matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_)) {
@@ -74,7 +91,7 @@ impl UraFileWatcher {
 
     /// 等待直到指定文件内容改变
     pub fn watch(&mut self, filename: &str) -> Result<String> {
-        let full_path = Path::new(&Self::ura_dir()?).join(filename);
+        let full_path = Path::new(&Self::plugin_dir()?).join(filename);
         // 初始化时尝试直接读取文件内容
         if self.contents.is_empty() && full_path.exists() {
             let contents = fs_err::read_to_string(&full_path)

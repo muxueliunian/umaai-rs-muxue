@@ -1634,6 +1634,9 @@ impl Game for OnsenGame {
     }
 
     fn calc_training_value(&self, buffs: &CardTrainingEffect, train: usize) -> Result<ActionValue> {
+        if train > 5 {
+            return Err(anyhow!("训练等级错误"));
+        }
         // 计算下层值
         let mut base_value = self.default_calc_training_value(buffs, train)?;
         // 下层不超过100

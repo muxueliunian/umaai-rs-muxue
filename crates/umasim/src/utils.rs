@@ -4,7 +4,7 @@ use anyhow::{Result, anyhow};
 use colored::Colorize;
 use comfy_table::Table;
 use flexi_logger::{DeferredNow, Duplicate, FileSpec, style};
-use log::Record;
+use log::{Record, error};
 use serde::Serialize;
 
 use crate::gamedata::{EventCollection, EventData, GAMECONSTANTS, GAMEDATA, GameConfig, LOGGER, OverrideGameConfig};
@@ -134,6 +134,10 @@ pub trait AttributeArray {
 
 impl<const N: usize> AttributeArray for [i32; N] {
     fn add_eq(&mut self, other: &Self) -> &mut Self {
+        if self.len() != other.len() {
+            error!("self: {self:?}, other: {other:?}");
+            panic!("数组长度不匹配, 请检查调用代码");
+        }
         for (i, x) in self.iter_mut().enumerate() {
             *x += other[i];
         }
