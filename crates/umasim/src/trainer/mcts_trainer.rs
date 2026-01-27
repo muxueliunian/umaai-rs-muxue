@@ -7,8 +7,12 @@
 //! - 生成高质量训练数据（每个状态有准确的价值估计）
 //! - 自对弈训练
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc,
+    Mutex,
+    atomic::{AtomicU64, Ordering}
+};
+
 use anyhow::{Result, anyhow};
 use colored::Colorize;
 use flexi_logger::LogSpecification;
@@ -17,6 +21,7 @@ use rand::prelude::StdRng;
 
 use crate::{
     game::{
+        InheritInfo,
         Trainer,
         onsen::{action::OnsenAction, game::OnsenGame}
     },
@@ -24,7 +29,7 @@ use crate::{
     global,
     neural::{Evaluator, HandwrittenEvaluator},
     search::{ActionResult, FlatSearch, SearchConfig, SearchOutput},
-    utils::format_luck
+    utils::{format_luck, pause_log, resume_log}
 };
 
 /// MCTS 训练员
@@ -85,26 +90,44 @@ impl MctsTrainer {
         self.search.config()
     }
 
-    /// 和上一回合比较，看是否同一局
-    pub fn is_same_game(&self, game: &OnsenGame) -> bool {
-        if let Some(last) = &self.last_game {
-            // 马娘ID相同且回合数相同或差1，则再检查卡组
-            if last.uma.uma_id == game.uma.uma_id && (last.turn == game.turn || last.turn + 1 == game.turn) {
-                for i in 0..6 {
-                    if last.deck[i].card_id != game.deck[i].card_id {
-                        return false;
-                    }
-                }
-                return true;
-            }
-        }
-        false
+    /// 初始化分数
+    pub fn reset(&mut self) {
+        self.last_game = None;
+        self.last_score.0.store(0, Ordering::SeqCst);
+        self.last_score.1.store(0, Ordering::SeqCst);
+        self.initial_score.0.store(0, Ordering::SeqCst);
+        self.initial_score.1.store(0, Ordering::SeqCst);
     }
 
-    pub fn format_action_result(
-        &self, action: &OnsenAction, _result: &ActionResult, score: f64, best_score: f64
-    ) -> String {
-        let text = format!("{action}: {score:.0}");
+    pub fn print_newgame_config(&mut self, game: &OnsenGame) {
+        // 输出模拟参数
+        let deck = game
+            .deck
+            .iter()
+            .map(|card| card.card_id * 10 + card.rank)
+            .collect::<Vec<_>>();
+        let inherit = InheritInfo {
+            blue_count: game.inherit.blue_count.clone(),
+            extra_count: game.inherit.extra_count.clone()
+        };
+        info!(
+            "{}",
+            format!(
+                r#"-------- 开始新游戏 --------
+模拟参数(可用 UmaSim 模拟本局):
+uma_id = {}
+cards = {deck:?}
+blue_count = {inherit:?}
+温泉使用蒙特卡洛搜索: {}"#,
+                game.uma.uma_id, self.mcts_onsen
+            )
+            .bright_yellow()
+        );
+        self.reset();
+    }
+
+    pub fn format_score(&self, score: f64, best_score: f64, tag: &str) -> String {
+        let text = format!("{tag}: {score:.0}");
         let delta = best_score - score;
         if delta <= 40.0 {
             format!("{}", text.bright_yellow().on_red())
@@ -115,6 +138,10 @@ impl MctsTrainer {
         } else {
             format!("{}", text.bright_black())
         }
+    }
+
+    pub fn format_action_result(&self, action: &OnsenAction, score: f64, best_score: f64) -> String {
+        self.format_score(score, best_score, &action.to_string())
     }
     // 计算本回合均分
     fn update_score(&self, game: &OnsenGame, actions: &[OnsenAction], search_output: &SearchOutput) {
@@ -142,7 +169,9 @@ impl MctsTrainer {
         let idx = actions.iter().position(|a| a == best_action).unwrap_or(0);
         let mut best_score = search_output.action_results[idx].0.mean();
         for (i, _action) in search_output.actions.iter().enumerate() {
-            let weighted_mean = search_output.action_results[i].0.weighted_mean(search_output.radical_factor);
+            let weighted_mean = search_output.action_results[i]
+                .0
+                .weighted_mean(search_output.radical_factor);
             if weighted_mean > best_score {
                 best_score = weighted_mean;
             }
@@ -167,7 +196,6 @@ impl MctsTrainer {
                 let weighted = result.0.weighted_mean(search_output.radical_factor);
                 line.push(self.format_action_result(
                     action,
-                    &result.0,
                     weighted + mcts_bonus as f64 - mean_weighted,
                     best_score - mean_weighted
                 ));
@@ -204,7 +232,9 @@ impl MctsTrainer {
         let idx = actions.iter().position(|a| a == best_action).unwrap_or(0);
         let mut best_score = search_output.action_results[idx].1.mean();
         for (i, _action) in search_output.actions.iter().enumerate() {
-            let weighted_mean = search_output.action_results[i].1.weighted_mean(search_output.radical_factor);
+            let weighted_mean = search_output.action_results[i]
+                .1
+                .weighted_mean(search_output.radical_factor);
             if weighted_mean > best_score {
                 best_score = weighted_mean;
             }
@@ -216,12 +246,7 @@ impl MctsTrainer {
             for (i, action) in search_output.actions.iter().enumerate() {
                 let result = &search_output.action_results[i];
                 let weighted = result.1.weighted_mean(search_output.radical_factor);
-                line.push(self.format_action_result(
-                    action,
-                    &result.1,
-                    weighted - mean_weighted,
-                    best_score - mean_weighted
-                ));
+                line.push(self.format_action_result(action, weighted - mean_weighted, best_score - mean_weighted));
             }
             info!("[回合 {}/PT] {}", game.turn + 1, line.join(" "));
         }
@@ -263,37 +288,15 @@ impl Trainer<OnsenGame> for MctsTrainer {
             }
             return Ok(idx);
         }
-        /*
-            // 检查是否是装备升级场景（所有动作都是 Upgrade）
-                let all_upgrade = actions.iter().all(|a| matches!(a, OnsenAction::Upgrade(_)));
-                if all_upgrade {
-                    // 装备升级：使用手写逻辑
-                    let idx = self.evaluator.select_upgrade_action(game, actions);
-                    if self.verbose {
-                        info!(
-                            "[回合 {}] MCTS 选择装备升级（手写逻辑）: {}",
-                            game.turn,
-                            actions[idx]
-                        );
-                    }
-                    return Ok(idx);
-                }
-        */
-        global!(LOGGER)
-            .lock()
-            .expect("logger lock")
-            .push_temp_spec(LogSpecification::off());
-
+        pause_log();
         // 使用 MCTS 搜索
         let search_output = self.search.search(game, actions, rng)?;
         {
             // 保存搜索结果
-            let mut s = self.search_output
-                .lock()
-                .map_err(|_| anyhow!("lock failed"))?;
+            let mut s = self.search_output.lock().map_err(|_| anyhow!("lock failed"))?;
             *s = search_output.clone();
         }
-        global!(LOGGER).lock().expect("logger lock").pop_temp_spec();
+        resume_log();
 
         let best_action = search_output.best_action();
         let best_action_2 = search_output.best_action_pt();
@@ -311,11 +314,14 @@ impl Trainer<OnsenGame> for MctsTrainer {
         if best_action == best_action_2 {
             info!("{}", format!("蒙特卡洛: {best_action}").bright_green());
         } else {
-            info!("{}", format!(
+            info!(
+                "{}",
+                format!(
                     "蒙特卡洛-重视评分: {}, 重视PT: {}",
                     best_action.to_string().bright_green(),
                     best_action_2.to_string().cyan()
-                ).bright_green()
+                )
+                .bright_green()
             );
         }
         Ok(idx)
@@ -325,23 +331,23 @@ impl Trainer<OnsenGame> for MctsTrainer {
         // 事件选择：使用手写逻辑
         let mut best_idx = 0;
         let mut best_value = f64::NEG_INFINITY;
+        let mut values = vec![];
 
         for (i, _choice) in choices.iter().enumerate() {
             let value = self.evaluator.evaluate_choice(game, i);
+            values.push(value);
             if value > best_value {
                 best_value = value;
                 best_idx = i;
             }
         }
 
-        if self.verbose {
-            warn!(
-                "[回合 {}] MCTS 选择事件选项（手写逻辑）: {} (索引 {})",
-                game.turn + 1,
-                choices[best_idx],
-                best_idx
-            );
-        }
+        //  let mut line = vec![];
+        //  for (i, v) in values.iter().enumerate() {
+        //      line.push(self.format_score(*v, best_value, &format!("选项{}", i+1)));
+        //  }
+        //  info!("[回合 {} 事件] {}", game.turn + 1, line.join(" "));
+        info!("{}", format!("手写逻辑: 选项 {}", best_idx + 1).bright_green());
 
         Ok(best_idx)
     }

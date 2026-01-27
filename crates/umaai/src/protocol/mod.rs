@@ -2,17 +2,18 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use log::warn;
+use colored::Colorize;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use umasim::{
     game::{BaseGame, BasePerson, FriendOutState, FriendState, InheritInfo, SupportCard, TurnStage, Uma, UmaFlags},
-    gamedata::GAMEDATA,
+    gamedata::{EventData, GAMEDATA},
     global,
     utils::{Array5, load_game_config}
 };
 
 pub mod onsen;
-pub mod urafile;
 pub mod story;
+pub mod urafile;
 pub use onsen::*;
 pub use story::*;
 
@@ -215,6 +216,17 @@ impl GameStatusBase {
             }
             deck.push(card);
         }
+        // 解析事件
+        let mut unresolved_events = vec![];
+        if let Some(story) = &self.story {
+            log::info!("{}", story.explain());
+            if let Ok(event) = EventData::try_from(story) {
+                unresolved_events.push(event);
+            } else {
+                warn!("事件效果解析失败, 无法计算");
+            }
+        }
+
         Ok(BaseGame {
             turn: self.turn,
             stage: TurnStage::Train, // 随便列一个
@@ -225,6 +237,7 @@ impl GameStatusBase {
             train_level_count: self.train_level_count.clone(),
             distribution: self.person_distribution.clone(),
             card_type_count: Arc::new(card_type_count),
+            unresolved_events,
             ..Default::default()
         })
     }

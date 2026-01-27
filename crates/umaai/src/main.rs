@@ -1,28 +1,40 @@
 //! umaai-rs - Rewrite UmaAI in Rust
 //!
 //! author: curran
-use std::{path::Path, sync::Mutex, time::Instant};
+use std::{
+    path::Path,
+    sync::{Mutex, atomic::Ordering},
+    time::Instant
+};
 
 use anyhow::{Result, anyhow};
 use colored::Colorize;
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
-
 use serde::Serialize;
 use text_to_ascii_art::to_art;
+use umaai::utils::get_stack_size;
 use umasim::{
     game::{
         Game,
         InheritInfo,
         Trainer,
-        onsen::{OnsenTurnStage, action::OnsenAction}
-    }, gamedata::init_global, neural::{Evaluator, NeuralNetEvaluator}, search::SearchConfig, trainer::MctsTrainer, utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause}
+        onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame}
+    },
+    gamedata::init_global,
+    neural::{Evaluator, NeuralNetEvaluator},
+    search::SearchConfig,
+    trainer::MctsTrainer,
+    utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause, pause_log, resume_log}
 };
 
-use crate::{protocol::{
-    GameStatusOnsen,
-    urafile::{UraFileWatcher, parse_game}
-}, utils::{SAVED_GAME, hotkey_handler}};
+use crate::{
+    protocol::{
+        GameStatusOnsen,
+        urafile::{UraFileWatcher, parse_game}
+    },
+    utils::{SAVED_GAME, hotkey_handler}
+};
 
 pub mod protocol;
 pub mod utils;
@@ -50,9 +62,74 @@ where
     Ok(())
 }
 
+/// 训练模式
+pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mut StdRng) -> Result<()> {
+    println!("{}", game.explain_distribution()?);
+    info!("{}", "正在计算...".bright_black());
+    if game.pending_selection {
+        // 是温泉选择状态
+        let actions = game.list_actions_onsen_select();
+        let onsen = trainer.select_action(game, &actions, rng)?;
+        // 前进一步选择升级
+        game.apply_action(&actions[onsen], rng)?;
+        let upgradeable = game.get_upgradeable_equipment();
+        if !upgradeable.is_empty() {
+            let actions = upgradeable
+                .iter()
+                .map(|x| OnsenAction::Upgrade(*x as i32))
+                .collect::<Vec<_>>();
+            trainer.select_action(game, &actions, rng)?;
+        }
+    } else {
+        // 如果被解析成 Bathing 但没有温泉券合buff，就直接跳过到 Train
+        if game.stage == OnsenTurnStage::Bathing && game.bathing.ticket_num == 0 && game.bathing.buff_remain_turn == 0 {
+            game.next();
+        }
+
+        let actions = game.list_actions()?;
+        if actions.is_empty() {
+            return Ok(());
+        }
+        let action_idx = trainer.select_action(game, &actions, rng)?;
+        let action = actions[action_idx].clone();
+
+        // 选择温泉券时需要继续给出训练推荐
+        if game.stage == OnsenTurnStage::Bathing {
+            pause_log();
+            if action == OnsenAction::UseTicket(true) {
+                game.do_use_ticket(rng)?;
+            }
+            game.next();
+            resume_log();
+
+            info!("{}", "正在计算训练...".bright_black());
+            let actions = game.list_actions()?;
+            if !actions.is_empty() {
+                let _action_idx = trainer.select_action(game, &actions, rng)?;
+                //let action = actions[action_idx].clone();
+            }
+        }
+    }
+    println!("{}", "[按 F2 保存当前回合状态]".bright_black());
+    Ok(())
+}
+
+/// 事件模式
+pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRng) -> Result<()> {
+    if let Some(event) = game.unresolved_events.first() {
+        info!("{}", format!("事件: #{} {}", event.id, event.name).cyan());
+        for (index, choice) in event.choices.iter().enumerate() {
+            info!("选项 {}: {}", index + 1, choice.explain());
+        }
+        let _selection = trainer.select_event_choice(game, event, &event.choices, rng)?;
+        println!("{}", "[按 F2 保存当前回合状态]".bright_black());
+    }
+    Ok(())
+}
+
 /// 实际的主函数
 async fn main_guard() -> Result<()> {
-    println!("{}", to_art("UMAAI 0.24".to_string(), "small", 0, 1, 0).expect("here"));
+    println!("{}", to_art("UMAAI 0.25".to_string(), "small", 0, 1, 0).expect("here"));
     // 0. 运行前检查
     check_windows_terminal()?;
     if !fs_err::exists("game_config.toml")? {
@@ -61,15 +138,24 @@ async fn main_guard() -> Result<()> {
     // 1. 先读取配置文件
     let game_config = load_game_config()?;
     let mcts_config = SearchConfig::new_game_config(&game_config);
-    // 2. 根据配置初始化日志
+    // 2. 根据配置初始化日志，设置工作线程
     init_logger("umaai", &game_config.log_level)?;
+    info!(
+        "{}",
+        format!("工作线程数: {}", game_config.collector.threads).bright_yellow()
+    );
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(game_config.collector.threads)
+        .build_global()?;
     //info!("search_config = {mcts_config:?}");
 
     // 3. 再初始化全局数据
     init_global()?;
 
     // ctrl-s handler
-    tokio::spawn(async move { hotkey_handler().await; });
+    tokio::spawn(async move {
+        hotkey_handler().await;
+    });
 
     let mut rng = StdRng::from_os_rng();
 
@@ -125,75 +211,38 @@ async fn main_guard() -> Result<()> {
     let mut watcher = UraFileWatcher::init()?;
     loop {
         let contents = watcher.watch("thisTurn.json")?;
+        let mut is_newgame = false;
         match parse_game::<GameStatusOnsen>(&contents) {
             Ok(mut game) => {
                 // 保存一份到全局
                 {
                     if let Some(mutex) = SAVED_GAME.get() {
-                        *mutex.lock().expect("saved game") = game.clone();
-                    } else {
-                        SAVED_GAME.set(Mutex::new(game.clone())).expect("SAVED_GAME already initialized");
-                    }
-                }
-                    
-                if game.turn <= 1 {
-                    // 直接模拟一局看得分，或者输出模拟参数
-                    let deck = game
-                        .deck
-                        .iter()
-                        .map(|card| card.card_id * 10 + card.rank)
-                        .collect::<Vec<_>>();
-                    let inherit = InheritInfo {
-                        blue_count: game.inherit.blue_count.clone(),
-                        extra_count: game.inherit.extra_count.clone()
-                    };
-                    info!("- sim 模拟参数: {} {deck:?}, {inherit:?}", game.uma.uma_id);
-                }
-                //-------------------------------
-                println!("{}", game.explain_distribution()?);
-                println!("正在计算...");
-                if game.pending_selection {
-                    // 是温泉选择状态
-                    let actions = game.list_actions_onsen_select();
-                    let onsen = trainer.select_action(&game, &actions, &mut rng)?;
-                    // 前进一步选择升级
-                    game.apply_action(&actions[onsen], &mut rng)?;
-                    let upgradeable = game.get_upgradeable_equipment();
-                    if !upgradeable.is_empty() {
-                        let actions = upgradeable
-                            .iter()
-                            .map(|x| OnsenAction::Upgrade(*x as i32))
-                            .collect::<Vec<_>>();
-                        trainer.select_action(&game, &actions, &mut rng)?;
-                    }
-                } else {
-                    // 如果被解析成 Bathing 但没有温泉券合buff，就直接跳过到 Train
-                    if game.stage == OnsenTurnStage::Bathing
-                        && game.bathing.ticket_num == 0
-                        && game.bathing.buff_remain_turn == 0
-                    {
-                        game.next();
-                    }
-
-                    let actions = game.list_actions()?;
-                    if actions.is_empty() {
-                        continue;
-                    }
-
-                    let action_idx = trainer.select_action(&game, &actions, &mut rng)?;
-                    let action = actions[action_idx].clone();
-
-                    // 当 mcts 建议 UseTicket(false) 时，直接跳过 Bathing 阶段，继续给出训练推荐。
-                    if action == OnsenAction::UseTicket(false) && game.stage == OnsenTurnStage::Bathing {
-                        game.next();
-                        let actions = game.list_actions()?;
-                        if !actions.is_empty() {
-                            let _action_idx = trainer.select_action(&game, &actions, &mut rng)?;
-                            //let action = actions[action_idx].clone();
+                        let mut saved = mutex.lock().expect("saved game");
+                        // 如果当前游戏不是下一轮，则打印当前游戏配置
+                        if !game.is_next_of(&saved) {
+                            is_newgame = true;
                         }
+                        *saved = game.clone();
+                    } else {
+                        SAVED_GAME
+                            .set(Mutex::new(game.clone()))
+                            .expect("SAVED_GAME already initialized");
+                        is_newgame = true;
                     }
                 }
-                println!("{}", "[按 F2 保存当前回合状态]".bright_black());
+                if is_newgame {
+                    trainer.print_newgame_config(&game);
+                    println!("{}", format!("温泉顺序: {:?}", game_config.onsen_order).bright_yellow());
+                    println!("{}", "------------------------------".bright_yellow())
+                }
+
+                if !game.unresolved_events.is_empty() {
+                    // 暂时不处理事件
+                    // calc_onsen_event(&trainer, &game, &mut rng)?;
+                    //info!("事件: {}", game.unresolved_events[0].name.cyan());
+                } else {
+                    calc_onsen_training(&trainer, &mut game, &mut rng)?;
+                }
             }
             Err(e) => {
                 println!("{}", format!("解析回合信息出错: {e}").red());

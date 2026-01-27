@@ -185,6 +185,20 @@ impl BaseGame {
             true
         }
     }
+
+    /// 比较self是否为last的同一或者下一回合
+    pub fn is_next_of(&self, last: &BaseGame) -> bool {
+        // 马娘ID相同且回合数相同或差1，则再检查卡组
+        if self.uma.uma_id == last.uma.uma_id && (self.turn == last.turn || self.turn == last.turn + 1) {
+            for i in 0..6 {
+                if self.deck[i].card_id != last.deck[i].card_id {
+                    return false;
+                }
+            }
+            return true;
+        }
+        false
+    }
 }
 
 #[cfg(test)]

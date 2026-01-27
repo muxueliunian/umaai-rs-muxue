@@ -413,8 +413,8 @@ impl FlatSearch {
                 best_idx = i;
             }
         }
-       // println!("best: #{best_idx}");
-       // println!("--------------------");
+        // println!("best: #{best_idx}");
+        // println!("--------------------");
         best_idx
     }
 
@@ -628,7 +628,7 @@ impl FlatSearch {
     ) -> Result<(f64, f64)> {
         let mut sim_game = game.clone();
         let mut best_score = (0.0, 0.0);
-        
+
         sim_game.apply_action(action, rng)?;
         for i in sim_game.get_upgradeable_equipment() {
             let score = self.simulate_dig_upgrade(&sim_game, &OnsenAction::Upgrade(i as i32), rng)?;

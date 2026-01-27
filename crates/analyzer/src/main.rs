@@ -53,9 +53,7 @@ fn run_onsen_once(
                     fs_err::write(&path, &json)?;
                     let mcts_path = format!("logs/search_turn{}.json", game_for_save.turn);
                     let mcts_result = {
-                        let output = trainer_mcts.search_output
-                            .lock()
-                            .map_err(|_| anyhow!("lock failed"))?;
+                        let output = trainer_mcts.search_output.lock().map_err(|_| anyhow!("lock failed"))?;
                         output.to_scores()
                     };
                     let json = serde_json::to_string_pretty(&mcts_result)?;

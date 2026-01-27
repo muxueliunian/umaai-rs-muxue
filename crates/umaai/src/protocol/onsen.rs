@@ -99,15 +99,16 @@ impl GameStatus for GameStatusOnsen {
             stage = OnsenTurnStage::Train;
         }
         if self.story.is_some() {
-            // 选择事件暂时都假设为Begin状态
-            stage = OnsenTurnStage::Begin;
+            // 选择事件暂时都假设为Distribute状态(生成随机事件后，分布人头之前)
+            stage = OnsenTurnStage::Distribute;
         }
         if self.playing_state == 36 {
             // 温泉选择状态
             stage = OnsenTurnStage::Begin;
             pending = true;
-            // 调整回合状态到新回合开始(仅开局不用调)
-            if base.turn != 2 {
+            // 实际小黑板数据，选择温泉时是前一回合结束，
+            // 而AI模拟时是按新回合开始计算才正确, 因此需要调整回合状态到新回合开始(仅开局不用调)
+            if base.turn > 2 {
                 base.turn += 1;
                 info!("调整为回合: {}", base.turn + 1);
             }

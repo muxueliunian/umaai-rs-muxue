@@ -1,5 +1,12 @@
+use anyhow::bail;
+use colored::Colorize;
 use serde::{Deserialize, Serialize};
-use umasim::{explain::Explain, gamedata::ActionValue, utils::Array6};
+use umasim::{
+    explain::Explain,
+    gamedata::{ActionValue, EventData, GAMECONSTANTS},
+    global,
+    utils::Array6
+};
 
 /// 从小黑板接收的事件信息
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -13,6 +20,46 @@ pub struct StoryStatus {
     pub trigger_name: String,
     /// 选项数据
     pub choices: Vec<Vec<StoryChoice>>
+}
+
+impl StoryStatus {
+    pub fn explain(&self) -> String {
+        let mut lines = vec![];
+        lines.push(
+            format!("事件 #{} [{}]{}", self.id, self.trigger_name, self.name)
+                .bright_yellow()
+                .to_string()
+        );
+        for (i, ch) in self.choices.iter().enumerate() {
+            if let Some(c) = ch.first() {
+                lines.push(format!("选项 {}: {}", i + 1, c.explain()));
+            }
+        }
+        lines.join("\n")
+    }
+}
+
+impl TryFrom<&StoryStatus> for EventData {
+    type Error = anyhow::Error;
+    /// 暂时只考虑SuccessEffect数值
+    fn try_from(value: &StoryStatus) -> anyhow::Result<Self> {
+        let mut choices = vec![];
+        for ch in &value.choices {
+            if let Some(success_value) = ch.first().and_then(|x| x.success_effect_value.as_ref()) {
+                choices.push(ActionValue::from(success_value))
+            } else {
+                bail!("success_effect_value is None. StoryStatus: {value:#?}");
+            }
+        }
+        //log::info!("{choices:?}");
+        Ok(EventData {
+            id: value.id,
+            name: value.name.clone(),
+            prob: 100,
+            choices,
+            ..Default::default()
+        })
+    }
 }
 
 /// 事件选项数据
@@ -31,6 +78,31 @@ pub struct StoryChoice {
     pub success_effect_value: Option<StoryEffectValue>,
     /// 失败数值
     pub failed_effect_value: Option<StoryEffectValue>
+}
+
+impl StoryChoice {
+    pub fn explain(&self) -> String {
+        let mut lines = vec![];
+        lines.push(format!("- {}", self.option));
+        let mut effect_line = ">> ".to_string();
+        if let Some(value) = &self.success_effect_value {
+            effect_line += &value.explain();
+        }
+        if let Some(value) = &self.failed_effect_value {
+            effect_line += &format!(" / {}", value.explain());
+        }
+        lines.push(format!("{}", effect_line.cyan()));
+        lines.join("\n")
+    }
+
+    /// 选项的默认成功概率(0.4)
+    pub fn default_success_rate() -> f64 {
+        global!(GAMECONSTANTS)
+            .event_probs
+            .get("default_success_event")
+            .cloned()
+            .unwrap_or(0.4)
+    }
 }
 
 /// 事件数值数据
@@ -71,22 +143,22 @@ impl StoryEffectValue {
 
     pub fn explain(&self) -> String {
         let mut line = String::new();
-        if self.status_pt() != [0; 6] { 
+        if self.status_pt() != [0; 6] {
             line += &format!("{} ", Explain::status_with_pt(&self.status_pt()));
         }
         if self.vital() != 0 {
             line += &format!("体力{}", self.vital());
         }
-        if self.friendship() != 0 { 
+        if self.friendship() != 0 {
             line += &format!("羁绊{} ", self.friendship());
         }
-        if self.motivation() != 0 { 
+        if self.motivation() != 0 {
             line += &format!("干劲{} ", self.motivation());
         }
-        if self.hint_level() > 0 { 
+        if self.hint_level() > 0 {
             line += &format!("{:?} Hint+{} ", self.skill_names, self.hint_level());
         }
-        if let Some(buff) = &self.buff_name { 
+        if let Some(buff) = &self.buff_name {
             line += &format!("获得状态->{buff} ");
         }
         line += &self.extras.join("/");
@@ -102,7 +174,7 @@ impl From<&StoryEffectValue> for ActionValue {
             vital: value.vital(),
             friendship: value.friendship(),
             motivation: value.motivation(),
-            max_vital: 0    // 暂无这个字段
+            max_vital: 0 // 暂无这个字段
         }
     }
 }

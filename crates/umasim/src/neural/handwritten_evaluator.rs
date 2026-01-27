@@ -22,7 +22,8 @@ use crate::{
         onsen::{OnsenOrder, action::OnsenAction, game::OnsenGame}
     },
     gamedata::{GAMECONSTANTS, onsen::ONSENDATA},
-    global, utils::load_game_config
+    global,
+    utils::load_game_config
 };
 
 // ============================================================================
@@ -356,7 +357,8 @@ impl HandwrittenEvaluator {
         }
         let year = (game.turn / 24 + 1).min(3);
         let onsens = self.onsen_order.year(year);
-        let ret = onsens.iter()
+        let ret = onsens
+            .iter()
             .find(|x| dig_actions.contains(&(**x as usize)))
             .cloned()
             .unwrap_or_else(|| {
@@ -364,7 +366,7 @@ impl HandwrittenEvaluator {
                 // AI没有按照设定顺序挖，此时直接选列表中第一个
                 dig_actions[0] as i32
             });
-            Some(OnsenAction::Dig(ret))
+        Some(OnsenAction::Dig(ret))
     }
 
     /// 按主流攻略顺序选择温泉（返回索引）
@@ -379,13 +381,10 @@ impl HandwrittenEvaluator {
     /// 选择的动作在 actions 中的索引
     pub fn select_onsen_index(&self, game: &OnsenGame, actions: &[OnsenAction]) -> usize {
         if let Some(act) = self.select_onsen_by_order(game, actions) {
-            return actions
-                .iter()
-                .position(|a| *a == act)
-                .unwrap_or_else(|| {
-                    println!("actions: {actions:?}, act: {act}");
-                    panic!("选择的温泉不在允许范围");
-                })
+            return actions.iter().position(|a| *a == act).unwrap_or_else(|| {
+                println!("actions: {actions:?}, act: {act}");
+                panic!("选择的温泉不在允许范围");
+            });
         } else {
             0
         }

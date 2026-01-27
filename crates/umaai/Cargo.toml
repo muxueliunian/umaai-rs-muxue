@@ -1,6 +1,6 @@
 [package]
 name = "umaai"
-version = "0.2.4"
+version = "0.2.5"
 edition = "2024"
 build = "build.rs"
 
@@ -34,3 +34,6 @@ tokio.workspace = true
 toml.workspace = true
 text-to-ascii-art.workspace = true
 flexi_logger.workspace = true
+os_str_bytes = "7.1.1"
+dunce = "1.0.5"
+windows = { version = "0.62.2", features = ["Win32", "Win32_System", "Win32_System_Threading"] }

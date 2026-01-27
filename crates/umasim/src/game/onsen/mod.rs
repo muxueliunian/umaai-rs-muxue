@@ -82,6 +82,5 @@ impl OnsenOrder {
             3 => &self.year3,
             _ => panic!("year must between 1..3")
         }
-
     }
 }

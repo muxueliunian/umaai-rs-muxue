@@ -15,7 +15,8 @@
         "doll": 0.33,
         "extra_train": 0.15,
         "hint_attr": 0.25,
-        "qiezhe_normal": 0.05
+        "qiezhe_normal": 0.05,
+        "default_success_event": 0.4
     },
     "rest_probs": [ 18, 57, 25 ],
     "no_event_turns": [0, 24, 30, 34, 36, 37, 38, 39, 48, 50, 54, 58, 60, 61, 62, 63, 71, 72, 73, 74, 75, 76, 77],

@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use anyhow::Result;
+use colored::Colorize;
 use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
@@ -237,7 +238,13 @@ async fn main() -> Result<()> {
 
     // 3. 再初始化全局数据
     init_global()?;
-
+    info!(
+        "{}",
+        format!("工作线程数: {}", game_config.collector.threads).bright_yellow()
+    );
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(game_config.collector.threads)
+        .build_global()?;
     let simulation_count = game_config.simulation_count.max(1);
 
     // 开始计时

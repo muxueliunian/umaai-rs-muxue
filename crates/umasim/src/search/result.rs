@@ -3,7 +3,9 @@
 //! 定义分数分布统计和搜索输出结构。
 
 use std::cell::Cell;
-use serde::{Serialize, Deserialize};
+
+use serde::{Deserialize, Serialize};
+
 use super::SearchConfig;
 use crate::{
     game::onsen::{action::OnsenAction, game::OnsenGame},
@@ -340,9 +342,7 @@ impl SearchOutput {
         }
         ret
     }
-
 }
-
 
 /// 动作均分和标准差，用于结果输出
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

@@ -9,6 +9,7 @@ use anyhow::{Result, anyhow, bail};
 use colored::Colorize;
 use log::{info, warn};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use os_str_bytes::OsStrBytes;
 use serde_json::Value;
 use umasim::utils::pause;
 
@@ -30,7 +31,12 @@ impl UraFileWatcher {
     pub fn ura_root() -> Result<String> {
         // 先检查.portable
         if Path::new("./.portable").is_dir() {
-            Ok(".portable".to_string())
+            let ret = dunce::canonicalize(".portable")?;
+            if let Some(s) = ret.to_str() {
+                Ok(s.to_string())
+            } else {
+                bail!("路径中暂时不能包含中文: {}", ret.to_string_lossy())
+            }
         } else {
             let local_app_path = env::var("LOCALAPPDATA")?;
             let local_app_ura = format!("{local_app_path}/UmamusumeResponseAnalyzer");
@@ -44,9 +50,7 @@ impl UraFileWatcher {
     /// 定位 SendGameStatusPlugin 输出数据的目录
     pub fn plugin_dir() -> Result<String> {
         let ura_root = Self::ura_root()?;
-        Ok(format!(
-            "{ura_root}/PluginData/SendGameStatusPlugin"
-        ))
+        Ok(format!("{ura_root}/PluginData/SendGameStatusPlugin"))
     }
 
     pub fn init() -> Result<Self> {

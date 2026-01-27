@@ -11,7 +11,10 @@ use log::info;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 use crate::{
-    explain::Explain, game::onsen::OnsenOrder, global, utils::{Array5, Array6}
+    explain::Explain,
+    game::onsen::OnsenOrder,
+    global,
+    utils::{Array5, Array6}
 };
 
 pub mod onsen;
@@ -903,7 +906,9 @@ pub struct OverrideConfig {
     /// 温泉选择是否使用蒙特卡洛
     pub mcts_selected_onsen: bool,
     /// 日志级别
-    pub log_level: String
+    pub log_level: String,
+    /// 线程数
+    pub num_threads: usize
 }
 
 impl OverrideGameConfig {
@@ -916,7 +921,7 @@ impl OverrideGameConfig {
         ret.mcts_selected_onsen = self.config_override.mcts_selected_onsen;
         ret.mcts.search_n = self.mcts.search_n;
         ret.mcts.radical_factor_max = self.mcts.radical_factor_max;
-
+        ret.collector.threads = self.config_override.num_threads;
         ret
     }
 }

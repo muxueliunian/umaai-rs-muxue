@@ -3,11 +3,14 @@ use std::{io::Write, sync::Mutex};
 use anyhow::{Result, anyhow};
 use colored::Colorize;
 use comfy_table::Table;
-use flexi_logger::{DeferredNow, Duplicate, FileSpec, style};
+use flexi_logger::{DeferredNow, Duplicate, FileSpec, LogSpecification, style};
 use log::{Record, error};
 use serde::Serialize;
 
-use crate::gamedata::{EventCollection, EventData, GAMECONSTANTS, GAMEDATA, GameConfig, LOGGER, OverrideGameConfig};
+use crate::{
+    gamedata::{EventCollection, EventData, GAMECONSTANTS, GAMEDATA, GameConfig, LOGGER, OverrideGameConfig},
+    global
+};
 
 pub type Array5 = [i32; 5];
 pub type Array6 = [i32; 6];
@@ -32,6 +35,17 @@ pub fn init_logger(app: &str, spec: &str) -> Result<()> {
         .set(Mutex::new(handle))
         .map_err(|_| anyhow!("Logger init failed"))?;
     Ok(())
+}
+
+pub fn pause_log() {
+    global!(LOGGER)
+        .lock()
+        .expect("logger lock")
+        .push_temp_spec(LogSpecification::off());
+}
+
+pub fn resume_log() {
+    global!(LOGGER).lock().expect("logger lock").pop_temp_spec();
 }
 
 /// 把当前工作目录修改为exe所在目录
