@@ -15,7 +15,6 @@ use std::sync::{
 
 use anyhow::{Result, anyhow};
 use colored::Colorize;
-use flexi_logger::LogSpecification;
 use log::{info, warn};
 use rand::prelude::StdRng;
 
@@ -25,11 +24,11 @@ use crate::{
         Trainer,
         onsen::{action::OnsenAction, game::OnsenGame}
     },
-    gamedata::{ActionValue, GAMECONSTANTS, LOGGER},
+    gamedata::{ActionValue, EventData, GAMECONSTANTS, LOGGER},
     global,
     neural::{Evaluator, HandwrittenEvaluator},
-    search::{ActionResult, FlatSearch, SearchConfig, SearchOutput},
-    utils::{format_luck, pause_log, resume_log}
+    search::{FlatSearch, SearchConfig, SearchOutput},
+    utils::{disable_log, enable_log, format_luck}
 };
 
 /// MCTS 训练员
@@ -288,7 +287,7 @@ impl Trainer<OnsenGame> for MctsTrainer {
             }
             return Ok(idx);
         }
-        pause_log();
+        disable_log();
         // 使用 MCTS 搜索
         let search_output = self.search.search(game, actions, rng)?;
         {
@@ -296,7 +295,7 @@ impl Trainer<OnsenGame> for MctsTrainer {
             let mut s = self.search_output.lock().map_err(|_| anyhow!("lock failed"))?;
             *s = search_output.clone();
         }
-        resume_log();
+        enable_log();
 
         let best_action = search_output.best_action();
         let best_action_2 = search_output.best_action_pt();
@@ -350,5 +349,15 @@ impl Trainer<OnsenGame> for MctsTrainer {
         info!("{}", format!("手写逻辑: 选项 {}", best_idx + 1).bright_green());
 
         Ok(best_idx)
+    }
+
+    /// 重构的选择事件逻辑
+    fn select_event_choice(
+            &self, game: &OnsenGame, event: &EventData, choices: &[ActionValue], rng: &mut StdRng
+        ) -> Result<usize> {
+        let choice_actions: Vec<_> = choices.iter().enumerate()
+            .map(|(i, _)| OnsenAction::Choice((Box::new(event.clone()), i)))
+            .collect();
+        self.select_action(game, &choice_actions, rng)
     }
 }

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     game::{base::*, onsen::game::OnsenGame, *},
-    gamedata::{GAMECONSTANTS, onsen::ONSENDATA},
+    gamedata::{EventData, GAMECONSTANTS, onsen::ONSENDATA},
     utils::system_event
 };
 
@@ -33,7 +33,9 @@ pub enum OnsenAction {
     /// 选择温泉
     Dig(i32),
     /// 升级工具
-    Upgrade(i32)
+    Upgrade(i32),
+    /// 选择事件选项
+    Choice((Box<EventData>, usize))
 }
 
 impl Display for OnsenAction {
@@ -61,6 +63,7 @@ impl Display for OnsenAction {
                 let name = &global!(ONSENDATA).dig_tool_name[*x as usize];
                 write!(f, "升级 {}", name.bright_yellow())
             }
+            OnsenAction::Choice((_event, choice)) => write!(f, "选项{}", *choice+1)
         }
     }
 }
@@ -176,7 +179,11 @@ impl ActionEnum for OnsenAction {
             // ========== 挖掘动作（选择温泉） ==========
             OnsenAction::Dig(onsen_index) => game.do_select_dig(*onsen_index as usize),
             // ========== 升级工具动作 ==========
-            OnsenAction::Upgrade(tool) => game.do_upgrade_equipment(*tool as usize)
+            OnsenAction::Upgrade(tool) => game.do_upgrade_equipment(*tool as usize),
+            // ========== 选择事件选项(test) ==========
+            OnsenAction::Choice((event, choice)) => {
+                game.apply_event(event, *choice, rng)
+            }
         }
     }
 

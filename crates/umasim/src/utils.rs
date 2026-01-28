@@ -37,14 +37,14 @@ pub fn init_logger(app: &str, spec: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn pause_log() {
+pub fn disable_log() {
     global!(LOGGER)
         .lock()
         .expect("logger lock")
         .push_temp_spec(LogSpecification::off());
 }
 
-pub fn resume_log() {
+pub fn enable_log() {
     global!(LOGGER).lock().expect("logger lock").pop_temp_spec();
 }
 

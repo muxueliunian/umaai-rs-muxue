@@ -25,7 +25,7 @@ use umasim::{
     neural::{Evaluator, NeuralNetEvaluator},
     search::SearchConfig,
     trainer::MctsTrainer,
-    utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause, pause_log, resume_log}
+    utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause, disable_log, enable_log}
 };
 
 use crate::{
@@ -95,12 +95,12 @@ pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mu
 
         // 选择温泉券时需要继续给出训练推荐
         if game.stage == OnsenTurnStage::Bathing {
-            pause_log();
+            disable_log();
             if action == OnsenAction::UseTicket(true) {
                 game.do_use_ticket(rng)?;
             }
             game.next();
-            resume_log();
+            enable_log();
 
             info!("{}", "正在计算训练...".bright_black());
             let actions = game.list_actions()?;
@@ -117,10 +117,6 @@ pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mu
 /// 事件模式
 pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRng) -> Result<()> {
     if let Some(event) = game.unresolved_events.first() {
-        info!("{}", format!("事件: #{} {}", event.id, event.name).cyan());
-        for (index, choice) in event.choices.iter().enumerate() {
-            info!("选项 {}: {}", index + 1, choice.explain());
-        }
         let _selection = trainer.select_event_choice(game, event, &event.choices, rng)?;
         println!("{}", "[按 F2 保存当前回合状态]".bright_black());
     }
@@ -237,9 +233,7 @@ async fn main_guard() -> Result<()> {
                 }
 
                 if !game.unresolved_events.is_empty() {
-                    // 暂时不处理事件
-                    // calc_onsen_event(&trainer, &game, &mut rng)?;
-                    //info!("事件: {}", game.unresolved_events[0].name.cyan());
+                    calc_onsen_event(&trainer, &game, &mut rng)?;
                 } else {
                     calc_onsen_training(&trainer, &mut game, &mut rng)?;
                 }
