@@ -18,8 +18,7 @@ use crate::{
     game::{
         Game,
         onsen::{action::OnsenAction, game::OnsenGame}
-    },
-    neural::{
+    }, gamedata::EventChoice, neural::{
         Evaluator,
         HandwrittenEvaluator,
         ThreadLocalNeuralNetLeafEvaluator,
@@ -701,7 +700,7 @@ impl<'a> crate::game::Trainer<OnsenGame> for SimulationTrainer<'a> {
     }
 
     fn select_choice(
-        &self, game: &OnsenGame, choices: &[crate::gamedata::ActionValue], _rng: &mut StdRng
+        &self, game: &OnsenGame, choices: &[Vec<EventChoice>], _rng: &mut StdRng
     ) -> Result<usize> {
         // 使用 HandwrittenEvaluator 的 evaluate_choice 逻辑
         let mut best_idx = 0;

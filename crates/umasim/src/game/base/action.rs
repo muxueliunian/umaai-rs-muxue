@@ -49,7 +49,7 @@ impl BaseAction {
             info!(">> 生涯比赛 - 比赛加成: {}", game.uma.race_bonus);
             let mut event = system_event("race_career")?.clone();
             // 事件面板乘算比赛加成
-            event.choices[0].map_status(|x| (x as f32 * race_bonus).round() as i32);
+            event.map_status(|x| (x as f32 * race_bonus).round() as i32);
             game.unresolved_events.push(event);
             game.uma.set_race(game.turn);
         } else {
@@ -58,7 +58,7 @@ impl BaseAction {
             let event_name = format!("race_g{grade}");
             let mut event = system_event(&event_name)?.clone();
             // 事件面板乘算比赛加成
-            event.choices[0].map_status(|x| (x as f32 * race_bonus).round() as i32);
+            event.map_status(|x| (x as f32 * race_bonus).round() as i32);
             game.unresolved_events.push(event);
             game.uma.set_race(game.turn);
         }

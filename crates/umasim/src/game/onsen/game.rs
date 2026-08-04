@@ -508,7 +508,7 @@ impl OnsenGame {
             };
             //hint_event.name = format!("{} - {}", hint_event.name, self.deck[person_index].short_name()?); // short_name is slow
             if !has_friendship {
-                hint_event.choices[0].friendship = 0;
+                hint_event.choices[0][0].value.friendship = 0;
             }
             self.unresolved_events.push(hint_event);
         }
@@ -616,7 +616,7 @@ impl OnsenGame {
         }
         if reporter_clicked {
             let mut event = system_event("reporter_click")?.clone();
-            event.choices[0].status_pt[train] = 2;
+            event.choices[0][0].value.status_pt[train] = 2;
             self.unresolved_events.push(event);
         }
         return Ok((true, vital_cost));
@@ -1491,18 +1491,17 @@ impl Game for OnsenGame {
     }
     /// 使事件生效（无选项）。修改羁绊和特殊事件的部分需要在当前类型里完成
     fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()> {
-        self.base.apply_event(event, choice);
-        // 判定超回复
-        if let Some(vital_cost) = event.choices.get(choice).map(|value| value.vital)
-            && vital_cost < 0
-        {
-            self.update_super_on_vital_cost(-vital_cost, rng);
-        }
-        if let (Some(person_index), Some(value)) = (&event.person_index, event.choices.get(choice)) {
-            if value.friendship != 0 {
-                self.add_friendship(*person_index as usize, value.friendship);
+        if let Some(result) = self.base.apply_event(event, choice, rng) {
+            // 判定超回复
+            if result.value.vital < 0
+            {
+                self.update_super_on_vital_cost(-result.value.vital, rng);
+            }
+            if let Some(person_index) = &event.person_index && result.value.friendship != 0 {
+                self.add_friendship(*person_index as usize, result.value.friendship);
             }
         }
+        
         // 判断特殊事件
         match event.id {
             4012 | 4013 => {

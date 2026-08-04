@@ -2,12 +2,12 @@ use std::default::Default;
 
 use anyhow::Result;
 use colored::Colorize;
-use log::info;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::{
     explain::Explain,
-    gamedata::{ActionValue, FreeRaceData, GAMECONSTANTS, GAMEDATA, UmaData},
+    gamedata::{ActionValue, EventChoice, FreeRaceData, GAMECONSTANTS, GAMEDATA, UmaData},
     global,
     utils::*
 };
@@ -66,6 +66,34 @@ impl UmaFlags {
             s += &format!("休息心得({}回合)", self.refresh_mind);
         }
         s
+    }
+
+    /// 添加状态
+    pub fn add(&mut self, rhs: &UmaFlags) -> &mut Self {
+        self.qiezhe |= rhs.qiezhe;
+        self.aijiao |= rhs.aijiao;
+        self.good_trainer |= rhs.good_trainer;
+        self.bad_trainer |= rhs.bad_trainer;
+        self.positive_thinking |= rhs.positive_thinking;
+        self.refresh_mind += rhs.refresh_mind;
+        self.lucky |= rhs.lucky;
+        self.doll |= rhs.doll;
+        self.ill |= rhs.ill;
+        self
+    }
+
+    /// 减少状态
+    pub fn remove(&mut self, rhs: &UmaFlags) -> &mut Self {
+        self.qiezhe &= !rhs.qiezhe;
+        self.aijiao &= !rhs.aijiao;
+        self.good_trainer &= !rhs.good_trainer;
+        self.bad_trainer &= !rhs.bad_trainer;
+        self.positive_thinking &= !rhs.positive_thinking;
+        self.refresh_mind -= rhs.refresh_mind;
+        self.lucky &= !rhs.lucky;
+        self.doll &= !rhs.doll;
+        self.ill &= !rhs.ill;
+        self
     }
 }
 
@@ -206,6 +234,20 @@ impl Uma {
         self.max_vital += action.max_vital;
         self.vital = (self.vital + action.vital).min(self.max_vital).max(0);
         self.total_hints += action.hint_level;
+        self
+    }
+
+    /// 根据事件选项更新Flag状态
+    pub fn update_flags(&mut self, choice: &EventChoice) -> &mut Self {
+        if let Some(flags) = &choice.add_flags {
+            self.flags.add(&flags);
+            warn!("获得状态: {}", flags.explain());
+        }
+        if let Some(flags) = &choice.remove_flags {
+            self.flags.remove(&flags);
+            warn!("失去状态: {}", flags.explain());
+        }
+
         self
     }
 

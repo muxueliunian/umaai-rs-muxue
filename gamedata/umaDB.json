@@ -877,6 +877,39 @@
     ],
     "star": 5
   },
+  "101003": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      0,
+      10,
+      20,
+      0
+    ],
+    "fiveStatusInitial": [
+      110,
+      90,
+      123,
+      127,
+      100
+    ],
+    "freeRaces": [],
+    "gameId": 101003,
+    "name": "[Baa Baa Patisserie]大树快车",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      24,
+      32,
+      35,
+      45,
+      58,
+      65,
+      69
+    ],
+    "star": 5
+  },
   "101101": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -7714,6 +7747,85 @@
     ],
     "star": 5
   },
+  "110202": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      14,
+      8,
+      8,
+      0
+    ],
+    "fiveStatusInitial": [
+      109,
+      117,
+      114,
+      111,
+      99
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 27,
+        "count": 1
+      }
+    ],
+    "gameId": 110202,
+    "name": "[ソナタ・アッラ・メンタ]万籁争鸣",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      32,
+      33,
+      43,
+      53,
+      55,
+      63,
+      69,
+      71
+    ],
+    "star": 5
+  },
+  "110301": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      0,
+      10,
+      0,
+      20
+    ],
+    "fiveStatusInitial": [
+      114,
+      108,
+      99,
+      108,
+      121
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 29,
+        "count": 1
+      }
+    ],
+    "gameId": 110301,
+    "name": "[Inspiring Genius]莱斯莱斯",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      31,
+      33,
+      43,
+      53,
+      65,
+      67,
+      69
+    ],
+    "star": 5
+  },
   "110401": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -8669,6 +8781,42 @@
     ],
     "star": 5
   },
+  "112901": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      10,
+      10,
+      10,
+      0,
+      0
+    ],
+    "fiveStatusInitial": [
+      127,
+      102,
+      102,
+      111,
+      108
+    ],
+    "freeRaces": [],
+    "gameId": 112901,
+    "name": "[The Changer]杏目",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      24,
+      30,
+      33,
+      43,
+      45,
+      53,
+      56,
+      58,
+      67,
+      69
+    ],
+    "star": 5
+  },
   "113101": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -8812,6 +8960,50 @@
       44,
       55,
       59,
+      67,
+      69,
+      71
+    ],
+    "star": 5
+  },
+  "113701": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      10,
+      0,
+      0,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      118,
+      119,
+      106,
+      111,
+      96
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 23,
+        "count": 1
+      },
+      {
+        "startTurn": 24,
+        "endTurn": 36,
+        "count": 1,
+        "grade": 3
+      }
+    ],
+    "gameId": 113701,
+    "name": "[Miracle Author]神业",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      43,
+      59,
+      66,
       67,
       69,
       71

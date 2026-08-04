@@ -64,6 +64,7 @@ fn run_basic_once<T: Trainer<BasicGame>>(
 /// # 探索性策略
 /// 使用 40% 探索率在温泉选择时引入随机性，让神经网络能够
 /// 从不同的挖掘顺序中学习，而不是只记住固定的顺序。
+/* 
 #[allow(dead_code)]
 fn run_collector_mode(config: &GameConfig, num_games: usize, rng: &mut StdRng) -> Result<()> {
     // 创建带探索率的训练员
@@ -177,7 +178,7 @@ fn run_collector_mode(config: &GameConfig, num_games: usize, rng: &mut StdRng) -
 
     Ok(())
 }
-
+*/
 /// 打印多次模拟的统计结果
 fn print_simulation_stats(results: &[SimulationResult], elapsed: std::time::Duration) {
     if results.is_empty() {
@@ -290,7 +291,9 @@ async fn main() -> Result<()> {
                     //run_collector_mode(&game_config, simulation_count, &mut rng)
                 }
                 "neuralnet" | "nn" => {
+                    unimplemented!()
                     // 神经网络训练员
+                    /* 
                     let model_path = game_config.neuralnet_model_path.as_str();
                     match NeuralNetTrainer::load(model_path) {
                         Ok(trainer) => {
@@ -321,7 +324,8 @@ async fn main() -> Result<()> {
                             println!("请确保模型文件存在，或使用其他训练员");
                             Err(e)
                         }
-                    }
+                        
+                    } */
                 }
                 "mcts" => {
                     // MCTS 训练员

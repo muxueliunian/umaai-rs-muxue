@@ -14,9 +14,7 @@ use log::info;
 use rand::prelude::StdRng;
 
 use crate::{
-    game::{Trainer, onsen::game::OnsenGame},
-    gamedata::ActionValue,
-    neural::{Evaluator, HandwrittenEvaluator}
+    game::{Trainer, onsen::game::OnsenGame}, gamedata::{ActionValue, EventChoice}, neural::{Evaluator, HandwrittenEvaluator}
 };
 
 /// 手写策略训练员
@@ -144,7 +142,7 @@ impl Trainer<OnsenGame> for HandwrittenTrainer {
         Ok(idx)
     }
 
-    fn select_choice(&self, game: &OnsenGame, choices: &[ActionValue], _rng: &mut StdRng) -> Result<usize> {
+    fn select_choice(&self, game: &OnsenGame, choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
         // 使用 HandwrittenEvaluator 的 evaluate_choice 逻辑
         let mut best_idx = 0;
         let mut best_value = f64::NEG_INFINITY;
@@ -159,10 +157,9 @@ impl Trainer<OnsenGame> for HandwrittenTrainer {
 
         if self.verbose {
             info!(
-                "[回合 {}] 手写策略选择事件选项: {} (索引 {})",
+                "[回合 {}] 手写策略选择选项: {}",
                 game.turn,
-                choices[best_idx].to_string().green(),
-                best_idx.to_string().green()
+                (best_idx+1).to_string().green()
             );
         }
 

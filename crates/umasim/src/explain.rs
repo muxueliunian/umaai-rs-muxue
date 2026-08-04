@@ -1,7 +1,7 @@
 use colored::Colorize;
 
 use crate::{
-    gamedata::GAMECONSTANTS,
+    gamedata::{EventChoice, GAMECONSTANTS},
     global,
     utils::{Array5, Array6}
 };
@@ -65,5 +65,13 @@ impl Explain {
     pub fn train_level_count(train: &Array5) -> String {
         let levels: Vec<_> = train.iter().map(|x| (x / 4 + 1).min(5)).collect();
         format!("{levels:?}")
+    }
+
+    pub fn event_choice(choice: &[EventChoice]) -> String {
+        choice
+            .iter()
+            .map(|x| x.explain())
+            .collect::<Vec<_>>()
+            .join(" | ")
     }
 }

@@ -156,7 +156,7 @@ impl BasicAction {
             }
             if reporter_clicked {
                 let mut event = system_event("reporter_click")?.clone();
-                event.choices[0].status_pt[train] = 2;
+                event.choices[0][0].value.status_pt[train] = 2;
                 game.unresolved_events.push(event);
             }
         }
@@ -433,11 +433,10 @@ impl Game for BasicGame {
 
     /// 使事件生效（无选项）。修改羁绊和特殊事件的部分需要在当前类型里完成
     fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()> {
-        self.base.apply_event(event, choice);
-        if let (Some(person_index), Some(value)) = (&event.person_index, event.choices.get(choice)) {
-            if value.friendship != 0 {
-                self.add_friendship(*person_index as usize, value.friendship);
-            }
+        if let Some(result) = self.base.apply_event(event, choice, rng) {
+            if let Some(person_index) = &event.person_index && result.value.friendship != 0 {
+                self.add_friendship(*person_index as usize, result.value.friendship);
+            } 
         }
         // 判断特殊事件
         match event.id {

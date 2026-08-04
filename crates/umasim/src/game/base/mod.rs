@@ -10,11 +10,13 @@ use log::{info, warn};
 pub use person::*;
 use rand::{rngs::StdRng, seq::IndexedRandom};
 
-use crate::{explain::Explain, game::*, gamedata::EventData, utils::*};
+use crate::{
+    explain::Explain, game::*, gamedata::{ChoiceResult, EventChoice, EventData}, utils::*
+};
 
-/// 一局游戏的基本状态，剧本通用，用于计算，不用于通信(例如通信只传递卡组id)  
-/// 不包含人头信息(Person类型可能不同)，实际的剧本对象需要补上Vec<Person>才能实现Game Trait    
-/// 需要频繁clone，一部分不变量需要引用  
+/// 一局游戏的基本状态，剧本通用，用于计算，不用于通信(例如通信只传递卡组id)
+/// 不包含人头信息(Person类型可能不同)，实际的剧本对象需要补上Vec<Person>才能实现Game Trait
+/// 需要频繁clone，一部分不变量需要引用
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BaseGame {
     /// 回合数 [0, 77]
@@ -31,7 +33,7 @@ pub struct BaseGame {
     pub friend: FriendState,
     /// 设施等级计数 (设施等级x4)
     pub train_level_count: Array5,
-    /// 人头分布 [训练, persons_index]. -1为不在    
+    /// 人头分布 [训练, persons_index]. -1为不在
     /// 使用index而非引用
     pub distribution: Vec<Vec<i32>>,
     /// 不在率下降，处理成加算
@@ -125,12 +127,38 @@ impl BaseGame {
             .collect();
         available_events.choose(rng).map(|e| (*e).clone())
     }
-    /// 使事件生效，无交互或随机判定（训练员无法选择）。如果需要随机判定或选择，需要把事件加入unresolved_events让他在回合后调用
-    pub fn apply_event(&mut self, event: &EventData, choice: usize) {
-        self.events.entry(event.id).and_modify(|x| *x += 1).or_insert(1);
-        if !event.choices.is_empty() {
-            self.uma.add_value(&event.choices[choice]);
+
+    /// 已经选择了选项choice，随机决定结果
+    pub fn random_select_choice_result(&self, choices: &[EventChoice], rng: &mut StdRng) -> Option<EventChoice> {
+        if choices.is_empty() {
+            None
+        } else if choices.len() == 1 {
+            Some(choices[0].clone())
+        } else {
+            choices.choose_weighted(rng, |c| { c.prob })
+                .inspect_err(|e| log::error!("sample error: {e:?}"))
+                .ok()
+                .cloned()
         }
+    }
+    /// 使事件生效，并随机决定结果, 返回实际生效的效果
+    pub fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Option<EventChoice> {
+        self.events.entry(event.id).and_modify(|x| *x += 1).or_insert(1);
+        if let Some(choice_result) = self.random_select_choice_result(&event.choices[choice], rng) {
+            if choice_result.result > 0 {
+                info!("事件结果: {}", ChoiceResult::try_from(choice_result.result).unwrap_or_default());
+            }
+            self.uma.add_value(&choice_result.value);
+            Some(choice_result)
+        } else {
+            None
+        }
+    }
+
+    /// 结算某个事件选项
+    pub fn apply_event_choice(&mut self, choice: &EventChoice) {
+        self.uma.add_value(&choice.value);
+        self.uma.update_flags(choice);
     }
 
     pub fn is_xiahesu(&self) -> bool {

@@ -39,7 +39,7 @@ use umasim::{
     game::{Game, InheritInfo, onsen::game::OnsenGame},
     gamedata::{GameConfig, init_global},
     search::{FlatSearch, SearchConfig},
-    trainer::MeanFilterCollectorTrainer,
+    //trainer::MeanFilterCollectorTrainer,
     utils::init_logger
 };
 

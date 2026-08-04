@@ -23,12 +23,7 @@ use crate::{
         InheritInfo,
         Trainer,
         onsen::{action::OnsenAction, game::OnsenGame}
-    },
-    gamedata::{ActionValue, EventData, GAMECONSTANTS, LOGGER},
-    global,
-    neural::{Evaluator, HandwrittenEvaluator},
-    search::{FlatSearch, SearchConfig, SearchOutput},
-    utils::{disable_log, enable_log, format_luck}
+    }, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, LOGGER}, global, neural::{Evaluator, HandwrittenEvaluator}, search::{FlatSearch, SearchConfig, SearchOutput}, utils::{disable_log, enable_log, format_luck}
 };
 
 /// MCTS 训练员
@@ -326,7 +321,7 @@ impl Trainer<OnsenGame> for MctsTrainer {
         Ok(idx)
     }
 
-    fn select_choice(&self, game: &OnsenGame, choices: &[ActionValue], _rng: &mut StdRng) -> Result<usize> {
+    fn select_choice(&self, game: &OnsenGame, choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
         // 事件选择：使用手写逻辑
         let mut best_idx = 0;
         let mut best_value = f64::NEG_INFINITY;
@@ -353,7 +348,7 @@ impl Trainer<OnsenGame> for MctsTrainer {
 
     /// 重构的选择事件逻辑
     fn select_event_choice(
-            &self, game: &OnsenGame, event: &EventData, choices: &[ActionValue], rng: &mut StdRng
+            &self, game: &OnsenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
         ) -> Result<usize> {
         let choice_actions: Vec<_> = choices.iter().enumerate()
             .map(|(i, _)| OnsenAction::Choice((Box::new(event.clone()), i)))

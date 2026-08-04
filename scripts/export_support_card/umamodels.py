@@ -198,6 +198,7 @@ class RouteRaceData:
     determine_race_flag: int
     alt_determine_race: int	# 25.02.23 新增
     alt_determine_race_flag: int
+    determine_race_for_generate: int    # 26.02.15 新增
 
 @dataclass
 class CharacterCard:

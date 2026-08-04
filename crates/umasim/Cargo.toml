@@ -7,13 +7,13 @@ edition = "2024"
 name = "umasim"
 path = "src/main.rs"
 
-[[bin]]
-name = "generate_training_data"
-path = "src/bin/generate_training_data.rs"
+# [[bin]]
+# name = "generate_training_data"
+# path = "src/bin/generate_training_data.rs"
 
-[[bin]]
-name = "generate_mean_filtered_data"
-path = "src/bin/generate_mean_filtered_data.rs"
+# [[bin]]
+# name = "generate_mean_filtered_data"
+# path = "src/bin/generate_mean_filtered_data.rs"
 
 [dependencies]
 anyhow.workspace = true
@@ -44,4 +44,6 @@ flexi_logger.workspace = true
 # ONNX 推理
 tract-onnx.workspace = true
 ndarray.workspace = true
+int-enum = "1.2.0"
+parse-display = "0.11.0"
 

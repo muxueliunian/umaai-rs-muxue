@@ -7,9 +7,7 @@ use rand_distr::{Distribution, weighted::WeightedIndex};
 
 use super::PersonType;
 use crate::{
-    game::{BaseAction, CardTrainingEffect, SupportCard, Uma},
-    gamedata::{ActionValue, EventData, GAMECONSTANTS},
-    global
+    explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS}, global
 };
 // Game为核心特性，
 // ActionEnum 执行动作，修改Game状态
@@ -100,13 +98,10 @@ pub trait Game: Clone {
     fn run_event<T: Trainer<Self>>(&mut self, event: &EventData, trainer: &T, rng: &mut StdRng) -> Result<()> {
         info!("+ 事件: #{} {}", event.id, event.name);
         if event.choices.len() > 1 {
-            // 只对决策事件打印选项（chance 事件通常不需要刷屏）
-            if event.random_choice_prob.is_none() {
-                for (index, choice) in event.choices.iter().enumerate() {
-                    info!("选项 {}: {}", index + 1, choice.explain());
-                }
+            for (index, choice) in event.choices.iter().enumerate() {
+                info!("选项 {}: {}", index + 1, Explain::event_choice(choice));
             }
-
+            
             // 统一调用 select_event_choice（默认实现内部区分 chance/决策）
             let selection = trainer.select_event_choice(self, event, &event.choices, rng)?;
             if selection >= event.choices.len() {
@@ -420,44 +415,13 @@ pub trait Trainer<G: Game> {
     /// 选择动作
     fn select_action(&self, game: &G, actions: &[<G as Game>::Action], rng: &mut StdRng) -> Result<usize>;
     /// 选择事件选项（旧接口，保留向后兼容）
-    fn select_choice(&self, game: &G, choices: &[ActionValue], rng: &mut StdRng) -> Result<usize>;
+    fn select_choice(&self, game: &G, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize>;
     /// 选择事件选项（新接口，携带完整的 EventData）
     ///
-    /// 默认实现：chance 事件按权重采样；决策事件回退到 select_choice。
+    /// 暂时回退到 select_choice。
     fn select_event_choice(
-        &self, game: &G, event: &EventData, choices: &[ActionValue], rng: &mut StdRng
+        &self, game: &G, _event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
     ) -> Result<usize> {
-        if choices.is_empty() {
-            return Ok(0);
-        }
-
-        if let Some(probs) = &event.random_choice_prob {
-            // 长度校验：不匹配时回退为均匀随机，保持 chance 语义
-            if probs.len() != choices.len() {
-                warn!(
-                    "事件#{} {} random_choice_prob.len()={} 与 choices.len()={} 不一致，回退为均匀随机",
-                    event.id,
-                    event.name,
-                    probs.len(),
-                    choices.len()
-                );
-                return Ok(rng.random_range(0..choices.len()));
-            }
-
-            // chance 事件：按权重采样；权重非法时回退为均匀随机（避免直接报错中断模拟）
-            match WeightedIndex::new(probs) {
-                Ok(weights) => Ok(weights.sample(rng)),
-                Err(e) => {
-                    warn!(
-                        "事件#{} {} random_choice_prob 非法（{}），回退为均匀随机",
-                        event.id, event.name, e
-                    );
-                    Ok(rng.random_range(0..choices.len()))
-                }
-            }
-        } else {
-            // 决策事件：回退到旧接口
-            self.select_choice(game, choices, rng)
-        }
+        self.select_choice(game, choices, rng)
     }
 }

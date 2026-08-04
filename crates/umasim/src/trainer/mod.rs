@@ -4,22 +4,21 @@ use log::info;
 use rand::{Rng, prelude::StdRng, seq::SliceRandom};
 
 use crate::{
-    game::{ActionEnum, BaseAction, Game, Trainer},
-    gamedata::ActionValue
+    game::{ActionEnum, BaseAction, Game, Trainer}, gamedata::{ActionValue, EventChoice}
 };
 
 // 导出手写逻辑训练员、数据收集训练员、神经网络训练员和 MCTS 训练员
-pub mod collector_trainer;
+//pub mod collector_trainer;
 pub mod handwritten_trainer;
 pub mod mcts_trainer;
-pub mod mean_filter_collector_trainer;
-pub mod neural_net_trainer;
+//pub mod mean_filter_collector_trainer;
+//pub mod neural_net_trainer;
 
-pub use collector_trainer::CollectorTrainer;
+//pub use collector_trainer::CollectorTrainer;
 pub use handwritten_trainer::HandwrittenTrainer;
 pub use mcts_trainer::MctsTrainer;
-pub use mean_filter_collector_trainer::MeanFilterCollectorTrainer;
-pub use neural_net_trainer::NeuralNetTrainer;
+//pub use mean_filter_collector_trainer::MeanFilterCollectorTrainer;
+//pub use neural_net_trainer::NeuralNetTrainer;
 
 /// 猴子训练师
 pub struct RandomTrainer;
@@ -55,7 +54,7 @@ impl<G: Game> Trainer<G> for RandomTrainer {
         Ok(ret)
     }
 
-    fn select_choice(&self, _game: &G, choices: &[ActionValue], rng: &mut StdRng) -> Result<usize> {
+    fn select_choice(&self, _game: &G, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
         let ret = rng.random_range(0..choices.len());
         info!("当前选项: {:?}, 随机选择选项 {}", choices, ret + 1);
         Ok(ret)
@@ -76,9 +75,13 @@ impl<G: Game> Trainer<G> for ManualTrainer {
             .ok_or_else(|| anyhow::anyhow!("未找到该动作: {selected}"))
     }
 
-    fn select_choice(&self, _game: &G, choices: &[ActionValue], _rng: &mut StdRng) -> Result<usize> {
-        let selected = Select::new("请选择:", choices.to_vec()).prompt()?;
-        choices
+    fn select_choice(&self, _game: &G, choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
+        let explain = choices
+            .iter()
+            .map(|x| x.iter().map(|y| y.explain()).collect::<Vec<_>>().join(" | "))
+            .collect::<Vec<_>>();
+        let selected = Select::new("请选择:", explain.clone()).prompt()?;
+        explain
             .iter()
             .position(|x| *x == selected)
             .ok_or_else(|| anyhow::anyhow!("未找到该选项: {selected}"))

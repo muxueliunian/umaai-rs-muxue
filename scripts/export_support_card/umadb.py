@@ -1,7 +1,7 @@
 import sqlite3
 from typing import Generator
 from dataclasses import dataclass, asdict
-import collections
+import collections, traceback
 
 from umamodels import *
 
@@ -343,7 +343,7 @@ class Umadb:
                 skill_upgrade_description_dict[desc.card_id][desc.rank].append(str(desc.skill_id))
             # 生涯比赛
             for card in card_data:
-                cursor.execute(f'SELECT * from {_TABLE_SINGLE_MODE_ROUTE_RACE} WHERE race_set_id == {card.chara_id} AND scenario_group_id == 100')
+                cursor.execute(f'SELECT * from {_TABLE_SINGLE_MODE_ROUTE_RACE} WHERE race_set_id == {card.chara_id} AND scenario_group_id == 100')             
                 route_race_dict[card.id] = [RouteRaceData(*row) for row in cursor.fetchall()]
 
         card_dict = {}

@@ -55,8 +55,8 @@ impl TryFrom<&StoryStatus> for EventData {
         Ok(EventData {
             id: value.id,
             name: value.name.clone(),
-            prob: 100,
-            choices,
+         //   prob: 100,
+         //   choices,
             ..Default::default()
         })
     }
