@@ -16,22 +16,31 @@ use crate::{
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct UmaFlags {
     /// 切者
+    #[serde(default)]
     pub qiezhe: bool,
     /// 爱娇
+    #[serde(default)]
     pub aijiao: bool,
     /// 擅长训练
+    #[serde(default)]
     pub good_trainer: bool,
     /// 不擅长训练
+    #[serde(default)]
     pub bad_trainer: bool,
     /// 正向思考
+    #[serde(default)]
     pub positive_thinking: bool,
     /// 休息心得，表示持续了几回合
+    #[serde(default)]
     pub refresh_mind: i32,
     /// 幸运体质
+    #[serde(default)]
     pub lucky: bool,
     /// 是否抓过娃娃
+    #[serde(default)]
     pub doll: bool,
     /// 是否生病
+    #[serde(default)]
     pub ill: bool
 }
 

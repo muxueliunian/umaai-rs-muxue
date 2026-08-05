@@ -91,6 +91,7 @@ pub struct EventData {
     #[serde(default)]
     pub end_turn: i32,
     /// 最大触发次数, 0为无限
+    #[serde(default)]
     pub max_trigger_time: u32,
     /// 选项是否可以选择, true -> 可以选择, false -> 自动选择
     #[serde(default)]
@@ -128,14 +129,19 @@ impl std::fmt::Display for ChoiceResult {
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct EventChoice {
     /// 选项结果，可以转为[ChoiceResult]
+    #[serde(default)]
     pub result: i32,
     /// 出现概率，0为默认，100为必定触发, 暂时不考虑根据属性改变的概率
+    #[serde(default)]
     pub prob: i32,
     /// 效果
+    #[serde(default)]
     pub value: ActionValue,
     /// 添加的状态
+    #[serde(default)]
     pub add_flags: Option<UmaFlags>,
     /// 移除的状态
+    #[serde(default)]
     pub remove_flags: Option<UmaFlags>
 }
 
@@ -179,6 +185,20 @@ impl EventChoice {
 }
 
 impl EventData {
+    /// 解释事件内容，输出事件名称和每个选项组的效果
+    pub fn explain(&self) -> String {
+        let first = format!("[{}] {} {}",
+            self.id,
+            self.name,
+            if self.player_select { "[选择]-->  " } else { "" }
+        );
+        let mut lines = vec![first];
+        for (i, group) in self.choices.iter().enumerate() {
+            lines.push(format!("  选项{}: {}", i + 1, Explain::event_choice(group)));
+        }
+        lines.join("\n")
+    }
+
     /// 返回第一个选项和可能性
     pub fn default_choice(&self) -> &EventChoice {
         &self.choices[0][0]
@@ -269,3 +289,45 @@ pub struct EventCollection {
     /// 系统事件
     pub system_events: HashMap<String, EventData>
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::gamedata::{GameConstants, GAMECONSTANTS, load_json};
+
+    /// 从workspace根目录的gamedata/events.json载入EventCollection，并分别explain各类事件
+    ///
+    /// 例如: cargo test -p umasim test_load_and_explain_all_events -- --nocapture
+    #[test]
+    fn test_load_and_explain_all_events() -> Result<()> {
+        // 切换到workspace根目录，以便正确加载gamedata目录下的文件
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let workspace_root = manifest_dir.parent()
+            .and_then(|p| p.parent())
+            .ok_or_else(|| anyhow!("无法定位workspace根目录"))?;
+        std::env::set_current_dir(workspace_root)?;
+
+        // 初始化GAMECONSTANTS，explain依赖train_names
+        GAMECONSTANTS.set(GameConstants::load()?).expect("global constants");
+
+        let events: EventCollection = load_json("gamedata/events.json")?;
+
+        println!("=== story_events ({} 条) ===", events.story_events.len());
+        for e in &events.story_events { println!("{}", e.explain()); }
+
+        println!("=== uma_events ({} 条) ===", events.uma_events.len());
+        for e in &events.uma_events { println!("{}", e.explain()); }
+
+        println!("=== card_events ({} 条) ===", events.card_events.len());
+        for e in &events.card_events { println!("{}", e.explain()); }
+
+        println!("=== friend_events ({} 条) ===", events.friend_events.len());
+        for e in events.friend_events.values() { println!("{}", e.explain()); }
+
+        println!("=== system_events ({} 条) ===", events.system_events.len());
+        for e in events.system_events.values() { println!("{}", e.explain()); }
+
+        Ok(())
+    }
+}
+
