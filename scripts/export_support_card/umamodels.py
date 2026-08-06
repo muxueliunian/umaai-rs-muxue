@@ -7,7 +7,7 @@ Talent = namedtuple('Talent', 'speed stamina power guts wiz')
 Proper = namedtuple('Proper', 'short mile middle long nige senko sashi oikomi turf dirt')
 Status = namedtuple('Status', 'speed stamina power guts wiz')
 EffectRow = namedtuple('EffectRow', 'init limit_lv5 limit_lv10 limit_lv15 limit_lv20 limit_lv25 limit_lv30 limit_lv35 limit_lv40 limit_lv45 limit_lv50')
-UniqueEffectRow = namedtuple('UniqueEffectRow', 'lv type_0 value_0 value_0_1 value_0_2 value_0_3 value_0_4 type_1 value_1 value_1_1 value_1_2 value_1_3 value_1_4')
+UniqueEffectRow = namedtuple('UniqueEffectRow', 'lv type_0 value_0 value_0_1 value_0_2 value_0_3 value_0_4 type_1 value_1 value_1_1 value_1_2 value_1_3 value_1_4 idle_mode_sub_rate')
 
 
 class SkillType(Enum):

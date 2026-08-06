@@ -144,12 +144,16 @@ impl BaseGame {
     /// 使事件生效，并随机决定结果, 返回实际生效的效果
     pub fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Option<EventChoice> {
         self.events.entry(event.id).and_modify(|x| *x += 1).or_insert(1);
-        if let Some(choice_result) = self.random_select_choice_result(&event.choices[choice], rng) {
-            if choice_result.result > 0 {
-                info!("事件结果: {}", ChoiceResult::try_from(choice_result.result).unwrap_or_default());
+        if !event.choices.is_empty() {
+            if let Some(choice_result) = self.random_select_choice_result(&event.choices[choice], rng) {
+                if choice_result.result > 0 {
+                    info!("事件结果: {}", ChoiceResult::try_from(choice_result.result).unwrap_or_default());
+                }
+                self.uma.add_value(&choice_result.value);
+                Some(choice_result)
+            } else {
+                None
             }
-            self.uma.add_value(&choice_result.value);
-            Some(choice_result)
         } else {
             None
         }

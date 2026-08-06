@@ -186,6 +186,7 @@ class _SupportCardUniqueEffect:
     value_1_2: int
     value_1_3: int
     value_1_4: int
+    idle_mode_sub_rate: int
 
 @dataclass
 class _SingleModeHintGain:

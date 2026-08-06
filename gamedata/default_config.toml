@@ -42,7 +42,7 @@ scenario = "onsen"
 #   "collector"   - 样本收集器（用于生成神经网络训练数据）
 #   "neuralnet"   - 神经网络训练员（使用 ONNX 模型进行决策）
 #   "mcts"        - 蒙特卡洛训练员（使用手写逻辑+mcts进行决策）
-trainer = "mcts"
+trainer = "handwritten"
 
 # neuralnet ONNX 模型路径
 neuralnet_model_path = "saved_models/onsen_v18/model.onnx"

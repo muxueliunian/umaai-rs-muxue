@@ -442,6 +442,41 @@
     ],
     "star": 5
   },
+  "100503": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      10,
+      0,
+      13,
+      7
+    ],
+    "fiveStatusInitial": [
+      113,
+      101,
+      109,
+      106,
+      121
+    ],
+    "freeRaces": [],
+    "gameId": 100503,
+    "name": "[ブランシュ・エトワール]富士奇石",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      22,
+      28,
+      30,
+      32,
+      45,
+      53,
+      58,
+      67,
+      71
+    ],
+    "star": 5
+  },
   "100601": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -1872,6 +1907,50 @@
     ],
     "star": 5
   },
+  "102203": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      0,
+      10,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      111,
+      104,
+      117,
+      104,
+      114
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 23,
+        "count": 1
+      },
+      {
+        "startTurn": 67,
+        "endTurn": 71,
+        "count": 1
+      }
+    ],
+    "gameId": 102203,
+    "name": "[麺華煌彩伝・極]美妙姿势",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      30,
+      33,
+      43,
+      44,
+      53,
+      59,
+      63
+    ],
+    "star": 5
+  },
   "102301": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -2156,6 +2235,46 @@
     ],
     "gameId": 102502,
     "name": "[柳绿小夜]曼城茶座",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      28,
+      41,
+      43,
+      47,
+      55,
+      59,
+      69,
+      71
+    ],
+    "star": 5
+  },
+  "102503": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      5,
+      10,
+      5,
+      10
+    ],
+    "fiveStatusInitial": [
+      104,
+      115,
+      112,
+      102,
+      117
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 25,
+        "count": 1
+      }
+    ],
+    "gameId": 102503,
+    "name": "[幽玄薔薇]曼城茶座",
     "preferRaces": [],
     "preferReds": [],
     "races": [
@@ -3520,6 +3639,42 @@
     "freeRaces": [],
     "gameId": 104102,
     "name": "[炽红☆领队]樱花进王",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      20,
+      29,
+      33,
+      41,
+      53,
+      59,
+      60,
+      64,
+      65,
+      69
+    ],
+    "star": 5
+  },
+  "104103": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      10,
+      0,
+      15,
+      0,
+      5
+    ],
+    "fiveStatusInitial": [
+      119,
+      73,
+      125,
+      122,
+      111
+    ],
+    "freeRaces": [],
+    "gameId": 104103,
+    "name": "[春雷の韋駄天]樱花进王",
     "preferRaces": [],
     "preferReds": [],
     "races": [
@@ -6304,6 +6459,47 @@
     ],
     "star": 5
   },
+  "107703": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      5,
+      10,
+      0,
+      15
+    ],
+    "fiveStatusInitial": [
+      102,
+      130,
+      92,
+      112,
+      114
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 23,
+        "count": 1
+      }
+    ],
+    "gameId": 107703,
+    "name": "[万福龍湯伝・頂]成田路",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      28,
+      30,
+      33,
+      43,
+      55,
+      59,
+      67,
+      69,
+      71
+    ],
+    "star": 5
+  },
   "107801": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -6555,6 +6751,45 @@
     ],
     "gameId": 108201,
     "name": "[Looking Fly!]北方飞翔",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      42,
+      43,
+      53,
+      55,
+      58,
+      67,
+      69
+    ],
+    "star": 5
+  },
+  "108202": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      15,
+      0,
+      0,
+      0,
+      15
+    ],
+    "fiveStatusInitial": [
+      113,
+      99,
+      118,
+      101,
+      119
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 32,
+        "count": 1
+      }
+    ],
+    "gameId": 108202,
+    "name": "[水縹の一閃]北方飞翔",
     "preferRaces": [],
     "preferReds": [],
     "races": [
@@ -7337,6 +7572,41 @@
     "freeRaces": [],
     "gameId": 109401,
     "name": "[王者的呐喊]森林宝穴",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      23,
+      30,
+      33,
+      43,
+      45,
+      53,
+      55,
+      69,
+      71
+    ],
+    "star": 5
+  },
+  "109402": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      7,
+      10,
+      13,
+      0
+    ],
+    "fiveStatusInitial": [
+      115,
+      102,
+      119,
+      119,
+      95
+    ],
+    "freeRaces": [],
+    "gameId": 109402,
+    "name": "[ヴァーミリオン・ヘッド]森林宝穴",
     "preferRaces": [],
     "preferReds": [],
     "races": [
@@ -8349,6 +8619,42 @@
     ],
     "star": 5
   },
+  "111201": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      0,
+      0,
+      20,
+      10
+    ],
+    "fiveStatusInitial": [
+      113,
+      95,
+      119,
+      108,
+      115
+    ],
+    "freeRaces": [],
+    "gameId": 111201,
+    "name": "[Daring Darling!]勇敢之心",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      22,
+      28,
+      30,
+      32,
+      43,
+      54,
+      56,
+      61,
+      66,
+      69
+    ],
+    "star": 5
+  },
   "111301": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -8495,6 +8801,42 @@
     ],
     "star": 5
   },
+  "111602": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      0,
+      10,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      116,
+      100,
+      126,
+      95,
+      113
+    ],
+    "freeRaces": [],
+    "gameId": 111602,
+    "name": "[La dama perfetta]贵妇人",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      24,
+      30,
+      33,
+      43,
+      45,
+      53,
+      59,
+      67,
+      69,
+      71
+    ],
+    "star": 5
+  },
   "111701": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -8532,6 +8874,46 @@
       55,
       59,
       71
+    ],
+    "star": 5
+  },
+  "111801": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      10,
+      0,
+      0,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      118,
+      100,
+      118,
+      111,
+      103
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 22,
+        "count": 1
+      }
+    ],
+    "gameId": 111801,
+    "name": "[Glacial Queen]爱慕律动",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      30,
+      33,
+      43,
+      44,
+      53,
+      59,
+      67,
+      68
     ],
     "star": 5
   },
@@ -8817,6 +9199,41 @@
     ],
     "star": 5
   },
+  "113001": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      0,
+      10,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      112,
+      102,
+      115,
+      109,
+      112
+    ],
+    "freeRaces": [],
+    "gameId": 113001,
+    "name": "[万折不撓の纏]旺紫丁",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      22,
+      30,
+      33,
+      43,
+      51,
+      53,
+      56,
+      68,
+      69
+    ],
+    "star": 5
+  },
   "113101": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -8892,6 +9309,46 @@
     ],
     "star": 5
   },
+  "113202": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      10,
+      0,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      112,
+      101,
+      110,
+      110,
+      117
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 23,
+        "count": 1
+      }
+    ],
+    "gameId": 113202,
+    "name": "[Love-Linked Aster]唯独爱你",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      31,
+      33,
+      44,
+      50,
+      56,
+      59,
+      68,
+      69
+    ],
+    "star": 5
+  },
   "113301": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -8923,6 +9380,44 @@
       59,
       67,
       71
+    ],
+    "star": 5
+  },
+  "113401": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      10,
+      0,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      111,
+      118,
+      98,
+      111,
+      112
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 22,
+        "count": 1
+      }
+    ],
+    "gameId": 113401,
+    "name": "[花宿しのクチュール]机伶金花",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      31,
+      33,
+      43,
+      59,
+      65,
+      69
     ],
     "star": 5
   },
@@ -8966,6 +9461,46 @@
     ],
     "star": 5
   },
+  "113601": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      10,
+      0,
+      0,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      114,
+      101,
+      117,
+      113,
+      105
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 26,
+        "count": 1
+      }
+    ],
+    "gameId": 113601,
+    "name": "[Divine Raiment]红色梦想",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      30,
+      33,
+      43,
+      45,
+      53,
+      56,
+      63,
+      69
+    ],
+    "star": 5
+  },
   "113701": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -9006,6 +9541,74 @@
       66,
       67,
       69,
+      71
+    ],
+    "star": 5
+  },
+  "114301": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      10,
+      0,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      120,
+      100,
+      120,
+      100,
+      110
+    ],
+    "freeRaces": [],
+    "gameId": 114301,
+    "name": "[Lueur Angélique]比萨胜驹",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      23,
+      30,
+      33,
+      45,
+      47,
+      51,
+      69,
+      71
+    ],
+    "star": 5
+  },
+  "114501": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      10,
+      10,
+      0,
+      10
+    ],
+    "fiveStatusInitial": [
+      119,
+      106,
+      119,
+      88,
+      118
+    ],
+    "freeRaces": [],
+    "gameId": 114501,
+    "name": "[Monochrome GM]统治地位",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      25,
+      29,
+      33,
+      46,
+      47,
+      48,
+      59,
       71
     ],
     "star": 5
