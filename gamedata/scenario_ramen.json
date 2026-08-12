@@ -1,0 +1,93 @@
+{
+    "scenario_id": 14,
+    "link_chara_id": [ 1022, 1058, 1060, 1077, 1120, 9001, 9008 ],
+    "ramen_success_pt": [ 1500, 3000, 3500, 5000 ],
+    "gain_pt_base": [ 300, 400, 500 ],
+    "gain_pt_delta": [ 30, 40, 50 ],
+    "feeling_gauge_gain_base": [ 3, 5, 10 ],
+    "card_special_feeling": {
+        "10021": 1,
+        "30021": 1,
+        "10083": 1,
+        "30052": 1,
+        "30305": 2
+    },
+    "ramen_basic_effect": [
+        { "xunlian": 0, "youqing": 0, "deyilv": 0, "fail_rate_drop": 0, "tbd": 0 },
+        { "xunlian": 0, "youqing": 0, "deyilv": 0, "fail_rate_drop": 0, "tbd": 0 },
+        { "xunlian": 0, "youqing": 0, "deyilv": 0, "fail_rate_drop": 0, "tbd": 0 }
+    ],
+    "ramen_success_effect": [
+        { "youqing": 5, "deyilv": 80, "hint": 30 },
+        { "youqing": 10, "deyilv": 120, "hint": 75 },
+        { "youqing": 25, "deyilv": 250, "hint": 125 }
+    ],
+    "ramen_fail_effect": [
+        { "youqing": 3, "deyilv": 30, "hint": 15 },
+        { "youqing": 5, "deyilv": 60, "hint": 30 },
+        { "youqing": 15, "deyilv": 150, "hint": 75 }
+    ],
+    "ramen_pt_effect": [
+        { "pt_min": 0, "xunlian": 0, "deyilv": 50, "hint": 0 },
+        { "pt_min": 250, "xunlian": 3, "deyilv": 55, "hint": 30 },
+        { "pt_min": 500, "xunlian": 5, "deyilv": 60, "hint": 40 },
+        { "pt_min": 1000, "xunlian": 8, "deyilv": 63, "hint": 50 },
+        { "pt_min": 1500, "xunlian": 10, "deyilv": 65, "hint": 60 },
+        { "pt_min": 2000, "xunlian": 12, "deyilv": 68, "hint": 70 },
+        { "pt_min": 2500, "xunlian": 14, "deyilv": 70, "hint": 80 },
+        { "pt_min": 3000, "xunlian": 16, "deyilv": 73, "hint": 90 },
+        { "pt_min": 3500, "xunlian": 18, "deyilv": 75, "hint": 100 },
+        { "pt_min": 4000, "xunlian": 20, "deyilv": 78, "hint": 110 },
+        { "pt_min": 5000, "xunlian": 20, "deyilv": 80, "hint": 120 }
+    ],
+    "region_feeling": [
+        [2, 2, 1],
+        [1, 2, 2],
+        [3, 1, 1],
+        [2, 3, 0],
+        [1, 1, 3],
+        [2, 0, 3],
+        [3, 2, 0],
+        [0, 3, 2],
+        [2, 1, 2],
+        [1, 3, 1]
+    ],
+    "region_bonus": [ 0, 3, 5, 7, 9, 10 ],
+    "training_basic_value": [
+        [
+            [11, 0, 2, 0, 0, 7, -20],
+            [12, 0, 2, 0, 0, 7, -21],
+            [13, 0, 2, 0, 0, 7, -22],
+            [14, 0, 3, 0, 0, 7, -24],
+            [15, 0, 4, 0, 0, 7, -25]
+        ],
+        [
+            [0, 10, 0, 3, 0, 7, -20],
+            [0, 11, 0, 4, 0, 7, -21],
+            [0, 12, 0, 4, 0, 7, -22],
+            [0, 13, 0, 5, 0, 7, -24],
+            [0, 14, 0, 6, 0, 7, -26]
+        ],
+        [
+            [0, 6, 9, 0, 0, 7, -21],
+            [0, 6, 10, 0, 0, 7, -22],
+            [0, 6, 11, 0, 0, 7, -23],
+            [0, 7, 12, 0, 0, 7, -25],
+            [0, 8, 13, 0, 0, 7, -27]
+        ],
+        [
+            [2, 0, 2, 11, 0, 7, -21],
+            [2, 0, 2, 12, 0, 7, -22],
+            [2, 0, 2, 13, 0, 7, -23],
+            [3, 0, 3, 14, 0, 7, -25],
+            [3, 0, 3, 15, 0, 7, -27]
+        ],
+        [
+            [3, 0, 0, 0, 7, 7, 5],
+            [3, 0, 0, 0, 8, 7, 5],
+            [3, 0, 0, 0, 9, 7, 5],
+            [4, 0, 0, 0, 10, 7, 5],
+            [5, 0, 0, 0, 11, 7, 5]
+        ]
+    ]
+}

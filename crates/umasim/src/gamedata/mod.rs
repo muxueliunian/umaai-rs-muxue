@@ -24,6 +24,7 @@ pub mod config;
 pub use config::*;
 
 pub mod onsen;
+pub mod ramen;
 #[derive(Clone, Debug)]
 pub struct GameData {
     pub uma: BTreeMap<String, UmaData>,
@@ -134,5 +135,6 @@ pub fn init_global() -> Result<()> {
     GAMECONSTANTS.set(GameConstants::load()?).expect("global constants");
     GAMEDATA.set(GameData::load()?).expect("global gamedata");
     onsen::init_onsen_data()?;
+    ramen::init_ramen_data()?;
     Ok(())
 }
