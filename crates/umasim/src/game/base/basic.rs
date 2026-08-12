@@ -167,8 +167,7 @@ impl BasicAction {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BasicGame {
     pub base: BaseGame,
-    pub persons: Vec<BasePerson>,
-    pub training_basic_value: TrainingBasicTable
+    pub persons: Vec<BasePerson>
 }
 
 impl Deref for BasicGame {
@@ -198,8 +197,7 @@ impl BasicGame {
     pub fn newgame(uma_id: u32, deck_ids: &[u32; 6], inherit: InheritInfo) -> Result<Self> {
         let mut ret = BasicGame {
             base: BaseGame::new(uma_id, deck_ids, inherit)?,
-            persons: vec![],
-            training_basic_value: global!(ONSENDATA).training_basic_value.clone()
+            persons: vec![]
         };
         ret.init_persons()?;
         Ok(ret)
@@ -561,7 +559,7 @@ impl Game for BasicGame {
     }
 
     fn training_basic_value(&self) -> &TrainingBasicTable {
-        &self.training_basic_value
+        &global!(ONSENDATA).training_basic_value
     }
 }
 
