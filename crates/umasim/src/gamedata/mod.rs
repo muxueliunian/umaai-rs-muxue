@@ -81,10 +81,12 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::utils::{init_logger, make_table};
+    use crate::utils::{init_logger, make_table, get_workspace_root};
 
     #[test]
     fn test_uma_data() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
         let uma_data: HashMap<String, UmaData> = serde_json::from_str(&fs_err::read_to_string("gamedata/umaDB.json")?)?;
         let umas: Vec<_> = uma_data.values().take(10).collect();
         println!("{}", make_table(&umas)?);
@@ -93,6 +95,8 @@ mod tests {
 
     #[test]
     fn test_support_data() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
         let support_data: HashMap<String, SupportCardData> =
             serde_json::from_str(&fs_err::read_to_string("gamedata/cardDB.json")?)?;
         let cards: Vec<_> = support_data.values().skip(300).take(10).collect();
@@ -102,6 +106,8 @@ mod tests {
 
     #[test]
     fn test_consts() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
         init_logger("test", "info")?;
         let consts = GameConstants::load()?;
         println!("{:?}", consts);
@@ -112,6 +118,8 @@ mod tests {
 
     #[test]
     fn test_turn_mask() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
         GAMECONSTANTS.set(GameConstants::load()?).expect("global constants");
         init_logger("test", "info")?;
         let mut free_race = FreeRaceData {

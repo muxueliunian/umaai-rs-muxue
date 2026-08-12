@@ -238,10 +238,12 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::{gamedata::*, utils::init_logger};
+    use crate::{gamedata::*, utils::{init_logger, get_workspace_root}};
 
     #[test]
     fn test_explain() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
         init_logger("test", "info")?;
         init_global()?;
         let mut game = BaseGame::default();
@@ -255,6 +257,8 @@ mod tests {
 
     #[test]
     fn test_newgame() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
         init_logger("test", "info")?;
         init_global()?;
         let game = BaseGame::new(101901, &[302424, 302464, 302484, 302564, 302574, 302644], InheritInfo {

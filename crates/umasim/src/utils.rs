@@ -57,6 +57,30 @@ pub fn check_working_dir() -> Result<()> {
     Ok(())
 }
 
+/// 获取workspace根目录路径
+/// 
+/// 通过CARGO_MANIFEST_DIR环境变量定位workspace根目录，
+/// 适用于测试和需要访问workspace级别资源（如gamedata目录）的场景。
+/// 
+/// # 返回值
+/// 返回workspace根目录的PathBuf，如果无法定位则返回错误。
+/// 
+/// # 示例
+/// ```rust
+/// use umasim::utils::get_workspace_root;
+/// 
+/// let workspace_root = get_workspace_root().expect("无法获取workspace根目录");
+/// println!("Workspace根目录: {:?}", workspace_root);
+/// ```
+pub fn get_workspace_root() -> Result<std::path::PathBuf> {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let workspace_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .ok_or_else(|| anyhow!("无法定位workspace根目录，请确保在正确的crate中运行"))?;
+    Ok(workspace_root.to_path_buf())
+}
+
 /// 检测终端类型
 pub fn check_windows_terminal() -> Result<()> {
     if !std::env::var("WT_SESSION").is_ok() {

@@ -333,9 +333,12 @@ impl SupportCard {
 mod tests {
     use super::*;
     use crate::gamedata::init_global;
+    use crate::utils::get_workspace_root;
 
     #[test]
     fn test_support() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
         init_logger("test", "info")?;
         init_global()?;
         let card = SupportCard::new(302424)?;

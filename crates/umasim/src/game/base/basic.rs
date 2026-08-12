@@ -573,6 +573,8 @@ mod tests {
 
     #[test]
     fn test_newgame() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
         init_logger("test", "info")?;
         init_global()?;
         let mut game = BasicGame::newgame(101901, &[302424, 302464, 302484, 302564, 302574, 302644], InheritInfo {

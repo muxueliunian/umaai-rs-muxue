@@ -9,7 +9,7 @@ use crate::{
     game::UmaFlags,
     gamedata::{GAMECONSTANTS, GAMEDATA},
     global,
-    utils::Array6
+    utils::{Array6, get_workspace_root}
 };
 
 /// 训练或事件数值
@@ -301,10 +301,7 @@ mod tests {
     #[test]
     fn test_load_and_explain_all_events() -> Result<()> {
         // 切换到workspace根目录，以便正确加载gamedata目录下的文件
-        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let workspace_root = manifest_dir.parent()
-            .and_then(|p| p.parent())
-            .ok_or_else(|| anyhow!("无法定位workspace根目录"))?;
+        let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
 
         // 初始化GAMECONSTANTS，explain依赖train_names

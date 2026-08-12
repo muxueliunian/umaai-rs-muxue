@@ -174,10 +174,12 @@ impl FriendState {
 mod tests {
 
     use super::*;
-    use crate::{gamedata::init_global, utils::init_logger};
+    use crate::{gamedata::init_global, utils::{init_logger, get_workspace_root}};
 
     #[test]
     fn test_friend() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
         init_logger("test", "info")?;
         init_global()?;
         let friend = FriendState::new(Some(302574), 3)?;
