@@ -25,7 +25,7 @@ use crate::{
         Uma,
         traits::*
     },
-    gamedata::*,
+    gamedata::{*, onsen::ONSENDATA},
     global,
     utils::{AttributeArray, global_events, system_event, system_event_prob}
 };
@@ -167,7 +167,8 @@ impl BasicAction {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct BasicGame {
     pub base: BaseGame,
-    pub persons: Vec<BasePerson>
+    pub persons: Vec<BasePerson>,
+    pub training_basic_value: TrainingBasicTable
 }
 
 impl Deref for BasicGame {
@@ -197,7 +198,8 @@ impl BasicGame {
     pub fn newgame(uma_id: u32, deck_ids: &[u32; 6], inherit: InheritInfo) -> Result<Self> {
         let mut ret = BasicGame {
             base: BaseGame::new(uma_id, deck_ids, inherit)?,
-            persons: vec![]
+            persons: vec![],
+            training_basic_value: global!(ONSENDATA).training_basic_value.clone()
         };
         ret.init_persons()?;
         Ok(ret)
@@ -556,6 +558,10 @@ impl Game for BasicGame {
         } else {
             (self.train_level_count[train] as usize / 4 + 1).min(5).max(1)
         }
+    }
+
+    fn training_basic_value(&self) -> &TrainingBasicTable {
+        &self.training_basic_value
     }
 }
 

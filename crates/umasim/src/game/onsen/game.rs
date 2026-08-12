@@ -28,7 +28,7 @@ use crate::{
         Uma,
         onsen::{action::OnsenAction, *}
     },
-    gamedata::{ActionValue, EventData, GAMECONSTANTS, onsen::ONSENDATA},
+    gamedata::{ActionValue, EventData, GAMECONSTANTS, TrainingBasicTable, onsen::ONSENDATA},
     global,
     utils::{Array5, Array6, AttributeArray, global_events, system_event, system_event_prob}
 };
@@ -1805,6 +1805,10 @@ impl Game for OnsenGame {
         } else {
             (self.train_level_count[train] as usize / 4 + 1).min(5).max(1)
         }
+    }
+
+    fn training_basic_value(&self) -> &TrainingBasicTable {
+        &global!(ONSENDATA).training_basic_value
     }
 
     fn on_simulation_end<T: Trainer<Self>>(&mut self, _trainer: &T, _rng: &mut StdRng) -> Result<()> {

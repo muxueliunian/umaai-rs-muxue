@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     game::CardTrainingEffect,
-    gamedata::{ActionValue, EventData, load_json},
+    gamedata::{ActionValue, EventData, TrainingBasicTable, load_json},
     utils::{Array5, AttributeArray}
 };
 
@@ -22,6 +22,8 @@ pub struct OnsenScenarioData {
     pub pr_base_value: ActionValue,
     /// 生涯比赛倍率
     pub career_race_multiplier: f32,
+    /// 训练基础值表格
+    pub training_basic_value: TrainingBasicTable,
     /// 温泉信息
     pub onsen_info: Vec<OnsenInfo>,
     /// 超回复效果

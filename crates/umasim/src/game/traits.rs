@@ -7,7 +7,7 @@ use rand_distr::{Distribution, weighted::WeightedIndex};
 
 use super::PersonType;
 use crate::{
-    explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS}, global
+    explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, TrainingBasicTable}, global
 };
 // Game为核心特性，
 // ActionEnum 执行动作，修改Game状态
@@ -300,6 +300,8 @@ pub trait Game: Clone {
     // 训练相关
     /// 设施等级 getter
     fn train_level(&self, train: usize) -> usize;
+    /// 训练基础值表格（剧本特定）
+    fn training_basic_value(&self) -> &TrainingBasicTable;
     /// uma getter
     fn uma(&self) -> &Uma;
     /// uma mut getter
@@ -336,7 +338,6 @@ pub trait Game: Clone {
     }
     /// provided: 计算训练属性
     fn default_calc_training_value(&self, buffs: &CardTrainingEffect, train: usize) -> Result<ActionValue> {
-        let cons = global!(GAMECONSTANTS);
         let train_level = self.train_level(train) - 1; // 返回1-5处理成0-4
         if train >= 5 {
             return Err(anyhow!("训练类型错误: {train}"));
@@ -347,7 +348,7 @@ pub trait Game: Clone {
             .filter(|p| **p >= 0 && **p != 6 && **p != 7)
             .count();
         // 基础值
-        let basic_value = &cons.training_basic_value[train][train_level];
+        let basic_value = &self.training_basic_value()[train][train_level];
         let basic_motivation = ((self.uma().motivation - 3) * 10) as f32;
         // 成长率
         let b = &self.uma().five_status_bonus;

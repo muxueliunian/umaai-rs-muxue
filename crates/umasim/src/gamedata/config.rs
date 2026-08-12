@@ -4,11 +4,14 @@ use serde::{Deserialize, Serialize};
 use log::info;
 use crate::{game::onsen::OnsenOrder, gamedata::load_json, utils::{Array5, Array6}};
 
+/// 训练基础值表格
+/// - 外层 Vec: 训练类型（通常5种，可扩展）
+/// -中层 Vec: 等级（通常Lv1-5，可扩展）
+/// - 内层 [i32; 7]: 7种属性（速耐力根智 + SP + 体力消耗）
+pub type TrainingBasicTable = Vec<Vec<[i32; 7]>>;
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GameConstants {
-    /// 训练基础值 训练类型 等级 速耐力根智pt体力
-    pub training_basic_value: Vec<Vec<Vec<i32>>>,
     /// 基础属性上限, 1200不减半
     pub five_status_limit_base: [i32; 5],
     /// 训练名字
