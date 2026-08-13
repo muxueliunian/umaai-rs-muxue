@@ -1,9 +1,34 @@
-# UmaAI-RS 项目规则总结
+# UmaAI-RS 项目规则
 
 ## 对话规则
 1. **语言要求**：必须使用中文进行思考和回答，语气要在轻松愉快的同时保持简洁和专业性
-2. **需求澄清**：如果对需求有任何不明确的地方，应该停下来进行讨论，不要直接生成代码
-3. **方案选择**：如果需要做方案选择，应该停下来交给用户选择，并给出建议，不要直接生成代码
+2. **避免信息过载**：上下文容量有限，优先精简，不堆砌内容
+3. **重构期文档策略**：重构中项目，不要频繁更新文档（如changelog、memo等），在提交前统一更新
+4. **需求澄清**：如果对需求有任何不明确的地方，应该停下来讨论，不要直接生成代码
+5. **方案选择**：因为本项目涉及大量不在上下文中的领域知识，如果需要做方案选择，应该停下来给出建议并交给用户选择，不要直接生成代码
+6. **提案前审视**：提案前从"做减法"的角度重新考虑一次，但不要反复质疑自己。（这个审视过程不用回答，只是在内部思考一下）
+
+## 项目特定上下文
+项目结构、配置文件、开发环境等详细信息，请参考相关文档中的 [project_context.md](.trae/documents/project_context.md)。
+
+## 相关文档
+`.trae/documents/`目录下还包含以下相关文档：
+- [project_context.md](.trae/documents/project_context.md)：项目特定上下文（项目结构、配置文件、开发环境）
+- [changelog.md](.trae/documents/changelog.md)：变更日志，记录每次任务的修改
+- [issues.md](.trae/documents/issues.md)：问题记录，记载复杂问题的解决过程
+- [glossary.md](.trae/documents/glossary.md)：术语表
+- [ramen_memo_cn.md](.trae/documents/ramen_memo_cn.md)：拉面剧本备忘录（中文）
+- [ramen_refactor_development_plan.md](.trae/documents/ramen_refactor_development_plan.md)：拉面重构开发计划
+- [cpu_search_optimization_plan.md](.trae/documents/cpu_search_optimization_plan.md)：CPU搜索优化计划
+- [gpu_acceleration_plan.md](.trae/documents/gpu_acceleration_plan.md)：GPU加速计划
+- [operation_action_decision_design.md](.trae/documents/operation_action_decision_design.md)：操作决策设计文档
+
+## 注意事项
+1. **规则优先级**：用户设置的规则优先级最高
+2. **上下文感知**：根据当前任务和文件类型调整行为
+3. **错误预防**：在不确定时寻求澄清，避免假设
+4. **代码质量**：保持代码简洁、可读、可维护
+5. **隐私保护**：生成的代码和文档不应透露用户信息或绝对路径等隐私细节，使用相对路径或占位符
 
 ## 编码规范
 ### 依赖管理
@@ -45,25 +70,3 @@
 ### Git操作
 1. **提交确认**：使用`git commit`之前，需要停下来由用户确认
 2. **安全性**：遵循Git安全协议，避免破坏性操作
-
-## 项目特定上下文
-项目结构、配置文件、开发环境等详细信息，请参考相关文档中的 [project_context.md](.trae/documents/project_context.md)。
-
-## 相关文档
-`.trae/documents/`目录下还包含以下相关文档：
-- [project_context.md](.trae/documents/project_context.md)：项目特定上下文（项目结构、配置文件、开发环境）
-- [changelog.md](.trae/documents/changelog.md)：变更日志，记录每次任务的修改
-- [issues.md](.trae/documents/issues.md)：问题记录，记载复杂问题的解决过程
-- [glossary.md](.trae/documents/glossary.md)：术语表
-- [ramen_memo_cn.md](.trae/documents/ramen_memo_cn.md)：拉面剧本备忘录（中文）
-- [ramen_refactor_development_plan.md](.trae/documents/ramen_refactor_development_plan.md)：拉面重构开发计划
-- [cpu_search_optimization_plan.md](.trae/documents/cpu_search_optimization_plan.md)：CPU搜索优化计划
-- [gpu_acceleration_plan.md](.trae/documents/gpu_acceleration_plan.md)：GPU加速计划
-- [operation_action_decision_design.md](.trae/documents/operation_action_decision_design.md)：操作决策设计文档
-
-## 注意事项
-1. **规则优先级**：用户设置的规则优先级最高
-2. **上下文感知**：根据当前任务和文件类型调整行为
-3. **错误预防**：在不确定时寻求澄清，避免假设
-4. **代码质量**：保持代码简洁、可读、可维护
-5. **隐私保护**：生成的代码和文档不应透露用户信息或绝对路径等隐私细节，使用相对路径或占位符

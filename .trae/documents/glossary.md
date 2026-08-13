@@ -171,7 +171,8 @@
 | `Status` | 属性 | 五维 |
 | `SkillPt` | 技能点 | |
 | `Vital` | 体力 | |
-| `Motivation` | 干劲 | 同 ganjing|
+| `Motivation` | 心情 | 同 ganjing |
+| `ganjing` | 干劲加成 | 支援卡随`Motivation`变化的加成词条 |
 | `Friendship` | 羁绊 | 同 jiban |
 | `HintLevel` | Hint 等级 | |
 | `FailureRate` | 失败率 | |
@@ -228,12 +229,6 @@
 | `ShiningBonus` | 友情加成 | 同 youqing |
 | `PersonDistribution` | 训练分布 | |
 | `MotivationBonus` | 干劲加成 | |
-
-**拉面杯术语**
-
-| 用语 | 中文 | 备注 |
-|---|---|---|
-| `ClonedPerson` | 分身人物 | 拉面 Buff 添加 |
 
 ## 事件
 
@@ -410,6 +405,7 @@
 | `RamenBuff` | 面 Buff | |
 | `LimitModifier` | 训练上限修正 | |
 | `CloneEffect` | 分身效果，包括分身位置和数量的列表 | |
+| `ClonedPerson` | 分身人物 | 拉面 Buff 添加 |
 | `ExtraHintEffect` | 额外 Hint | |
 | `FailRateDrop` | 失败率修正 | |
 

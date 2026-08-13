@@ -13,10 +13,19 @@
         "30305": 2
     },
     "ramen_basic_effect": [
-        { "xunlian": 0, "youqing": 0, "deyilv": 0, "fail_rate_drop": 0, "tbd": 0 },
-        { "xunlian": 0, "youqing": 0, "deyilv": 0, "fail_rate_drop": 0, "tbd": 0 },
-        { "xunlian": 0, "youqing": 0, "deyilv": 0, "fail_rate_drop": 0, "tbd": 0 }
+        { "xunlian": 15, "youqing": 0, "deyilv": 0, "fail_rate_drop": 30, "jiban": 10, "status_limit": 0, "hint_special": false },
+        { "xunlian": 15, "youqing": 30, "deyilv": 0, "fail_rate_drop": 50, "jiban": 0, "status_limit": 20, "hint_special": false },
+        { "xunlian": 15, "youqing": 45, "deyilv": 0, "fail_rate_drop": 100, "jiban": 0, "status_limit": 40, "hint_special": true }
     ],
+    "finals_effect": {
+        "base": { "vital": 20, "motivation": 1, "saihou": 100, "youqing": 150 },
+        "extra": { "pt_bonus": 100, "pt_limit": 100, "clone_count": 1 },
+        "training_limit_options": [
+            [0, 1, 3, 4],
+            [0, 1, 2, 4],
+            [0, 2, 3, 4]
+        ]
+    },
     "ramen_success_effect": [
         { "youqing": 5, "deyilv": 80, "hint": 30 },
         { "youqing": 10, "deyilv": 120, "hint": 75 },
@@ -53,6 +62,28 @@
         [1, 3, 1]
     ],
     "region_bonus": [ 0, 3, 5, 7, 9, 10 ],
+    "ramen_region_effect": [
+        { "id": 0, "xunlian": 20, "hint_count": 1, "at_trains": [0] },
+        { "id": 1, "xunlian": 20, "hint_count": 1, "at_trains": [1] },
+        { "id": 2, "xunlian": 20, "hint_count": 1, "at_trains": [2] },
+        { "id": 3, "xunlian": 20, "hint_count": 1, "at_trains": [3] },
+        { "id": 4, "xunlian": 20, "hint_count": 1, "at_trains": [4] },
+        { "id": 5, "youqing": 10, "hint_count": 2, "at_trains": [0, 1, 2, 3, 4] },
+        { "id": 6, "youqing": 50, "hint_count": 2, "at_trains": [2, 3] },
+        { "id": 7, "youqing": 50, "hint_count": 2, "at_trains": [1, 3] },
+        { "id": 8, "youqing": 50, "hint_count": 2, "at_trains": [1, 2] },
+        { "id": 9, "youqing": 50, "hint_count": 2, "at_trains": [4] },
+        { "id": 10, "youqing": 50, "pt_bonus": 50, "at_trains": [0] },
+        { "id": 11, "youqing": 60, "pt_bonus": 50, "at_trains": [1] },
+        { "id": 12, "youqing": 60, "pt_bonus": 50, "at_trains": [2] },
+        { "id": 13, "youqing": 60, "pt_bonus": 50, "at_trains": [3] },
+        { "id": 14, "youqing": 60, "pt_bonus": 50, "at_trains": [4] },
+        { "id": 15, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 2, 4] },
+        { "id": 16, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 2, 3] },
+        { "id": 17, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 1, 4] },
+        { "id": 18, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 1, 2] },
+        { "id": 19, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 3, 4] }
+    ],
     "training_basic_value": [
         [
             [11, 0, 2, 0, 0, 7, -20],

@@ -60,13 +60,22 @@
 
 ### 拉面基础效果 (ramen_basic_effect)
 
-每年的基础效果词条（数值待确认）：
+每年的基础效果词条：
 
-| 年份 | xunlian | youqing | deyilv | fail_rate_drop | tbd |
-|---|---|---|---|---|---|
-| 1 | 0 | 0 | 0 | 0 | 0 |
-| 2 | 0 | 0 | 0 | 0 | 0 |
-| 3 | 0 | 0 | 0 | 0 | 0 |
+| 年份 | xunlian | youqing | deyilv | fail_rate_drop | jiban | status_limit | hint_special |
+|---|---|---|---|---|---|---|---|
+| 1 | 15 | 0 | 0 | 30 | 10 | 0 | false |
+| 2 | 15 | 30 | 0 | 50 | 0 | 20 | false |
+| 3 | 15 | 45 | 0 | 100 | 0 | 40 | true |
+
+说明：
+- xunlian: 训练加成
+- youqing: 友情训练加成
+- deyilv: 得意率（本剧本无此效果）
+- fail_rate_drop: 失败率下降
+- jiban: 羁绊增加
+- status_limit: 属性和PT上限增加
+- hint_special: 仅第三年生效的特殊hint效果
 
 ### RMJ成功效果 (ramen_success_effect)
 
@@ -137,10 +146,59 @@
 
 合宿使用Lv5数值。
 
+### 地域拉面效果 (ramen_region_effect)
+
+每个地域对应的拉面效果，id从0开始（对应region_feeling数组索引）：
+
+| id | 效果类型 | 数值 | 发动Hint数 | 训练位置(at_trains) |
+|---|---|---|---|---|
+| 0-4 | xunlian | 20 | 1 | 分别为 [0], [1], [2], [3], [4] |
+| 5 | youqing | 10 | 2 | [0, 1, 2, 3, 4] |
+| 6 | youqing | 50 | 2 | [2, 3] |
+| 7 | youqing | 50 | 2 | [1, 3] |
+| 8 | youqing | 50 | 2 | [1, 2] |
+| 9 | youqing | 50 | 2 | [4] |
+| 10 | youqing+pt_bonus | 50+50 | - | [0] |
+| 11-14 | youqing+pt_bonus | 60+50 | - | 分别为 [1], [2], [3], [4] |
+| 15 | youqing+pt_bonus | 40+50 | - | [0, 2, 4] |
+| 16 | youqing+pt_bonus | 40+50 | - | [0, 2, 3] |
+| 17 | youqing+pt_bonus | 40+50 | - | [0, 1, 4] |
+| 18 | youqing+pt_bonus | 40+50 | - | [0, 1, 2] |
+| 19 | youqing+pt_bonus | 40+50 | - | [0, 3, 4] |
+
+**字段说明：**
+- xunlian: 训练加成
+- youqing: 友情训练加成
+- pt_bonus: PT奖励加成
+- hint_count: 发动Hint数量
+- at_trains: 生效的训练位置（0=速, 1=耐, 2=力, 3=根, 4=智）
+
+### 超级拉面效果 (finals_effect)
+
+超RMJ極的效果，分为基础效果、额外效果和单独效果：
+
+**基础效果：**
+- 体力(vital): +20
+- 干劲(motivation): +1
+- 赛后(race_bonus): +100
+- 友情(youqing): +150
+
+**额外效果**（ramen_success_pt达到5000时）：
+- PT奖励(pt_bonus): +100
+- PT训练上限(pt_limit): +100
+- 全支援卡分身数(clone_count): +1
+
+**注意**：超级拉面的分身 和 地区效果的分身 不同，地区效果是“指定训练增加一个随机分身”，超级拉面是“每个支援卡增加一个分身到随机训练”，且都不包含友人卡。
+
+**单独效果选项**（增加训练上限100）：
+- 选项1: 速/耐/根/智 [0,1,3,4]
+- 选项2: 速/耐/力/智 [0,1,2,4]
+- 选项3: 速/力/根/智 [0,2,3,4]
+
 ## TODO
 
-拉面基础效果需要确认 - wip
-最终超级拉面效果需要确认 - wip
+~~拉面基础效果需要确认 - wip~~ ✓
+~~最终超级拉面效果需要确认 - wip~~ ✓
+~~地区拉面效果需要记录 - wip~~ ✓
 结算事件效果
 剧本事件，友人事件需要记录
-地区拉面效果需要记录 - wip
