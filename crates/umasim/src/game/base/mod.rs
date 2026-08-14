@@ -11,7 +11,7 @@ pub use person::*;
 use rand::{rngs::StdRng, seq::IndexedRandom};
 
 use crate::{
-    explain::Explain, game::*, gamedata::{ChoiceResult, EventChoice, EventData}, utils::*
+    explain::Explain, game::*, gamedata::{ChoiceResult, EventChoice, EventData, TriggerType}, utils::*
 };
 
 /// 一局游戏的基本状态，剧本通用，用于计算，不用于通信(例如通信只传递卡组id)
@@ -123,7 +123,13 @@ impl BaseGame {
     pub fn random_select_event(&self, events: &[EventData], rng: &mut StdRng) -> Option<EventData> {
         let available_events: Vec<_> = events
             .iter()
-            .filter(|e| e.max_trigger_time == 0 || *self.events.get(&e.id).unwrap_or(&0) < e.max_trigger_time)
+            .filter(|e| {
+                if let TriggerType::Random { max_time } = &e.trigger {
+                    *max_time == 0 || *self.events.get(&e.id).unwrap_or(&0) < *max_time
+                } else {
+                    true
+                }
+            })
             .collect();
         available_events.choose(rng).map(|e| (*e).clone())
     }

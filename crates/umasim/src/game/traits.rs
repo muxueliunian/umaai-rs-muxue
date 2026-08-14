@@ -7,7 +7,7 @@ use rand_distr::{Distribution, weighted::WeightedIndex};
 
 use super::PersonType;
 use crate::{
-    explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, TrainingBasicTable}, global
+    explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, TrainingBasicTable, TriggerType}, global
 };
 // Game为核心特性，
 // ActionEnum 执行动作，修改Game状态
@@ -123,10 +123,16 @@ pub trait Game: Clone {
         events
             .iter()
             .filter_map(|e| {
-                if e.start_turn == self.turn() {
-                    Some(e.clone())
-                } else {
-                    None
+                match &e.trigger {
+                    TriggerType::Random { .. } => Some(e.clone()),
+                    TriggerType::Code => None,
+                    TriggerType::Fixed { turns } => {
+                        if turns.contains(&self.turn()) {
+                            Some(e.clone())
+                        } else {
+                            None
+                        }
+                    }
                 }
             })
             .collect()

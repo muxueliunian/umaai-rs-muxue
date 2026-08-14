@@ -218,16 +218,12 @@
         {
             "id": 400012001,
             "name": "温泉杯开始",
-            "start_turn": 2,
-            "end_turn": 2,
-            "max_trigger_time": 1           
+            "trigger": { "type": "Fixed", "turns": [2] }
         },
         {
             "id": 400012005,
             "name": "1年目　大盛況！",
-            "start_turn": 24,
-            "end_turn": 24,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [24] },
             "choices": [[{
                 "value": {
                     "status_pt": [ 10, 10, 10, 10, 10, 150 ]
@@ -237,9 +233,7 @@
         {
             "id": 400012011,
             "name": "2年目　大盛況！",
-            "start_turn": 48,
-            "end_turn": 48,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [48] },
             "choices": [[{
                 "value": {
                     "status_pt": [ 30, 30, 30, 30, 30, 200 ],
@@ -250,9 +244,7 @@
         {
             "id": 400012017,
             "name": "3年目　千客万来！！",
-            "start_turn": 72,
-            "end_turn": 72,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [72] },
             "choices": [[{
                     "value": {
                         "status_pt": [ 40, 40, 40, 40, 40, 300 ],
@@ -263,9 +255,7 @@
         {
             "id": 400012021,
             "name": "ぴょいや！大宴会！",
-            "start_turn": 77,
-            "end_turn": 77,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [77] },
             "choices": [[{
                     "value": {
                         "status_pt": [ 40, 40, 40, 40, 40, 250 ],

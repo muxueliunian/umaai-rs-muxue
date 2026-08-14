@@ -3,9 +3,7 @@
         {
             "id": 400000400,
             "name": "马娘登场",
-            "start_turn": 0,
-            "end_turn": 0,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [0] },
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 0, 0, 0, 0, 120 ]
@@ -15,9 +13,7 @@
         {
             "id": 4009,
             "name": "经典年-新年",
-            "start_turn": 24,
-            "end_turn": 24,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [24] },
             "choices": [
                 [{ "value": { "status_pt": [ 25, 0, 0, 0, 0, 0 ] } }],
                 [{ "value": { "vital": 20 } }],
@@ -27,9 +23,7 @@
         {
             "id": 4010,
             "name": "古马年-新年",
-            "start_turn": 48,
-            "end_turn": 48,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [48] },
             "choices": [
                 [{ "value": { "vital": 30 } }],
                 [{ "value": { "status_pt": [ 8, 8, 8, 8, 8, 0 ] } }],
@@ -39,9 +33,7 @@
         {
             "id": 4012,
             "name": "第二年继承",
-            "start_turn": 30,
-            "end_turn": 30,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [30] },
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 0, 0, 0, 0, 0 ]
@@ -51,9 +43,7 @@
         {
             "id": 4013,
             "name": "第三年继承",
-            "start_turn": 54,
-            "end_turn": 54,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [54] },
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 0, 0, 0, 0, 0 ]
@@ -65,9 +55,7 @@
         {
             "id": 5001,
             "name": "马娘事件1",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [
                 [{ "value": {
                     "status_pt": [ 20, 0, 0, 0, 0, 0 ]
@@ -80,9 +68,7 @@
         {
             "id": 5002,
             "name": "马娘事件2",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [
                 [{ "value": {
                     "status_pt": [ 0, 20, 0, 0, 0, 0 ]
@@ -95,9 +81,7 @@
         {
             "id": 5003,
             "name": "马娘事件3",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [
                 [{ "value": {
                     "status_pt": [ 0, 0, 20, 0, 0, 0 ]
@@ -110,9 +94,7 @@
         {
             "id": 5004,
             "name": "马娘事件4",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [
                 [{ "value": {
                     "status_pt": [ 0, 0, 0, 20, 0, 0 ]
@@ -125,9 +107,7 @@
         {
             "id": 5005,
             "name": "马娘事件5",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [
                 [{ "value": {
                     "status_pt": [ 0, 0, 0, 0, 20, 0 ]
@@ -140,9 +120,7 @@
         {
             "id": 5006,
             "name": "马娘事件-粉丝信",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [
                 [{ "value": {
                     "status_pt": [ 0, 0, 0, 0, 0, 30 ],
@@ -153,9 +131,7 @@
         {
             "id": 5007,
             "name": "马娘事件-通用切",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [
                 [{  "result": 1,
                     "prob": 97,
@@ -182,9 +158,7 @@
         {
             "id": 8001,
             "name": "支援卡连续事件1",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 5,
+            "trigger": { "type": "Random", "max_time": 5 },
             "choices": [[{
                 "value": {
                     "status_pt": [ 4, 4, 4, 4, 4, 0 ],
@@ -197,9 +171,7 @@
         {
             "id": 8002,
             "name": "支援卡连续事件2",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 5,
+            "trigger": { "type": "Random", "max_time": 5 },
             "choices": [[{
                 "value": {
                     "status_pt": [ 6, 6, 6, 6, 6, 0 ],
@@ -212,9 +184,7 @@
         {
             "id": 8003,
             "name": "支援卡连续事件3",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 5,
+            "trigger": { "type": "Random", "max_time": 5 },
             "choices": [[{
                 "value": {
                     "status_pt": [ 8, 8, 8, 8, 8, 10 ],
@@ -228,9 +198,7 @@
         "first": {
             "id": 809050001,
             "name": "極楽への誘い",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 0, 9, 9, 9, 0 ],
@@ -243,9 +211,7 @@
         "click": {
             "id": 809050032,
             "name": "存分に励みな！",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 99,
+            "trigger": { "type": "Random", "max_time": 99 },
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 0, 0, 0, 0, 9 ],
@@ -256,9 +222,7 @@
         "out": {
             "id": 809050004,
             "name": "湯煙サスペンス劇場～女将・保科健子～",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "player_select": true,
             "choices": [[{
                 "value": {
@@ -280,9 +244,7 @@
         "newyear": {
             "id": 809050021,
             "name": "健子との絆・新春温泉奮闘記",
-            "start_turn": 24,
-            "end_turn": 24,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [24] },
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 12, 12, 12, 0, 0 ],
@@ -296,9 +258,7 @@
         "1": {
             "id": 809050011,
             "name": "牌で語る",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [[{
                 "value": {
                     "status_pt": [ 15, 0, 15, 0, 15, 22 ],
@@ -311,9 +271,7 @@
         "2": {
             "id": 809050012,
             "name": "ねっ、女将♪",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 25, 0, 0, 0, 20 ],
@@ -326,9 +284,7 @@
         "3": {
             "id": 809050013,
             "name": "くゆる、あの日々",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "player_select": true,
             "choices": [[
                 { "value": {
@@ -346,9 +302,7 @@
         "4": {
             "id": 809050014,
             "name": "どんな道を選ぼうと",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [[{
                 "value": {
                     "status_pt": [ 15, 0, 20, 0, 0, 25 ],
@@ -359,9 +313,7 @@
         "5": {
             "id": 809050015,
             "name": "純情すぎる若人に",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Random", "max_time": 1 },
             "choices": [[{
                     "value": {
                         "status_pt": [ 20, 0, 0, 25, 0, 30 ],
@@ -374,9 +326,7 @@
         "end": {
             "id": 809050023,
             "name": "ゆこまよいとこ、なんどでも……",
-            "start_turn": 78,
-            "end_turn": 78,
-            "max_trigger_time": 1,
+            "trigger": { "type": "Fixed", "turns": [78] },
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 0, 10, 10, 10, 40 ]
@@ -388,9 +338,7 @@
         "race_career": {
             "id": 4001,
             "name": "生涯比赛胜利",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 0,
+            "trigger": { "type": "Code" },
             "choices": [[{
                 "value": {
                     "status_pt": [ 7, 7, 7, 7, 7, 67 ]
@@ -400,9 +348,7 @@
         "race_reporter": {
             "id": 4100,
             "name": "G1比赛-记者",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 0,
+            "trigger": { "type": "Code" },
             "choices": [[
                 {
                     "value": {
@@ -415,8 +361,7 @@
         "race_g1": {
             "id": 4101,
             "name": "G1比赛",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "player_select": true,
             "choices": [[
                 {
@@ -446,8 +391,7 @@
         "race_g2": {
             "id": 4102,
             "name": "G2比赛",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "player_select": true,
             "choices": [[
                 {
@@ -477,8 +421,7 @@
         "race_g3": {
             "id": 4103,
             "name": "G3比赛",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "player_select": true,
             "choices": [[
                 {
@@ -508,8 +451,7 @@
         "race_g4": {
             "id": 4104,
             "name": "OP比赛",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "player_select": true,
             "choices": [[
                 {
@@ -539,9 +481,7 @@
         "drop_motivation": {
             "id": 4002,
             "name": "掉心情",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 6,
+            "trigger": { "type": "Code" },
             "choices": [[
                 {
                     "value": {
@@ -555,9 +495,7 @@
         "drop_motivation_positive": {
             "id": 40021,
             "name": "掉心情-有正向思考",
-            "start_turn": -1,
-            "end_turn": -1,
-            "max_trigger_time": 6,
+            "trigger": { "type": "Code" },
             "choices": [[
                 {
                     "value": {
@@ -571,8 +509,7 @@
         "training_fail": {
             "id": 4003,
             "name": "训练失败",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "player_select": true,
             "choices": [
                 [{
@@ -612,8 +549,7 @@
         "training_fail_low": {
             "id": 4004,
             "name": "训练大失败",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "player_select": true,
             "choices": [
                 [{
@@ -655,10 +591,8 @@
         "normal_outing_1": {
             "id": 4005,
             "name": "普通出行-散步",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "prob": 100,
-            "max_trigger_time": 0,
             "choices": [[
                 {
                     "value": {
@@ -672,8 +606,7 @@
         "normal_outing_2": {
             "id": 4006,
             "name": "普通出行-抽签",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "choices": [[
                 { 
                     "prob": 40,
@@ -705,8 +638,7 @@
         "normal_outing_3": {
             "id": 4007,
             "name": "普通出行-KTV",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 0, 0, 0, 0, 0 ],
@@ -718,8 +650,7 @@
         "normal_outing_doll": {
             "id": 4008,
             "name": "抓娃娃",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "choices": [[{
                 "value": {
                     "hint_level": 1,
@@ -732,11 +663,9 @@
         "yayoi_click": {
             "id": 901,
             "name": "点击理事长",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "prob": 100,
             "person_index": 6,
-            "max_trigger_time": 0,
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 0, 0, 0, 0, 3 ],
@@ -747,11 +676,9 @@
         "reporter_click": {
             "id": 902,
             "name": "点击记者",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "prob": 100,
             "person_index": 7,
-            "max_trigger_time": 0,
             "choices": [[{
                 "value": {
                     "status_pt": [ 0, 0, 0, 0, 0, 0 ],
@@ -762,11 +689,9 @@
         "extra_train": {
             "id": 102,
             "name": "追加训练",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "prob": 100,
             "person_index": 6,
-            "max_trigger_time": 0,
             "player_select": true,
             "choices": [[{
                 "value": {
@@ -786,8 +711,7 @@
         "ticket": {
             "id": 4011,
             "name": "新年抽签",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "choices": [[{
                 "result": 2,
                 "prob": 20,
@@ -820,10 +744,8 @@
         "ending": {
             "id": 5011,
             "name": "育成结束",
-            "start_turn": -1,
-            "end_turn": -1,
+            "trigger": { "type": "Code" },
             "prob": 100,
-            "max_trigger_time": 1,
             "choices": [[{
                 "value": {
                     "status_pt": [ 5, 5, 5, 5, 5, 20 ]

@@ -298,10 +298,16 @@ impl Game for BasicGame {
             .story_events
             .iter()
             .filter_map(|e| {
-                if e.start_turn == self.turn {
-                    Some(e.clone())
-                } else {
-                    None
+                match &e.trigger {
+                    TriggerType::Random { .. } => Some(e.clone()),
+                    TriggerType::Code => None,
+                    TriggerType::Fixed { turns } => {
+                        if turns.contains(&self.turn) {
+                            Some(e.clone())
+                        } else {
+                            None
+                        }
+                    }
                 }
             })
             .collect::<Vec<_>>();

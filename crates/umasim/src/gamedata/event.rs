@@ -12,6 +12,26 @@ use crate::{
     utils::{Array6, get_workspace_root}
 };
 
+/// 事件触发类型
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum TriggerType {
+    /// 随机事件，任意回合可触发
+    Random {
+        /// 最大触发次数, 0为无限
+        #[serde(default)]
+        max_time: u32
+    },
+    /// 代码生成的临时事件，不会触发仅列出（默认）
+    #[default]
+    Code,
+    /// 固定回合触发
+    Fixed {
+        /// 触发回合列表
+        turns: Vec<i32>
+    }
+}
+
 /// 训练或事件数值
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ActionValue {
@@ -84,15 +104,9 @@ pub struct EventData {
     /// 对应第几张卡或者理事长记者，计算时随机指定，不在数据里
     #[serde(default)]
     pub person_index: Option<i32>,
-    /// 可以触发的开始回合
+    /// 触发类型
     #[serde(default)]
-    pub start_turn: i32,
-    /// 结束回合, 不包含
-    #[serde(default)]
-    pub end_turn: i32,
-    /// 最大触发次数, 0为无限
-    #[serde(default)]
-    pub max_trigger_time: u32,
+    pub trigger: TriggerType,
     /// 选项是否可以选择, true -> 可以选择, false -> 自动选择
     #[serde(default)]
     pub player_select: bool,
