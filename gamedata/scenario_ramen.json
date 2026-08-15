@@ -18,7 +18,7 @@
         { "xunlian": 15, "youqing": 45, "deyilv": 0, "fail_rate_drop": 100, "jiban": 0, "status_limit": 40, "hint_special": true }
     ],
     "finals_effect": {
-        "base": { "vital": 20, "motivation": 1, "saihou": 100, "youqing": 150 },
+        "base": { "vital": 20, "motivation": 1, "saihou": 100, "youqing": 150, "hint_level": 3 },
         "extra": { "pt_bonus": 100, "pt_limit": 100, "clone_count": 1 },
         "training_limit_options": [
             [0, 1, 3, 4],
@@ -63,26 +63,26 @@
     ],
     "region_bonus": [ 0, 3, 5, 7, 9, 10 ],
     "ramen_region_effect": [
-        { "id": 0, "xunlian": 20, "hint_count": 1, "at_trains": [0] },
-        { "id": 1, "xunlian": 20, "hint_count": 1, "at_trains": [1] },
-        { "id": 2, "xunlian": 20, "hint_count": 1, "at_trains": [2] },
-        { "id": 3, "xunlian": 20, "hint_count": 1, "at_trains": [3] },
-        { "id": 4, "xunlian": 20, "hint_count": 1, "at_trains": [4] },
-        { "id": 5, "youqing": 10, "hint_count": 2, "at_trains": [0, 1, 2, 3, 4] },
-        { "id": 6, "youqing": 50, "hint_count": 2, "at_trains": [2, 3] },
-        { "id": 7, "youqing": 50, "hint_count": 2, "at_trains": [1, 3] },
-        { "id": 8, "youqing": 50, "hint_count": 2, "at_trains": [1, 2] },
-        { "id": 9, "youqing": 50, "hint_count": 2, "at_trains": [4] },
-        { "id": 10, "youqing": 50, "pt_bonus": 50, "at_trains": [0] },
-        { "id": 11, "youqing": 60, "pt_bonus": 50, "at_trains": [1] },
-        { "id": 12, "youqing": 60, "pt_bonus": 50, "at_trains": [2] },
-        { "id": 13, "youqing": 60, "pt_bonus": 50, "at_trains": [3] },
-        { "id": 14, "youqing": 60, "pt_bonus": 50, "at_trains": [4] },
-        { "id": 15, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 2, 4] },
-        { "id": 16, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 2, 3] },
-        { "id": 17, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 1, 4] },
-        { "id": 18, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 1, 2] },
-        { "id": 19, "youqing": 40, "pt_bonus": 50, "at_trains": [0, 3, 4] }
+        { "id": 0, "name": "札幌", "xunlian": 20, "hint_count": 1, "at_trains": [0] },
+        { "id": 1, "name": "函馆", "xunlian": 20, "hint_count": 1, "at_trains": [1] },
+        { "id": 2, "name": "新潟", "xunlian": 20, "hint_count": 1, "at_trains": [2] },
+        { "id": 3, "name": "福岛", "xunlian": 20, "hint_count": 1, "at_trains": [3] },
+        { "id": 4, "name": "东京", "xunlian": 20, "hint_count": 1, "at_trains": [4] },
+        { "id": 5, "name": "中山", "youqing": 10, "hint_count": 2, "at_trains": [0, 1, 2, 3, 4] },
+        { "id": 6, "name": "中京", "youqing": 50, "hint_count": 2, "at_trains": [2, 3] },
+        { "id": 7, "name": "京都", "youqing": 50, "hint_count": 2, "at_trains": [1, 3] },
+        { "id": 8, "name": "阪神", "youqing": 50, "hint_count": 2, "at_trains": [1, 2] },
+        { "id": 9, "name": "小仓", "youqing": 50, "hint_count": 2, "at_trains": [4] },
+        { "id": 10, "name": "札幌", "youqing": 50, "pt_bonus": 50, "at_trains": [0] },
+        { "id": 11, "name": "函馆", "youqing": 60, "pt_bonus": 50, "at_trains": [1] },
+        { "id": 12, "name": "新潟", "youqing": 60, "pt_bonus": 50, "at_trains": [2] },
+        { "id": 13, "name": "福岛", "youqing": 60, "pt_bonus": 50, "at_trains": [3] },
+        { "id": 14, "name": "东京", "youqing": 60, "pt_bonus": 50, "at_trains": [4] },
+        { "id": 15, "name": "中山", "youqing": 40, "pt_bonus": 50, "at_trains": [0, 2, 4] },
+        { "id": 16, "name": "中京", "youqing": 40, "pt_bonus": 50, "at_trains": [0, 2, 3] },
+        { "id": 17, "name": "京都", "youqing": 40, "pt_bonus": 50, "at_trains": [0, 1, 4] },
+        { "id": 18, "name": "阪神", "youqing": 40, "pt_bonus": 50, "at_trains": [0, 1, 2] },
+        { "id": 19, "name": "小仓", "youqing": 40, "pt_bonus": 50, "at_trains": [0, 3, 4] }
     ],
     "training_basic_value": [
         [
@@ -125,7 +125,7 @@
         {
             "id": 400014001,
             "name": "拉面杯开始",
-            "trigger": { "type": "Fixed", "turns": [2] }
+            "trigger": { "type": "Code" }
         },
         {
             "id": 401402,
