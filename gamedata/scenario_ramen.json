@@ -13,9 +13,9 @@
         "30305": 2
     },
     "ramen_basic_effect": [
-        { "xunlian": 15, "youqing": 0, "deyilv": 0, "fail_rate_drop": 30, "jiban": 10, "status_limit": 0, "hint_special": false },
-        { "xunlian": 15, "youqing": 30, "deyilv": 0, "fail_rate_drop": 50, "jiban": 0, "status_limit": 20, "hint_special": false },
-        { "xunlian": 15, "youqing": 45, "deyilv": 0, "fail_rate_drop": 100, "jiban": 0, "status_limit": 40, "hint_special": true }
+        { "xunlian": 15, "youqing": 0, "deyilv": 0, "fail_rate_drop": 30, "friendship": 10, "status_limit": 0, "hint_special": false },
+        { "xunlian": 15, "youqing": 30, "deyilv": 0, "fail_rate_drop": 50, "friendship": 0, "status_limit": 20, "hint_special": false },
+        { "xunlian": 15, "youqing": 45, "deyilv": 0, "fail_rate_drop": 100, "friendship": 0, "status_limit": 40, "hint_special": true }
     ],
     "finals_effect": {
         "base": { "vital": 20, "motivation": 1, "saihou": 100, "youqing": 150, "hint_level": 3 },
