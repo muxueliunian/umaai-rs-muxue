@@ -408,6 +408,12 @@
 | `ClonedPerson` | 分身人物 | 拉面 Buff 添加 |
 | `ExtraHintEffect` | 额外 Hint | |
 | `FailRateDrop` | 失败率修正 | |
+| `FeelingGauge` | 诀窍槽 | A/B/C三个，上限7 |
+| `FeelingGaugeGain` | 诀窍槽获取量 | 基础值+训练加成 |
+| `FriendUnlock` | 友人解锁 | 触发友人出行的前置事件 |
+| `FriendOuting` | 友人出行 | 可进行5次，获得隐藏风味 |
+| `TrainingCamp` | 夏合宿 | 回合36-39和60-63 |
+| `TrainingCampReward` | 夏合宿奖励 | 合宿期间触发的事件 |
 
 **地域名称**
 
