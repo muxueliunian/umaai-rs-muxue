@@ -126,6 +126,257 @@
             "id": 400014001,
             "name": "拉面杯开始",
             "trigger": { "type": "Fixed", "turns": [2] }
+        },
+        {
+            "id": 401402,
+            "name": "夏合宿开始",
+            "trigger": { "type": "Fixed", "turns": [36, 60] },
+            "choices": [[{
+                "value": {
+                    "vital": 15,
+                    "motivation": 1
+                }
+            }]]
+        },
+        {
+            "id": 401403,
+            "name": "夏合宿奖励",
+            "trigger": { "type": "Fixed", "turns": [37, 38, 39, 61, 62, 63] },
+            "choices": [[{
+                "value": {
+                    "vital": 10
+                }
+            }]]
+        },
+        {
+            "id": 401404,
+            "name": "第一年RMJ",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "result": 2,
+                "value": {
+                    "status_pt": [10, 10, 10, 10, 10, 100],
+                    "vital": 33,
+                    "friendship": 10
+                }
+            },
+            {
+                "result": 1,
+                "value": {
+                    "status_pt": [5, 5, 5, 5, 5, 50],
+                    "vital": 30
+                }
+            }]]
+        },
+        {
+            "id": 401405,
+            "name": "第二年RMJ",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "result": 2,
+                "value": {
+                    "status_pt": [15, 15, 15, 15, 15, 150],
+                    "vital": 40,
+                    "hint_level": 1,
+                    "friendship": 10
+                }
+            },
+            {
+                "result": 1,
+                "value": {
+                    "status_pt": [10, 10, 10, 10, 10, 75],
+                    "vital": 30
+                }
+            }]]
+        },
+        {
+            "id": 401406,
+            "name": "第三年RMJ",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "result": 2,
+                "value": {
+                    "status_pt": [30, 30, 30, 30, 30, 250],
+                    "vital": 40,
+                    "hint_level": 9
+                }
+            },
+            {
+                "result": 1,
+                "value": {
+                    "status_pt": [20, 20, 20, 20, 20, 200],
+                    "vital": 35,
+                    "hint_level": 4
+                }
+            }]]
+        },
+        {
+            "id": 401407,
+            "name": "育成结束",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "value": {
+                    "status_pt": [40, 40, 40, 40, 40, 200],
+                    "hint_level": 2
+                }
+            }]]
         }
-    ]
+    ],
+    "friend_events": {
+        "first": {
+            "id": 830305101,
+            "name": "友人登场",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "value": {
+                    "status_pt": [0, 0, 5, 5, 0, 5],
+                    "max_vital": 4,
+                    "motivation": 1,
+                    "friendship": 15
+                }
+            }]]
+        },
+        "click": {
+            "id": 830305102,
+            "name": "点击友人",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "result": 1,
+                "prob": 80,
+                "value": {
+                    "status_pt": [0, 0, 0, 0, 0, 7],
+                    "friendship": 5
+                }
+            },
+            {
+                "result": 2,
+                "prob": 20,
+                "value": {
+                    "status_pt": [0, 0, 0, 0, 0, 7],
+                    "friendship": 5,
+                    "motivation": 1
+                }
+            }]]
+        },
+        "out": {
+            "id": 830305103,
+            "name": "友人解锁",
+            "trigger": { "type": "Code" },
+            "player_select": true,
+            "choices": [[{
+                "value": {
+                    "status_pt": [0, 0, 0, 0, 5, 5],
+                    "vital": 25,
+                    "motivation": 1,
+                    "friendship": 5
+                },
+                "add_flags": { "refresh_mind": 1 }
+            }],
+            [{
+                "value": {
+                    "status_pt": [5, 0, 0, 0, 5, 5],
+                    "hint_level": 5,
+                    "motivation": 1,
+                    "friendship": 5
+                },
+                "add_flags": { "refresh_mind": 1 }
+            }]]
+        },
+        "outing1": {
+            "id": 830305111,
+            "name": "友人出行1",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "value": {
+                    "status_pt": [5, 5, 5, 5, 5, 0],
+                    "vital": 35,
+                    "max_vital": 4,
+                    "motivation": 1,
+                    "friendship": 5
+                }
+            }]]
+        },
+        "outing2": {
+            "id": 830305112,
+            "name": "友人出行2",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "value": {
+                    "status_pt": [10, 0, 0, 10, 0, 0],
+                    "vital": 30,
+                    "motivation": 1,
+                    "friendship": 5,
+                    "hint_level": 2
+                }
+            }]]
+        },
+        "outing3": {
+            "id": 830305113,
+            "name": "友人出行3",
+            "trigger": { "type": "Code" },
+            "player_select": true,
+            "choices": [[{
+                "value": {
+                    "vital": 50,
+                    "motivation": 1,
+                    "friendship": 5
+                }
+            }],
+            [{
+                "value": {
+                    "status_pt": [10, 0, 10, 10, 0, 20],
+                    "motivation": 1,
+                    "friendship": 5
+                }
+            }]]
+        },
+        "outing4": {
+            "id": 830305114,
+            "name": "友人出行4",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "value": {
+                    "status_pt": [0, 15, 0, 0, 0, 10],
+                    "vital": 30,
+                    "motivation": 1
+                }
+            }]]
+        },
+        "outing5": {
+            "id": 830305115,
+            "name": "友人出行5",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "value": {
+                    "status_pt": [10, 10, 10, 0, 0, 10],
+                    "vital": 40,
+                    "motivation": 1,
+                    "hint_level": 3
+                }
+            }]]
+        },
+        "newyear": {
+            "id": 830305104,
+            "name": "友人新年",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "value": {
+                    "status_pt": [5, 5, 5, 5, 5, 0],
+                    "motivation": 1,
+                    "friendship": 5,
+                    "hint_level": 3
+                }
+            }]]
+        },
+        "end": {
+            "id": 830305105,
+            "name": "友人结束",
+            "trigger": { "type": "Code" },
+            "choices": [[{
+                "value": {
+                    "status_pt": [15, 15, 0, 0, 15, 50]
+                }
+            }]]
+        }
+    }
 }

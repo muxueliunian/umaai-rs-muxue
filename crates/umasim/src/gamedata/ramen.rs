@@ -5,7 +5,8 @@ use std::sync::OnceLock;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::gamedata::{TrainingBasicTable, load_json};
+use crate::gamedata::{TrainingBasicTable, EventData, load_json};
+use std::collections::HashMap;
 
 /// 拉面基础效果
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -37,7 +38,12 @@ pub struct RamenScenarioData {
     pub training_basic_value: TrainingBasicTable,
     /// 拉面基础效果（按年份）
     pub ramen_basic_effect: Vec<RamenBasicEffect>,
-    // 后续补充其他字段...
+    /// 剧本事件
+    #[serde(default)]
+    pub scenario_events: Vec<EventData>,
+    /// 友人事件
+    #[serde(default)]
+    pub friend_events: HashMap<String, EventData>,
 }
 
 impl RamenScenarioData {

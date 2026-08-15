@@ -340,5 +340,30 @@ mod tests {
 
         Ok(())
     }
+
+    /// 从workspace根目录的gamedata/scenario_ramen.json载入拉面剧本事件，并显示内容
+    ///
+    /// 例如: cargo test -p umasim test_load_and_explain_ramen_events -- --nocapture
+    #[test]
+    fn test_load_and_explain_ramen_events() -> Result<()> {
+        use crate::gamedata::ramen::RamenScenarioData;
+
+        // 切换到workspace根目录，以便正确加载gamedata目录下的文件
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+
+        // 初始化GAMECONSTANTS，explain依赖train_names
+        GAMECONSTANTS.set(GameConstants::load()?).expect("global constants");
+
+        let ramen_data = RamenScenarioData::load()?;
+
+        println!("=== scenario_events ({} 条) ===", ramen_data.scenario_events.len());
+        for e in &ramen_data.scenario_events { println!("{}", e.explain()); }
+
+        println!("\n=== friend_events ({} 条) ===", ramen_data.friend_events.len());
+        for e in ramen_data.friend_events.values() { println!("{}", e.explain()); }
+
+        Ok(())
+    }
 }
 

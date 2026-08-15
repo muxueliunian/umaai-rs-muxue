@@ -26,6 +26,9 @@
   - `default_config.toml`：默认游戏配置
   - `game_config.toml`：用户自定义游戏配置
 
+### 游戏常量
+- 回合数默认从0开始，特殊情况下会说明从1开始
+
 ### 配置格式
 - 使用JSON和TOML格式
 

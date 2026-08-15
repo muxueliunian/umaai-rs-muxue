@@ -2,6 +2,18 @@
 
 本文件用于简要记录每次任务的修改内容。
 
+## 2026-08-14
+
+### 拉面剧本事件数据补充
+- 在scenario_ramen.json中添加scenario_events和friend_events数据
+- 更新RamenScenarioData结构体，添加对应的事件字段
+- 添加单元测试验证事件数据加载
+
+### EventData触发类型重构
+- 新增TriggerType枚举：Random/Code/Fixed三种触发类型
+- 移除EventData中的start_turn/end_turn/max_trigger_time字段
+- 更新JSON数据文件和触发逻辑代码
+
 ## 2026-08-13
 
 ### 文档整理
