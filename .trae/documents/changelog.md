@@ -10,9 +10,12 @@
 - RamenEffect 字段对应剧本加成词条（xunlian、youqing、pt_bonus、train_limit、pt_limit 等）
 - RamenAction 采用组合动作模型（ramen + operation），Display 显示地区名称
 - 使用 IntEnum derive 替代手写 index/from_index，去掉 OutingType 独立枚举
-- 新增 RegionEffect 结构体和 ramen_region_effect 字段到 RamenScenarioData
+- 新增 RegionEffect 结构体和 region_feeling 字段到 RamenScenarioData
 - 修正 RamenBasicEffect.jiban → friendship，与 JSON 数据对齐
 - 实现诀窍系统规则函数：槽基础值分配、库存溢出管理、训练加成、友情加成
+- 诀窍槽基础值分配算法：floor + 消耗=1固定分配1 + 最小已分配优先补足
+- 修正诀窍槽溢出逻辑：清零而非取余，超出部分不保留
+- 改进测试：混合类型验证溢出丢弃顺序，去除 assert 改用 println 输出
 
 ### 拉面重构计划调整与文档整理
 - 将 `opt/` 目录重命名为 `archive/`，归档旧规划文档

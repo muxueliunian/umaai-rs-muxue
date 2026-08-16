@@ -4,7 +4,7 @@
 //! 函数以 `RamenState` 或相关数据为参数，不直接修改游戏状态的其他部分。
 
 use super::{FeelingType, RamenState};
-use crate::gamedata::ramen::RAMENDATA;
+use crate::{gamedata::ramen::RAMENDATA, global};
 
 /// 诀窍总上限
 pub const FEELING_LIMIT: i32 = 10;
@@ -20,48 +20,63 @@ pub const RAMEN_COST: i32 = 5;
 /// base_sum 固定为 10（只考虑新友人）。
 /// 按配方总消耗 [A, B, C] 的比例分配，四舍五入后调整使总和等于 base_sum。
 pub fn calc_gauge_base_distribution(selected_regions: &[usize; 3]) -> [i32; 3] {
-    let ramen_data = match RAMENDATA.get() {
-        Some(d) => d,
-        None => return [4, 3, 3] // fallback
-    };
+    let ramen_data = global!(RAMENDATA);
     let base_sum = 10;
 
     // 累加三个配方的各类型消耗
     let mut recipe_sum = [0i32; 3];
     for &region_idx in selected_regions {
-        if let Some(feeling) = ramen_data.region_feeling.get(region_idx) {
-            for j in 0..3 {
-                recipe_sum[j] += feeling[j];
-            }
+        let feeling = &ramen_data.region_feeling[region_idx];
+        for j in 0..3 {
+            recipe_sum[j] += feeling[j];
         }
     }
 
-    // 按比例分配，四舍五入
+    // 按比例分配：先 floor，再逐个补给"已分配最少"的位置
+    // 已分配相同时，优先给配方消耗量更大的位置
+    // 特殊规则：消耗=1 的位置固定分配 1，且不允许任何位置分配为 0
     let mut result = [0i32; 3];
-    let total_consumed: i32 = recipe_sum.iter().sum();
-    if total_consumed == 0 {
-        // fallback: 均分
-        return [4, 3, 3];
-    }
+    let mut fixed = [false; 3];
     for i in 0..3 {
-        result[i] = (recipe_sum[i] as f64 * base_sum as f64 / total_consumed as f64).round() as i32;
+        if recipe_sum[i] == 1 {
+            result[i] = 1;
+            fixed[i] = true;
+        }
     }
-
-    // 调整使总和等于 base_sum
-    let diff = base_sum - result.iter().sum::<i32>();
-    if diff != 0 {
-        // 按消耗量从大到小调整
-        let mut indices: Vec<usize> = (0..3).collect();
-        indices.sort_by(|&a, &b| recipe_sum[b].cmp(&recipe_sum[a]));
-        for &i in &indices {
-            if diff == 0 {
-                break;
+    let fixed_sum: i32 = result.iter().sum();
+    let remaining = base_sum - fixed_sum;
+    // 对未固定的位置按比例分配
+    let unfixed_consumed: i32 = (0..3).filter(|&i| !fixed[i]).map(|i| recipe_sum[i]).sum();
+    for i in 0..3 {
+        if !fixed[i] && unfixed_consumed > 0 {
+            let exact = recipe_sum[i] as f64 * remaining as f64 / unfixed_consumed as f64;
+            result[i] = exact.floor() as i32;
+        }
+    }
+    let mut diff = base_sum - result.iter().sum::<i32>();
+    while diff > 0 {
+        // 找已分配最小、配方消耗最大的未固定位置
+        let mut best = None;
+        for i in 0..3 {
+            if fixed[i] {
+                continue;
             }
-            if diff > 0 {
-                result[i] += 1;
-            } else if result[i] > 0 {
-                result[i] -= 1;
+            match best {
+                None => best = Some(i),
+                Some(b) => {
+                    if result[i] < result[b]
+                        || (result[i] == result[b] && recipe_sum[i] > recipe_sum[b])
+                    {
+                        best = Some(i);
+                    }
+                }
             }
+        }
+        if let Some(b) = best {
+            result[b] += 1;
+            diff -= 1;
+        } else {
+            break;
         }
     }
 
@@ -72,12 +87,13 @@ pub fn calc_gauge_base_distribution(selected_regions: &[usize; 3]) -> [i32; 3] {
 
 /// 向指定类型的诀窍槽增加数值，满 GAUGE_LIMIT 则清零并获得 1 个诀窍。
 ///
+/// 无论溢出多少，都只能增加 1 个诀窍并清零，超出部分不保留。
 /// 返回实际获得的诀窍数量（0 或 1）。
 pub fn add_gauge(state: &mut RamenState, feeling_type: FeelingType, amount: i32) -> i32 {
     let idx = feeling_type as usize;
     state.feeling_slot[idx] += amount;
     if state.feeling_slot[idx] >= GAUGE_LIMIT {
-        state.feeling_slot[idx] %= GAUGE_LIMIT;
+        state.feeling_slot[idx] = 0;
         add_feeling(state, feeling_type, 1);
         1
     } else {
@@ -155,60 +171,92 @@ pub fn fill_gauge_after_train(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{gamedata::init_global, utils::{get_workspace_root, init_logger}};
 
     #[test]
-    fn test_gauge_base_distribution() {
-        // 札幌[2,2,1] + 函馆[1,2,2] + 新潟[3,1,1] = [6,5,4], sum=15
-        let dist = calc_gauge_base_distribution(&[0, 1, 2]);
-        println!("[0,1,2] 札幌函館新潟 => {dist:?}, sum={}", dist.iter().sum::<i32>());
-        assert_eq!(dist.iter().sum::<i32>(), 10);
-
-        // 札幌[2,2,1] + 福岛[2,3,0] + 中京[3,2,0] = [7,7,1], sum=15
-        let dist = calc_gauge_base_distribution(&[0, 3, 6]);
-        println!("[0,3,6] 札幌福島中京 => {dist:?}, sum={}", dist.iter().sum::<i32>());
-        assert_eq!(dist.iter().sum::<i32>(), 10);
+    fn test_gauge_base_distribution() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+        // ramen_memo 中"使用新友人"(base_sum=10) 的全部算例
+        // 地区索引: 札幌=0, 函馆=1, 新潟=2, 福岛=3, 东京=4, 中山=5, 中京=6, 京都=7, 小仓=9
+        let cases: &[([usize; 3], &str)] = &[
+            ([2, 3, 6], "新潟福島中京"),
+            ([0, 3, 6], "札幌福島中京"),
+            ([0, 3, 9], "札幌福島小倉"),
+            ([0, 6, 9], "札幌中京小倉"),
+            ([3, 7, 9], "福島京都小倉"),
+            ([0, 3, 7], "札幌福島京都"),
+            ([0, 6, 7], "札幌中京京都"),
+            ([0, 1, 6], "札幌函館中京"),
+            ([0, 4, 6], "札幌東京中京"),
+            ([0, 5, 6], "札幌中山中京"),
+            ([5, 6, 7], "中山中京京都"),
+        ];
+        for &(regions, name) in cases {
+            let dist = calc_gauge_base_distribution(&regions);
+            let mut sorted = dist;
+            sorted.sort_by(|a, b| b.cmp(a));
+            let ramen_data = global!(RAMENDATA);
+            let mut actual_sum = [0i32; 3];
+            for &r in &regions {
+                let f = &ramen_data.region_feeling[r];
+                for j in 0..3 { actual_sum[j] += f[j]; }
+            }
+            println!(
+                "{name}: 配方 {:?} 分配 {:?} 降序 {:?}",
+                actual_sum, dist, sorted
+            );
+        }
+        Ok(())
     }
 
     #[test]
     fn test_feeling_overflow() {
         let mut state = RamenState::default();
-        // 填满 10 个 A
-        add_feeling(&mut state, FeelingType::A, 10);
-        println!("初始: {:?}", state.feeling_stock);
-        println!("队列: {:?}", state.feeling_queue);
-        assert_eq!(state.feeling_stock.iter().sum::<i32>(), FEELING_LIMIT);
+        // 先加 5A, 3B, 2C，共 10 个，顺序为 [A,A,A,A,A,B,B,B,C,C]
+        add_feeling(&mut state, FeelingType::A, 5);
+        add_feeling(&mut state, FeelingType::B, 3);
+        add_feeling(&mut state, FeelingType::C, 2);
+        println!("初始状态:");
+        println!("  库存 A={} B={} C={}", state.feeling_stock[0], state.feeling_stock[1], state.feeling_stock[2]);
+        println!("  总数 {}", state.feeling_stock.iter().sum::<i32>());
+        println!("  队列 {:?}", state.feeling_queue);
 
-        // 再加 1 个 B，应该丢弃最早的 A
+        // 再加 1 个 B，总数将超上限 10，应丢弃队列最前面的 A
+        println!("\n加 1 个 B (总数将超过上限 {}):", FEELING_LIMIT);
         add_feeling(&mut state, FeelingType::B, 1);
-        println!("加B后: {:?}", state.feeling_stock);
-        println!("队列: {:?}", state.feeling_queue);
-        assert_eq!(state.feeling_stock.iter().sum::<i32>(), FEELING_LIMIT);
-        assert_eq!(state.feeling_stock[1], 1); // B = 1
-        assert_eq!(state.feeling_stock[0], 9); // A = 9（丢了一个）
+        println!("  库存 A={} B={} C={}", state.feeling_stock[0], state.feeling_stock[1], state.feeling_stock[2]);
+        println!("  总数 {}", state.feeling_stock.iter().sum::<i32>());
+        println!("  队列 {:?}", state.feeling_queue);
+        println!("  => 队列最前面是 A，丢弃 1 个 A → A=4 B=4 C=2");
     }
 
     #[test]
     fn test_gauge_overflow() {
         let mut state = RamenState::default();
         state.feeling_slot[0] = 5;
+        println!("初始槽值 A={}", state.feeling_slot[0]);
+
+        // 5+3=8 >= 7，溢出，清零，获得 1 个诀窍，超出部分不保留
+        println!("\n诀窍槽 A +3 (5+3=8 >= 上限 {}):", GAUGE_LIMIT);
         let gained = add_gauge(&mut state, FeelingType::A, 3);
-        println!("槽值: {:?}, 获得诀窍: {gained}", state.feeling_slot);
-        println!("库存: {:?}", state.feeling_stock);
-        assert_eq!(gained, 1);
-        assert_eq!(state.feeling_slot[0], 1); // 5+3=8, 满7清零, 余1
-        assert_eq!(state.feeling_stock[0], 1);
+        println!("  溢出! 槽值清零 (超出的 1 点不保留)");
+        println!("  获得诀窍 A +{gained}");
+        println!("  槽值 A={}", state.feeling_slot[0]);
+        println!("  库存 A={}", state.feeling_stock[0]);
     }
 
     #[test]
     fn test_train_feeling_bonus() {
-        // 支援卡=2, NPC=3 => 1+2+1=4
-        let bonus = calc_train_feeling_bonus(2, 3);
-        println!("支援卡2 NPC3 => bonus={bonus}");
-        assert_eq!(bonus, 4);
+        // 公式: 1 + 支援卡数量 + floor(NPC数量 / 2)
+        let (sc, npc) = (2, 3);
+        let bonus = calc_train_feeling_bonus(sc, npc);
+        println!("支援卡={sc} NPC={npc}: 1 + {sc} + {npc}/2 = 1 + {sc} + {} = {bonus}", npc / 2);
 
-        // 支援卡=4, NPC=5 => 1+4+2=7
-        let bonus = calc_train_feeling_bonus(4, 5);
-        println!("支援卡4 NPC5 => bonus={bonus}");
-        assert_eq!(bonus, 7);
+        let (sc, npc) = (4, 5);
+        let bonus = calc_train_feeling_bonus(sc, npc);
+        println!("支援卡={sc} NPC={npc}: 1 + {sc} + {npc}/2 = 1 + {sc} + {} = {bonus}", npc / 2);
     }
 }

@@ -82,14 +82,6 @@ impl RamenScenarioData {
         load_json("gamedata/scenario_ramen.json")
     }
 
-    /// 根据地区 ID 获取地区名称
-    pub fn region_name(&self, id: usize) -> &str {
-        self.ramen_region_effect
-            .iter()
-            .find(|r| r.id == id)
-            .map(|r| r.name.as_str())
-            .unwrap_or("???")
-    }
 }
 
 /// 全局拉面杯剧本数据
