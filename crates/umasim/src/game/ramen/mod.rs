@@ -1,0 +1,111 @@
+//! 拉面杯剧本模块
+//!
+//! 拉面杯围绕诀窍（feeling）和拉面展开，核心机制包括：
+//! - 三种诀窍（A/B/C）库存管理
+//! - 拉面配方和制作
+//! - 年度地区选择
+//! - 超级拉面（72-77 回合自动生效）
+//! - 组合动作（吃面 + 基础操作）
+
+pub mod action;
+pub mod effects;
+pub mod events;
+pub mod policy;
+pub mod rules;
+pub mod state;
+
+pub use action::*;
+pub use state::*;
+
+use enum_iterator::Sequence;
+use int_enum::IntEnum;
+use serde::{Deserialize, Serialize};
+
+/// 拉面杯回合阶段
+///
+/// 拉面杯在普通回合的基础上增加了地区选择和超级拉面选择阶段。
+/// 超级拉面选择初期固定为选项二，不做独立决策。
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Sequence)]
+pub enum RamenStage {
+    /// 1. 回合开始，随机事件
+    #[default]
+    Begin,
+    /// 2. 分配人头前，随机事件
+    Distribute,
+    // --- 可操作部分
+    /// 3. 选择训练或比赛（含吃面决策）
+    Train,
+    /// 4. 回合后事件
+    AfterTrain,
+    // --- 特殊阶段
+    /// 年度地区选择（每年年初独立决策）
+    RegionSelect,
+    /// 超级拉面选择（回合 71 结束后）
+    SuperRamenSelect,
+    /// 剧本结算（回合 23/47/71 结束时）
+    Settlement
+}
+
+impl RamenStage {
+    /// 获取回合内的下一个阶段，如果已到回合末尾则返回 None
+    pub fn next(&self) -> Option<Self> {
+        match self {
+            Self::Begin => Some(Self::Distribute),
+            Self::Distribute => Some(Self::Train),
+            Self::Train => Some(Self::AfterTrain),
+            // AfterTrain 是普通回合的最后阶段
+            Self::AfterTrain => None,
+            // 特殊阶段不参与回合内流转
+            Self::RegionSelect | Self::SuperRamenSelect | Self::Settlement => None
+        }
+    }
+}
+
+/// 诀窍类型
+///
+/// 拉面杯有三种诀窍类型，用于配方消耗和诀窍槽系统。
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, IntEnum)]
+pub enum FeelingType {
+    /// 诀窍 A
+    A = 0,
+    /// 诀窍 B
+    B = 1,
+    /// 诀窍 C
+    C = 2
+}
+
+/// 训练类型（与 BaseAction 对应）
+#[repr(i32)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, IntEnum)]
+pub enum TrainingType {
+    /// 速度
+    Speed = 0,
+    /// 耐力
+    Stamina = 1,
+    /// 力量
+    Power = 2,
+    /// 根性
+    Guts = 3,
+    /// 智力
+    Wisdom = 4
+}
+
+/// 拉面基础操作（不含吃面决策）
+///
+/// 对应玩家在每个回合可选的非拉面操作。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Operation {
+    /// 训练（指定训练类型）
+    Train(TrainingType),
+    /// 比赛
+    Race,
+    /// 休息
+    Rest,
+    /// 普通外出
+    NormalOuting,
+    /// 友人出行
+    FriendOuting,
+    /// 治病
+    Clinic
+}

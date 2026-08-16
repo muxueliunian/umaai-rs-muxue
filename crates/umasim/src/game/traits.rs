@@ -348,7 +348,7 @@ pub trait Game: Clone {
         if train >= 5 {
             return Err(anyhow!("训练类型错误: {train}"));
         }
-        // 人数, 排除掉理事长和记者
+        // 人数, 包括NPC, 排除掉理事长和记者
         let person_count = self.distribution()[train]
             .iter()
             .filter(|p| **p >= 0 && **p != 6 && **p != 7)

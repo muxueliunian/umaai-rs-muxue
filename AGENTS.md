@@ -24,12 +24,8 @@
 - [gpu_acceleration_plan.md](.trae/documents/gpu_acceleration_plan.md)：GPU加速计划
 - [operation_action_decision_design.md](.trae/documents/operation_action_decision_design.md)：操作决策设计文档
 
-## 注意事项
-1. **规则优先级**：用户设置的规则优先级最高
-2. **上下文感知**：根据当前任务和文件类型调整行为
-3. **错误预防**：在不确定时寻求澄清，避免假设
-4. **代码质量**：保持代码简洁、可读、可维护
-5. **隐私保护**：生成的代码和文档不应透露用户信息或绝对路径等隐私细节，使用相对路径或占位符
+## 安全注意事项
+1. **隐私保护**：生成的代码和文档不应透露用户信息或绝对路径等隐私细节，使用相对路径或占位符
 
 ## Rust 编码规范
 ### 依赖管理

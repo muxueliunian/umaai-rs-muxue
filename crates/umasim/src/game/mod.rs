@@ -1,6 +1,7 @@
 pub mod base;
 pub mod inherit;
 pub mod onsen;
+pub mod ramen;
 pub mod simulator;
 pub mod support_card;
 pub mod traits;

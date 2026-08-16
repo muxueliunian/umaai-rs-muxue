@@ -4,6 +4,16 @@
 
 ## 2026-08-16
 
+### 拉面杯模块 1a 核心类型定义 + 1b-1 诀窍系统
+- 建立 `game/ramen/` 模块：mod.rs、state.rs、action.rs、rules.rs、effects.rs、events.rs、policy.rs
+- 定义核心类型：RamenGame、RamenState、RamenEffect、RamenAction、RamenStage、FeelingType、TrainingType、Operation
+- RamenEffect 字段对应剧本加成词条（xunlian、youqing、pt_bonus、train_limit、pt_limit 等）
+- RamenAction 采用组合动作模型（ramen + operation），Display 显示地区名称
+- 使用 IntEnum derive 替代手写 index/from_index，去掉 OutingType 独立枚举
+- 新增 RegionEffect 结构体和 ramen_region_effect 字段到 RamenScenarioData
+- 修正 RamenBasicEffect.jiban → friendship，与 JSON 数据对齐
+- 实现诀窍系统规则函数：槽基础值分配、库存溢出管理、训练加成、友情加成
+
 ### 拉面重构计划调整与文档整理
 - 将 `opt/` 目录重命名为 `archive/`，归档旧规划文档
 - 将 `master/` 目录重命名为 `master_mdb_data/`，统一数据目录命名

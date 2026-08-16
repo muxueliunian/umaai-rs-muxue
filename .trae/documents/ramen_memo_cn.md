@@ -86,7 +86,8 @@
 ### 超级拉面(super_ramen)
 在URA回合（回合72-77），每回合自动享受超级拉面效果，记录在`finals_effect`中
 其中，`extra`效果为满足`支援卡种类>=4`时额外生效；`training_limit_options`为按玩家选择
-超级拉面期间不可以吃其他面
+* 超级拉面期间不可以吃其他面，不享受地区效果
+* 超级拉面期间，基础效果(ramen_basic_effect) 依然生效
 
 ### NPC
 剧本机制启动后，在普通训练中会出现`NPC`类型的`Person`，为了方便，NPC的支援卡ID固定为五个链接角色的chara_id:
@@ -190,6 +191,32 @@ ramen_memo里记录的典型的分配结果为：（左-总消耗，右-分配�
 
 ----
 
+## 训练计算公式
+
+训练数值分为下层数值`lower_value`和上层数值`upper_value`
+
+### 下层数值
+- 不计算剧本加成，按基础公式 `default_calc_training_value` 计算出的训练数值
+- 下层数值上限固定为100
+
+### 上层数值
+- 首先计算有剧本加成的总训练数值`training_value_ramen`
+- upper_value = training_value_ramen - lower_value
+- 之后进行上层数值上限约束，上限基础为100，随剧本buff增加
+- 约束后，实际的最终训练数值 training_value = lower_value + upper_value
+
+### 剧本加成
+- 生效范围：ramen_pt_effect 常驻生效；ramen_basic_effect, ramen_region_effect 仅在**吃面后**，在 at_trains 标注的训练位置生效，不吃面时不生效
+- 训练加成 xunlian: ramen_pt_effect, ramen_basic_effect, ramen_region_effect, 求和
+- 友情加成 youqing: 来自 ramen_success_effect / ramen_fail_effect, ramen_basic_effect, ramen_region_effect 求和。仅在友情训练时生效，非友情训练时 youqing=0
+- PT加成 pt_bonus：来自 ramen_region_effect
+- 上层数值上限加成：来自ramen_basic_effect （对属性和PT都生效），finals_effect（仅对pt生效）
+- 属性训练上层数值 training_value_ramen = lower_value * (100 + xunlian)/100.0 * (100+youqing)/100.0
+- PT训练上层数值 training_value_ramen = lower_value * (100+xunlian)/100.0 * (100+youqing)/100.0 * (100+pt_bonus)/100.0
+- Hint出现率：在分配人物时计算，不参与训练数值计算。基础值为 7.5%,随剧本Buff增加，例如+30就是 7.5* (1+30%)=9.75%
+- hint_special表示“支援卡类型>=4时，除了友人、团队卡以外的所有支援卡都出现Hint，且训练后发动所有的Hint事件”，在事件逻辑里处理
+----
+
 ## 剧本数据 (scenario_ramen.json)
 
 ### 基本信息
@@ -232,7 +259,7 @@ ramen_memo里记录的典型的分配结果为：（左-总消耗，右-分配�
 
 ### 回合隐藏风味 (turn_special_feeling)
 
-指定回合开始时获得的万能食材数量（回合从0开始）：
+指定回合开始时获得的隐藏风味数量（回合从0开始）：
 
 | 回合 | 数量 |
 |---|---|
