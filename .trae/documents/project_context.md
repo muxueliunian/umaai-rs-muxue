@@ -46,16 +46,32 @@
 
 ## 拉面杯模块结构
 
+### 模块入口（mod.rs）
+- `RamenStage`：回合阶段枚举（Begin/Distribute/Train/AfterTrain/NextTurn/RegionSelect/SuperRamenSelect/Settlement）
+- `FeelingType`：诀窍类型（A/B/C）
+- `TrainingType`：训练类型（Speed/Stamina/Power/Guts/Wisdom）
+- `Operation`：基础操作（Train/Race/Rest/NormalOuting/FriendOuting/Clinic）
+
 ### 核心类型（state.rs）
 - `RamenGame`: 拉面杯游戏主状态，通过Deref暴露BaseGame
 - `RamenState`: 拉面杯专用状态（诀窍、隐藏风味、剧本PT等）
 - `RamenEffect`: 效果合并（基础+地区+超级拉面+PT常驻）
+- 辅助方法：`add_friend_and_npcs()`、`add_reporter()`、`add_person()`
+
+### Game trait 实现（game.rs）
+- 阶段流转：`RamenStage::next()` 负责回合内，`Game::next()` 负责跨阶段
+- `init_persons()`：开局仅加入非友人卡 + 理事长
+- `run_stage()`：分发到各阶段处理函数（run_begin/run_distribute/run_train/run_after_train 等）
+- `list_actions()`：生成所有吃面/不吃面 × 操作的组合动作
+- `generate_events()`：复用 BasicGame 随机事件
+- 动态人头管理：`manage_persons_on_turn_start()`
 
 ### 动作定义（action.rs）
 - `RamenAction`: 拉面杯动作（ramen + operation）
-- `list_ramen_choices()`: 阶段1 - 吃面选择
-- `list_operations()`: 阶段2 - 基础操作
-- `list_all_actions()`: 组合所有动作
+- `ActionEnum` 实现：吃面与训练严格分阶段执行
+- `apply_ramen()`：吃面处理（消耗诀窍、获得PT、分身分配）
+- `do_train()`：训练执行（拆分为多个辅助函数）
+- `TrainParams`：训练参数缓存结构
 
 ### 规则函数（rules.rs）
 - 诀窍系统：add_gauge、add_feeling、calc_gauge_base_distribution
@@ -77,4 +93,19 @@
 ### 策略（policy.rs）
 - `fixed_region_selection`: 地区选择策略（固定顺序）
 - `fixed_super_ramen_selection`: 超级拉面选择策略（固定选项二）
+
+## 训练员（Trainer）
+
+### RandomTrainer（猴子训练员）
+- **定义位置**：`crates/umasim/src/trainer/mod.rs`
+- **用途**：随机决策器，可用于测试和基线对比
+- **决策逻辑**：
+  - 体力 < 45 → 优先休息（Sleep）
+  - 心情 < 5 → 优先外出（NormalOuting/FriendOuting）
+  - 否则 → 优先训练（Train）
+  - 都不满足 → 随机选择
+- **使用位置**：
+  - `main.rs`：模拟运行时使用
+  - `game/base/basic.rs`：测试中使用
+- **导入方式**：`use crate::trainer::RandomTrainer;`
 

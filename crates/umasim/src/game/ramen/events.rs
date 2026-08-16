@@ -91,10 +91,11 @@ impl FriendEventState {
 /// 获取指定回合开始时获得的隐藏风味数量（简化为新友人情况）
 ///
 /// 固定回合获得隐藏风味，其他回合返回 0。
+/// 与 `rules::get_turn_special_feeling` 保持一致。
 pub fn get_turn_special_feeling(turn: i32) -> i32 {
     match turn {
-        2 | 23 | 35 | 47 | 59 => 2,
-        36 | 37 | 38 | 60 => 1,
+        2 | 24 | 36 | 48 | 60 => 2,
+        37 | 38 | 39 | 61 | 62 | 63 => 1,
         _ => 0,
     }
 }
@@ -185,8 +186,8 @@ mod tests {
     #[test]
     fn test_turn_special_feeling() {
         let expected: &[(i32, i32)] = &[
-            (2, 2), (23, 2), (35, 2), (36, 1), (37, 1), (38, 1),
-            (47, 2), (59, 2), (60, 1),
+            (2, 2), (24, 2), (36, 2), (37, 1), (38, 1), (39, 1),
+            (48, 2), (60, 2), (61, 1), (62, 1), (63, 1),
         ];
         for &(turn, amount) in expected {
             let result = get_turn_special_feeling(turn);
@@ -195,7 +196,7 @@ mod tests {
         }
 
         // 其他回合返回 0
-        let zero_turns = [1, 3, 22, 24, 39, 46, 48, 58, 61, 72];
+        let zero_turns = [0, 1, 3, 10, 23, 35, 47, 59, 64, 72];
         for turn in zero_turns {
             let result = get_turn_special_feeling(turn);
             println!("回合 {turn} 隐藏风味: {result}");

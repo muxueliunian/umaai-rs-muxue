@@ -58,6 +58,7 @@
 ### 可额外使用的工具
   - `cargo nextest`：用于运行测试
   - `tokei`：用于代码统计
+  - 因为安装了win coreutils，也可以使用`grep`等命令
 
 ### Git操作
 1. **提交前先写changelog**：提交分为两步：先更新changelog文档，由用户确认后再调用git commit提交

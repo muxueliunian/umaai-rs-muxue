@@ -10,6 +10,7 @@
 pub mod action;
 pub mod effects;
 pub mod events;
+pub mod game;
 pub mod policy;
 pub mod rules;
 pub mod state;
@@ -38,9 +39,11 @@ pub enum RamenStage {
     /// 4. 回合后事件
     AfterTrain,
     // --- 特殊阶段
-    /// 年度地区选择（每年年初独立决策）
+    /// 推进到下一回合（处理回合边界逻辑）
+    NextTurn,
+    /// 年度地区选择（第 1 回合结束后）
     RegionSelect,
-    /// 超级拉面选择（回合 71 结束后）
+    /// 超级拉面选择（第 71 回合结束后）
     SuperRamenSelect,
     /// 剧本结算（回合 23/47/71 结束时）
     Settlement
@@ -53,9 +56,10 @@ impl RamenStage {
             Self::Begin => Some(Self::Distribute),
             Self::Distribute => Some(Self::Train),
             Self::Train => Some(Self::AfterTrain),
-            // AfterTrain 是普通回合的最后阶段
-            Self::AfterTrain => None,
-            // 特殊阶段不参与回合内流转
+            Self::AfterTrain => Some(Self::NextTurn),
+            // NextTurn 在 run_stage 中推进回合，回到 Begin 或特殊阶段
+            Self::NextTurn => None,
+            // 特殊阶段处理后回到 Begin
             Self::RegionSelect | Self::SuperRamenSelect | Self::Settlement => None
         }
     }

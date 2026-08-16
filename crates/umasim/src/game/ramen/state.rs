@@ -8,7 +8,9 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use super::{FeelingType, RamenStage};
-use crate::game::{BaseGame, BasePerson, InheritInfo};
+use super::rules::NPC_CHARA_IDS;
+use crate::game::{BaseGame, BasePerson, InheritInfo, PersonType};
+use crate::game::traits::Game;
 
 /// 拉面杯专用状态
 ///
@@ -166,10 +168,43 @@ impl RamenGame {
         for i in 0..5 {
             ret.uma.five_status_limit[i] = ret.uma.five_status_limit[i].min(2800);
         }
-        // TODO: init_persons 将在 Game trait 实现中处理
         // 携带5种卡以上才能分身
         ret.deck_can_split = ret.card_type_count.iter().filter(|x| **x > 0).count() >= 5;
+        // 初始化人头（Game trait 方法）
+        Game::init_persons(&mut ret)?;
         Ok(ret)
+    }
+
+    /// 添加友人卡和NPC（第2回合开始）
+    pub fn add_friend_and_npcs(&mut self) -> Result<()> {
+        // 添加友人卡（card_type >= 5）
+        let friend_persons: Vec<BasePerson> = self
+            .deck
+            .iter()
+            .filter(|card| card.card_type >= 5)
+            .map(|card| BasePerson::try_from(card))
+            .collect::<Result<Vec<_>>>()?;
+        for p in friend_persons {
+            self.add_person(p);
+        }
+        // 添加5个NPC
+        for &npc_id in NPC_CHARA_IDS {
+            self.add_person(BasePerson {
+                person_index: 0,
+                person_type: PersonType::Npc,
+                train_type: -1,
+                chara_id: npc_id,
+                friendship: 0,
+                is_hint: false,
+                card_id: None,
+            });
+        }
+        Ok(())
+    }
+
+    /// 添加记者（第12回合开始）
+    pub fn add_reporter(&mut self) {
+        self.add_person(BasePerson::reporter());
     }
 
     /// 添加人头

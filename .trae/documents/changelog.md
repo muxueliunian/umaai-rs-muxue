@@ -4,6 +4,35 @@
 
 ## 2026-08-16
 
+### 拉面杯模块 1d 最小闭环实现
+
+**核心实现：**
+- 新增 `game.rs`：实现 Game trait for RamenGame
+- 阶段流转设计：`RamenStage::next()` 负责回合内，`Game::next()` 负责跨阶段
+- 实现 `run_stage` 各阶段逻辑：Begin/Distribute/Train/AfterTrain/RegionSelect/SuperRamenSelect
+- 实现 `list_actions`：生成所有吃面/不吃面 × 操作的组合动作
+- 实现 `generate_events`：复用 BasicGame 随机事件
+- 实现 `apply_event`：处理继承、友人解锁等特殊事件
+
+**动作执行（action.rs 重构）：**
+- 吃面与训练严格分阶段：`apply_ramen()` → `do_train()`
+- 吃面处理包括分身分配（`distribute_clones`）
+- 拆分 `do_train` 为多个辅助函数：`calc_train_params`、`handle_train_success`、`handle_train_failure` 等
+- 修复 `global!` 返回引用不需要再加 `&` 的问题
+
+**人头管理：**
+- `init_persons`：开局仅加入非友人卡 + 理事长
+- 动态添加：第2回合（turn==2）添加友人卡和NPC，第12回合（turn==12）添加记者
+- `add_friend_and_npcs()`、`add_reporter()` 方法
+
+**其他修复：**
+- 修复 `events.rs` 隐藏风味回合表与 `rules.rs` 一致
+- 新增 `RamenStage::NextTurn` 阶段处理回合边界逻辑
+- 测试卡组更新为最新卡：杏目、青春永驻、名将怒涛、洛林军歌、里见光钻、骏川手纲
+
+**开发计划更新：**
+- 标记 1d 步骤为已完成
+
 ### 拉面杯模块 1b 核心游戏机制 + 1c 动作预览和手写策略
 
 **1b - 核心游戏机制：**
