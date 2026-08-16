@@ -299,7 +299,7 @@ pub trait Game: Clone {
     fn shining_count(&self, train: usize) -> usize {
         self.distribution()[train]
             .iter()
-            .filter(|index| **index >= 0) // 过滤掉 -1（空位）
+            .filter(|index| **index >= 0) // 过滤掉分身（负数）和空位（-1）
             .filter(|index| self.is_shining_at(**index as usize, train))
             .count()
     }
@@ -348,10 +348,10 @@ pub trait Game: Clone {
         if train >= 5 {
             return Err(anyhow!("训练类型错误: {train}"));
         }
-        // 人数, 包括NPC, 排除掉理事长和记者
+        // 人数, 包括NPC和分身, 排除掉理事长和记者
         let person_count = self.distribution()[train]
             .iter()
-            .filter(|p| **p >= 0 && **p != 6 && **p != 7)
+            .filter(|p| **p != 6 && **p != 7)
             .count();
         // 基础值
         let basic_value = &self.training_basic_value()[train][train_level];

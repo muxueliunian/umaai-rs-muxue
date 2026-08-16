@@ -158,6 +158,11 @@ impl DerefMut for RamenGame {
 impl RamenGame {
     /// 创建新的拉面杯游戏实例
     pub fn newgame(uma_id: u32, deck_ids: &[u32; 6], inherit: InheritInfo) -> Result<Self> {
+        // 检测卡组是否携带新友人卡(30305)
+        let has_new_friend = deck_ids.iter().any(|&id| id / 10 == 30305);
+        if !has_new_friend {
+            anyhow::bail!("卡组未携带新友人卡(id:30305)，拉面杯模拟器仅支持新友人卡组");
+        }
         let mut ret = RamenGame {
             base: BaseGame::new(uma_id, deck_ids, inherit)?,
             stage: RamenStage::Begin,
@@ -170,8 +175,8 @@ impl RamenGame {
         for i in 0..5 {
             ret.uma.five_status_limit[i] = ret.uma.five_status_limit[i].min(2800);
         }
-        // 携带5种卡以上才能分身
-        ret.deck_can_split = ret.card_type_count.iter().filter(|x| **x > 0).count() >= 5;
+        // 携带4种卡以上才能分身
+        ret.deck_can_split = ret.card_type_count.iter().filter(|x| **x > 0).count() >= 4;
         // 初始化人头（Game trait 方法）
         Game::init_persons(&mut ret)?;
         Ok(ret)

@@ -67,6 +67,15 @@ impl Explain {
         format!("{levels:?}")
     }
 
+    /// 显示带剧本加成的训练等级
+    pub fn train_level_count_with_bonus(train: &Array5, bonus: i32) -> String {
+        let levels: Vec<_> = train.iter().map(|&x| {
+            let base = (x / 4 + 1).min(5);
+            (base + bonus).min(5).max(1)
+        }).collect();
+        format!("{levels:?}")
+    }
+
     pub fn event_choice(choice: &[EventChoice]) -> String {
         choice
             .iter()

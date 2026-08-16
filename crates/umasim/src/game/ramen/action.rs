@@ -142,6 +142,8 @@ impl ActionEnum for RamenAction {
         // 阶段2：执行基础操作
         match self.operation {
             Operation::Train(train) => {
+                // 拉面羁绊效果必须在训练前生效（影响闪耀判定）
+                self.apply_ramen_friendship(game)?;
                 self.do_train(game, train as usize, rng)?;
             }
             Operation::FriendOuting => {
@@ -202,11 +204,19 @@ impl RamenAction {
     ///
     /// 地区拉面 id >= 5 时，会在指定训练位置分配额外的人头（分身）。
     /// 分身不计算得意率，不包含友人卡。
+    ///
+    /// 满员规则：
+    /// - 每个训练位置最多5个人
+    /// - 如果已满5人，分身会优先"挤"掉NPC
+    /// - 如果已经包含5个非NPC的人物，则不能创建分身
+    ///
+    /// 分身分配逻辑：
+    /// - 对于 at_trains 中的每个训练位置，随机选择一个支援卡分配分身
     fn distribute_clones(
         &self,
         game: &mut super::RamenGame,
         region_id: usize,
-        _rng: &mut StdRng,
+        rng: &mut StdRng,
     ) -> Result<()> {
         let ramen_data = global!(RAMENDATA);
         let region = &ramen_data.ramen_region_effect[region_id];
@@ -221,23 +231,231 @@ impl RamenAction {
             return Ok(());
         }
 
-        // 对每个支援卡（index 0-5），如果在指定训练位置，分配一个分身
-        for person_idx in 0..6i32 {
-            let person = &game.persons[person_idx as usize];
-            if person.person_type != PersonType::Card {
+        // 获取所有支援卡索引
+        let card_indices: Vec<i32> = (0..6i32)
+            .filter(|&i| game.persons[i as usize].person_type == PersonType::Card)
+            .collect();
+        if card_indices.is_empty() {
+            return Ok(());
+        }
+
+        // 对于 at_trains 中的每个训练位置，随机选择一个不重复的支援卡分配分身
+        for &train in clone_trains {
+            let train = train as usize;
+            if train >= 5 {
                 continue;
             }
 
-            // 检查该角色是否在指定训练位置
-            let train = person.train_type as usize;
-            if train < 5 && clone_trains.contains(&(train as i32)) {
-                // 分配分身（使用 -person_idx - 100 标识分身）
-                let clone_idx = -(person_idx + 100);
-                game.base.distribution[train].push(clone_idx);
-                info!(">> 分身: {} -> {}训练", person.short_name(), global!(GAMECONSTANTS).train_names[train]);
+            // 获取当前训练位置已有的人员（包括本体和分身）
+            let existing: std::collections::HashSet<i32> = game.base.distribution[train]
+                .iter()
+                .filter(|&&id| id >= 0)
+                .copied()
+                .collect();
+
+            // 过滤掉已在该训练位置的支援卡
+            let available: Vec<i32> = card_indices.iter()
+                .filter(|&&idx| !existing.contains(&idx))
+                .copied()
+                .collect();
+
+            if available.is_empty() {
+                warn!(">> 分身失败: {}训练无可用支援卡（所有支援卡已在该位置）", 
+                    global!(GAMECONSTANTS).train_names[train]);
+                continue;
+            }
+
+            // 随机选择一个不重复的支援卡
+            let person_idx = *available.choose(rng).unwrap();
+
+            // 检查当前训练位置的人数
+            let dist = &game.base.distribution[train];
+            let non_npc_count = dist.iter()
+                .filter(|&&id| id >= 0 && game.persons[id as usize].person_type != PersonType::Npc)
+                .count();
+
+            if non_npc_count >= 5 {
+                // 已经有5个非NPC人物，不能创建分身
+                warn!(">> 分身失败: {}训练已满5个非NPC人物，无法添加分身", 
+                    global!(GAMECONSTANTS).train_names[train]);
+                continue;
+            }
+
+            if dist.len() >= 5 {
+                // 已满5人，尝试挤掉NPC
+                if let Some(npc_pos) = dist.iter().position(|&id| {
+                    id >= 0 && game.persons[id as usize].person_type == PersonType::Npc
+                }) {
+                    let removed_id = game.base.distribution[train].remove(npc_pos);
+                    game.base.distribution[train].push(person_idx);
+                    warn!(">> 分身挤掉NPC: {} -> {}训练 (挤掉{})", 
+                        game.persons[person_idx as usize].short_name(), 
+                        global!(GAMECONSTANTS).train_names[train],
+                        game.persons[removed_id as usize].short_name()
+                    );
+                } else {
+                    warn!(">> 分身失败: {}训练已满5人且无NPC可挤，无法添加分身", 
+                        global!(GAMECONSTANTS).train_names[train]);
+                }
+            } else {
+                // 未满5人，直接添加
+                game.base.distribution[train].push(person_idx);
+                info!(">> 分身: {} -> {}训练", 
+                    game.persons[person_idx as usize].short_name(), 
+                    global!(GAMECONSTANTS).train_names[train]);
             }
         }
 
+        Ok(())
+    }
+
+    /// 超级拉面分身分配
+    ///
+    /// 触发条件：超级拉面回合且支援卡种类>=4
+    /// - 每个支援卡（含友人卡）固定额外出现一次
+    /// - 分配算法：出现的训练范围由`training_limit_options`指定
+    /// - 随机选择训练位置，如果分配失败则重新随机
+    /// - 特殊规则：同一训练不能存在相同卡的`Person`和分身
+    pub fn distribute_super_ramen_clones(
+        game: &mut super::RamenGame,
+        rng: &mut StdRng,
+    ) -> Result<()> {
+        if !game.is_super_ramen_turn() || !game.deck_can_split {
+            return Ok(());
+        }
+
+        let Some(sel) = game.ramen.super_ramen else {
+            return Ok(());
+        };
+        let options = super::rules::get_super_ramen_clone_train_options()?;
+        let Some(option_trains) = options.get(sel) else {
+            return Ok(());
+        };
+
+        info!(">> 超级拉面分身分配 (选项 {})", sel + 1);
+
+        // 获取所有支援卡索引（含友人卡，index 0-5）
+        let card_indices: Vec<i32> = (0..6i32)
+            .filter(|&i| {
+                let person = &game.persons[i as usize];
+                person.person_type == PersonType::Card || person.person_type == PersonType::ScenarioCard
+            })
+            .collect();
+
+        if card_indices.is_empty() {
+            return Ok(());
+        }
+
+        // 对每个支援卡，随机分配到一个训练位置，失败则重试
+        for &person_idx in &card_indices {
+            let mut success = false;
+            let max_retries = option_trains.len() * 2; // 最多重试次数
+            
+            for _ in 0..max_retries {
+                // 随机选择一个训练位置
+                let &train = option_trains.choose(rng).unwrap();
+                let train = train as usize;
+                
+                match Self::try_add_clone(game, person_idx, train) {
+                    Ok(()) => {
+                        success = true;
+                        break;
+                    }
+                    Err(_) => continue, // 分配失败，重试
+                }
+            }
+            
+            if !success {
+                warn!(">> 超级拉面分身失败: {} 无法分配到任何训练位置", 
+                    game.persons[person_idx as usize].short_name());
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 尝试在指定训练位置添加分身
+    ///
+    /// 返回错误如果：
+    /// - 已有5个非NPC人物
+    /// - 已满5人且无NPC可挤
+    fn try_add_clone(
+        game: &mut super::RamenGame,
+        person_idx: i32,
+        train: usize,
+    ) -> Result<()> {
+        if train >= 5 {
+            return Err(anyhow::anyhow!("训练位置越界: {}", train));
+        }
+
+        // 检查是否已有该人物的分身
+        if game.base.distribution[train].contains(&person_idx) {
+            return Err(anyhow::anyhow!("{}训练已有{}的分身", 
+                global!(GAMECONSTANTS).train_names[train],
+                game.persons[person_idx as usize].short_name()));
+        }
+
+        // 检查当前训练位置的人数
+        let dist = &game.base.distribution[train];
+        let non_npc_count = dist.iter()
+            .filter(|&&id| id >= 0 && game.persons[id as usize].person_type != PersonType::Npc)
+            .count();
+
+        if non_npc_count >= 5 {
+            return Err(anyhow::anyhow!("{}训练已满5个非NPC人物", 
+                global!(GAMECONSTANTS).train_names[train]));
+        }
+
+        if dist.len() >= 5 {
+            // 已满5人，尝试挤掉NPC
+            if let Some(npc_pos) = dist.iter().position(|&id| {
+                id >= 0 && game.persons[id as usize].person_type == PersonType::Npc
+            }) {
+                let removed_id = game.base.distribution[train].remove(npc_pos);
+                game.base.distribution[train].push(person_idx);
+                warn!(">> 超级拉面分身挤掉NPC: {} -> {}训练 (挤掉{})", 
+                    game.persons[person_idx as usize].short_name(), 
+                    global!(GAMECONSTANTS).train_names[train],
+                    game.persons[removed_id as usize].short_name()
+                );
+            } else {
+                return Err(anyhow::anyhow!("{}训练已满5人且无NPC可挤", 
+                    global!(GAMECONSTANTS).train_names[train]));
+            }
+        } else {
+            // 未满5人，直接添加
+            game.base.distribution[train].push(person_idx);
+            info!(">> 超级拉面分身: {} -> {}训练", 
+                game.persons[person_idx as usize].short_name(), 
+                global!(GAMECONSTANTS).train_names[train]);
+        }
+
+        Ok(())
+    }
+
+    /// 训练前应用拉面羁绊效果
+    ///
+    /// `ramen_basic_effect.friendship` 对卡组所有支援卡生效（含友人卡，不含理事长/记者/NPC）。
+    /// 必须在训练前生效，因为羁绊值影响闪耀判定（friendship >= 80）。
+    ///
+    /// 生效条件：吃面回合（`current_ramen.is_some()`）或超级拉面回合（72-77）。
+    fn apply_ramen_friendship(&self, game: &mut super::RamenGame) -> Result<()> {
+        let eating = game.ramen.current_ramen.is_some();
+        let super_ramen = game.is_super_ramen_turn();
+        if !eating && !super_ramen {
+            return Ok(());
+        }
+        let year_idx = (game.current_year() - 1) as usize;
+        let ramen_data = global!(RAMENDATA);
+        if let Some(basic) = ramen_data.ramen_basic_effect.get(year_idx) {
+            if basic.friendship > 0 {
+                for i in 0..game.persons.len() {
+                    if matches!(game.persons[i].person_type, PersonType::Card | PersonType::ScenarioCard) {
+                        game.add_friendship(i, basic.friendship);
+                    }
+                }
+            }
+        }
         Ok(())
     }
 
@@ -337,15 +555,7 @@ impl RamenAction {
         game.base.train_level_count[train] += 1;
 
         // 处理羁绊和后续事件
-        self.handle_post_train(game, train, params, rng)?;
-
-        // 拉面羁绊效果对卡组所有卡生效（如第一年吃面+10羁绊）
-        let ramen_friendship = params.ramen_effect.friendship;
-        if ramen_friendship > 0 {
-            for i in 0..6 {
-                game.add_friendship(i, ramen_friendship);
-            }
-        }
+        self.handle_post_train(game, train, rng)?;
 
         // 诀窍槽填充
         self.fill_feeling_gauge(game, train, params)?;
@@ -394,7 +604,6 @@ impl RamenAction {
         &self,
         game: &mut super::RamenGame,
         train: usize,
-        params: &TrainParams,
         rng: &mut StdRng,
     ) -> Result<()> {
         let friendship_bonus = if game.uma.flags.aijiao { 9 } else { 7 };
@@ -420,7 +629,13 @@ impl RamenAction {
         // 额外训练事件（非合宿）
         let extra_train_prob = system_event_prob("extra_train")?;
         if !game.is_xiahesu() && rng.random_bool(extra_train_prob as f64) {
-            game.base.unresolved_events.push(EventData::extra_training_event(train));
+            let mut event = EventData::extra_training_event(train);
+            // 动态设置理事长索引
+            if let Some(yayoi_index) = game.persons.iter()
+                .position(|p| p.person_type == PersonType::Yayoi) {
+                event.person_index = Some(yayoi_index as i32);
+            }
+            game.base.unresolved_events.push(event);
         }
 
         // 友人点击事件
@@ -438,19 +653,23 @@ impl RamenAction {
         hint_persons: &[i32],
         rng: &mut StdRng,
     ) -> Result<()> {
-        if let Some(p) = hint_persons.choose(rng) {
+        if let Some(&p) = hint_persons.choose(rng) {
+            if p < 0 || p as usize >= game.persons.len() {
+                return Ok(());
+            }
+            let person_index = p as usize;
             let attr_prob = system_event_prob("hint_attr")?;
-            let hint_level = if *p < 6 {
-                1 + game.deck[*p as usize].card_value().hint_level
+            let hint_level = if person_index < 6 {
+                1 + game.deck[person_index].card_value().hint_level
             } else {
                 1
             };
-            let mut hint_event = if rng.random_bool(attr_prob as f64) {
-                EventData::hint_attr_event(game.persons[*p as usize].train_type as usize, *p as usize)?
+            let mut hint_event = if rng.random_bool(attr_prob) {
+                EventData::hint_attr_event(game.persons[person_index].train_type as usize, person_index)?
             } else {
-                EventData::hint_skill_event(hint_level, *p as usize)
+                EventData::hint_skill_event(hint_level, person_index)
             };
-            hint_event.name = format!("{} - {}", hint_event.name, game.deck[*p as usize].short_name());
+            hint_event.name = format!("{} - {}", hint_event.name, game.deck[person_index].short_name());
             game.base.unresolved_events.push(hint_event);
         }
         Ok(())
@@ -516,11 +735,13 @@ impl RamenAction {
     ) -> Result<()> {
         if let Some(train_feelings) = game.ramen.train_feeling_type {
             let base_dist = super::rules::calc_gauge_base_distribution(&game.ramen.selected_regions);
+            // 计算支援卡数量（包括分身，分身id < 0 但本体 id 在 0-5 范围）
+            let support_count = game.distribution[train]
+                .iter()
+                .filter(|&&p| p != 6 && p != 7)  // 排除理事长和记者
+                .count();
             let train_bonus = super::rules::calc_train_feeling_bonus(
-                game.distribution[train]
-                    .iter()
-                    .filter(|&&p| p >= 0 && p < 6)
-                    .count(),
+                support_count,
                 5, // 5 个 NPC
             );
             fill_gauge_after_train(

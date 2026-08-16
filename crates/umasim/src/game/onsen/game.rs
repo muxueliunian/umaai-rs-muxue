@@ -592,7 +592,13 @@ impl OnsenGame {
         }
         let extra_train_prob = system_event_prob("extra_train")?;
         if !self.is_xiahesu() && rng.random_bool(extra_train_prob as f64) {
-            self.unresolved_events.push(EventData::extra_training_event(train));
+            let mut event = EventData::extra_training_event(train);
+            // 动态设置理事长索引
+            if let Some(yayoi_index) = self.persons.iter()
+                .position(|p| p.person_type == PersonType::Yayoi) {
+                event.person_index = Some(yayoi_index as i32);
+            }
+            self.unresolved_events.push(event);
         }
 
         // 更新友人状态

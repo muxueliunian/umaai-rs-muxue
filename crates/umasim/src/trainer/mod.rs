@@ -26,30 +26,32 @@ pub struct RandomTrainer;
 impl<G: Game> Trainer<G> for RandomTrainer {
     fn select_action(&self, game: &G, actions: &[<G as Game>::Action], rng: &mut StdRng) -> Result<usize> {
         let mut random_index: Vec<_> = (0..actions.len()).collect();
-        let mut ret = 0;
+        let mut ret = None;
         random_index.shuffle(rng);
-        for i in random_index {
-            // 优先休息，回心情，训练。都不满足就随机第一个
+        for i in &random_index {
+            // 优先休息，回心情，训练。都不满足就随机选择
             if game.uma().vital < 45 {
-                if actions[i].as_base_action() == Some(BaseAction::Sleep) {
-                    ret = i;
+                if actions[*i].as_base_action() == Some(BaseAction::Sleep) {
+                    ret = Some(*i);
                     break;
                 }
             } else if game.uma().motivation < 5 {
                 if matches!(
-                    actions[i].as_base_action(),
+                    actions[*i].as_base_action(),
                     Some(BaseAction::NormalOuting) | Some(BaseAction::FriendOuting)
                 ) {
-                    ret = i;
+                    ret = Some(*i);
                     break;
                 }
             } else {
-                if matches!(actions[i].as_base_action(), Some(BaseAction::Train(_))) {
-                    ret = i;
+                if matches!(actions[*i].as_base_action(), Some(BaseAction::Train(_))) {
+                    ret = Some(*i);
                     break;
                 }
             }
         }
+        // 如果没有找到匹配的动作，随机选择一个
+        let ret = ret.unwrap_or(random_index[0]);
         info!("吗喽训练员选择：{:?}", actions[ret]);
         Ok(ret)
     }

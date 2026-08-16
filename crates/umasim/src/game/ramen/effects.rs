@@ -61,34 +61,52 @@ fn calc_region_bonus_tier(year_scenario_pt: i32) -> usize {
 /// 计算超级拉面回合的效果（回合 72-77 自动生效）
 ///
 /// 超级拉面期间：
-/// - 基础效果（ramen_basic_effect）依然生效
+/// - `ramen_pt_effect` 按最高档生效
+/// - `ramen_basic_effect` 按最高档生效
+/// - 第3年RMJ结算效果（rmj_results[2]）常驻生效
+/// - `finals_effect.base` 效果生效
+/// - `finals_effect.extra` 效果仅在支援卡种类 >= 4 时生效
 /// - 地区效果不生效
-/// - 额外效果（finals_effect）自动生效
-/// - extra 效果仅在支援卡种类 >= 4 时生效
 ///
 /// # 参数
 /// - `game`: 拉面杯游戏状态
 /// - `year_idx`: 年份索引（0-2）
-fn calc_finals_effect(game: &RamenGame, year_idx: usize) -> RamenTrainingEffect {
+fn calc_finals_effect(game: &RamenGame, _year_idx: usize) -> RamenTrainingEffect {
     let ramen_data = global!(RAMENDATA);
     let mut effect = RamenTrainingEffect::default();
 
-    // 基础效果（ramen_basic_effect）在超级拉面回合依然生效
-    if year_idx < ramen_data.ramen_basic_effect.len() {
-        let basic = &ramen_data.ramen_basic_effect[year_idx];
-        effect.xunlian += basic.xunlian;
-        effect.youqing += basic.youqing;
-        effect.fail_rate_drop += basic.fail_rate_drop;
-        effect.friendship += basic.friendship;
-        effect.status_limit += basic.status_limit;
-        effect.hint_special |= basic.hint_special;
+    // 1. ramen_pt_effect 按最高档生效（最后一档）
+    let pt_effect = ramen_data.ramen_pt_effect.last().unwrap();
+    effect.xunlian += pt_effect.xunlian;
+    effect.deyilv += pt_effect.deyilv;
+    effect.hint += pt_effect.hint;
+
+    // 2. ramen_basic_effect 按最高档生效（最后一档）
+    let basic = ramen_data.ramen_basic_effect.last().unwrap();
+    effect.xunlian += basic.xunlian;
+    effect.youqing += basic.youqing;
+    effect.fail_rate_drop += basic.fail_rate_drop;
+    effect.friendship += basic.friendship;
+    effect.status_limit += basic.status_limit;
+    effect.hint_special |= basic.hint_special;
+
+    // 3. 第3年RMJ结算效果（rmj_results[2]）在URA期间生效
+    if let Some(&success) = game.ramen.rmj_results.get(2) {
+        let rmj_effect = if success {
+            &ramen_data.ramen_success_effect[2]
+        } else {
+            &ramen_data.ramen_fail_effect[2]
+        };
+        effect.youqing += rmj_effect.youqing;
+        effect.deyilv += rmj_effect.deyilv;
+        effect.hint += rmj_effect.hint;
     }
 
-    // finals_effect 基础效果
+    // 4. finals_effect.base 效果
     let finals = &ramen_data.finals_effect;
     effect.youqing += finals.base.youqing;
 
-    // extra 效果：支援卡种类 >= 4 时额外生效
+    // 5. finals_effect.extra 效果：支援卡种类 >= 4 时额外生效
     if game.deck_can_split {
         effect.pt_bonus += finals.extra.pt_bonus;
         effect.pt_limit += finals.extra.pt_limit;

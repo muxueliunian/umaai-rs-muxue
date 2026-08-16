@@ -41,7 +41,7 @@ pub enum RamenStage {
     // --- 特殊阶段
     /// 推进到下一回合（处理回合边界逻辑）
     NextTurn,
-    /// 年度地区选择（第 1 回合结束后）
+    /// 年度地区选择（回合 23/47/71 结束后，RMJ 结算后）
     RegionSelect,
     /// 超级拉面选择（第 71 回合结束后）
     SuperRamenSelect,

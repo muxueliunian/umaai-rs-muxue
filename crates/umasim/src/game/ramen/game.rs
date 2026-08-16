@@ -9,6 +9,7 @@
 use anyhow::Result;
 use comfy_table::{ColumnConstraint, Table, Width};
 use log::{info, warn};
+use rand::prelude::IndexedRandom;
 use rand::{Rng, rngs::StdRng};
 use rand_distr::{Distribution, weighted::WeightedIndex};
 
@@ -93,7 +94,17 @@ impl Game for RamenGame {
                 self.ramen.eat_count = 0;
             }
 
-            // 特殊阶段跳转（地区选择已移至 Begin 阶段）
+            // 年度地区选择：回合23（第1年结束后）、回合47（第2年结束后）
+            // RMJ 结算后选择下一年的地区
+            match self.base.turn {
+                23 | 47 => {
+                    self.stage = RamenStage::RegionSelect;
+                    return true;
+                }
+                _ => {}
+            }
+
+            // 特殊阶段跳转：超级拉面选择（回合71）
             if self.base.turn == 71 {
                 self.stage = RamenStage::SuperRamenSelect;
                 return true;
@@ -103,10 +114,10 @@ impl Game for RamenGame {
             return self.advance_turn();
         }
 
-        // 特殊阶段（SuperRamenSelect/Settlement）→ 推进到下一回合
+        // 特殊阶段（RegionSelect/SuperRamenSelect/Settlement）→ 推进到下一回合
         if matches!(
             self.stage,
-            RamenStage::SuperRamenSelect | RamenStage::Settlement
+            RamenStage::RegionSelect | RamenStage::SuperRamenSelect | RamenStage::Settlement
         ) {
             return self.advance_turn();
         }
@@ -121,7 +132,16 @@ impl Game for RamenGame {
             RamenStage::Train => self.run_train(trainer, rng)?,
             RamenStage::AfterTrain => self.run_after_train(trainer, rng)?,
             RamenStage::NextTurn => {} // 回合推进逻辑在 next() 中处理
-            RamenStage::RegionSelect => {} // 已移至 Begin 阶段
+            RamenStage::RegionSelect => {
+                // 回合2→第1年(year_idx=0)，回合23→第2年(year_idx=1)，回合47→第3年(year_idx=2)
+                let year_idx = match self.base.turn {
+                    2 => 0,
+                    23 => 1,
+                    47 => 2,
+                    _ => unreachable!("unexpected turn for RegionSelect: {}", self.base.turn),
+                };
+                self.run_region_select(trainer, rng, year_idx)?;
+            }
             RamenStage::SuperRamenSelect => self.run_super_ramen_select()?,
             RamenStage::Settlement => {} // RMJ 结算在 next() 中处理
         }
@@ -196,11 +216,19 @@ impl Game for RamenGame {
                     .expect("event weights");
             match weights.sample(rng) {
                 0 => {
-                    if let Some(event) = self.base.generate_card_event(
-                        rng.random_range(0..6i32),
-                        rng,
-                    ) {
-                        events.push(event);
+                    // 只从 Card 类型的人物中随机选择
+                    let card_indices: Vec<i32> = self.persons.iter()
+                        .enumerate()
+                        .filter(|(_, p)| p.person_type == PersonType::Card)
+                        .map(|(i, _)| i as i32)
+                        .collect();
+                    if let Some(&person_index) = card_indices.choose(rng) {
+                        if let Some(event) = self.base.generate_card_event(
+                            person_index,
+                            rng,
+                        ) {
+                            events.push(event);
+                        }
                     }
                 }
                 1 => {
@@ -250,6 +278,7 @@ impl Game for RamenGame {
             super::events::EVENT_FRIEND_UNLOCK => {
                 info!(">> 友人出行已解锁");
                 self.friend.out_state = FriendOutState::AfterUnlock;
+                self.uma.flags.refresh_mind = 1;
             }
             _ => {}
         }
@@ -281,6 +310,27 @@ impl Game for RamenGame {
     }
 
     fn has_group_buff(&self) -> bool { self.friend.group_buff_turn > 0 }
+
+    /// 重写闪耀判定
+    ///
+    /// 支援卡（含分身）：只能在本体的得意训练位置闪耀（train_type == train && friendship >= 80）
+    /// 友人卡：有 group buff 时闪耀
+    fn is_shining_at(&self, person_index: usize, train: usize) -> bool {
+        if person_index >= self.persons.len() {
+            return false;
+        }
+        let person = &self.persons[person_index];
+        match person.person_type {
+            // 支援卡（含分身）：只能在本体的得意训练位置闪耀
+            PersonType::Card => {
+                person.train_type == train as i32 && person.friendship >= 80
+            },
+            // 友人卡：有 group buff 时闪耀
+            PersonType::ScenarioCard => self.has_group_buff(),
+            // NPC、理事长、记者不能闪耀
+            _ => false
+        }
+    }
 
     fn train_level(&self, train: usize) -> usize {
         if self.is_xiahesu() {
@@ -316,6 +366,10 @@ impl Game for RamenGame {
             let mut row = vec![];
             for train in 0..5 {
                 if let Some(id) = dist[train].get(i) {
+                    if *id < 0 || *id as usize >= self.persons.len() {
+                        row.push("".to_string());
+                        continue;
+                    }
                     let mut text = self.persons[*id as usize].explain();
                     if self.is_shining_at(*id as usize, train) {
                         text = format!("+{text}+");
@@ -454,12 +508,9 @@ impl RamenGame {
             }
         }
 
-        // 年度地区选择：回合2（第1年）、回合23（第2年）、回合47（第3年）
-        match self.base.turn {
-            2 => self.run_region_select(trainer, rng, 0)?,
-            23 => self.run_region_select(trainer, rng, 1)?,
-            47 => self.run_region_select(trainer, rng, 2)?,
-            _ => {}
+        // 第1年地区选择（回合2开始时）
+        if self.base.turn == 2 {
+            self.run_region_select(trainer, rng, 0)?;
         }
 
         // 固定回合分配隐藏风味（初始化回合已由 init_feeling_stocks 处理，跳过）
@@ -476,14 +527,14 @@ impl RamenGame {
             }
         }
 
-        // 生成并执行回合前事件
-        let events = self.generate_events(rng);
-        self.add_mandatory_events();
-        // 立即执行强制事件（如友人新年、友人结束）
-        let mandatory = std::mem::take(&mut self.base.unresolved_events);
-        for event in &mandatory {
-            self.run_event(event, trainer, rng)?;
+        // 休息心得
+        if self.uma.flags.refresh_mind > 0 {
+            self.update_refresh_mind(rng);
         }
+
+        // 生成回合前事件（含随机事件和强制事件）
+        let mut events = self.generate_events(rng);
+        self.add_mandatory_events(&mut events);
         for event in &events {
             self.run_event(event, trainer, rng)?;
         }
@@ -513,6 +564,12 @@ impl RamenGame {
             self.ramen.train_feeling_type = Some(feelings);
             self.distribute_all(rng)?;
             self.distribute_hint(rng)?;
+
+            // 超级拉面分身在 distribute_all 之后分配
+            if self.is_super_ramen_turn() {
+                super::action::RamenAction::distribute_super_ramen_clones(self, rng)?;
+            }
+
             info!("训练:\n{}", self.explain_distribution()?);
         }
         Ok(())
@@ -535,7 +592,7 @@ impl RamenGame {
         Ok(())
     }
 
-    /// 年度地区选择（在 Begin 阶段调用，通过 Trainer 统一接口决策）
+    /// 年度地区选择（在 NextTurn 阶段 RMJ 结算后调用，通过 Trainer 统一接口决策）
     ///
     /// `year_idx`: 0=第1年(地区0-4), 1=第2年(地区5-9), 2=第3年(地区10-19)
     fn run_region_select<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng, year_idx: usize) -> Result<()> {
@@ -567,19 +624,20 @@ impl RamenGame {
     /// 根据携带的友人卡类型决定初始化数量：
     /// - 新友人(30305)：每种诀窍=2，隐藏诀窍+=2
     /// - 旧友人(9001/9008)：每种诀窍=1，隐藏诀窍+=1
-    /// - 无友人卡：不初始化
+    /// - 无友人卡：每种诀窍=0，隐藏诀窍+=1
     fn init_feeling_stocks(&mut self) {
         // 查找友人卡
         let friend_card = self.deck.iter().find(|c| c.card_type >= 5);
-        let Some(card) = friend_card else { return };
-
-        let is_new_friend = card.card_id == 30305;
-        let is_old_friend = matches!(card.data.chara_id, 9001 | 9008);
-        let init_val = if is_new_friend { 2 } else if is_old_friend { 1 } else { 0 };
-        if init_val == 0 { return; }
+        let init_val = match friend_card {
+            Some(card) if card.card_id == 30305 => 2,       // 新友人
+            Some(card) if matches!(card.data.chara_id, 9001 | 9008) => 1, // 旧友人
+            _ => 0,                                           // 无友人卡
+        };
 
         self.ramen.feeling_stock = [init_val; 3];
-        self.ramen.special_feeling = (self.ramen.special_feeling + init_val).min(4);
+        // 无友人卡时仍获得1个隐藏风味
+        let special_gain = if init_val > 0 { init_val } else { 1 };
+        self.ramen.special_feeling = (self.ramen.special_feeling + special_gain).min(4);
         self.ramen.feeling_queue.clear();
         for _ in 0..init_val {
             for ft in [super::FeelingType::A, super::FeelingType::B, super::FeelingType::C] {
@@ -588,8 +646,25 @@ impl RamenGame {
         }
         info!(
             ">> 诀窍初始化: 每种={} 隐藏+{} (={})",
-            init_val, init_val, self.ramen.special_feeling
+            init_val, special_gain, self.ramen.special_feeling
         );
+    }
+
+    /// 更新休息心得
+    ///
+    /// 当 refresh_mind > 0 时，每回合开始时体力+5，并根据概率判定是否结束。
+    fn update_refresh_mind(&mut self, rng: &mut StdRng) {
+        let t = self.uma.flags.refresh_mind as usize;
+        if t > 0 {
+            info!("休息心得已持续 {t} 回合 -->");
+            self.uma.add_value(&ActionValue { vital: 5, ..Default::default() });
+            self.uma.flags.refresh_mind += 1;
+            let end_prob = global!(GAMECONSTANTS).group_buff_end_prob[t.min(6)];
+            if rng.random_bool(end_prob) {
+                info!(">> 休息心得结束");
+                self.uma.flags.refresh_mind = 0;
+            }
+        }
     }
 
     /// 计算剧本 Hint 出现率加成百分比
@@ -633,6 +708,23 @@ impl RamenGame {
         Ok(())
     }
 
+    /// 格式化游戏状态（重写 BaseGame::explain，显示带剧本加成的训练等级）
+    pub fn explain(&self) -> Result<String> {
+        let mut lines = vec![];
+        lines.push(format!(
+            "回合: {}-{:?} 设施等级: {} 友人: {}",
+            self.base.turn + 1,
+            self.base.stage,
+            crate::explain::Explain::train_level_count_with_bonus(
+                &self.base.train_level_count,
+                self.ramen.train_level_bonus
+            ),
+            self.base.friend.explain()
+        ));
+        lines.push(self.base.uma.explain()?);
+        Ok(lines.join("\n"))
+    }
+
     /// 格式化拉面杯剧本信息（用于回合开始时显示）
     ///
     /// 包含：当前拉面地域及效果、当前选择地区、诀窍库存和槽值、剧本PT及加成档位
@@ -650,12 +742,15 @@ impl RamenGame {
         // 当前拉面
         let ramen_str = if let Some(idx) = self.ramen.current_ramen {
             if let Some(region) = ramen_data.ramen_region_effect.get(idx) {
-                let eff = super::effects::calc_ramen_training_effect(self, 0, false);
+                // 计算地域效果生效的训练位置的效果
+                let train = region.at_trains.first().copied().unwrap_or(0) as usize;
+                let eff = super::effects::calc_ramen_training_effect(self, train, false);
                 let mut parts = vec![];
                 if eff.xunlian != 0 { parts.push(format!("训+{}", eff.xunlian)); }
                 if eff.fail_rate_drop as i32 != 0 { parts.push(format!("失败率-{}", eff.fail_rate_drop as i32)); }
                 if eff.friendship != 0 { parts.push(format!("羁绊+{}", eff.friendship)); }
                 if eff.status_limit != 0 { parts.push(format!("上限+{}", eff.status_limit)); }
+                if eff.pt_bonus != 0 { parts.push(format!("PT+{}", eff.pt_bonus)); }
                 if parts.is_empty() { region.name.clone() } else { format!("{}({})", region.name, parts.join(",")) }
             } else {
                 "无".to_string()
@@ -664,9 +759,25 @@ impl RamenGame {
             "无".to_string()
         };
 
-        // URA回合：简化显示
+        // URA回合：显示超级拉面加成
         if is_ura {
-            return format!("拉面: {}", ramen_str);
+            let eff = super::effects::calc_ramen_training_effect(self, 0, false);
+            let mut parts = vec![];
+            if eff.xunlian != 0 { parts.push(format!("训+{}", eff.xunlian)); }
+            if eff.youqing != 0 { parts.push(format!("友情+{}", eff.youqing)); }
+            if eff.deyilv != 0 { parts.push(format!("得意+{}", eff.deyilv)); }
+            if eff.fail_rate_drop as i32 != 0 { parts.push(format!("失败率-{}", eff.fail_rate_drop as i32)); }
+            if eff.friendship != 0 { parts.push(format!("羁绊+{}", eff.friendship)); }
+            if eff.status_limit != 0 { parts.push(format!("上限+{}", eff.status_limit)); }
+            if eff.pt_bonus != 0 { parts.push(format!("PT+{}", eff.pt_bonus)); }
+            if eff.hint != 0 { parts.push(format!("hint+{}", eff.hint)); }
+            if eff.clone_count != 0 { parts.push(format!("分身+{}", eff.clone_count)); }
+            
+            let mut result = format!("超级拉面回合");
+            if !parts.is_empty() {
+                result.push_str(&format!(" [{}]", parts.join(",")));
+            }
+            return result;
         }
 
         // 普通回合：完整显示
@@ -705,23 +816,17 @@ impl RamenGame {
     }
 
     /// 添加强制事件（友人事件、育成结束事件）
-    fn add_mandatory_events(&mut self) {
+    fn add_mandatory_events(&self, events: &mut Vec<EventData>) {
         let ramen_data = global!(RAMENDATA);
         if self.friend.out_state == FriendOutState::AfterUnlock {
             if self.base.turn == 24 {
-                self.base.unresolved_events.push(
-                    ramen_data.friend_events["newyear"].clone(),
-                );
+                events.push(ramen_data.friend_events["newyear"].clone());
             } else if self.base.turn == 77 {
-                self.base.unresolved_events.push(
-                    ramen_data.friend_events["end"].clone(),
-                );
+                events.push(ramen_data.friend_events["end"].clone());
             }
         }
         if self.base.turn == 77 {
-            self.base.unresolved_events.push(
-                system_event("ending").expect("ending event").clone(),
-            );
+            events.push(system_event("ending").expect("ending event").clone());
         }
     }
 }
@@ -792,7 +897,8 @@ mod tests {
         )?;
 
         let trainer = RandomTrainer;
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = StdRng::from_os_rng();
+        println!("随机种子: {:?}", rng);
 
         println!("开始完整模拟...");
         game.run_full_game(&trainer, &mut rng)?;
@@ -807,6 +913,71 @@ mod tests {
         println!("隐藏风味: {}", game.ramen.special_feeling);
         let score = game.uma.calc_score();
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_random_event_generation() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        // 创建游戏实例
+        let mut game = RamenGame::newgame(
+            101901,
+            &[302424, 302894, 303044, 302924, 303024, 303054],
+            crate::game::InheritInfo {
+                blue_count: [15, 3, 0, 0, 0],
+                extra_count: [0, 30, 0, 0, 30, 30],
+            },
+        )?;
+
+        // 使用随机种子
+        let mut rng = StdRng::from_os_rng();
+        println!("随机种子: {:?}", rng);
+
+        // 模拟一整年（24回合）的事件生成
+        println!("\n========== 模拟一整年（24回合）的事件生成 ==========");
+        let mut total_events = 0;
+        let mut event_counts = std::collections::HashMap::new();
+
+        for turn in 1..=24 {
+            game.base.turn = turn;
+            let events = game.generate_events(&mut rng);
+
+            println!("\n回合 {}: 生成 {} 个事件", turn, events.len());
+            for (i, event) in events.iter().enumerate() {
+                println!("  事件 {}: ID={}, 名称={}", i + 1, event.id, event.name);
+                total_events += 1;
+                *event_counts.entry(event.name.clone()).or_insert(0) += 1;
+                // 更新事件计数（模拟 apply_event 的计数逻辑）
+                *game.base.events.entry(event.id).or_insert(0) += 1;
+            }
+
+            if events.is_empty() {
+                println!("  无事件触发");
+            }
+        }
+
+        // 输出统计信息
+        println!("\n========== 事件统计 ==========");
+        println!("总事件数: {}", total_events);
+        println!("平均每次回合事件数: {:.2}", total_events as f64 / 24.0);
+
+        println!("\n事件类型统计:");
+        let mut sorted_events: Vec<_> = event_counts.iter().collect();
+        sorted_events.sort_by(|a, b| b.1.cmp(a.1));
+        for (name, count) in sorted_events {
+            println!("  {}: {} 次", name, count);
+        }
+
+        // 验证事件生成逻辑
+        println!("\n========== 事件分布验证 ==========");
+        let event_dist = global!(GAMECONSTANTS).get_event_distribution();
+        println!("事件分布配置: {:?}", event_dist);
+        println!("说明: [支援卡事件, 马娘事件, 掉心情事件, 无事件]");
 
         Ok(())
     }
