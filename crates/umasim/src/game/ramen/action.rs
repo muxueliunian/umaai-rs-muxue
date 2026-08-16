@@ -88,6 +88,13 @@ impl Display for RamenAction {
             Operation::NormalOuting => "普通出行".to_string(),
             Operation::FriendOuting => "友人出行".to_string(),
             Operation::Clinic => "治病".to_string(),
+            Operation::RegionSelect(regions) => {
+                let ramen_data = RAMENDATA.get();
+                let names: Vec<&str> = regions.iter().filter_map(|&idx| {
+                    ramen_data.and_then(|d| d.ramen_region_effect.get(idx)).map(|r| r.name.as_str())
+                }).collect();
+                format!("地区[{}]", names.join(","))
+            }
         };
         write!(f, "{ramen_text}{op_text}")
     }
@@ -104,6 +111,7 @@ impl Operation {
             Operation::NormalOuting => Some(BaseAction::NormalOuting),
             Operation::FriendOuting => Some(BaseAction::FriendOuting),
             Operation::Clinic => Some(BaseAction::Clinic),
+            Operation::RegionSelect(_) => None,
         }
     }
 }
@@ -120,12 +128,28 @@ impl ActionEnum for RamenAction {
         // 阶段1：吃面处理（必须在训练前完成，因为分身会影响人头分布）
         if let Some(ramen_idx) = self.ramen {
             self.apply_ramen(game, ramen_idx, rng)?;
+            // 吃面后、训练前，打印当前回合信息
+            println!("---- 吃面后 ----");
+            let ramen_info = game.explain_ramen_info();
+            if !ramen_info.is_empty() {
+                info!("{}", ramen_info);
+            }
+            if let Ok(dist_info) = game.explain_distribution() {
+                info!("训练:\n{}", dist_info);
+            }
         }
 
         // 阶段2：执行基础操作
         match self.operation {
             Operation::Train(train) => {
                 self.do_train(game, train as usize, rng)?;
+            }
+            Operation::FriendOuting => {
+                self.do_friend_outing(game)?;
+            }
+            Operation::RegionSelect(regions) => {
+                game.ramen.selected_regions = regions;
+                info!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
             }
             op => {
                 if let Some(base_action) = op.to_base_action() {
@@ -315,6 +339,14 @@ impl RamenAction {
         // 处理羁绊和后续事件
         self.handle_post_train(game, train, params, rng)?;
 
+        // 拉面羁绊效果对卡组所有卡生效（如第一年吃面+10羁绊）
+        let ramen_friendship = params.ramen_effect.friendship;
+        if ramen_friendship > 0 {
+            for i in 0..6 {
+                game.add_friendship(i, ramen_friendship);
+            }
+        }
+
         // 诀窍槽填充
         self.fill_feeling_gauge(game, train, params)?;
 
@@ -365,7 +397,7 @@ impl RamenAction {
         params: &TrainParams,
         rng: &mut StdRng,
     ) -> Result<()> {
-        let friendship_bonus = if game.uma.flags.aijiao { 9 } else { 7 } + params.ramen_effect.friendship;
+        let friendship_bonus = if game.uma.flags.aijiao { 9 } else { 7 };
         let mut hint_persons = vec![];
         let mut friend_clicked = false;
 
@@ -424,26 +456,55 @@ impl RamenAction {
         Ok(())
     }
 
-    /// 处理友人点击事件
+    /// 处理友人点击事件（使用拉面杯友人事件）
     fn handle_friend_click(
         &self,
         game: &mut super::RamenGame,
         _rng: &mut StdRng,
     ) -> Result<()> {
+        let ramen_data = global!(RAMENDATA);
         match game.friend.out_state {
             FriendOutState::UnClicked => {
                 game.friend.out_state = FriendOutState::BeforeUnlock;
-                let mut event = global_events().friend_events["first"].clone();
+                let mut event = ramen_data.friend_events["first"].clone();
                 event.person_index = Some(game.friend.person_index as i32);
                 game.base.unresolved_events.push(event);
             }
             _ => {
-                let mut event = global_events().friend_events["click"].clone();
+                let mut event = ramen_data.friend_events["click"].clone();
                 event.person_index = Some(game.friend.person_index as i32);
                 game.base.unresolved_events.push(event);
             }
         }
         Ok(())
+    }
+
+    /// 友人出行（使用拉面杯友人出行事件 + 增加隐藏风味）
+    fn do_friend_outing(
+        &self,
+        game: &mut super::RamenGame,
+    ) -> Result<()> {
+        let ramen_data = global!(RAMENDATA);
+        let mut which = 0;
+        while which < 5 && game.friend.out_used[which] {
+            which += 1;
+        }
+        if which < 5 {
+            info!(">> 友人出行 #{}", which + 1);
+            let key = format!("outing{}", which + 1);
+            let mut event = ramen_data.friend_events[&key].clone();
+            event.person_index = Some(game.friend.person_index as i32);
+            game.friend.out_used[which] = true;
+            game.base.unresolved_events.push(event);
+
+            // 友人出行后获得隐藏风味（新友人固定2个）
+            let special = 2;
+            game.ramen.special_feeling = (game.ramen.special_feeling + special).min(4);
+            info!(">> 隐藏风味 +{} (={})", special, game.ramen.special_feeling);
+            Ok(())
+        } else {
+            Err(anyhow!("友人出行越界: {which}"))
+        }
     }
 
     /// 填充诀窍槽

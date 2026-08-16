@@ -27,10 +27,7 @@ impl BasePerson {
     pub fn short_name(&self) -> String {
         let gamedata = global!(GAMEDATA);
         match self.person_type {
-            PersonType::Npc => {
-                let short_chara_name: String = gamedata.get_chara_name(self.chara_id).chars().take(2).collect();
-                format!("[NPC]{short_chara_name}")
-            }
+            PersonType::Npc => "[NPC]".to_string(),
             PersonType::Yayoi => "理事长".to_string(),
             PersonType::Reporter => "记者".to_string(),
             _ => {
@@ -46,7 +43,7 @@ impl BasePerson {
 
     pub fn explain(&self) -> String {
         let mut ret = self.short_name();
-        if self.friendship > 0 && self.friendship < 100 {
+        if self.person_type != PersonType::Npc && self.friendship > 0 && self.friendship < 100 {
             ret = format!("{}{}", ret, self.friendship);
         }
         if self.is_hint {

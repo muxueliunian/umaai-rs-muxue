@@ -25,10 +25,11 @@ pub fn calc_gauge_base_distribution(selected_regions: &[usize; 3]) -> [i32; 3] {
     let ramen_data = global!(RAMENDATA);
     let base_sum = 10;
 
-    // 累加三个配方的各类型消耗
+    // 累加三个配方的各类型消耗（年3地区复用年1配方，取模映射）
     let mut recipe_sum = [0i32; 3];
     for &region_idx in selected_regions {
-        let feeling = &ramen_data.region_feeling[region_idx];
+        let feeling_idx = region_idx % ramen_data.region_feeling.len();
+        let feeling = &ramen_data.region_feeling[feeling_idx];
         for j in 0..3 {
             recipe_sum[j] += feeling[j];
         }
@@ -174,10 +175,9 @@ fn calc_net_recipe(recipe: &[i32; 3], special_targets: &[i32; 3]) -> [i32; 3] {
 /// - 配方总消耗不等于 `RAMEN_COST`
 pub fn get_recipe(recipe_idx: usize) -> Result<&'static [i32; 3]> {
     let ramen_data = global!(RAMENDATA);
-    let recipe = ramen_data
-        .region_feeling
-        .get(recipe_idx)
-        .ok_or_else(|| anyhow::anyhow!("recipe_idx 越界: {recipe_idx}"))?;
+    // 年3地区(10-19)复用年1配方(0-9)，取模映射
+    let feeling_idx = recipe_idx % ramen_data.region_feeling.len();
+    let recipe = &ramen_data.region_feeling[feeling_idx];
     if recipe.iter().sum::<i32>() != RAMEN_COST {
         anyhow::bail!("配方总消耗不为 {RAMEN_COST}: idx={recipe_idx}, recipe={recipe:?}");
     }
@@ -339,6 +339,26 @@ pub fn get_region_range(year_idx: usize) -> Result<Vec<usize>> {
         .get(year_idx)
         .ok_or_else(|| anyhow::anyhow!("year_idx 越界: {year_idx}"))?;
     Ok((start..=end).collect())
+}
+
+/// 生成指定年份的所有3地区组合（不考虑顺序）
+///
+/// 返回所有 C(n, 3) 的组合，每个组合为 `[usize; 3]`，已排序。
+pub fn get_region_combinations(year_idx: usize) -> Result<Vec<[usize; 3]>> {
+    let range = get_region_range(year_idx)?;
+    let n = range.len();
+    if n < 3 {
+        anyhow::bail!("可选地区不足 3 个: year_idx={year_idx}, range={range:?}");
+    }
+    let mut combos = vec![];
+    for i in 0..n - 2 {
+        for j in i + 1..n - 1 {
+            for k in j + 1..n {
+                combos.push([range[i], range[j], range[k]]);
+            }
+        }
+    }
+    Ok(combos)
 }
 
 /// 验证地区选择是否合法。
@@ -575,9 +595,9 @@ mod tests {
         state.special_feeling = 0;
         println!("special=0, 替换A: can_make={}", can_make_ramen(&state, recipe, &[1, 0, 0]));
 
-        // get_recipe 测试
+        // get_recipe 测试（年3地区通过取模映射到年1配方）
         assert!(get_recipe(0).is_ok());
-        assert!(get_recipe(999).is_err());
+        assert!(get_recipe(15).is_ok()); // 年3地区，映射到 region 5
         println!("get_recipe 测试通过");
 
         Ok(())

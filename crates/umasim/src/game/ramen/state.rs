@@ -40,6 +40,8 @@ pub struct RamenState {
     pub scenario_pt: i32,
     /// RMJ 结算结果（第几次结算的成功/失败状态）
     pub rmj_results: Vec<bool>,
+    /// 训练等级剧本加成（RMJ成功时+1，上限5）
+    pub train_level_bonus: i32,
 
     // ========== 超级拉面 ==========
     /// 超级拉面选择（选的是第几个训练限制选项，回合 >= 72 时自动生效）
@@ -177,7 +179,7 @@ impl RamenGame {
 
     /// 添加友人卡和NPC（第2回合开始）
     pub fn add_friend_and_npcs(&mut self) -> Result<()> {
-        // 添加友人卡（card_type >= 5）
+        // 添加友人卡（card_type >= 5），并更新 friend.person_index
         let friend_persons: Vec<BasePerson> = self
             .deck
             .iter()
@@ -185,7 +187,9 @@ impl RamenGame {
             .map(|card| BasePerson::try_from(card))
             .collect::<Result<Vec<_>>>()?;
         for p in friend_persons {
+            let idx = self.persons.len();
             self.add_person(p);
+            self.friend.person_index = idx;
         }
         // 添加5个NPC
         for &npc_id in NPC_CHARA_IDS {
@@ -213,9 +217,9 @@ impl RamenGame {
         self.persons.push(person);
     }
 
-    /// 添加羁绊
+    /// 添加羁绊（NPC不增加羁绊）
     pub fn add_friendship(&mut self, person_index: usize, value: i32) {
-        if person_index < self.persons.len() {
+        if person_index < self.persons.len() && self.persons[person_index].person_type != PersonType::Npc {
             let old_value = self.persons[person_index].friendship;
             let new_value = (self.persons[person_index].friendship + value).min(100);
             self.persons[person_index].friendship = new_value;

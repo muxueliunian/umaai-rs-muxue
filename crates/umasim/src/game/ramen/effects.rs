@@ -40,7 +40,7 @@ pub struct RamenTrainingEffect {
 /// 根据当前剧本PT查找对应的 `ramen_pt_effect` 档位
 ///
 /// 从高到低查找第一个 `pt_min <= scenario_pt` 的档位。
-fn find_pt_effect_tier(scenario_pt: i32) -> usize {
+pub fn find_pt_effect_tier(scenario_pt: i32) -> usize {
     let ramen_data = global!(RAMENDATA);
     let mut tier = 0;
     for (i, pe) in ramen_data.ramen_pt_effect.iter().enumerate() {

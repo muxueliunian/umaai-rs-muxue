@@ -50,18 +50,26 @@
 - `RamenStage`：回合阶段枚举（Begin/Distribute/Train/AfterTrain/NextTurn/RegionSelect/SuperRamenSelect/Settlement）
 - `FeelingType`：诀窍类型（A/B/C）
 - `TrainingType`：训练类型（Speed/Stamina/Power/Guts/Wisdom）
-- `Operation`：基础操作（Train/Race/Rest/NormalOuting/FriendOuting/Clinic）
+- `Operation`：基础操作（Train/Race/Rest/NormalOuting/FriendOuting/Clinic/RegionSelect([usize; 3])）
 
 ### 核心类型（state.rs）
 - `RamenGame`: 拉面杯游戏主状态，通过Deref暴露BaseGame
 - `RamenState`: 拉面杯专用状态（诀窍、隐藏风味、剧本PT等）
+  - `train_level_bonus`: 训练等级剧本加成字段
 - `RamenEffect`: 效果合并（基础+地区+超级拉面+PT常驻）
 - 辅助方法：`add_friend_and_npcs()`、`add_reporter()`、`add_person()`
+- `init_feeling_stocks()`: 诀窍初始化方法
+- `add_friendship()`: NPC不增加羁绊
 
 ### Game trait 实现（game.rs）
 - 阶段流转：`RamenStage::next()` 负责回合内，`Game::next()` 负责跨阶段
 - `init_persons()`：开局仅加入非友人卡 + 理事长
-- `run_stage()`：分发到各阶段处理函数（run_begin/run_distribute/run_train/run_after_train 等）
+- `run_stage()`：分发到各阶段处理函数（run_begin/run_distribute/run_train/run_after_train 等，RegionSelect 已移入 run_begin 处理）
+- `explain_ramen_info()`：格式化拉面杯剧本信息
+- `init_feeling_stocks()`：诀窍值初始化/重置
+- `run_region_select()`：年度地区选择
+- `distribute_hint()` override：应用剧本Hint率加成
+- `calc_hint_bonus_pct()`：计算剧本Hint加成
 - `list_actions()`：生成所有吃面/不吃面 × 操作的组合动作
 - `generate_events()`：复用 BasicGame 随机事件
 - 动态人头管理：`manage_persons_on_turn_start()`
@@ -71,13 +79,15 @@
 - `ActionEnum` 实现：吃面与训练严格分阶段执行
 - `apply_ramen()`：吃面处理（消耗诀窍、获得PT、分身分配）
 - `do_train()`：训练执行（拆分为多个辅助函数）
+- `do_friend_outing`：友人出行（使用拉面杯事件 + 隐藏风味）
+- RegionSelect动作处理
 - `TrainParams`：训练参数缓存结构
 
 ### 规则函数（rules.rs）
 - 诀窍系统：add_gauge、add_feeling、calc_gauge_base_distribution
 - 做面/吃面：can_make_ramen、consume_for_ramen、calc_ramen_pt_gain
 - RMJ结算：check_rmj（返回RmjResult枚举）
-- 地区选择：get_region_range、validate_region_selection
+- 地区选择：get_region_range、validate_region_selection、get_region_combinations（生成所有3地区组合）
 - 分身规则：get_region_clone_trains、get_super_ramen_clone_train_options
 - 隐藏风味：get_turn_special_feeling
 
@@ -88,7 +98,7 @@
 
 ### 事件处理（events.rs）
 - `FriendEventState`: 友人事件状态管理
-- 训练角标分配：assign_train_feeling_type
+- 训练角标分配：assign_train_feeling_type（每种诀窍至少出现1次）
 
 ### 策略（policy.rs）
 - `fixed_region_selection`: 地区选择策略（固定顺序）

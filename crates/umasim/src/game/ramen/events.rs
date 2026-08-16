@@ -6,6 +6,7 @@
 
 use rand::rngs::StdRng;
 use rand::Rng;
+use rand::seq::SliceRandom;
 use serde::{Deserialize, Serialize};
 
 use crate::utils::Array5;
@@ -106,11 +107,22 @@ pub fn get_turn_special_feeling(turn: i32) -> i32 {
 ///
 /// 每回合每个训练随机分配一个诀窍类型角标，该角标决定训练
 /// 额外加成作用于哪个诀窍槽。
+/// 每种诀窍类型至少出现1次（前3个位置打乱保证覆盖，后2个随机）。
 ///
 /// # 返回值
 /// `Array5`（`[i32; 5]`），分别对应速度/耐力/力量/根性/智力训练的诀窍类型角标（0=A, 1=B, 2=C）。
 pub fn assign_train_feeling_type(rng: &mut StdRng) -> Array5 {
-    [(); 5].map(|_| rng.random_range(0..3))
+    let mut result = [0i32; 5];
+    // 前3个位置保证每种类型各出现1次
+    let mut base = [0, 1, 2];
+    base.shuffle(rng);
+    result[0] = base[0];
+    result[1] = base[1];
+    result[2] = base[2];
+    // 后2个位置随机
+    result[3] = rng.random_range(0..3);
+    result[4] = rng.random_range(0..3);
+    result
 }
 
 // ========== 事件 ID 常量 ==========

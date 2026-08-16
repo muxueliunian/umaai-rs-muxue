@@ -112,4 +112,6 @@ pub enum Operation {
     FriendOuting,
     /// 治病
     Clinic,
+    /// 地区选择（选择3个地区）
+    RegionSelect([usize; 3]),
 }
