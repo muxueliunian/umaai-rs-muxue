@@ -51,6 +51,67 @@ pub struct RegionEffect {
     pub at_trains: Vec<i32>
 }
 
+/// 超级拉面基础效果
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FinalsBaseEffect {
+    /// 体力恢复
+    pub vital: i32,
+    /// 干劲提升
+    pub motivation: i32,
+    /// 赛后加成
+    pub saihou: i32,
+    /// 友情加成
+    pub youqing: i32,
+    /// hint等级
+    pub hint_level: i32,
+}
+
+/// 超级拉面额外效果（大成功时）
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FinalsExtraEffect {
+    /// PT加成
+    pub pt_bonus: i32,
+    /// PT上限增加
+    pub pt_limit: i32,
+    /// 分身数量
+    pub clone_count: i32,
+}
+
+/// 超级拉面效果
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct FinalsEffect {
+    /// 基础效果
+    pub base: FinalsBaseEffect,
+    /// 额外效果（大成功时）
+    pub extra: FinalsExtraEffect,
+    /// 训练限制选项（三个选项对应的训练位置）
+    pub training_limit_options: Vec<Vec<i32>>,
+}
+
+/// RMJ成功/失败效果
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct RmjEffect {
+    /// 友情加成
+    pub youqing: i32,
+    /// 得意率加成
+    pub deyilv: i32,
+    /// hint出现率加成
+    pub hint: i32,
+}
+
+/// 剧本PT常驻加成
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PtEffect {
+    /// 最低PT要求
+    pub pt_min: i32,
+    /// 训练加成
+    pub xunlian: i32,
+    /// 得意率加成
+    pub deyilv: i32,
+    /// hint出现率加成
+    pub hint: i32,
+}
+
 /// 拉面杯剧本数据
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RamenScenarioData {
@@ -58,13 +119,43 @@ pub struct RamenScenarioData {
     pub scenario_id: i32,
     /// 链接角色ID
     pub link_chara_id: Vec<i32>,
+    /// RMJ结算阈值（按年份）
+    #[serde(default)]
+    pub ramen_success_pt: Vec<i32>,
+    /// 每次吃面基础PT增量（按年份）
+    #[serde(default)]
+    pub gain_pt_base: Vec<i32>,
+    /// 随吃面次数叠加的PT修正值（按年份）
+    #[serde(default)]
+    pub gain_pt_delta: Vec<i32>,
+    /// 诀窍槽基础值总和（无友人/旧友人/新友人）
+    #[serde(default)]
+    pub feeling_gauge_gain_base: Vec<i32>,
+    /// 支援卡隐藏风味
+    #[serde(default)]
+    pub card_special_feeling: HashMap<String, i32>,
     /// 训练基础值表格
     pub training_basic_value: TrainingBasicTable,
     /// 拉面基础效果（按年份）
     pub ramen_basic_effect: Vec<RamenBasicEffect>,
+    /// 超级拉面效果
+    #[serde(default)]
+    pub finals_effect: FinalsEffect,
+    /// RMJ成功效果（按年份）
+    #[serde(default)]
+    pub ramen_success_effect: Vec<RmjEffect>,
+    /// RMJ失败效果（按年份）
+    #[serde(default)]
+    pub ramen_fail_effect: Vec<RmjEffect>,
+    /// 剧本PT常驻加成
+    #[serde(default)]
+    pub ramen_pt_effect: Vec<PtEffect>,
     /// 地区诀窍配方
     #[serde(default)]
     pub region_feeling: Vec<[i32; 3]>,
+    /// 地区词条加成档位
+    #[serde(default)]
+    pub region_bonus: Vec<i32>,
     /// 地区拉面效果
     #[serde(default)]
     pub ramen_region_effect: Vec<RegionEffect>,

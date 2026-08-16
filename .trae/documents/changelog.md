@@ -4,6 +4,30 @@
 
 ## 2026-08-16
 
+### 拉面杯模块 1b 核心游戏机制 + 1c 动作预览和手写策略
+
+**1b - 核心游戏机制：**
+- 补充 RamenScenarioData 数据结构（FinalsEffect、RmjEffect、PtEffect 等）
+- 实现效果计算模块（effects.rs）：calc_ramen_training_effect、apply_ramen_training_value
+- 实现做面/吃面规则：支持手动指定隐藏风味替换目标（special_targets）
+- 实现 RMJ 结算：新增 RmjResult 枚举（Fail/Success/GreatSuccess）
+- 实现地区选择规则：get_region_range、validate_region_selection
+- 实现分身规则：get_region_clone_trains、get_super_ramen_clone_train_options
+- 实现隐藏风味分配：get_turn_special_feeling
+- 实现友人事件状态管理（FriendEventState）
+- 实现训练角标分配（assign_train_feeling_type）
+- 修正隐藏风味回合表：2,24,36,48,60=>2; 37,38,39,61,62,63=>1
+
+**1c - 动作预览和手写策略：**
+- 实现地区选择策略（fixed_region_selection）
+- 实现超级拉面选择策略（fixed_super_ramen_selection）
+- 实现动作生成函数（list_ramen_choices、list_operations、list_all_actions）
+- 动作采用分离决策模型：吃面选择 × 基础操作
+- 清理 mod.rs 无用依赖
+
+**开发计划更新：**
+- 标记 1b 和 1c 步骤为已完成
+
 ### 拉面杯模块 1a 核心类型定义 + 1b-1 诀窍系统
 - 建立 `game/ramen/` 模块：mod.rs、state.rs、action.rs、rules.rs、effects.rs、events.rs、policy.rs
 - 定义核心类型：RamenGame、RamenState、RamenEffect、RamenAction、RamenStage、FeelingType、TrainingType、Operation

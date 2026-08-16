@@ -107,5 +107,5 @@ pub enum Operation {
     /// 友人出行
     FriendOuting,
     /// 治病
-    Clinic
+    Clinic,
 }

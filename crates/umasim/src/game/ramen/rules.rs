@@ -3,6 +3,8 @@
 //! 诀窍系统、做面/吃面、RMJ 结算等核心机制的纯函数实现。
 //! 函数以 `RamenState` 或相关数据为参数，不直接修改游戏状态的其他部分。
 
+use anyhow::Result;
+
 use super::{FeelingType, RamenState};
 use crate::{gamedata::ramen::RAMENDATA, global};
 
@@ -123,6 +125,288 @@ pub fn add_feeling(state: &mut RamenState, feeling_type: FeelingType, count: i32
         }
     }
 }
+
+// ========== 做面/吃面 ==========
+
+/// 校验隐藏风味替换目标的合法性。
+///
+/// - `recipe`: 配方消耗 [A, B, C]
+/// - `special_targets`: 每种类型用几个隐藏风味替换 [A, B, C]
+///
+/// 约束：
+/// - 每个 `special_targets[i] >= 0` 且 `<= recipe[i]`
+/// - `sum(special_targets) <= 2`（单次做面最多用 2 个隐藏风味）
+fn validate_special_targets(recipe: &[i32; 3], special_targets: &[i32; 3]) -> Result<()> {
+    let total: i32 = special_targets.iter().sum();
+    if total > 2 {
+        anyhow::bail!("隐藏风味使用总数不能超过 2，实际: {total}");
+    }
+    for i in 0..3 {
+        if special_targets[i] < 0 {
+            anyhow::bail!("special_targets[{i}] 不能为负: {}", special_targets[i]);
+        }
+        if special_targets[i] > recipe[i] {
+            anyhow::bail!(
+                "special_targets[{i}] 超过配方消耗: {} > {}",
+                special_targets[i],
+                recipe[i]
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 计算隐藏风味替换后的实际诀窍消耗。
+///
+/// 返回 `[A, B, C]` 实际需要消耗的诀窍数量。
+fn calc_net_recipe(recipe: &[i32; 3], special_targets: &[i32; 3]) -> [i32; 3] {
+    [
+        recipe[0] - special_targets[0],
+        recipe[1] - special_targets[1],
+        recipe[2] - special_targets[2],
+    ]
+}
+
+/// 获取指定地区的配方。
+///
+/// # 错误
+/// - `recipe_idx` 超出范围
+/// - 配方总消耗不等于 `RAMEN_COST`
+pub fn get_recipe(recipe_idx: usize) -> Result<&'static [i32; 3]> {
+    let ramen_data = global!(RAMENDATA);
+    let recipe = ramen_data
+        .region_feeling
+        .get(recipe_idx)
+        .ok_or_else(|| anyhow::anyhow!("recipe_idx 越界: {recipe_idx}"))?;
+    if recipe.iter().sum::<i32>() != RAMEN_COST {
+        anyhow::bail!("配方总消耗不为 {RAMEN_COST}: idx={recipe_idx}, recipe={recipe:?}");
+    }
+    Ok(recipe)
+}
+
+/// 检查是否有足够的诀窍和隐藏风味做面。
+///
+/// 假设 `recipe` 和 `special_targets` 已经通过合法性校验。
+/// 只检查当前资源是否足够。
+///
+/// - `recipe`: 配方消耗 [A, B, C]
+/// - `special_targets`: 每种类型用几个隐藏风味替换 [A, B, C]
+pub fn can_make_ramen(state: &RamenState, recipe: &[i32; 3], special_targets: &[i32; 3]) -> bool {
+    let total_special: i32 = special_targets.iter().sum();
+    if total_special > state.special_feeling {
+        return false;
+    }
+    let net = calc_net_recipe(recipe, special_targets);
+    (0..3).all(|i| state.feeling_stock[i] >= net[i])
+}
+
+/// 消耗诀窍做面，返回实际消耗的隐藏风味数量。
+///
+/// - `recipe_idx`: `region_feeling` 数组下标
+/// - `special_targets`: 每种类型用几个隐藏风味替换 [A, B, C]，总和 <= 2
+///
+/// # 错误
+/// - recipe_idx 无效或配方非法
+/// - special_targets 不合法（负值、超过配方消耗、总和 > 2）
+/// - 隐藏风味不足
+/// - 诀窍库存不足
+pub fn consume_for_ramen(
+    state: &mut RamenState,
+    recipe_idx: usize,
+    special_targets: &[i32; 3],
+) -> Result<i32> {
+    let recipe = get_recipe(recipe_idx)?;
+    validate_special_targets(recipe, special_targets)?;
+    let total_special: i32 = special_targets.iter().sum();
+    if total_special > state.special_feeling {
+        anyhow::bail!(
+            "隐藏风味不足: 需要 {total_special}，实际 {}",
+            state.special_feeling
+        );
+    }
+    let net = calc_net_recipe(recipe, special_targets);
+    for i in 0..3 {
+        if state.feeling_stock[i] < net[i] {
+            anyhow::bail!(
+                "诀窍不足: 类型{i} 需要 {}，实际 {}",
+                net[i],
+                state.feeling_stock[i]
+            );
+        }
+    }
+    // 消耗诀窍
+    for i in 0..3 {
+        state.feeling_stock[i] -= net[i];
+    }
+    // 同步更新 feeling_queue
+    let mut remaining = net;
+    state.feeling_queue.retain(|&ft| {
+        let idx = ft as usize;
+        if remaining[idx] > 0 {
+            remaining[idx] -= 1;
+            false
+        } else {
+            true
+        }
+    });
+    state.special_feeling -= total_special;
+    Ok(total_special)
+}
+
+/// 计算吃面获得的剧本 PT。
+///
+/// - `year_idx`: 年份索引（0-2）
+/// - `eat_count`: 当年内已吃面次数（第一面 eat_count=0）
+///
+/// 公式：`gain_pt_base[year] + gain_pt_delta[year] * min(eat_count, 5)`
+///
+/// # 错误
+/// `year_idx` 超出范围时返回错误。
+pub fn calc_ramen_pt_gain(year_idx: usize, eat_count: i32) -> Result<i32> {
+    let ramen_data = global!(RAMENDATA);
+    let base = ramen_data
+        .gain_pt_base
+        .get(year_idx)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("year_idx 越界: {year_idx}"))?;
+    let delta = ramen_data
+        .gain_pt_delta
+        .get(year_idx)
+        .copied()
+        .ok_or_else(|| anyhow::anyhow!("year_idx 越界: {year_idx}"))?;
+    Ok(base + delta * eat_count.min(5))
+}
+
+// ========== RMJ 结算 ==========
+
+/// RMJ 结算结果
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RmjResult {
+    /// 失败
+    Fail,
+    /// 成功
+    Success,
+    /// 大成功（第三年 pt >= 5000）
+    GreatSuccess,
+}
+
+impl RmjResult {
+    /// 是否成功（包括大成功）
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::Success | Self::GreatSuccess)
+    }
+
+    /// 是否大成功
+    pub fn is_great_success(&self) -> bool {
+        matches!(self, Self::GreatSuccess)
+    }
+}
+
+/// 执行 RMJ 结算，返回结算结果。
+///
+/// 比较当前剧本 PT 与阈值 `ramen_success_pt[year_idx]`。
+/// 第三年（year_idx=2）PT >= 5000 为大成功。
+/// 结果存入 `state.rmj_results`。
+pub fn check_rmj(state: &mut RamenState, year_idx: usize) -> RmjResult {
+    let ramen_data = global!(RAMENDATA);
+    let threshold = ramen_data
+        .ramen_success_pt
+        .get(year_idx)
+        .copied()
+        .unwrap_or(i32::MAX);
+    let result = if state.scenario_pt < threshold {
+        RmjResult::Fail
+    } else if year_idx == 2 && state.scenario_pt >= 5000 {
+        RmjResult::GreatSuccess
+    } else {
+        RmjResult::Success
+    };
+    state.rmj_results.push(result.is_success());
+    result
+}
+
+// ========== 地区选择 ==========
+
+/// 各年份的地区 ID 范围 [start, end_inclusive]。
+const REGION_RANGES: [(usize, usize); 3] = [(0, 4), (5, 9), (10, 19)];
+
+/// 获取指定年份可选地区 ID 列表。
+///
+/// # 错误
+/// `year_idx` 超出范围（0-2）时返回错误。
+pub fn get_region_range(year_idx: usize) -> Result<Vec<usize>> {
+    let &(start, end) = REGION_RANGES
+        .get(year_idx)
+        .ok_or_else(|| anyhow::anyhow!("year_idx 越界: {year_idx}"))?;
+    Ok((start..=end).collect())
+}
+
+/// 验证地区选择是否合法。
+///
+/// 选择 3 个地区，必须在该年份范围内且互不重复。
+pub fn validate_region_selection(year_idx: usize, selections: &[usize; 3]) -> bool {
+    let Some(&(start, end)) = REGION_RANGES.get(year_idx) else {
+        return false;
+    };
+    selections.iter().all(|&id| id >= start && id <= end)
+        && selections[0] != selections[1]
+        && selections[0] != selections[2]
+        && selections[1] != selections[2]
+}
+
+// ========== 隐藏风味 ==========
+
+/// 获取指定回合开始时获得的隐藏风味数量（仅考虑新友人卡 id: 30305）。
+pub fn get_turn_special_feeling(turn: i32) -> i32 {
+    match turn {
+        2 | 24 | 36 | 48 | 60 => 2,
+        37 | 38 | 39 | 61 | 62 | 63 => 1,
+        _ => 0,
+    }
+}
+
+// ========== 地区词条加成 ==========
+
+/// 根据当年累计剧本 PT 计算地区词条加成档位数值。
+///
+/// 每 300 点 PT 提升一档，最高第 5 档（1500+ PT）。
+pub fn calc_region_bonus(scenario_pt: i32) -> i32 {
+    const BONUS_TABLE: [i32; 6] = [0, 3, 5, 7, 9, 10];
+    let tier = (scenario_pt / 300).min(5) as usize;
+    BONUS_TABLE[tier]
+}
+
+// ========== 分身系统 ==========
+
+/// 获取地区拉面分身的训练位置列表。
+///
+/// 返回 `at_trains` 字段的 clone。
+/// 地区分身条件（id >= 5 且 card_type_count >= 4）应在游戏逻辑中判定。
+///
+/// # 错误
+/// `region_id` 超出范围时返回错误。
+pub fn get_region_clone_trains(region_id: usize) -> Result<Vec<i32>> {
+    let ramen_data = global!(RAMENDATA);
+    let effect = ramen_data
+        .ramen_region_effect
+        .get(region_id)
+        .ok_or_else(|| anyhow::anyhow!("region_id 越界: {region_id}"))?;
+    Ok(effect.at_trains.clone())
+}
+
+/// 获取超级拉面分身的训练范围选项。
+///
+/// 返回 `training_limit_options` 的 clone。
+/// 超级拉面分身条件（card_type_count >= 4）应在游戏逻辑中判定。
+pub fn get_super_ramen_clone_train_options() -> Result<Vec<Vec<i32>>> {
+    let ramen_data = global!(RAMENDATA);
+    Ok(ramen_data.finals_effect.training_limit_options.clone())
+}
+
+/// NPC 相关常量
+///
+/// 5 个固定 NPC 的 chara_id（美妙/怒涛/内恰/成田路/金镇）。
+pub const NPC_CHARA_IDS: &[u32] = &[1022, 1058, 1060, 1077, 1120];
 
 // ========== 训练诀窍槽加成 ==========
 
@@ -258,5 +542,367 @@ mod tests {
         let (sc, npc) = (4, 5);
         let bonus = calc_train_feeling_bonus(sc, npc);
         println!("支援卡={sc} NPC={npc}: 1 + {sc} + {npc}/2 = 1 + {sc} + {} = {bonus}", npc / 2);
+    }
+
+    // ========== 做面/吃面测试 ==========
+
+    #[test]
+    fn test_can_make_ramen() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        // 获取配方
+        let recipe = get_recipe(0).expect("札幌配方应存在");
+        println!("札幌配方: {recipe:?}");
+
+        let mut state = RamenState::default();
+        state.feeling_stock = [5, 5, 5];
+        // 无隐藏风味，足够
+        println!("库存={:?}, special={}", state.feeling_stock, state.special_feeling);
+        println!("不使用隐藏风味: can_make={}", can_make_ramen(&state, recipe, &[0, 0, 0]));
+
+        // 库存不足的情况
+        state.feeling_stock = [1, 5, 5];
+        println!("\n库存={:?} => A不足", state.feeling_stock);
+        println!("can_make={}", can_make_ramen(&state, recipe, &[0, 0, 0]));
+
+        // 用隐藏风味弥补 A
+        state.special_feeling = 1;
+        println!("special=1, 替换A: can_make={}", can_make_ramen(&state, recipe, &[1, 0, 0]));
+        // 隐藏风味不够用
+        state.special_feeling = 0;
+        println!("special=0, 替换A: can_make={}", can_make_ramen(&state, recipe, &[1, 0, 0]));
+
+        // get_recipe 测试
+        assert!(get_recipe(0).is_ok());
+        assert!(get_recipe(999).is_err());
+        println!("get_recipe 测试通过");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_consume_for_ramen() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        let mut state = RamenState::default();
+        state.feeling_stock = [5, 5, 5];
+        state.feeling_queue = vec![
+            FeelingType::A, FeelingType::A, FeelingType::A, FeelingType::A, FeelingType::A,
+            FeelingType::B, FeelingType::B, FeelingType::B, FeelingType::B, FeelingType::B,
+            FeelingType::C, FeelingType::C, FeelingType::C, FeelingType::C, FeelingType::C,
+        ];
+        println!("初始: stock={:?}, queue_len={}", state.feeling_stock, state.feeling_queue.len());
+
+        // 札幌 [2,2,1], 不使用隐藏风味
+        let used = consume_for_ramen(&mut state, 0, &[0, 0, 0])?;
+        println!("消耗后: stock={:?}, queue_len={}, used_special={}", state.feeling_stock, state.feeling_queue.len(), used);
+
+        // 使用隐藏风味：替换 1A + 1B
+        state.special_feeling = 2;
+        let used = consume_for_ramen(&mut state, 0, &[1, 1, 0])?;
+        println!("再做一次(替换1A+1B): stock={:?}, special={}, used_special={}", state.feeling_stock, state.special_feeling, used);
+
+        // 验证手动选择替换：配方 [1,1,3] (东京=4)，替换 2C
+        state.feeling_stock = [5, 5, 5];
+        state.special_feeling = 2;
+        state.feeling_queue = vec![FeelingType::A; 5].into_iter().chain(vec![FeelingType::B; 5]).chain(vec![FeelingType::C; 5]).collect();
+        let used = consume_for_ramen(&mut state, 4, &[0, 0, 2])?;
+        println!("东京[1,1,3], 替换2C: stock={:?}, special={}, used_special={}", state.feeling_stock, state.special_feeling, used);
+        // 预期: A=5-1=4, B=5-1=4, C=5-1=4, special=2-2=0
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_consume_for_ramen_errors() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        let mut state = RamenState::default();
+        state.feeling_stock = [5, 5, 5];
+
+        // 无效 recipe_idx
+        let result = consume_for_ramen(&mut state, 999, &[0, 0, 0]);
+        println!("无效 recipe_idx: {result:?}");
+
+        // 超过配方消耗
+        let result = consume_for_ramen(&mut state, 0, &[3, 0, 0]);
+        println!("special_targets[0]=3 超过配方消耗: {result:?}");
+
+        // 隐藏风味不足
+        state.special_feeling = 0;
+        let result = consume_for_ramen(&mut state, 0, &[1, 0, 0]);
+        println!("隐藏风味不足: {result:?}");
+
+        // 负值
+        let result = consume_for_ramen(&mut state, 0, &[-1, 0, 0]);
+        println!("负值: {result:?}");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_calc_ramen_pt_gain() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        // gain_pt_base = [300, 400, 500], gain_pt_delta = [30, 40, 50]
+        let ramen_data = global!(RAMENDATA);
+        println!("gain_pt_base: {:?}", ramen_data.gain_pt_base);
+        println!("gain_pt_delta: {:?}", ramen_data.gain_pt_delta);
+
+        // 第1年第1面(eat_count=0): 300 + 30*0 = 300
+        let pt = calc_ramen_pt_gain(0, 0)?;
+        println!("第1年第1面: {pt}");
+
+        // 第1年第4面(eat_count=3): 300 + 30*3 = 390
+        let pt = calc_ramen_pt_gain(0, 3)?;
+        println!("第1年第4面: {pt}");
+
+        // 第1年第6面(eat_count=5, 已上限): 300 + 30*5 = 450
+        let pt = calc_ramen_pt_gain(0, 5)?;
+        println!("第1年第6面: {pt}");
+
+        // 第1年 eat_count=10 超过5, 按5算: 300 + 30*5 = 450
+        let pt = calc_ramen_pt_gain(0, 10)?;
+        println!("第1年 eat_count=10: {pt}");
+
+        // 第3年第1面: 500 + 50*0 = 500
+        let pt = calc_ramen_pt_gain(2, 0)?;
+        println!("第3年第1面: {pt}");
+
+        // year_idx 越界
+        let result = calc_ramen_pt_gain(3, 0);
+        println!("year_idx=3 越界: {result:?}");
+        assert!(result.is_err());
+
+        Ok(())
+    }
+
+    // ========== RMJ 结算测试 ==========
+
+    #[test]
+    fn test_check_rmj() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        let ramen_data = global!(RAMENDATA);
+        println!("ramen_success_pt: {:?}", ramen_data.ramen_success_pt);
+
+        // 第1年: 阈值1500
+        let mut state = RamenState::default();
+        state.scenario_pt = 1500;
+        let result = check_rmj(&mut state, 0);
+        println!("第1年 pt=1500: {result:?}");
+        assert!(result.is_success());
+        assert!(!result.is_great_success());
+
+        state.scenario_pt = 1499;
+        let result = check_rmj(&mut state, 0);
+        println!("第1年 pt=1499: {result:?}");
+        assert!(!result.is_success());
+
+        // 第3年: 阈值3500
+        state.scenario_pt = 3500;
+        let result = check_rmj(&mut state, 2);
+        println!("第3年 pt=3500: {result:?}");
+        assert!(result.is_success());
+        assert!(!result.is_great_success());
+
+        // 第3年: >=5000为大成功
+        state.scenario_pt = 5000;
+        let result = check_rmj(&mut state, 2);
+        println!("第3年 pt=5000 (大成功): {result:?}");
+        assert!(result.is_success());
+        assert!(result.is_great_success());
+
+        // 第3年: 4999 只是普通成功
+        state.scenario_pt = 4999;
+        let result = check_rmj(&mut state, 2);
+        println!("第3年 pt=4999: {result:?}");
+        assert!(result.is_success());
+        assert!(!result.is_great_success());
+
+        println!("rmj_results: {:?}", state.rmj_results);
+        Ok(())
+    }
+
+    // ========== 地区选择测试 ==========
+
+    #[test]
+    fn test_get_region_range() -> anyhow::Result<()> {
+        let range0 = get_region_range(0)?;
+        println!("第1年可选地区: {range0:?}");
+        assert_eq!(range0, vec![0, 1, 2, 3, 4]);
+
+        let range1 = get_region_range(1)?;
+        println!("第2年可选地区: {range1:?}");
+        assert_eq!(range1, vec![5, 6, 7, 8, 9]);
+
+        let range2 = get_region_range(2)?;
+        println!("第3年可选地区: {range2:?}");
+        assert_eq!(range2.len(), 10);
+        assert_eq!(range2[0], 10);
+        assert_eq!(range2[9], 19);
+
+        // year_idx 越界
+        assert!(get_region_range(3).is_err());
+        println!("year_idx 越界验证通过");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_validate_region_selection() {
+        // 合法选择
+        assert!(validate_region_selection(0, &[0, 2, 4]));
+        assert!(validate_region_selection(1, &[5, 7, 9]));
+        assert!(validate_region_selection(2, &[10, 15, 19]));
+        println!("合法选择验证通过");
+
+        // 超出范围
+        assert!(!validate_region_selection(0, &[0, 2, 5]));
+        assert!(!validate_region_selection(1, &[4, 7, 9]));
+        println!("超出范围验证通过");
+
+        // 重复选择
+        assert!(!validate_region_selection(0, &[0, 0, 4]));
+        assert!(!validate_region_selection(2, &[10, 15, 10]));
+        println!("重复选择验证通过");
+
+        // 无效年份
+        assert!(!validate_region_selection(3, &[0, 1, 2]));
+        println!("无效年份验证通过");
+    }
+
+    // ========== 隐藏风味测试 ==========
+
+    #[test]
+    fn test_get_turn_special_feeling() {
+        // 固定回合获得2个
+        for &turn in &[2, 24, 36, 48, 60] {
+            let amount = get_turn_special_feeling(turn);
+            println!("回合{turn}: 隐藏风味={amount}");
+            assert_eq!(amount, 2);
+        }
+        // 固定回合获得1个
+        for &turn in &[37, 38, 39, 61, 62, 63] {
+            let amount = get_turn_special_feeling(turn);
+            println!("回合{turn}: 隐藏风味={amount}");
+            assert_eq!(amount, 1);
+        }
+        // 其他回合为0
+        for &turn in &[0, 1, 10, 23, 35, 50, 70] {
+            let amount = get_turn_special_feeling(turn);
+            println!("回合{turn}: 隐藏风味={amount}");
+            assert_eq!(amount, 0);
+        }
+    }
+
+    // ========== 地区词条加成测试 ==========
+
+    #[test]
+    fn test_calc_region_bonus() {
+        // 0-299: 档0, 加成0
+        println!("PT=0: bonus={}", calc_region_bonus(0));
+        assert_eq!(calc_region_bonus(0), 0);
+        println!("PT=299: bonus={}", calc_region_bonus(299));
+        assert_eq!(calc_region_bonus(299), 0);
+
+        // 300-599: 档1, 加成3
+        println!("PT=300: bonus={}", calc_region_bonus(300));
+        assert_eq!(calc_region_bonus(300), 3);
+
+        // 600-899: 档2, 加成5
+        println!("PT=600: bonus={}", calc_region_bonus(600));
+        assert_eq!(calc_region_bonus(600), 5);
+
+        // 900-1199: 档3, 加成7
+        println!("PT=1000: bonus={}", calc_region_bonus(1000));
+        assert_eq!(calc_region_bonus(1000), 7);
+
+        // 1200-1499: 档4, 加成9
+        println!("PT=1200: bonus={}", calc_region_bonus(1200));
+        assert_eq!(calc_region_bonus(1200), 9);
+
+        // 1500+: 档5, 加成10
+        println!("PT=1500: bonus={}", calc_region_bonus(1500));
+        assert_eq!(calc_region_bonus(1500), 10);
+        println!("PT=5000: bonus={}", calc_region_bonus(5000));
+        assert_eq!(calc_region_bonus(5000), 10);
+    }
+
+    // ========== 分身系统测试 ==========
+
+    #[test]
+    fn test_get_region_clone_trains() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        // 地区 5 (中山): at_trains = [0,1,2,3,4]
+        let trains = get_region_clone_trains(5)?;
+        println!("地区5(中山) 分身位置: {trains:?}");
+        assert_eq!(trains, vec![0, 1, 2, 3, 4]);
+
+        // 地区 6 (中京): at_trains = [2,3]
+        let trains = get_region_clone_trains(6)?;
+        println!("地区6(中京) 分身位置: {trains:?}");
+        assert_eq!(trains, vec![2, 3]);
+
+        // id < 5 的地区 at_trains 只有1个位置
+        let trains = get_region_clone_trains(0)?;
+        println!("地区0(札幌) 分身位置: {trains:?}");
+        assert_eq!(trains, vec![0]);
+
+        // 无效 id 返回错误
+        assert!(get_region_clone_trains(999).is_err());
+        println!("id=999 越界验证通过");
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_super_ramen_clone_train_options() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        let options = get_super_ramen_clone_train_options()?;
+        println!("超级拉面训练选项: {options:?}");
+        assert_eq!(options.len(), 3);
+        // 选项1: 速/耐/根/智 [0,1,3,4]
+        assert_eq!(options[0], vec![0, 1, 3, 4]);
+        // 选项2: 速/耐/力/智 [0,1,2,4]
+        assert_eq!(options[1], vec![0, 1, 2, 4]);
+        // 选项3: 速/力/根/智 [0,2,3,4]
+        assert_eq!(options[2], vec![0, 2, 3, 4]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_npc_chara_ids() {
+        println!("NPC chara_ids: {:?}", NPC_CHARA_IDS);
+        assert_eq!(NPC_CHARA_IDS.len(), 5);
+        assert_eq!(NPC_CHARA_IDS[0], 1022); // 美妙
+        assert_eq!(NPC_CHARA_IDS[1], 1058); // 怒涛
+        assert_eq!(NPC_CHARA_IDS[2], 1060); // 内恰
+        assert_eq!(NPC_CHARA_IDS[3], 1077); // 成田路
+        assert_eq!(NPC_CHARA_IDS[4], 1120); // 金镇
     }
 }
