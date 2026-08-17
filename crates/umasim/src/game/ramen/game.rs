@@ -390,22 +390,40 @@ impl Game for RamenGame {
         for train in 0..5 {
             let buffs = self.calc_training_buff(train)?;
             let fail_rate = self.calc_training_failure_rate(&buffs, train);
-            let value = self.calc_training_value(&buffs, train)?;
+            let base_value = self.calc_training_value(&buffs, train)?;
             let is_shining = self.shining_count(train) > 0;
             let header = &headers[train];
 
             if !show_ramen {
                 // 剧本机制未开启 或 URA回合：只显示基础训练数值和失败率
                 if fail_rate > 0.0 {
-                    lines.push(format!("{} {} 失败率: {}%", header, value.explain(), fail_rate));
+                    lines.push(format!("{} {} 失败率: {}%", header, base_value.explain(), fail_rate));
                 } else {
-                    lines.push(format!("{} {}", header, value.explain()));
+                    lines.push(format!("{} {}", header, base_value.explain()));
                 }
             } else {
-                // 普通回合：显示训练数值 + 失败率 + 诀窍槽明细
+                // 普通回合：显示训练数值（包含拉面效果）+ 失败率 + 诀窍槽明细
                 let ramen_effect = calc_ramen_training_effect(self, train, is_shining);
                 let effective_fail = (fail_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0)
                     .min(100.0).max(0.0);
+
+                // 应用拉面效果到训练数值
+                let (status_val, pt_val) = super::effects::apply_ramen_training_value(
+                    base_value.status_pt[train],
+                    &ramen_effect,
+                    train,
+                );
+                let value = ActionValue {
+                    status_pt: {
+                        let mut arr = [0; 6];
+                        arr[train] = status_val;
+                        arr[5] = pt_val;
+                        arr
+                    },
+                    vital: base_value.vital,
+                    motivation: base_value.motivation,
+                    ..Default::default()
+                };
 
                 // 诀窍槽加成明细
                 let support_count = dist[train].iter()
@@ -486,7 +504,7 @@ impl RamenGame {
 
     /// Begin 阶段：动态人头管理、隐藏风味、事件处理
     fn run_begin<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
-        println!("-----------------------------------------");
+        info!("-----------------------------------------");
         info!("{}", self.explain()?);
         // 显示拉面杯信息（剧本机制未开启或URA回合时简化显示）
         let ramen_info = self.explain_ramen_info();
@@ -599,7 +617,7 @@ impl RamenGame {
         let ramen_data = global!(RAMENDATA);
         let year = year_idx + 1;
         let combos = super::rules::get_region_combinations(year_idx)?;
-        println!("==== 第{}年 地区选择 ({}种组合) ====", year, combos.len());
+        info!("==== 第{}年 地区选择 ({}种组合) ====", year, combos.len());
         for (i, combo) in combos.iter().enumerate() {
             let names: Vec<&str> = combo.iter().filter_map(|&idx| {
                 ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str())
@@ -839,9 +857,18 @@ mod tests {
     use crate::{
         gamedata::init_global,
         trainer::RandomTrainer,
-        utils::{get_workspace_root, init_logger},
+        utils::{get_workspace_root, init_logger, disable_log, enable_log},
     };
     use rand::SeedableRng;
+
+    // 测试用公共参数
+    // [速]杏目, [智]青春永驻, [耐]名将怒涛, [速]洛林军歌, [速]里见光钻, [友]骏川手纲
+    const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+    const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
+        blue_count: [15, 3, 0, 0, 0],
+        extra_count: [0, 30, 0, 0, 30, 30],
+    };
+    const TEST_UMA_ID: u32 = 102601;
 
     #[test]
     fn test_ramen_game_newgame() -> Result<()> {
@@ -850,15 +877,7 @@ mod tests {
         init_logger("test", "info")?;
         init_global()?;
 
-        // [速]杏目, [智]青春永驻, [耐]名将怒涛, [速]洛林军歌, [速]里见光钻, [友]骏川手纲
-        let game = RamenGame::newgame(
-            101901,
-            &[302424, 302894, 303044, 302924, 303024, 303054],
-            crate::game::InheritInfo {
-                blue_count: [15, 3, 0, 0, 0],
-                extra_count: [0, 30, 0, 0, 30, 30],
-            },
-        )?;
+        let game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
         println!("开局人头数: {}", game.persons.len());
         println!("{}", game.explain()?);
 
@@ -886,15 +905,7 @@ mod tests {
         init_logger("test", "info")?;
         init_global()?;
 
-        // [速]杏目, [智]青春永驻, [耐]名将怒涛, [速]洛林军歌, [速]里见光钻, [友]骏川手纲
-        let mut game = RamenGame::newgame(
-            102601,
-            &[302424, 302894, 303044, 302924, 303024, 303054],
-            crate::game::InheritInfo {
-                blue_count: [15, 3, 0, 0, 0],
-                extra_count: [0, 30, 0, 0, 30, 30],
-            },
-        )?;
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
 
         let trainer = RandomTrainer;
         let mut rng = StdRng::from_os_rng();
@@ -917,6 +928,44 @@ mod tests {
         Ok(())
     }
 
+    /// 静默测试游戏流程
+    ///
+    /// 关闭日志输出，仅输出育成配置和最终结果
+    #[test]
+    fn test_ramen_silent_loop() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "error")?;  // 只输出错误
+        init_global()?;
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        let trainer = RandomTrainer;
+        let mut rng = StdRng::from_os_rng();
+
+        println!("=== 静默测试 ===");
+        println!("卡组: {:?}", TEST_DECK);
+        println!("随机种子: {:?}", rng);
+
+        // 关闭日志运行游戏
+        disable_log();
+        game.run_full_game(&trainer, &mut rng)?;
+        enable_log();
+
+        // 输出最终结果
+        println!("\n=== 育成结果 ===");
+        println!("最终回合: {}", game.turn());
+        println!("剧本PT: {}", game.ramen.scenario_pt);
+        println!("RMJ结果: {:?}", game.ramen.rmj_results);
+        println!("地区选择: {:?}", game.ramen.selected_regions);
+        println!("超级拉面选择: {:?}", game.ramen.super_ramen);
+        println!("诀窍库存: A={} B={} C={}", game.ramen.feeling_stock[0], game.ramen.feeling_stock[1], game.ramen.feeling_stock[2]);
+        println!("隐藏风味: {}", game.ramen.special_feeling);
+        let score = game.uma.calc_score();
+        println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
+
+        Ok(())
+    }
+
     #[test]
     fn test_random_event_generation() -> Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -925,14 +974,7 @@ mod tests {
         init_global()?;
 
         // 创建游戏实例
-        let mut game = RamenGame::newgame(
-            101901,
-            &[302424, 302894, 303044, 302924, 303024, 303054],
-            crate::game::InheritInfo {
-                blue_count: [15, 3, 0, 0, 0],
-                extra_count: [0, 30, 0, 0, 30, 30],
-            },
-        )?;
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
 
         // 使用随机种子
         let mut rng = StdRng::from_os_rng();

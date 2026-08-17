@@ -129,7 +129,7 @@ impl ActionEnum for RamenAction {
         if let Some(ramen_idx) = self.ramen {
             self.apply_ramen(game, ramen_idx, rng)?;
             // 吃面后、训练前，打印当前回合信息
-            println!("---- 吃面后 ----");
+            info!("---- 吃面后 ----");
             let ramen_info = game.explain_ramen_info();
             if !ramen_info.is_empty() {
                 info!("{}", ramen_info);
