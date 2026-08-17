@@ -408,8 +408,15 @@ impl Game for RamenGame {
                     .min(100.0).max(0.0);
 
                 // 应用拉面效果到训练数值
-                let (status_val, pt_val) = super::effects::apply_ramen_training_value(
+                // 属性训练值：lower * (100+xunlian)/100 * (100+youqing)/100
+                let (status_val, _) = super::effects::apply_ramen_training_value(
                     base_value.status_pt[train],
+                    &ramen_effect,
+                    train,
+                );
+                // PT训练值：PT下层 * (100+xunlian)/100 * (100+youqing)/100 * (100+pt_bonus)/100
+                let (_, pt_val) = super::effects::apply_ramen_training_value(
+                    base_value.status_pt[5],
                     &ramen_effect,
                     train,
                 );

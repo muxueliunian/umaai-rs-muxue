@@ -4,6 +4,21 @@
 
 ## 2026-08-17
 
+### umaai 跨平台构建支持与相关更新
+
+**umaai Linux 构建修复（umaai 现可在 Ubuntu 下编译运行）：**
+- `winscribe`（Windows 资源编译）改为仅在 `cfg(windows)` 目标下作为 build-dependency
+- `windows` crate 改为 `cfg(windows)` 限定依赖（其依赖链 windows-future 0.3.2 与 windows-core 0.62.2 版本不兼容，在 Linux 上编译失败）
+- build.rs 的 Windows 资源编译逻辑（.ico 图标 + `/STACK` 链接参数）用 `#[cfg(windows)]` 包裹
+- 补声明 Linux 专用的 `libc` 依赖；`utils.rs` 中 Linux 版 `get_stack_size` 补 `pub`
+
+**其他：**
+- issues.md 新增"Ubuntu 下 umaai 二进制图标方案待定"记录（含两个候选方向的说明）
+- umasim：ramen/game.rs 训练值计算拆分为属性与 PT 两次调用（PT 使用 status_pt[5]，补充计算公式注释）
+- AGENTS.md 项目规则修订（语言要求措辞、文档载入策略、安全注意事项等）
+- project_context.md 新增"测试"章节（ramen 完整流程测试 test_ramen_silent_loop 的说明）
+- 备注：工作树其余文件的未提交改动均为行尾（LF/CRLF）层面的变化，无内容修改，按要求未处理，留待提交时自然消解或另行处理
+
 ### 拉面杯模块机制修正、显示改进与架构重构
 
 **机制修正：**

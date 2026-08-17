@@ -44,6 +44,14 @@
 ### Shell
 - PowerShell
 
+## 测试
+
+### 模拟游戏流程测试
+- 位置：`crates/umasim/src/game/ramen/game.rs`
+- 使用 `test_ramen_silent_loop` 测试用例验证完整的拉面剧本游戏流程
+- 该测试关闭日志（`disable_log`）运行完整游戏，仅输出育成配置和最终结果，适合作为端到端的流程验证
+- 运行命令：`cargo nextest run -p umasim test_ramen_silent_loop`（或 `cargo test -p umasim test_ramen_silent_loop`）
+
 ## 拉面杯模块结构
 
 ### 模块入口（mod.rs）

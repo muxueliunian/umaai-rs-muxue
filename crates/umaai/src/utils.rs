@@ -10,6 +10,7 @@ use ratatui::crossterm::{
     event::{self, Event, KeyCode, KeyEventKind}
 };
 use umasim::game::onsen::game::OnsenGame;
+#[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::GetCurrentThreadStackLimits;
 
 use crate::protocol::GameStatusOnsen;
@@ -52,7 +53,7 @@ pub fn get_stack_size() -> usize {
 }
 
 #[cfg(target_os = "linux")]
-fn get_stack_size() -> usize {
+pub fn get_stack_size() -> usize {
     let mut limits = libc::rlimit { rlim_cur: 0, rlim_max: 0 };
     unsafe { libc::getrlimit(libc::RLIMIT_STACK, &mut limits) };
     limits.rlim_cur as usize

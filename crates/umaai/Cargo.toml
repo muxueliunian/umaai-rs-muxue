@@ -4,8 +4,17 @@ version = "0.2.6"
 edition = "2024"
 build = "build.rs"
 
-[build-dependencies]
+# winscribe 仅在 Windows 目标下作为构建依赖（编译 .ico 资源）
+[target.'cfg(windows)'.build-dependencies]
 winscribe = "0.1.3"
+
+# windows crate 仅为 Windows 专用的 API（GetCurrentThreadStackLimits）服务，
+# 且其依赖链（windows-future 等）在 Linux 上不兼容，故限定目标平台
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = ["Win32", "Win32_System", "Win32_System_Threading"] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.189"
 
 [dependencies]
 umasim.workspace = true
@@ -36,4 +45,3 @@ text-to-ascii-art.workspace = true
 flexi_logger.workspace = true
 os_str_bytes = "7.1.1"
 dunce = "1.0.5"
-windows = { version = "0.62.2", features = ["Win32", "Win32_System", "Win32_System_Threading"] }

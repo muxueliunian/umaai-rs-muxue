@@ -160,3 +160,17 @@
   - 当前 `fill_feeling_gauge()` 函数未处理夏合宿的特殊规则
 - **解决方案**：需要在 `fill_feeling_gauge()` 中添加夏合宿判断，如果是夏合宿则诀窍槽直接+7
 - **备注**：夏合宿回合为36-39和60-63，需要检查 `is_xiahesu()` 函数的实现
+
+---
+
+## Ubuntu 下 umaai 二进制图标方案待定
+- **日期**：2026-08-17
+- **状态**：待解决（暂缓）
+- **问题描述**：umaai 的 Windows 版通过 build.rs + winscribe 把 `.ico` 图标嵌入二进制；Ubuntu 下 ELF 二进制没有 Windows 资源节的图标嵌入机制，需要确定 Linux 版的图标落地方式
+- **排查过程**：
+  - Linux ELF 无原生图标资源节，无法直接嵌入 `.ico`
+  - 候选方案一：`.desktop` 文件 + 外置 PNG/SVG 图标（桌面菜单展示，Linux 惯例）
+  - 候选方案二：`include_bytes!` 把 PNG 数据嵌入二进制（自包含、单文件分发，需补充 PNG 资源）
+  - 已顺带修复 umaai 的 Linux 构建：winscribe 改为仅在 `cfg(windows)` 目标下作为 build-dependency；build.rs 的 Windows 资源编译逻辑用 `#[cfg(windows)]` 包裹；`windows` crate 及其依赖链（windows-future 0.3.2 与 windows-core 0.62.2 不兼容，Linux 上编译失败）改为 `cfg(windows)` 限定依赖；补声明 Linux 专用的 `libc` 依赖；Linux 版 `get_stack_size` 补 `pub` 修饰
+- **解决方案**：暂不处理，待用户明确图标使用场景（桌面菜单展示或二进制自包含）后再实施
+- **备注**：umaai 为 CLI + TUI 程序（clap + ratatui），桌面图标应用场景有限

@@ -1,7 +1,7 @@
 # UmaAI-RS 项目规则
 
 ## 对话规则与工作规范
-1. **语言要求**：必须使用中文进行思考和回答，语气要在轻松愉快的同时保持简洁和专业性
+1. **语言要求**：必须使用中文进行思考和回答，语气要在简洁和专业的同时，保持轻松愉快
 2. **避免信息过载**：上下文容量有限，优先精简，不堆砌内容
 3. **重构期文档策略**：重构中项目，不要频繁更新文档（如changelog、memo等），在提交前统一更新，更新内容需要包括由Agent和用户做的全部的修改，但应简短概括，不用列出具体的修改点
 4. **需求澄清**：首次开始新任务前，仔细检查用户给的初始需求和文档，提出任何不明确/错误的地方。在执行过程中如果有新的不明确的地方，也应该主动提出，不要猜测用户意图。
@@ -13,19 +13,20 @@
 项目结构、配置文件、开发环境等详细信息，请参考相关文档中的 [project_context.md](.trae/documents/project_context.md)。
 
 ## 相关文档
-`.trae/documents/`目录下还包含以下相关文档：
-- [project_context.md](.trae/documents/project_context.md)：项目特定上下文（项目结构、配置文件、开发环境）
-- [changelog.md](.trae/documents/changelog.md)：变更日志，记录每次任务的修改
-- [issues.md](.trae/documents/issues.md)：问题记录，记载复杂问题的解决过程
+`.trae/documents/`目录下还包含以下相关文档，仅在有需要时载入：
 - [glossary.md](.trae/documents/glossary.md)：术语表
+- [project_context.md](.trae/documents/project_context.md)：项目特定上下文（项目结构、配置文件、开发环境）
 - [ramen_memo_cn.md](.trae/documents/ramen_memo_cn.md)：拉面剧本备忘录（中文）
 - [ramen_refactor_development_plan.md](.trae/documents/ramen_refactor_development_plan.md)：拉面重构开发计划
-- [cpu_search_optimization_plan.md](.trae/documents/cpu_search_optimization_plan.md)：CPU搜索优化计划
-- [gpu_acceleration_plan.md](.trae/documents/gpu_acceleration_plan.md)：GPU加速计划
-- [operation_action_decision_design.md](.trae/documents/operation_action_decision_design.md)：操作决策设计文档
+
+以及在项目中提交前需要更新的文档，有需要时可以载入：
+- [changelog.md](.trae/documents/changelog.md)：变更日志，记录每次任务的修改
+- [issues.md](.trae/documents/issues.md)：问题记录，记载复杂问题的解决过程
 
 ## 安全注意事项
 1. **隐私保护**：生成的代码和文档不应透露用户信息或绝对路径等隐私细节，使用相对路径或占位符
+2. **必须由用户确认的操作**: 在修改根目录、系统文件、配置时，必须由用户确认; 在修改、删除工作区以外的文件时，必须由用户确认
+3. **符号链接、软链接必须检查绝对路径**: 在命令涉及符号链接、软链接时，必须确认绝对路径在工作区内，避免意外操作到关键系统文件。
 
 ## Rust 编码规范
 ### 依赖管理
@@ -55,19 +56,12 @@
 2. **Trait实现**：工具类方法，如果符合Rust的标准Trait（如`From`，`TryFrom`，`Deref`，`Display`等）应优先实现这些Trait
 
 ## 工具使用
-### 可额外使用的工具
+### 可在Powershell环境下额外使用的工具
   - `cargo nextest`：用于运行测试
   - `tokei`：用于代码统计
-  - 因为安装了win coreutils，也可以使用`grep`等命令
+  - `grep`
 
 ### Git操作
 1. **提交前先写changelog**：提交分为两步：先更新changelog文档，由用户确认后再调用git commit提交
 2. **提交所有修改**: changelog和提交都需要包括当前工作树下由Agent和用户做的全部的修改
-2. **安全性**：遵循Git安全协议，避免破坏性操作
-
-### 必须由用户确认的操作
-1. 在修改根目录、系统文件、配置时，必须由用户确认
-2. 在修改、删除工作区以外的文件时，必须由用户确认
-
-### 符号链接、软链接必须检查绝对路径
-在命令涉及符号链接、软链接时，必须确认绝对路径在工作区内，避免意外操作到关键系统文件。
+3. **安全性**：遵循Git安全协议，避免破坏性操作

@@ -4394,6 +4394,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "indicatif",
  "inquire",
+ "libc",
  "log",
  "notify",
  "os_str_bytes",
