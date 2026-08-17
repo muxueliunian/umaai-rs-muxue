@@ -112,8 +112,8 @@ mod tests {
     fn test_turn_mask() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        GAMECONSTANTS.set(GameConstants::load()?).expect("global constants");
-        init_logger("test", "info")?;
+        let _ = GAMECONSTANTS.set(GameConstants::load()?);
+        let _ = init_logger("test", "info");
         let mut free_race = FreeRaceData {
             start_turn: 24,
             end_turn: 47,
@@ -132,8 +132,12 @@ pub static GAMECONSTANTS: OnceLock<GameConstants> = OnceLock::new();
 pub static LOGGER: OnceLock<Mutex<LoggerHandle>> = OnceLock::new();
 
 pub fn init_global() -> Result<()> {
-    GAMECONSTANTS.set(GameConstants::load()?).expect("global constants");
-    GAMEDATA.set(GameData::load()?).expect("global gamedata");
+    // 幂等：已初始化过则直接返回，允许测试套件中重复调用
+    if GAMECONSTANTS.get().is_some() && GAMEDATA.get().is_some() {
+        return Ok(());
+    }
+    let _ = GAMECONSTANTS.set(GameConstants::load()?);
+    let _ = GAMEDATA.set(GameData::load()?);
     onsen::init_onsen_data()?;
     ramen::init_ramen_data()?;
     Ok(())

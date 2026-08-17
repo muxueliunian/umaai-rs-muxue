@@ -26,13 +26,23 @@ use crate::utils::{global_events, system_event, system_event_prob};
 
 /// 拉面杯动作
 ///
-/// 包含吃面决策和基础操作两个部分。
+/// 三阶段选择的状态机下，`RamenAction` 复用单一结构承载每个阶段的决策：
+/// - `RamenSelect` 阶段：仅 `ramen` 字段有意义，`operation = Operation::StageOnly`
+/// - `SpecialSelect` 阶段：`ramen = pending`、`special_targets` 字段有意义，`operation = StageOnly`
+/// - `Train` 阶段：`ramen`/`special_targets` 为 pending 拷贝，`operation` 为真实操作
+///
+/// `apply` 按当前 `game.stage` 路由处理：阶段阶段动作仅切阶段并写入 pending，
+/// Train 阶段动作才真执行吃面 + 基础操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RamenAction {
     /// 吃面决策
     /// - None: 不吃面
     /// - Some(idx): 吃 ramen_region_effect[idx] 对应的地区拉面
     pub ramen: Option<usize>,
+    /// 隐藏风味替换目标
+    /// - None: 不替换（吃面但不省诀窍，或阶段阶段未确定）
+    /// - Some([tA, tB, tC]): 替换各类 `t[i]` 个普通诀窍
+    pub special_targets: Option<[i32; 3]>,
     /// 基础操作
     pub operation: Operation,
 }
@@ -42,6 +52,7 @@ impl RamenAction {
     pub fn no_ramen(operation: Operation) -> Self {
         Self {
             ramen: None,
+            special_targets: None,
             operation,
         }
     }
@@ -50,7 +61,28 @@ impl RamenAction {
     pub fn with_ramen(ramen_idx: usize, operation: Operation) -> Self {
         Self {
             ramen: Some(ramen_idx),
+            special_targets: None,
             operation,
+        }
+    }
+
+    /// 创建 `RamenSelect` 阶段动作（仅承载面选择，不含 operation）。
+    ///
+    /// `ramen_idx = None` 表示不吃面；否则为 `selected_regions` 中某一面。
+    pub fn ramen_select(ramen_idx: Option<usize>) -> Self {
+        Self {
+            ramen: ramen_idx,
+            special_targets: None,
+            operation: Operation::StageOnly,
+        }
+    }
+
+    /// 创建 `SpecialSelect` 阶段动作（承载隐藏风味用法）。
+    pub fn special_select(ramen_idx: usize, targets: [i32; 3]) -> Self {
+        Self {
+            ramen: Some(ramen_idx),
+            special_targets: Some(targets),
+            operation: Operation::StageOnly,
         }
     }
 
@@ -67,6 +99,19 @@ impl RamenAction {
 
 impl Display for RamenAction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // 隐藏风味替换说明（如有）
+        let targets_text = match self.special_targets {
+            Some(t) if t.iter().any(|&x| x > 0) => {
+                let mut parts = Vec::new();
+                for (i, &n) in t.iter().enumerate() {
+                    if n > 0 {
+                        parts.push(format!("{}{}", "ABC".chars().nth(i).unwrap(), n));
+                    }
+                }
+                format!("(替{})", parts.join("+"))
+            }
+            _ => String::new(),
+        };
         let ramen_text = match self.ramen {
             Some(idx) => {
                 let name = RAMENDATA
@@ -74,7 +119,7 @@ impl Display for RamenAction {
                     .and_then(|d| d.ramen_region_effect.get(idx))
                     .map(|r| r.name.as_str())
                     .unwrap_or("???");
-                format!("吃面/{name} + ")
+                format!("吃面/{name}{targets_text} + ")
             }
             None => String::new(),
         };
@@ -95,6 +140,7 @@ impl Display for RamenAction {
                 }).collect();
                 format!("地区[{}]", names.join(","))
             }
+            Operation::StageOnly => "<阶段阶段>".to_string(),
         };
         write!(f, "{ramen_text}{op_text}")
     }
@@ -112,6 +158,7 @@ impl Operation {
             Operation::FriendOuting => Some(BaseAction::FriendOuting),
             Operation::Clinic => Some(BaseAction::Clinic),
             Operation::RegionSelect(_) => None,
+            Operation::StageOnly => None,
         }
     }
 }
@@ -125,41 +172,89 @@ impl ActionEnum for RamenAction {
     type Game = super::RamenGame;
 
     fn apply(&self, game: &mut super::RamenGame, rng: &mut StdRng) -> Result<()> {
-        // 阶段1：吃面处理（必须在训练前完成，因为分身会影响人头分布）
-        if let Some(ramen_idx) = self.ramen {
-            self.apply_ramen(game, ramen_idx, rng)?;
-            // 吃面后、训练前，打印当前回合信息
-            info!("---- 吃面后 ----");
-            let ramen_info = game.explain_ramen_info();
-            if !ramen_info.is_empty() {
-                info!("{}", ramen_info);
-            }
-            if let Ok(dist_info) = game.explain_distribution() {
-                info!("训练:\n{}", dist_info);
-            }
-        }
-
-        // 阶段2：执行基础操作
-        match self.operation {
-            Operation::Train(train) => {
-                // 拉面羁绊效果必须在训练前生效（影响闪耀判定）
-                self.apply_ramen_friendship(game)?;
-                self.do_train(game, train as usize, rng)?;
-            }
-            Operation::FriendOuting => {
-                self.do_friend_outing(game)?;
-            }
-            Operation::RegionSelect(regions) => {
-                game.ramen.selected_regions = regions;
-                info!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
-            }
-            op => {
-                if let Some(base_action) = op.to_base_action() {
-                    base_action.apply(&mut game.base, rng)?;
+        use super::RamenStage;
+        match game.stage {
+            RamenStage::RamenSelect => {
+                // race_turn 短路：operation 非 StageOnly 表示 race turn 一体化执行
+                if !matches!(self.operation, Operation::StageOnly) {
+                    // 非阶段阶段动作（如 race_turn 的 Race）：直接执行 operation 并跳到 AfterTrain
+                    if let Some(base_action) = self.operation.to_base_action() {
+                        base_action.apply(&mut game.base, rng)?;
+                    }
+                    game.stage = RamenStage::AfterTrain;
+                    return Ok(());
                 }
+                // 阶段阶段：仅承载面选择，写 pending；Game::next() 会按 pending_ramen 推 SpecialSelect 或 Train
+                game.ramen.pending_ramen = self.ramen;
+                game.ramen.pending_special_targets = [0, 0, 0];
+                Ok(())
+            }
+            RamenStage::SpecialSelect => {
+                // 阶段阶段：仅承载隐藏风味用法，写 pending；Game::next() 推到 Train
+                let targets = self
+                    .special_targets
+                    .ok_or_else(|| anyhow::anyhow!("SpecialSelect 阶段动作应携带 special_targets"))?;
+                game.ramen.pending_special_targets = targets;
+                Ok(())
+            }
+            RamenStage::Train => {
+                // 真执行：吃面（用 pending_targets）+ 基础操作
+                if let Some(ramen_idx) = self.ramen {
+                    self.apply_ramen(game, ramen_idx, rng)?;
+                    info!("---- 吃面后 ----");
+                    let ramen_info = game.explain_ramen_info();
+                    if !ramen_info.is_empty() {
+                        info!("{}", ramen_info);
+                    }
+                    if let Ok(dist_info) = game.explain_distribution() {
+                        info!("训练:\n{}", dist_info);
+                    }
+                }
+
+                match self.operation {
+                    Operation::Train(train) => {
+                        // 拉面羁绊效果必须在训练前生效（影响闪耀判定）
+                        self.apply_ramen_friendship(game)?;
+                        self.do_train(game, train as usize, rng)?;
+                    }
+                    Operation::FriendOuting => {
+                        self.do_friend_outing(game)?;
+                    }
+                    Operation::RegionSelect(regions) => {
+                        game.ramen.selected_regions = regions;
+                        info!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
+                    }
+                    Operation::StageOnly => {
+                        // Train 阶段不应收到 StageOnly 操作；若出现则忽略
+                    }
+                    op => {
+                        if let Some(base_action) = op.to_base_action() {
+                            base_action.apply(&mut game.base, rng)?;
+                        }
+                    }
+                }
+                Ok(())
+            }
+            // 其他阶段（如 RegionSelect）保持旧行为，按 operation 直接分发
+            _ => {
+                if let Some(ramen_idx) = self.ramen {
+                    self.apply_ramen(game, ramen_idx, rng)?;
+                }
+                match self.operation {
+                    Operation::RegionSelect(regions) => {
+                        game.ramen.selected_regions = regions;
+                        info!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
+                    }
+                    Operation::StageOnly => {}
+                    op => {
+                        if let Some(base_action) = op.to_base_action() {
+                            base_action.apply(&mut game.base, rng)?;
+                        }
+                    }
+                }
+                Ok(())
             }
         }
-        Ok(())
     }
 
     fn as_base_action(&self) -> Option<BaseAction> {
@@ -179,8 +274,9 @@ impl RamenAction {
         rng: &mut StdRng,
     ) -> Result<()> {
         let _recipe = super::rules::get_recipe(ramen_idx)?;
-        // 默认不使用隐藏风味（special_targets = [0,0,0]）
-        let used_special = consume_for_ramen(&mut game.ramen, ramen_idx, &[0, 0, 0])?;
+        // 隐藏风味用法来自 pending 阶段（SpecialSelect 已写入），未设置时默认为 [0,0,0]
+        let targets = game.ramen.pending_special_targets;
+        let used_special = consume_for_ramen(&mut game.ramen, ramen_idx, &targets)?;
         game.ramen.current_ramen = Some(ramen_idx);
 
         // 计算并增加剧本PT
@@ -841,21 +937,90 @@ pub fn list_all_actions(
     actions
 }
 
-/// 获取当年可用的面（诀窍足够）
+// ========== 三阶段决策候选生成 ==========
+
+/// `RamenSelect` 阶段的候选动作：不吃 + 候选面（`selected_regions` 中可做面）
+///
+/// 所有候选动作的 `operation = Operation::StageOnly`，`special_targets = None`。
+pub fn list_ramen_select_actions(
+    state: &super::RamenState,
+    selected_regions: &[usize; 3],
+) -> Vec<RamenAction> {
+    use super::rules::list_special_targets_for;
+
+    let mut actions = vec![RamenAction::ramen_select(None)]; // 不吃面
+    for &region_id in selected_regions {
+        // 用隐藏风味可达（候选非空）即可选
+        let ok = !list_special_targets_for(state, region_id)
+            .map(|t| t.is_empty())
+            .unwrap_or(true);
+        if ok {
+            actions.push(RamenAction::ramen_select(Some(region_id)));
+        }
+    }
+    actions
+}
+
+/// `SpecialSelect` 阶段的候选动作：`list_special_targets_for` 生成的每个 targets 一个
+///
+/// 所有候选动作的 `ramen = Some(ramen_idx)`、`operation = Operation::StageOnly`。
+pub fn list_special_select_actions(
+    state: &super::RamenState,
+    ramen_idx: usize,
+) -> anyhow::Result<Vec<RamenAction>> {
+    use super::rules::list_special_targets_for;
+
+    let targets = list_special_targets_for(state, ramen_idx)?;
+    Ok(targets
+        .into_iter()
+        .map(|t| RamenAction::special_select(ramen_idx, t))
+        .collect())
+}
+
+/// `Train` 阶段的候选动作：所有 Operation ×（带 pending 的完整动作）
+///
+/// 每个候选动作的 `ramen = pending_ramen`、`special_targets = Some(pending_targets)`、
+/// `operation = Op`，`Display` 时呈现完整决策。
+pub fn list_train_actions(
+    pending_ramen: Option<usize>,
+    pending_targets: [i32; 3],
+    can_friend_outing: bool,
+    is_ill: bool,
+) -> Vec<RamenAction> {
+    let operations = list_operations(can_friend_outing, is_ill);
+    operations
+        .into_iter()
+        .map(|op| {
+            let mut a = match pending_ramen {
+                None => RamenAction::no_ramen(op),
+                Some(idx) => RamenAction::with_ramen(idx, op),
+            };
+            a.special_targets = Some(pending_targets);
+            a
+        })
+        .collect()
+}
+
+/// 获取当年可用的面（存在合法 `special_targets` 即可选）。
+///
+/// 与之前用 `can_make_ramen(recipe, &[0,0,0])` 过滤不同：本函数委托给
+/// [`super::rules::list_special_targets_for`]，允许"普通诀窍不够、用隐藏风味补缺口"的面
+/// 也算作可选。例如库存 A=5 B=0 C=0、recipe=[2,2,1] 时，用 1 个隐藏风味替代 B 仍可做面。
 ///
 /// 返回可以吃的面的 ID 列表。
 pub fn get_available_ramens(
     state: &super::RamenState,
     selected_regions: &[usize; 3],
 ) -> Vec<usize> {
-    use super::rules::can_make_ramen;
+    use super::rules::list_special_targets_for;
 
     let mut available = Vec::new();
     for &region_id in selected_regions {
-        if let Ok(recipe) = super::rules::get_recipe(region_id) {
-            if can_make_ramen(state, recipe, &[0, 0, 0]) {
-                available.push(region_id);
-            }
+        if !list_special_targets_for(state, region_id)
+            .map(|t| t.is_empty())
+            .unwrap_or(true)
+        {
+            available.push(region_id);
         }
     }
     available
@@ -871,8 +1036,8 @@ mod tests {
     fn test_ramen_action_display() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
-        init_global()?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
 
         let a1 = RamenAction::no_ramen(Operation::Train(TrainingType::Speed));
         println!("动作1: {a1}");
@@ -885,6 +1050,23 @@ mod tests {
 
         let a4 = RamenAction::with_ramen(5, Operation::Rest);
         println!("动作4: {a4}");
+
+        // 新增：含 special_targets 的动作 Display 应输出 (替...)
+        let mut a5 = RamenAction::with_ramen(0, Operation::Train(TrainingType::Speed));
+        a5.special_targets = Some([1, 1, 0]);
+        println!("动作5: {a5}");
+
+        // 占位阶段动作：StageOnly + ramen=Some
+        let a6 = RamenAction::ramen_select(Some(0));
+        println!("动作6 (RamenSelect 选面): {a6}");
+
+        // 占位阶段动作：StageOnly + ramen=None（不吃面）
+        let a7 = RamenAction::ramen_select(None);
+        println!("动作7 (RamenSelect 不吃面): {a7}");
+
+        // 占位阶段动作：StageOnly + special_targets
+        let a8 = RamenAction::special_select(0, [1, 0, 0]);
+        println!("动作8 (SpecialSelect): {a8}");
 
         Ok(())
     }
@@ -931,8 +1113,8 @@ mod tests {
     fn test_list_all_actions() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
-        init_global()?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
 
         // 无可用面，无友人，无生病
         let actions = list_all_actions(&[], false, false);
@@ -964,8 +1146,8 @@ mod tests {
     fn test_get_available_ramens() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
-        init_global()?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
 
         let selected_regions = [0, 1, 2];
 
@@ -981,6 +1163,118 @@ mod tests {
         let available = get_available_ramens(&state, &selected_regions);
         println!("诀窍不足: 可用面={available:?}");
         assert_eq!(available.len(), 0);
+
+        // 关键：用隐藏风味可达（库存紧但 hidden 够）应视为可选
+        // 札幌 [2,2,1]，库存 A=5 B=0 C=0，special=1：min_needed=[0,2,0]，need_sum=2 = budget → 空（缺 2 不可用 1 个 hidden）
+        // 改为库存 A=5 B=0 C=5, special=1: min_needed=[0,2,0], need_sum=2 > budget=1 → 空
+        // 库存 A=5 B=1 C=5, special=2: min_needed=[0,1,0], need_sum=1, budget=2-1=1 → [0,1,0]（含 1 个 B 替换）
+        let mut state = RamenState::default();
+        state.feeling_stock = [5, 1, 5];
+        state.special_feeling = 2;
+        let available = get_available_ramens(&state, &selected_regions);
+        println!("隐藏风味补 B 缺口: 可用面={available:?}");
+        // 札幌 [2,2,1] 缺 B=1，用 1 个 hidden 补 → 可选
+        assert!(available.contains(&0));
+
+        Ok(())
+    }
+
+    // ========== 三阶段决策候选生成测试 ==========
+
+    #[test]
+    fn test_list_ramen_select_actions_full() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut state = RamenState::default();
+        state.feeling_stock = [5, 5, 5]; // 全够
+        state.special_feeling = 2;
+
+        let actions = list_ramen_select_actions(&state, &[0, 1, 2]);
+        println!("全富余 3 个面: {} 个动作", actions.len());
+        // 不吃 + 3 面 = 4 个
+        assert_eq!(actions.len(), 4);
+        // 第一个动作一定是不吃面
+        assert_eq!(actions[0].ramen, None);
+        assert!(matches!(actions[0].operation, Operation::StageOnly));
+        assert_eq!(actions[0].special_targets, None);
+
+        // 其他动作各对应一个面
+        for (i, a) in actions.iter().enumerate().skip(1) {
+            assert_eq!(a.ramen, Some(i - 1 + 0)); // 0,1,2
+            assert!(matches!(a.operation, Operation::StageOnly));
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_ramen_select_actions_no_available() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let state = RamenState::default(); // 库存全 0
+        let actions = list_ramen_select_actions(&state, &[0, 1, 2]);
+        println!("全空: {} 个动作", actions.len());
+        // 仅"不吃面"一个候选
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].ramen, None);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_special_select_actions_uses_special_targets() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut state = RamenState::default();
+        state.feeling_stock = [2, 5, 5]; // 札幌 [2,2,1] 缺 A=0 不缺，stock 够
+        state.special_feeling = 2;
+
+        let actions = list_special_select_actions(&state, 0)?;
+        println!("札幌全富余 special=2: {} 个候选", actions.len());
+        // 9 种：1 (sum=0) + 3 (sum=1) + 5 (sum=2) = 9
+        assert_eq!(actions.len(), 9);
+        // 所有动作 ramen=Some(0)、operation=StageOnly
+        for a in &actions {
+            assert_eq!(a.ramen, Some(0));
+            assert!(matches!(a.operation, Operation::StageOnly));
+        }
+        // 第一个应是 [0,0,0]（sum 升序）
+        assert_eq!(actions[0].special_targets, Some([0, 0, 0]));
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_train_actions_carries_pending() -> anyhow::Result<()> {
+        let actions = list_train_actions(Some(2), [1, 0, 0], false, false);
+        println!("带 pending 的 Train 阶段: {} 个动作", actions.len());
+        // 8 个 operation
+        assert_eq!(actions.len(), 8);
+        // 每个动作 ramen=Some(2)、special_targets=Some([1,0,0])
+        for a in &actions {
+            assert_eq!(a.ramen, Some(2));
+            assert_eq!(a.special_targets, Some([1, 0, 0]));
+        }
+
+        // 不吃面 + 全 targets=[0,0,0]
+        let actions = list_train_actions(None, [0, 0, 0], false, false);
+        for a in &actions {
+            assert_eq!(a.ramen, None);
+            assert_eq!(a.special_targets, Some([0, 0, 0]));
+        }
+
+        // 有友人 + 治病
+        let actions = list_train_actions(None, [0, 0, 0], true, true);
+        assert_eq!(actions.len(), 10);
 
         Ok(())
     }

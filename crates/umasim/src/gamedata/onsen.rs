@@ -163,6 +163,10 @@ pub struct HotelEffect {
 pub static ONSENDATA: OnceLock<OnsenScenarioData> = OnceLock::new();
 
 pub fn init_onsen_data() -> Result<()> {
-    ONSENDATA.set(OnsenScenarioData::load()?).expect("onsen data");
+    // 幂等：已初始化过则直接返回
+    if ONSENDATA.get().is_some() {
+        return Ok(());
+    }
+    let _ = ONSENDATA.set(OnsenScenarioData::load()?);
     Ok(())
 }

@@ -81,7 +81,7 @@
   3. **ActionValue 新增字段**：`ActionValue` 包含 `friendship`、`hint_level`、`max_vital` 字段，构造时需要 `..Default::default()`。✅ 已解决
   4. **超级拉面自动效果未完整实现**：回合 72-77 的超级拉面效果（vital/motivation/saihou 恢复）目前仅记录日志，未实际应用 `finals_effect.base` 的 vital 和 motivation 效果。⏳ 待后续处理
   5. **分身系统未实现**：地区拉面分身（id >= 5）和超级拉面分身（每个支援卡额外出现一次）的逻辑尚未实现，后续需要在 distribute_all 中集成。⏳ 待后续处理
-  6. **特殊吃面决策**：当前 `do_train` 中吃面使用默认 `special_targets = [0,0,0]`（不使用隐藏风味），未来需要支持手动选择替换目标。⏳ 待后续处理
+  6. **特殊吃面决策**：当前 `do_train` 中吃面使用默认 `special_targets = [0,0,0]`（不使用隐藏风味）。✅ 已解决（定案见「拉面杯动作阶段扩展：隐藏风味决策」）
   7. **年初选面策略**：当前使用 `fixed_region_selection` 固定顺序，需要在未来接入搜索/RL 策略时替换。✅ 已解决（改为通过Trainer统一接口select_action决策）
   8. **随机事件复用**：当前 `generate_events` 复用 BasicGame 的随机事件（支援卡事件、马娘事件等），这些事件是否适用于拉面杯需要确认。⏳ 待确认
   9. **回合编号问题**：人头动态添加的回合编号需要从0开始计算（turn==2 为第2回合，turn==12 为第12回合）。✅ 已修复
@@ -174,3 +174,20 @@
   - 已顺带修复 umaai 的 Linux 构建：winscribe 改为仅在 `cfg(windows)` 目标下作为 build-dependency；build.rs 的 Windows 资源编译逻辑用 `#[cfg(windows)]` 包裹；`windows` crate 及其依赖链（windows-future 0.3.2 与 windows-core 0.62.2 不兼容，Linux 上编译失败）改为 `cfg(windows)` 限定依赖；补声明 Linux 专用的 `libc` 依赖；Linux 版 `get_stack_size` 补 `pub` 修饰
 - **解决方案**：暂不处理，待用户明确图标使用场景（桌面菜单展示或二进制自包含）后再实施
 - **备注**：umaai 为 CLI + TUI 程序（clap + ratatui），桌面图标应用场景有限
+
+---
+
+## 拉面杯动作阶段扩展：隐藏风味决策
+
+- **日期**：2026-08-17
+- **状态**：已定案（阶段机三阶段）
+- **问题描述**：`apply_ramen`（`action.rs:175`）硬编码 `special_targets = [0,0,0]`，Trainer 无权决策隐藏诀窍用法；`list_all_actions`（`action.rs:824`）也没有该维度。`get_available_ramens`（`action.rs:847`）用 `can_make_ramen(state, recipe, &[0,0,0])` 过滤，把"用隐藏风味才做得出的面"也屏蔽了（如库存 A=5 B=0 C=0、recipe=[2,2,1]，用 1 个隐藏风味替代 B 本可做面）。函数层已就绪（`consume_for_ramen`/`can_make_ramen` 已接受 `special_targets` 参数），缺的是上层决策传递。
+- **决策域规模（实测）**：targets 合法域为 `0 ≤ t[i] ≤ recipe[i]`、`sum(t) ≤ min(2, 隐藏风味库存)`；最小必要替换 `min_needed[i] = max(0, recipe[i] - stock[i])`，`sum(min_needed) > 2` 时该面不可做。库存紧张时每面可行方案仅 1~6 种，全富余时达 9~10 种/面（recipe=[2,2,1] 全富余正好 9 种）；3 面全富余（如库存 3+3+4、隐藏风味 4）时合并枚举峰值约 280~310 动作
+- **方案对比**：
+  - **笛卡尔积枚举**：`ramen × targets × operations` 三维组合，单回合 368~466 动作，涨一个数量级，否决
+  - **默认 `[0,0,0]` + 扩展接口**：改动小但语义不完整，普通 Trainer 看不到非默认选项，否决
+  - **改 `Trainer` trait 拆三接口**：搜索空间最自然，但要重写所有 Trainer 实现，且 `list_actions` 被 onsen/basic 共用不能破坏，否决
+  - **聚合"用 0/1/2 个"再深入**：第二阶段仍需决策主体，在单次 `select_action` 接口下只能退化为规则默认（违背显式决策目标）或隐式变成更长阶段链，否决
+  - **定案：阶段机三阶段** —— `RamenStage` 拆为 `RamenSelect`（选面）→ `SpecialSelect`（选诀窍用法）→ `Train`（选训练），不动 `Trainer` trait。理由：该维度规模波动大（1~6 ↔ 9~10 种）且"省哪类诀窍"有战略含义（影响后续做面），峰值只有树形分层能消化；与 `RegionSelect` 阶段同模式，MCTS/`run_stage` 循环天然适配
+- **落地要点**：`RamenGame` 增加 pending（`pending_ramen`、`pending_special_targets`），`apply_ramen` 改从 pending 读 targets；新增 `list_special_targets_for(state, ramen_idx) -> Vec<[i32; 3]>`（从 `min_needed` 出发、剩余预算内分配），`get_available_ramens` 改为"候选非空即可选"；`SpecialSelect` 候选含 `[0,0,0]`（吃面但不省诀窍）与"改为不吃面"选项，保证完备；选"不吃面"时短路跳过该阶段
+- **备注**：与第 84 行「特殊吃面决策」子条目呼应，两条目已同步标注已解决

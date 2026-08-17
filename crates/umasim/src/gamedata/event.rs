@@ -318,8 +318,8 @@ mod tests {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
 
-        // 初始化GAMECONSTANTS，explain依赖train_names
-        GAMECONSTANTS.set(GameConstants::load()?).expect("global constants");
+        // 初始化GAMECONSTANTS（幂等：已初始化则跳过），explain依赖train_names
+        let _ = GAMECONSTANTS.set(GameConstants::load()?);
 
         let events: EventCollection = load_json("gamedata/events.json")?;
 
@@ -352,8 +352,8 @@ mod tests {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
 
-        // 初始化GAMECONSTANTS，explain依赖train_names
-        GAMECONSTANTS.set(GameConstants::load()?).expect("global constants");
+        // 初始化GAMECONSTANTS（幂等：已初始化则跳过），explain依赖train_names
+        let _ = GAMECONSTANTS.set(GameConstants::load()?);
 
         let ramen_data = RamenScenarioData::load()?;
 

@@ -26,6 +26,10 @@ pub fn log_format(w: &mut dyn Write, _now: &mut DeferredNow, record: &Record) ->
 }
 
 pub fn init_logger(app: &str, spec: &str) -> Result<()> {
+    // 幂等：已初始化过则直接返回，允许测试套件中重复调用
+    if LOGGER.get().is_some() {
+        return Ok(());
+    }
     let handle = flexi_logger::Logger::try_with_str(spec)?
         .format_for_stderr(log_format)
         .log_to_file(FileSpec::default().directory("logs").basename(app))

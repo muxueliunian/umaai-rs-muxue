@@ -180,6 +180,10 @@ pub static RAMENDATA: OnceLock<RamenScenarioData> = OnceLock::new();
 
 /// 初始化拉面杯剧本数据
 pub fn init_ramen_data() -> Result<()> {
-    RAMENDATA.set(RamenScenarioData::load()?).expect("ramen data");
+    // 幂等：已初始化过则直接返回
+    if RAMENDATA.get().is_some() {
+        return Ok(());
+    }
+    let _ = RAMENDATA.set(RamenScenarioData::load()?);
     Ok(())
 }

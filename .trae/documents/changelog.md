@@ -2,6 +2,31 @@
 
 本文件用于简要记录每次任务的修改内容。
 
+## 2026-08-18
+
+### 拉面杯三阶段决策重构（隐藏风味显式化）
+
+**目标：** 解决 `apply_ramen` 硬编码 `special_targets = [0,0,0]` 的问题，让 Trainer 显式决策"是否用隐藏风味 / 怎么用"。
+
+**核心改动（定案：阶段机三阶段，与 `issues.md`「拉面杯动作阶段扩展：隐藏风味决策」定案一致）：**
+- 新增公共前置 `list_special_targets_for(state, ramen_idx)`（rules.rs）：从 `min_needed = max(0, recipe - stock)` 出发，剩余预算内分配，输出按 `sum(t)` 升序的合法 `targets` 候选（库存紧 1~6 种，全富余 9~10 种）
+- `Operation` 新增 `StageOnly` 占位变体；`RamenAction` 新增 `special_targets: Option<[i32;3]>` 字段；新增 `ramen_select`/`special_select` 构造方法
+- `RamenStage` 拆为 `RamenSelect`（选面）→ `SpecialSelect`（选隐藏风味用法）→ `Train`（选训练），每个阶段一次 `run_stage` 调用，符合线上版 AI「吃面前 / 吃面后训练前」两个独立 stage 的需求
+- `list_actions` 按 stage 分发：`list_ramen_select_actions`、`list_special_select_actions`、`list_train_actions`；`get_available_ramens` 改为"候选非空即可选"（即允许"用隐藏风味可达"的面）
+- `RamenAction::apply` 按 stage 路由：阶段阶段仅写 pending；Train 阶段真执行（用 `pending_special_targets`）；race_turn 短路，operation 非 StageOnly 时直接执行
+- `Game::next()` 在 RamenSelect 阶段按 `pending_ramen` 决定推 SpecialSelect（吃了面）或 Train（不吃面）
+- `RamenState` 新增 `pending_ramen` / `pending_special_targets` 与 `clear_pending()`；回合边界（Begin / NextTurn）清空
+
+**测试与稳定性：**
+- 新增 `list_special_targets_for` 6 个单元测试（全富余 9 种、最小必要替换、不可做、无特殊风味、含 0 维度、升序校验），全部通过
+- 新增 `test_three_stage_decision_flow` 验证三阶段衔接与 pending 字段传递
+- 同步把 `init_global` / `init_logger` / `init_onsen_data` / `init_ramen_data` / `event.rs` / `gamedata/mod.rs` 中的 `set().expect()` 改为幂等早退，让 cargo test 不再因 OnceLock 重复 set 而级联失败（35 个测试从失败变为 70 通过 0 失败）
+- `test_ramen_silent_loop` 等回归测试全部通过
+
+**issues.md 同步：**
+- 「拉面杯动作阶段扩展：隐藏风味决策」一节重写为定案记录（状态改为"已定案（阶段机三阶段）"）
+- 第 84 行"特殊吃面决策"子条目同步标注为已解决，附跳转指向定案节
+
 ## 2026-08-17
 
 ### umaai 跨平台构建支持与相关更新
@@ -62,6 +87,10 @@
 **已知问题：**
 1. 训练数值不对，尤其是友情加成
 2. 超级拉面得意率人物分配错误
+
+### 拉面杯训练数值端到端观测测试
+
+- `crates/umasim/src/game/ramen/game.rs` `tests` 模块新增 `test_random_distribution_training_value`：固定回合 30（第二年，Lv=4）、支援卡羁绊 100，分别打印不吃面和吃面场景下的训练分布与数值，便于排查"训练数值不对，尤其是友情加成"的问题
 
 ## 2026-08-16
 

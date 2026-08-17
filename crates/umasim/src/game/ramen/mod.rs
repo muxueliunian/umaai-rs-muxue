@@ -26,6 +26,13 @@ use serde::{Deserialize, Serialize};
 ///
 /// 拉面杯在普通回合的基础上增加了地区选择和超级拉面选择阶段。
 /// 超级拉面选择初期固定为选项二，不做独立决策。
+///
+/// 可操作部分（Train）拆为三阶段状态机：
+/// - `RamenSelect`：选择吃哪碗面（含不吃）→ 写入 `pending_ramen`
+/// - `SpecialSelect`：选择隐藏风味用法（仅在 `pending_ramen` 非 None 时进入）→ 写入 `pending_special_targets`
+/// - `Train`：选择基础操作（与现有 Operation 一致）
+///
+/// 每个阶段都是一次 `run_stage` 调用，由外部 `run_full_game` 按 stage 顺序驱动。
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize, Sequence)]
 pub enum RamenStage {
     /// 1. 回合开始，随机事件
@@ -33,8 +40,12 @@ pub enum RamenStage {
     Begin,
     /// 2. 分配人头前，随机事件
     Distribute,
-    // --- 可操作部分
-    /// 3. 选择训练或比赛（含吃面决策）
+    // --- 可操作部分（三阶段）
+    /// 3a. 选择吃哪碗面（含不吃）
+    RamenSelect,
+    /// 3b. 选择隐藏风味用法（仅在选了面时进入；不吃面时短路跳过）
+    SpecialSelect,
+    /// 3c. 选择训练或比赛（含吃面执行）
     Train,
     /// 4. 回合后事件
     AfterTrain,
@@ -54,7 +65,9 @@ impl RamenStage {
     pub fn next(&self) -> Option<Self> {
         match self {
             Self::Begin => Some(Self::Distribute),
-            Self::Distribute => Some(Self::Train),
+            Self::Distribute => Some(Self::RamenSelect),
+            Self::RamenSelect => Some(Self::SpecialSelect),
+            Self::SpecialSelect => Some(Self::Train),
             Self::Train => Some(Self::AfterTrain),
             Self::AfterTrain => Some(Self::NextTurn),
             // NextTurn 在 run_stage 中推进回合，回到 Begin 或特殊阶段
@@ -114,4 +127,10 @@ pub enum Operation {
     Clinic,
     /// 地区选择（选择3个地区）
     RegionSelect([usize; 3]),
+    /// 阶段阶段动作占位（仅承载本阶段决策，不执行任何 operation）
+    ///
+    /// 用于 `RamenSelect`/`SpecialSelect` 阶段的 `RamenAction`，这些阶段的决策
+    /// 仅体现在 `ramen` 或 `special_targets` 字段上，不需要真正的基础操作。
+    /// `apply` 看到此变体时直接切阶段、不执行任何操作。
+    StageOnly,
 }

@@ -50,6 +50,21 @@ impl<G: Game> Trainer<G> for RandomTrainer {
                 }
             }
         }
+        // 没有基础动作候选时（拉面杯三阶段决策中阶段阶段动作全为 None）：
+        // 优先选有"实质内容"的候选（RamenAction 专属：ramen 非 None 或 special_targets 含非零值），
+        // 避免误选"占位"动作（如 SpecialSelect 阶段默认生成的 [0,0,0]）。
+        if ret.is_none() {
+            for i in &random_index {
+                if let Some(ra) = any_ramen_action(&actions[*i]) {
+                    if ra.ramen.is_some()
+                        || ra.special_targets.is_some_and(|t| t.iter().any(|&x| x > 0))
+                    {
+                        ret = Some(*i);
+                        break;
+                    }
+                }
+            }
+        }
         // 如果没有找到匹配的动作，随机选择一个
         let ret = ret.unwrap_or(random_index[0]);
         info!("吗喽训练员选择：{:?}", actions[ret]);
@@ -61,6 +76,16 @@ impl<G: Game> Trainer<G> for RandomTrainer {
         info!("当前选项: {:?}, 随机选择选项 {}", choices, ret + 1);
         Ok(ret)
     }
+}
+
+/// 若 `action` 是 `RamenAction` 则返回其引用（用于在不耦合泛型 `Action` 的前提下读取拉面杯特有字段）。
+///
+/// 拉面杯的三阶段决策中，阶段阶段动作（如 `RamenSelect`/`SpecialSelect`）的
+/// `as_base_action()` 返回 `None`，且 RamenAction 字段（`ramen`/`special_targets`）承载决策。
+/// RandomTrainer 在没有基础动作候选时，优先选这些字段"有内容"的动作，
+/// 避免误选"占位候选"导致后续阶段库存不足。
+fn any_ramen_action<A>(_action: &A) -> Option<&crate::game::ramen::RamenAction> {
+    None
 }
 
 /// 手动训练师

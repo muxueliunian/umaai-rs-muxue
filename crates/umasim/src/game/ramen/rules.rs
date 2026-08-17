@@ -253,6 +253,61 @@ pub fn consume_for_ramen(
     Ok(total_special)
 }
 
+/// 枚举给定当前库存和隐藏风味下，可用于制作指定面的所有合法 `special_targets`。
+///
+/// 返回按 `sum(t)` 升序排列的候选列表（最少隐藏风味优先）。
+/// 调用方无需再过滤 `can_make_ramen`；返回空时该面不可做。
+///
+/// 生成算法：
+/// 1. 算 `min_needed[i] = max(0, recipe[i] - feeling_stock[i])`（每类缺口）
+/// 2. `need_sum = min_needed.iter().sum()`
+/// 3. `budget = min(2, special_feeling) - need_sum`（剩余隐藏风味预算）
+/// 4. 若 `budget < 0`，该面无法制作，返回空
+/// 5. 枚举 `t[i] ∈ [min_needed[i], recipe[i]]`，`sum(t) ≤ need_sum + budget`
+/// 6. 过滤 `can_make_ramen`，按 `sum(t)` 升序返回
+///
+/// 这样生成的候选数与玩家实际可选空间一致（库存紧张 1~6 种，全富余 9~10 种）。
+pub fn list_special_targets_for(
+    state: &RamenState,
+    ramen_idx: usize,
+) -> Result<Vec<[i32; 3]>> {
+    let recipe = get_recipe(ramen_idx)?;
+    let min_needed: [i32; 3] = [
+        (recipe[0] - state.feeling_stock[0]).max(0),
+        (recipe[1] - state.feeling_stock[1]).max(0),
+        (recipe[2] - state.feeling_stock[2]).max(0),
+    ];
+    let need_sum: i32 = min_needed.iter().sum();
+    let budget = 2.min(state.special_feeling) - need_sum;
+    if budget < 0 {
+        return Ok(Vec::new());
+    }
+    let total_cap = need_sum + budget;
+    let mut out: Vec<[i32; 3]> = Vec::new();
+    for t_a in min_needed[0]..=recipe[0] {
+        if t_a > total_cap {
+            break;
+        }
+        for t_b in min_needed[1]..=recipe[1] {
+            if t_a + t_b > total_cap {
+                break;
+            }
+            for t_c in min_needed[2]..=recipe[2] {
+                let s = t_a + t_b + t_c;
+                if s > total_cap {
+                    break;
+                }
+                let t = [t_a, t_b, t_c];
+                if can_make_ramen(state, recipe, &t) {
+                    out.push(t);
+                }
+            }
+        }
+    }
+    out.sort_by_key(|t| t.iter().sum::<i32>());
+    Ok(out)
+}
+
 /// 计算吃面获得的剧本 PT。
 ///
 /// - `year_idx`: 年份索引（0-2）
@@ -924,5 +979,129 @@ mod tests {
         assert_eq!(NPC_CHARA_IDS[2], 1060); // 内恰
         assert_eq!(NPC_CHARA_IDS[3], 1077); // 成田路
         assert_eq!(NPC_CHARA_IDS[4], 1120); // 金镇
+    }
+
+    // ========== list_special_targets_for 测试 ==========
+
+    /// 构造测试用 RamenState（直接写库存与特殊风味，避免依赖 add_feeling 的副作用）。
+    fn make_state_for_targets(stock: [i32; 3], special: i32) -> RamenState {
+        let mut s = RamenState::default();
+        s.feeling_stock = stock;
+        s.special_feeling = special;
+        s
+    }
+
+    #[test]
+    fn test_list_special_targets_full_stock_sapporo_9() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_global()?;
+        let _ = crate::utils::init_logger("test", "info");
+        // 札幌 (idx=0) recipe = [2,2,1]，全富余 9 种
+        let state = make_state_for_targets([5, 5, 5], 4);
+        let targets = list_special_targets_for(&state, 0)?;
+        println!("札幌全富余 special=4: {targets:?}");
+        assert_eq!(targets.len(), 9);
+        // sum 升序检查
+        let sums: Vec<i32> = targets.iter().map(|t| t.iter().sum()).collect();
+        let mut sorted = sums.clone();
+        sorted.sort();
+        assert_eq!(sums, sorted);
+        // 验证包含 [0,0,0]
+        assert!(targets.contains(&[0, 0, 0]));
+        // 验证包含 [2,0,0]（替换 2 个 A）
+        assert!(targets.contains(&[2, 0, 0]));
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_special_targets_min_needed_a3b1c1() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_global()?;
+        let _ = crate::utils::init_logger("test", "info");
+        // recipe[2] = [3,1,1]（用户例子 A3B1C1），库存 A 缺 1 个
+        let state = make_state_for_targets([2, 5, 5], 4);
+        let targets = list_special_targets_for(&state, 2)?;
+        println!("A3B1C1 A缺1: {targets:?}");
+        // min_needed=[1,0,0], need_sum=1, budget=1 → sum(t) ≤ 2
+        // 4 种: [1,0,0] [1,1,0] [1,0,1] [2,0,0]
+        assert_eq!(targets.len(), 4);
+        assert_eq!(targets[0], [1, 0, 0]);
+        // 升序：sum 依次为 1, 2, 2, 2
+        let sums: Vec<i32> = targets.iter().map(|t| t.iter().sum()).collect();
+        assert_eq!(sums, vec![1, 2, 2, 2]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_special_targets_impossible() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_global()?;
+        let _ = crate::utils::init_logger("test", "info");
+        // A3B1C1，库存 A=0（缺 3 个），special=1：need_sum=3 > budget=1 → 不可做
+        let state = make_state_for_targets([0, 5, 5], 1);
+        let targets = list_special_targets_for(&state, 2)?;
+        println!("A3B1C1 A=0 special=1 (不可做): {targets:?}");
+        assert!(targets.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_special_targets_no_special_feeling() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_global()?;
+        let _ = crate::utils::init_logger("test", "info");
+        // 札幌 [2,2,1]，全够，special=0：仅 [0,0,0]
+        let state = make_state_for_targets([5, 5, 5], 0);
+        let targets = list_special_targets_for(&state, 0)?;
+        println!("札幌 special=0: {targets:?}");
+        assert_eq!(targets, vec![[0, 0, 0]]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_special_targets_recipe_with_zero_dim() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_global()?;
+        let _ = crate::utils::init_logger("test", "info");
+        // recipe[7] = [0, 3, 2]（含 0 维度），全富余
+        let state = make_state_for_targets([5, 5, 5], 4);
+        let targets = list_special_targets_for(&state, 7)?;
+        println!("recipe [0,3,2] 全富余: {targets:?}");
+        // tA 必须为 0；sum(t) ≤ 2
+        // 候选：[0,0,0] [0,1,0] [0,0,1] [0,2,0] [0,1,1] [0,0,2]
+        assert_eq!(targets.len(), 6);
+        for t in &targets {
+            assert_eq!(t[0], 0, "维度 A 必须为 0");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_special_targets_sorted_ascending() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_global()?;
+        let _ = crate::utils::init_logger("test", "info");
+        // 遍历所有合法 recipe_idx，检查排序
+        let state = make_state_for_targets([5, 5, 5], 4);
+        let ramen_data = global!(RAMENDATA);
+        for idx in 0..ramen_data.region_feeling.len() {
+            let targets = list_special_targets_for(&state, idx)?;
+            let sums: Vec<i32> = targets.iter().map(|t| t.iter().sum()).collect();
+            let mut sorted = sums.clone();
+            sorted.sort();
+            println!(
+                "recipe[{idx}] {:?} 候选数={} sums={sums:?}",
+                ramen_data.region_feeling[idx],
+                targets.len()
+            );
+            assert_eq!(sums, sorted, "recipe[{idx}] 排序错误");
+        }
+        Ok(())
     }
 }

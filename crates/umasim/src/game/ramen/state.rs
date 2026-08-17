@@ -51,7 +51,15 @@ pub struct RamenState {
     /// 当年吃面次数（每年重置，叠加增量上限 5 次）
     pub eat_count: i32,
     /// 诀窍角标分配（回合 2-71 时每个训练随机分配一个诀窍类型）
-    pub train_feeling_type: Option<[FeelingType; 5]>
+    pub train_feeling_type: Option<[FeelingType; 5]>,
+
+    // ========== 三阶段决策 pending ==========
+    /// 当前回合已选定的面（`RamenSelect` 阶段写入，`Train` 阶段消费）
+    /// - None: 不吃面
+    /// - Some(idx): 选定 `ramen_region_effect[idx]`
+    pub pending_ramen: Option<usize>,
+    /// 当前回合已选定的隐藏风味用法（`SpecialSelect` 阶段写入，`Train` 阶段消费）
+    pub pending_special_targets: [i32; 3],
 }
 
 /// 拉面效果合并（基础效果 + 地区效果 + 超级拉面效果 + Pt常驻效果）
@@ -152,6 +160,18 @@ impl Deref for RamenGame {
 impl DerefMut for RamenGame {
     fn deref_mut(&mut self) -> &mut Self::Target {
         &mut self.base
+    }
+}
+
+impl RamenState {
+    /// 清空三阶段决策的 pending 字段
+    ///
+    /// 调用时机：
+    /// - `Begin` 阶段开始时（清理上一回合残留）
+    /// - `Train` 阶段结束后（防御性清理，避免 pending 跨回合保留）
+    pub fn clear_pending(&mut self) {
+        self.pending_ramen = None;
+        self.pending_special_targets = [0, 0, 0];
     }
 }
 
