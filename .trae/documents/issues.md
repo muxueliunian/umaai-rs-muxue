@@ -123,7 +123,7 @@
 
 ## 训练数值不对，尤其是友情加成
 - **日期**：2026-08-17
-- **状态**：待解决
+- **状态**：已解决
 - **问题描述**：训练数值计算可能不正确，特别是友情加成（youqing）的生效条件
 - **排查过程**：
   - 闪耀判定逻辑：支援卡只能在本体的得意训练位置闪耀（train_type == train && friendship >= 80）
@@ -131,8 +131,21 @@
   - `is_shining_at()` 函数已重写，但可能仍有逻辑问题
   - `calc_training_buff()` 中，非闪耀时 effect.youqing = 0
   - `calc_ramen_training_effect()` 中，非闪耀时 effect.youqing = 0
-- **解决方案**：待排查，需要检查闪耀判定和友情加成的完整计算链路
-- **备注**：可能需要打印训练计算中间值来定位问题
+  - 旧实现：`RamenGame::calc_training_value` 仅调用 `default_calc_training_value`（卡 buff），然后由 `apply_ramen_to_train_value` 用 `apply_ramen_training_value` 简版公式（`lower * xunlian * youqing`，缺干劲/人数/成长率）追加拉面 buff；同时 `explain_distribution` 也用简版公式，导致显示数值与实际生效数值不一致
+- **解决方案**：
+  - 重写 `RamenGame::calc_training_value` 为两阶段实现（模仿 OnsenGame）：
+    - 阶段1：`default_calc_training_value` 应用卡 buff 后约束 status_pt[i] ≤ 100
+    - 阶段2：拉面 buff 累乘到下层值上
+      - `xunlian × youqing` 对 `status_pt[0..4]`（**5 个属性**，含副属性加成）都生效
+      - `pt_bonus` 仅对 `status_pt[5]`（PT）生效
+      - upper 上限 = 100 + status_limit（PT: 100 + status_limit + pt_limit）
+  - `explain_distribution` 直接使用 `calc_training_value` 的结果，删除简版公式调用
+  - `handle_train_success` 直接使用 `calc_training_value` 的结果
+  - 删除 `apply_ramen_to_train_value` 函数（已无人调用）
+- **备注**：
+  - 测试 `test_train_param_decomposition` 已包含 3 张速卡 + 2 个 NPC 在速训练、不吃面/吃面 Some(5) 的场景验证
+  - 完整77 回合 `test_ramen_silent_loop` 通过
+  - 核心修正：副属性（来自 `buff.bonus`）也享受拉面 buff 加成，这之前被忽略
 
 ---
 

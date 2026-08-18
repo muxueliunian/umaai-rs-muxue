@@ -6,7 +6,7 @@
 //! - `RamenStage::next()`：负责回合内普通阶段流转（Begin → Distribute → Train → AfterTrain）
 //! - `Game::next()`：负责跨阶段流转（AfterTrain → NextTurn → Begin/特殊阶段）
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use comfy_table::{ColumnConstraint, Table, Width};
 use log::{info, warn};
 use rand::prelude::IndexedRandom;
@@ -459,30 +459,14 @@ impl Game for RamenGame {
                 }
             } else {
                 // 普通回合：显示训练数值（包含拉面效果）+ 失败率 + 诀窍槽明细
+                // calc_training_value 内部已经完成两阶段计算（含拉面 buff），
+                // 直接使用 status_pt[train] 和 status_pt[5] 即可
                 let ramen_effect = calc_ramen_training_effect(self, train, is_shining);
                 let effective_fail = (fail_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0)
                     .min(100.0).max(0.0);
 
-                // 应用拉面效果到训练数值
-                // 属性训练值：lower * (100+xunlian)/100 * (100+youqing)/100
-                let (status_val, _) = super::effects::apply_ramen_training_value(
-                    base_value.status_pt[train],
-                    &ramen_effect,
-                    train,
-                );
-                // PT训练值：PT下层 * (100+xunlian)/100 * (100+youqing)/100 * (100+pt_bonus)/100
-                let (_, pt_val) = super::effects::apply_ramen_training_value(
-                    base_value.status_pt[5],
-                    &ramen_effect,
-                    train,
-                );
                 let value = ActionValue {
-                    status_pt: {
-                        let mut arr = [0; 6];
-                        arr[train] = status_val;
-                        arr[5] = pt_val;
-                        arr
-                    },
+                    status_pt: base_value.status_pt,
                     vital: base_value.vital,
                     motivation: base_value.motivation,
                     ..Default::default()
@@ -518,7 +502,41 @@ impl Game for RamenGame {
     }
 
     fn calc_training_value(&self, buffs: &crate::game::CardTrainingEffect, train: usize) -> Result<ActionValue> {
-        self.default_calc_training_value(buffs, train)
+        if train > 5 {
+            return Err(anyhow!("训练类型错误"));
+        }
+        // 两阶段计算：参考 OnsenGame 的实现
+        // 1. 下层值：default_calc_training_value 应用卡 buff（友情/训练/干劲/人数/成长率），
+        //    然后约束 status_pt 各元素 ≤ 100（剧本规则：下层不超过 100）
+        let mut base_value = self.default_calc_training_value(buffs, train)?;
+        for i in 0..6 {
+            base_value.status_pt[i] = base_value.status_pt[i].min(100);
+        }
+        // 2. 拉面 buff：累乘到下层值上（不合并到 buffs，避免累乘 vs 加法混淆）
+        let is_shining = self.shining_count(train) > 0;
+        let ramen_effect = super::effects::calc_ramen_training_effect(self, train, is_shining);
+        let xunlian_mult = (100 + ramen_effect.xunlian) as f64 / 100.0;
+        let youqing_mult = (100 + ramen_effect.youqing) as f64 / 100.0;
+        let pt_bonus_mult = (100 + ramen_effect.pt_bonus) as f64 / 100.0;
+        let status_limit = 100 + ramen_effect.status_limit;
+        let pt_limit = 100 + ramen_effect.status_limit + ramen_effect.pt_limit;
+        // 3. 上层值：拉面 buff 带来的增量
+        // - xunlian × youqing 对 status_pt[0..4]（5 个属性训练值，含副属性加成 buff.bonus）都生效
+        // - pt_bonus 仅对 status_pt[5]（PT）单独生效
+        for i in 0..5 {
+            if base_value.status_pt[i] > 0 {
+                let upper_raw = (base_value.status_pt[i] as f64 * xunlian_mult * youqing_mult) as i32
+                    - base_value.status_pt[i];
+                let upper = upper_raw.min(status_limit).max(0);
+                base_value.status_pt[i] += upper;
+            }
+        }
+        // PT 部分额外乘 pt_bonus
+        let pt_upper_raw = (base_value.status_pt[5] as f64 * xunlian_mult * youqing_mult * pt_bonus_mult) as i32
+            - base_value.status_pt[5];
+        let pt_upper = pt_upper_raw.min(pt_limit).max(0);
+        base_value.status_pt[5] += pt_upper;
+        Ok(base_value)
     }
 
     fn person_is_available(&self, person_index: usize) -> bool {
@@ -1131,6 +1149,100 @@ mod tests {
         println!("隐藏风味: {}", game.ramen.special_feeling);
         let score = game.uma.calc_score();
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
+
+        Ok(())
+    }
+
+    /// 训练参数分解日志专项测试
+    ///
+    /// 固定场景：回合 31（第二年，Lv=4），3 张速卡（杏目 id=0、洛林 id=3、里见 id=4）
+    /// + 2 个 NPC 都在速训练位置，羁绊全部 100。然后分别在
+    /// "不吃面"和"吃面 Some(5) 中京"两种情况下触发速训练，
+    /// 输出 `explain_distribution` 和 `calc_train_params` 分解日志，
+    /// 排查 issues.md「训练数值不对，尤其是友情加成」。
+    #[test]
+    fn test_train_param_decomposition() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        // 跳到回合 31（避开 102601 的生涯比赛回合）
+        game.base.turn = 31;
+        game.add_friend_and_npcs()?; // persons[0..5]=支援卡，[6]=友人卡，[7..12]=5个NPC
+        game.add_reporter(); // persons[12]=记者
+        // 所有支援卡羁绊 = 100（确保都能闪耀）
+        for i in 0..6 {
+            game.persons[i].friendship = 100;
+            game.deck[i].friendship = 100;
+        }
+        // 第二年参数
+        game.ramen.scenario_pt = 2000;
+        game.ramen.rmj_results = vec![true]; // year 1 RMJ 成功
+        // 训练次数全部 10，配合 train_level_bonus 让训练等级 = 4
+        game.base.train_level_count = [10, 10, 10, 10, 10];
+        game.ramen.train_level_bonus = 1;
+        // 第 1 年地区选 [0, 6, 7]（札幌/中京/京都），便于 add_reporter 等流程
+        game.ramen.selected_regions = [0, 6, 7];
+
+        // 直接构造 distribution：3 张速卡 + 2 个 NPC 都在速训练位置
+        game.base.distribution = vec![
+            vec![0, 3, 4, 7, 8], // 速：杏目 + 洛林 + 里见 + NPC#1 + NPC#2
+            vec![],              // 耐
+            vec![],              // 力
+            vec![],              // 根
+            vec![],              // 智
+        ];
+        // 训练角标设为 [A, B, C, A, B]（无所谓，主要让 explain_distribution 不报错）
+        game.ramen.train_feeling_type = Some([
+            FeelingType::A,
+            FeelingType::B,
+            FeelingType::C,
+            FeelingType::A,
+            FeelingType::B,
+        ]);
+
+        use crate::game::traits::{ActionEnum, Game};
+        let mut rng = StdRng::seed_from_u64(42);
+
+        // 跳到 Train 阶段
+        game.stage = crate::game::ramen::RamenStage::Train;
+
+        // ============ 场景 A：不吃面、速训练 ============
+        game.ramen.current_ramen = None;
+        let actions = game.list_actions()?;
+        let train_idx = actions
+            .iter()
+            .position(|a| {
+                matches!(
+                    a.as_base_action(),
+                    Some(crate::game::BaseAction::Train(0))
+                )
+            })
+            .expect("应能找到速训练动作");
+        println!(
+            "\n===== 场景 A：不吃面、速训练 =====\n{}",
+            game.explain_distribution()?
+        );
+        game.apply_action(&actions[train_idx], &mut rng)?;
+
+        // ============ 场景 B：吃面 Some(5) 中京、速训练 ============
+        game.ramen.current_ramen = Some(5); // 中京 at_trains=[0,1,2,3,4], youqing=10
+        let train_idx2 = actions
+            .iter()
+            .position(|a| {
+                matches!(
+                    a.as_base_action(),
+                    Some(crate::game::BaseAction::Train(0))
+                )
+            })
+            .expect("应能找到速训练动作");
+        println!(
+            "\n===== 场景 B：吃面 Some(5) 中京、速训练 =====\n{}",
+            game.explain_distribution()?
+        );
+        game.apply_action(&actions[train_idx2], &mut rng)?;
 
         Ok(())
     }

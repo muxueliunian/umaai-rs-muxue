@@ -221,6 +221,8 @@ impl ActionEnum for RamenAction {
                 // 真执行：吃面（用 pending_targets）+ 基础操作
                 if let Some(ramen_idx) = self.ramen {
                     self.apply_ramen(game, ramen_idx, rng)?;
+                    // 拉面羁绊效果必须在训练前生效（影响闪耀判定）
+                    self.apply_ramen_friendship(game)?;
                     info!("---- 吃面后 ----");
                     let ramen_info = game.explain_ramen_info();
                     if !ramen_info.is_empty() {
@@ -235,8 +237,6 @@ impl ActionEnum for RamenAction {
 
                 match self.operation {
                     Operation::Train(train) => {
-                        // 拉面羁绊效果必须在训练前生效（影响闪耀判定）
-                        self.apply_ramen_friendship(game)?;
                         self.do_train(game, train as usize, rng)?;
                         // 训练分支：fill_feeling_gauge 已在 do_train 内统一处理（含 is_xiahesu）
                     }
@@ -666,6 +666,9 @@ impl RamenAction {
     }
 
     /// 计算训练参数（buffs、失败率、拉面效果）
+    ///
+    /// 调试模式（INFO 日志级别）下输出每个支援卡的 youqing 原始值/闪耀状态/最终
+    /// 值，方便排查"友情加成不对"问题（详见 issues.md）。
     fn calc_train_params(
         &self,
         game: &super::RamenGame,
@@ -680,6 +683,77 @@ impl RamenAction {
         let failure_rate = (base_failure_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0)
             .min(100.0)
             .max(0.0);
+
+        // ========== 详细日志：训练参数逐项分解 ==========
+        let train_name = global!(GAMECONSTANTS).train_names[train].clone();
+        let shining_count = game.shining_count(train);
+        info!(
+            "\n===== 训练参数分解 {}训练 =====\n\
+             distribution={:?} shining_count={} is_shining={}",
+            train_name,
+            game.distribution[train],
+            shining_count,
+            is_shining,
+        );
+
+        // 逐个支援卡：原始 youqing vs 清零后的 youqing
+        for &pidx in game.distribution[train].iter() {
+            if pidx < 0 {
+                continue;
+            }
+            let person = &game.persons[pidx as usize];
+            let shining_at = game.is_shining_at(pidx as usize, train);
+            if pidx < 6 {
+                // 支援卡：重新计算卡效果原始值（不应用 youqing 清零），方便对比
+                let (raw_effect, _) = game.deck[pidx as usize].calc_training_effect(game, train as i32)?;
+                let raw_youqing = raw_effect.youqing;
+                let final_youqing = if shining_at { raw_youqing } else { 0.0 };
+                info!(
+                    "  [#{pidx}] {} 类型={} 羁绊={} shining_at={} raw_youqing={:.1} final_youqing={:.1} raw_xunlian={}",
+                    person.short_name(),
+                    person.train_type,
+                    person.friendship,
+                    shining_at,
+                    raw_youqing,
+                    final_youqing,
+                    raw_effect.xunlian,
+                );
+            } else {
+                // NPC / 记者 / 友人 等
+                info!(
+                    "  [#{pidx}] {} 类型={:?} 羁绊={} shining_at={} (非支援卡，不贡献 youqing)",
+                    person.short_name(),
+                    person.person_type,
+                    person.friendship,
+                    shining_at,
+                );
+            }
+        }
+
+        info!(
+            "  → buffs 汇总: youqing={:.1} xunlian={} failure_rate_drop={:.1} ganjing={} deyilv={:.1}",
+            buffs.youqing,
+            buffs.xunlian,
+            buffs.fail_rate_drop,
+            buffs.ganjing,
+            buffs.deyilv,
+        );
+        info!(
+            "  → ramen_effect: xunlian={} youqing={} deyilv={} hint={} fail_rate_drop={} pt_bonus={} status_limit={} friendship={}",
+            ramen_effect.xunlian,
+            ramen_effect.youqing,
+            ramen_effect.deyilv,
+            ramen_effect.hint,
+            ramen_effect.fail_rate_drop,
+            ramen_effect.pt_bonus,
+            ramen_effect.status_limit,
+            ramen_effect.friendship,
+        );
+        info!(
+            "  → failure_rate: base={:.2}% final={:.2}%\n",
+            base_failure_rate,
+            failure_rate,
+        );
 
         Ok(TrainParams {
             buffs,
@@ -717,9 +791,8 @@ impl RamenAction {
         params: &TrainParams,
         rng: &mut StdRng,
     ) -> Result<()> {
-        // 计算并应用训练值（基础值 + 拉面效果同时生效）
-        let base_value = game.calc_training_value(&params.buffs, train)?;
-        let final_value = self.apply_ramen_to_train_value(base_value, train, params);
+        // calc_training_value 内部已两阶段计算（含拉面 buff），直接使用结果
+        let final_value = game.calc_training_value(&params.buffs, train)?;
         game.uma.add_value(&final_value);
 
         // 增加训练次数
@@ -732,42 +805,6 @@ impl RamenAction {
         self.fill_feeling_gauge(game, train, params, game.is_xiahesu())?;
 
         Ok(())
-    }
-
-    /// 应用拉面效果到训练值
-    ///
-    /// 拉面效果和PT加成同时生效，一次性计算最终值。
-    fn apply_ramen_to_train_value(
-        &self,
-        base_value: ActionValue,
-        train: usize,
-        params: &TrainParams,
-    ) -> ActionValue {
-        // 属性训练值：lower * (100+xunlian)/100 * (100+youqing)/100
-        let (status_val, pt_val) = apply_ramen_training_value(
-            base_value.status_pt[train],
-            &params.ramen_effect,
-            train,
-        );
-
-        // PT训练值：属性值 * (100+pt_bonus)/100
-        let (_, final_pt) = apply_ramen_training_value(
-            base_value.status_pt[5],
-            &params.ramen_effect,
-            train,
-        );
-
-        ActionValue {
-            status_pt: {
-                let mut arr = [0; 6];
-                arr[train] = status_val;
-                arr[5] = final_pt;
-                arr
-            },
-            vital: base_value.vital,
-            motivation: base_value.motivation,
-            ..Default::default()
-        }
     }
 
     /// 处理训练后的羁绊和事件

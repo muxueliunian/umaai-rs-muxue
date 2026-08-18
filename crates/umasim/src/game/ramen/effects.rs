@@ -312,6 +312,19 @@ pub fn apply_ramen_training_value(
     let status_upper = status_upper_raw.min(status_limit);
     let pt_upper = pt_upper_raw.min(pt_limit);
 
+    // 调试日志：打印约束前后的 upper/lower 值（排查训练数值不对时使用）
+    log::info!(
+        "  apply_ramen_training_value: lower={} (raw={}) \
+         xunlian={} youqing={} pt_bonus={} status_limit={} pt_limit={}\n    \
+         属性: status_upper_raw={} -> status_limit={} -> status_upper={} (最终={})\n    \
+         PT:   pt_upper_raw={} -> pt_limit={} -> pt_upper={} (最终={})",
+        lower, lower_value,
+        effect.xunlian, effect.youqing, effect.pt_bonus,
+        effect.status_limit, effect.pt_limit,
+        status_upper_raw, status_limit, status_upper, lower + status_upper,
+        pt_upper_raw, pt_limit, pt_upper, lower + pt_upper,
+    );
+
     (lower + status_upper, lower + pt_upper)
 }
 
