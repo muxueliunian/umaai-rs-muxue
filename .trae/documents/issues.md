@@ -16,6 +16,22 @@
 
 ---
 
+## basic_effect.hint_special 尚未处理
+
+- **日期**：2026-08-19
+- **状态**：待解决
+- **问题描述**：`RamenBasicEffect.hint_special`（第三年 `true`）表示"支援卡类型>=4 时，除友人/团队卡以外的所有支援卡都出现 Hint，且训练后发动所有的 Hint 事件"。当前代码在 `effects.rs` 的 `calc_finals_effect` / `calc_normal_effect` 中已经把 `basic.hint_special` 合并到 `RamenTrainingEffect.hint_special` 字段，但是没有下游消费者：`distribute_hint` 仅按 `hint` 加成概率判定单个支援卡是否出现 Hint，没有按 `hint_special` 强制所有非友人/团队支援卡出现 Hint 的逻辑；hint 事件触发逻辑也没有"训练后发动所有 Hint 事件"的处理。
+- **排查过程**：
+  - `effects.rs:91, 167` 把 `basic.hint_special` 合并到 `effect.hint_special`，但只是布尔字段透传
+  - `RamenGame::distribute_hint`（`game.rs:550`）只读取 `calc_hint_bonus_pct()` 的 hint 加成，不读取 `hint_special`
+  - `handle_train_success` / hint 事件触发逻辑（`action.rs`）按单卡 hint 触发流程处理，未实现"训练后发动所有 Hint"
+- **解决方案**：待实现。在 `distribute_hint` 中：
+  1. 若 `effect.hint_special` 为真，则遍历所有支援卡（除友人/团队外），强制 `set_hint(true)`
+  2. 若已吃面，则训练后把所有"hint=true"的支援卡的 hint 事件加入 unresolved_events
+- **备注**：仅第三年生效（`ramen_basic_effect[2].hint_special = true`），生效范围与 hint_special 字段语义一致。
+
+---
+
 ## 测试批量运行时的全局状态问题
 - **日期**：2026-08-13
 - **状态**：基本解决

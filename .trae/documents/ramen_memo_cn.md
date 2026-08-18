@@ -81,6 +81,17 @@
 
 如果通过检测，则当前的`RMJ`事件触发`result=2`，下一年常驻享受前一年的`ramen_success_effect`，否则`result=1`，应用`ramen_fail_effect`。
 
+**RMJ 事件**（在回合 23/47/71 末立即触发）：
+- 第1年：401404
+- 第2年：401405
+- 第3年：401406
+
+事件 choice 结构：选项组内含 2 个分支（`result=2` 成功 / `result=1` 失败），根据 `rmj_results[year_idx]` 选择对应分支并应用其 value。RMJ 事件没有 `player_select=true`，由代码自动按 RMJ 结算结果选择。
+
+**RMJ 结算后 scenario_pt 归零**：下一年（年2 / 年3 / URA 阶段）的剧本 PT 从 0 重新累计。注意：
+- `ramen_success_effect / ramen_fail_effect` 已经基于 `rmj_results` 可读取（下一年常驻生效）
+- 新一年的 `ramen_pt_effect` 档位和 `region_bonus` 基于 PT=0 重新计算（pt_min=0 档位：`deyilv=50`，`region_bonus=0`）
+
 **RMJ结算效果生效时间**：
 - 第1年结算（rmj_results[0]）→ 第2年生效
 - 第2年结算（rmj_results[1]）→ 第3年生效
@@ -103,6 +114,13 @@
   - 第3年RMJ结算效果（ramen_success_effect 或 ramen_fail_effect）生效
   - `finals_effect.base` 效果生效
   - `finals_effect.extra` 效果仅在支援卡种类 >= 4 时生效
+
+**finals_effect.base 自动应用**（每个 URA 回合 Begin 阶段）：
+- `vital`（体力恢复，+20）：每个 URA 回合（turn=72-77）都生效，每回合 +20
+- `motivation`（干劲提升，+1）：每个 URA 回合都生效，每回合 +1
+- `saihou`（赛后加成，+100）：**仅 turn=72 一次性 +100**，之后回合（turn=73-77）保留已生效值，不重复累加
+  - 实现：`self.uma.race_bonus += finals.base.saihou`（仅在 `self.base.turn == 72` 时执行一次）
+  - 例如初始 race_bonus=60（来自支援卡），turn=72 后变为 60+100=160，turn=73-77 比赛都用 160 乘算
 
 ### NPC
 剧本机制启动后，在普通训练中会出现`NPC`类型的`Person`，为了方便，NPC的支援卡ID固定为五个链接角色的chara_id:
@@ -513,3 +531,60 @@ ramen_memo里记录的典型的分配结果为：（左-总消耗，右-分配�
 ### 隐藏风味回合表（已修正）
 - 2, 24, 36, 48, 60 → 获得2个
 - 37, 38, 39, 61, 62, 63 → 获得1个
+
+### 固定触发事件清单（2026-08-19 补）
+
+**回合开始时触发**（Begin 阶段，按 turn 选择）：
+- `turn=0` 开始：400000400 马娘登场（来自 `global_events().story_events`，`player_select=false`）
+- `turn=24` 开始：4009 经典年-新年（来自 `global_events().story_events`，`player_select=true`，3 选 1）
+- `turn=48` 开始：4010 古马年-新年（来自 `global_events().story_events`，`player_select=true`，3 选 1）
+
+**回合结束时触发**（NextTurn / AfterTrain 阶段，push 到 `unresolved_events`）：
+- `turn=23` 末：401404 第一年RMJ（RMJ 结算后立即 apply）
+- `turn=47` 末：401405 第二年RMJ（RMJ 结算后立即 apply）
+- `turn=71` 末：401406 第三年RMJ（RMJ 结算后立即 apply）
+- `turn=48` 末：4011 新年抽签（`system_events["ticket"]`，4 个 result 分支按 prob 加权选）
+- `turn=77` 末：401407 育成结束 + 5011 ending（system_events） + 友人结束事件（ramen_data.friend_events["end"]）
+
+**实现细节**：
+- 回合开始事件：通过 `RamenGame::generate_events` 触发，遍历 `global_events().story_events` + `ramen_data.scenario_events` 的 Fixed 触发回合
+- 回合结束事件：在 `add_mandatory_events`（turn=48 ticket, turn=77 ending+401407+友人结束）和 `next()` 的 RMJ 结算（turn=23/47/71）分支中 push 到 `base.unresolved_events`，由 AfterTrain 阶段统一消费
+- **race_turn 短路修复**：`run_ramen_select` 的 race_turn 短路路径（turn=72/73/74/75/76/77）在 apply Race 后立即调用 `run_after_train` 处理 unresolved_events，再 `stage=NextTurn`。否则 AfterTrain 会被 next() 跳过，turn=77 的 ending/401407/友人结束事件漏触发
+
+### 事件 player_select（2026-08-19 补）
+
+`EventData.player_select` 字段控制是否由 Trainer 决策事件选项：
+- `player_select=true`：调用 Trainer 的 `select_event_choice` 在 `choices` 间选择（如 4009、4010 的 3 选 1）
+- `player_select=false`：直接选第 0 组选项，由 `apply_event` 按 prob/result 内部决定具体分支（如 RMJ 事件 401404-401406、抽签 4011）
+
+`Game::run_event` 默认实现的判断条件：`event.player_select && event.choices.len() > 1`（不仅用 `choices.len() > 1`，避免把"单选项 + prob 加权"的事件错送给 Trainer）。
+
+### RMJ 结算流程（2026-08-19 补）
+
+`Game::next()` 的 NextTurn 阶段处理 RMJ 结算（turn=23/47/71），流程：
+1. `check_rmj` 写入 `rmj_results`（success/fail），计算 train_level_bonus
+2. 重置 `eat_count = 0`
+3. `find_rmj_event(year_idx)` 找到 401404/401405/401406 事件，**立即 apply**（不是 push 到 unresolved_events 等下一回合）
+   - RMJ 事件没有 `player_select=true`，直接 `apply_event(event, 0, rng)`
+   - apply_event 中根据 `rmj_results[year_idx]`（true=result=2, false=result=1）选择对应分支
+4. `scenario_pt = 0`（下一年重新累计 PT）
+
+早期实现错误：把 RMJ 事件 push 到 unresolved_events，导致在 `turn=N+1` 的 AfterTrain 阶段才执行（晚 1 个回合）。修复为立即 apply。
+
+### Trainer 事件选项决策（select_event_choice）
+
+Trainer trait 的 `select_event_choice` 是 `select_choice` 的扩展接口，传入完整 `EventData` 便于上下文决策：
+```rust
+fn select_event_choice<G: Game>(
+    &self, game: &G, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
+) -> Result<usize>;
+```
+
+默认实现回退到 `select_choice`。MctsTrainer / HandwrittenTrainer 可按事件 ID / 选项 value 决定策略。
+
+### 超级拉面自动恢复（2026-08-19 补）
+
+`run_begin` 阶段对 `is_super_ramen_turn()` 的处理：
+- 每个 URA 回合（turn=72-77）Begin 阶段：`self.uma.add_value(&ActionValue { vital: finals.base.vital, motivation: finals.base.motivation })`，即体力+20、干劲+1
+- 仅 turn=72 时：`self.uma.race_bonus += finals.base.saihou`（一次性+100）。turn=73-77 不再重复累加，避免 race_bonus 持续增长
+- 实现位置：`crates/umasim/src/game/ramen/game.rs` 的 `run_begin` 函数末尾

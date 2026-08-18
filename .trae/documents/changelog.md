@@ -4,6 +4,43 @@
 
 ## 2026-08-18
 
+### scenario_pt 每年初归零
+
+剧本PT（`scenario_pt`）在每年 RMJ 结算后归零，下一年重新累计。即：
+- turn=23 RMJ 结算后 PT 归零，第2年（turn=24-47）从 0 开始累计
+- turn=47 RMJ 结算后 PT 归零，第3年（turn=48-71）从 0 开始累计
+- turn=71 RMJ 结算后 PT 归零（URA 阶段不再累计 PT）
+
+逻辑位置：`Game::next()` 的 NextTurn 阶段，在 RMJ 结算 + 写入 `rmj_results` + apply RMJ 事件 之后立即归零。这样 `ramen_success_effect / ramen_fail_effect` 的常驻效果已可读取，新一年的 `ramen_pt_effect` 档位和 `region_bonus` 也会基于新的 PT 重新计算。
+
+新增单元测试 `test_scenario_pt_reset_after_rmj` 验证 turn=23 末 RMJ 结算后 PT=2500 → 0。
+
+### RMJ 事件触发时机修正 + 超级拉面基础效果自动应用
+
+- **RMJ 事件触发时机修复**：RMJ 事件（401404/401405/401406）原在 turn=23/47/71 后**多延迟一整个回合**才触发（push 到 `unresolved_events` 后等 AfterTrain 阶段消费）。修复为在 NextTurn 阶段 RMJ 结算后**立即 apply**（不需要 Trainer，RMJ 事件无 player_select）。现在 turn=23/47/71 末（即 1-indexed 第 24/48/72 回合末）正确触发
+- **超级拉面 base 效果应用**：
+  - `vital+20`、`motivation+1`：每个 URA 回合（turn=72-77）Begin 阶段都生效
+  - `saihou+100`（赛后加成）：**仅在 turn=72 一次性 +100**，之后回合保留已生效值，不重复累加（避免 race_bonus 无限增长到 160/260/360/...）。实测 race_bonus 从 60（支援卡）一次性提升到 160，后续 5 个 URA 比赛都是 160
+
+新增 3 个单元测试：`test_rmj_event_immediate_apply_at_turn_23`（验证 turn=23 末立即触发 401404）、`test_super_ramen_base_effect_vital_motivation`（验证 turn=72 一次性+100）、`test_super_ramen_saihou_one_time_only`（验证 4 个连续 URA 回合 race_bonus 仅 +100）。
+
+### 拉面杯 RMJ 结算与固定触发事件补全
+
+落实 issues 中"RMJ 结算后触发对应事件"和"补充固定触发事件"两批修复：
+
+- **RMJ 结算事件触发**：每年 RMJ 结算后（回合 23/47/71 结束阶段），将对应事件 push 到 `unresolved_events`：401404（第1年）/401405（第2年）/401406（第3年）；`apply_event` 增加分支选择逻辑，根据 `rmj_results[year_idx]` 选 result=2（成功）或 result=1（失败）的分支并直接 `add_value`
+- **固定触发事件补全**：
+  - 回合 0 开始：触发 400000400 马娘登场
+  - 回合 24 开始：触发 4009 经典年新年
+  - 回合 48 开始：触发 4010 古马年新年
+  - 回合 48 结束：触发 4011 新年抽签（`system_events["ticket"]`，按 prob 加权选 result）
+  - 回合 77 结束：触发 401407 + 5011（ending）+ 友人结束事件
+- **`generate_events` 扩展**：除 ramen_data.scenario_events 外，再处理 `global_events().story_events` 的 Fixed 事件（400000400/4009/4010）
+- **`run_event` 默认实现**：决策条件由 `event.choices.len() > 1` 改为 `event.player_select && event.choices.len() > 1`，保证 `player_select=true` 的事件无论选项数都交给 Trainer 决策
+- **race_turn 短路修复**：race_turn 时 `run_ramen_select` 显式调用 `run_after_train` 处理 `unresolved_events` 后再 `stage = NextTurn`，避免 turn=77 的 ending/401407/友人结束事件因 stage 跳过 AfterTrain 而漏触发
+
+新增 9 个单元测试覆盖：`select_rmj_choice_by_result`/`rmj_event_year`/`rmj_event_apply_success`/`rmj_event_apply_fail`/`rmj_event_push_to_unresolved`/`generate_events_uma_debut`/`generate_events_classic_newyear`/`generate_events_ancient_newyear`/`add_mandatory_events_ticket_at_48`/`add_mandatory_events_ending_at_77`。
+
 ### 拉面杯训练分布剧本得意率加成修复
 
 `RamenGame::deyilv` 此前只返回卡的 deyilv，未加剧本加成。修正为：`effects.rs` 新增 `calc_scenario_deyilv` 汇总 `pt_effect + rmj_effect` 的 deyilv；`RamenGame::deyilv` 返回"卡 deyilv + 剧本 deyilv"。新增 6 个测试覆盖普通回合/超级拉面/RMJ 成功失败等场景。`Game::distribute_person` 中"不出现"判定仍受得意率影响的小问题留待后续，详见 issues.md。

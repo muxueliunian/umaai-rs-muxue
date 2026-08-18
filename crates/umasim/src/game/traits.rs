@@ -95,13 +95,21 @@ pub trait Game: Clone {
     /// 应用事件效果，一些特殊事件需要用到rng和Result
     fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()>;
     /// 执行事件，如果有选项，交给Trainer去决定
+    ///
+    /// 决策策略：
+    /// - `player_select = true`：调用 Trainer 在 `choices` 间选择（玩家决策）
+    /// - `player_select = false`：直接选第 0 组选项，由 `apply_event` 按 prob/result 内部决定具体分支
+    ///
+    /// 注意：原判断条件 `event.choices.len() > 1` 改用 `event.player_select`，
+    /// 以保证带 player_select=true 的事件无论选项数都交给 Trainer 决策，
+    /// 而单选项的 RMJ/抽签等随机事件仍走 `apply_event` 内的 prob 加权逻辑。
     fn run_event<T: Trainer<Self>>(&mut self, event: &EventData, trainer: &T, rng: &mut StdRng) -> Result<()> {
         info!("+ 事件: #{} {}", event.id, event.name);
-        if event.choices.len() > 1 {
+        if event.player_select && event.choices.len() > 1 {
             for (index, choice) in event.choices.iter().enumerate() {
                 info!("选项 {}: {}", index + 1, Explain::event_choice(choice));
             }
-            
+
             // 统一调用 select_event_choice（默认实现内部区分 chance/决策）
             let selection = trainer.select_event_choice(self, event, &event.choices, rng)?;
             if selection >= event.choices.len() {

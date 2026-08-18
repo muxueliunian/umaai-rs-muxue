@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use comfy_table::{ColumnConstraint, Table, Width};
 use log::{info, warn};
 use rand::prelude::IndexedRandom;
-use rand::{Rng, rngs::StdRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rand_distr::{Distribution, weighted::WeightedIndex};
 
 use super::{RamenGame, RamenStage, RamenAction, Operation, FeelingType};
@@ -109,6 +109,32 @@ impl Game for RamenGame {
                 }
                 info!("RMJ 结算: {:?} (PT={}) 训练等级加成={}", result, self.ramen.scenario_pt, self.ramen.train_level_bonus);
                 self.ramen.eat_count = 0;
+                // RMJ 事件立即 apply（在 turn=N 末触发，而非 turn=N+1 末）
+                // 原因：push 到 unresolved_events 后会被 AfterTrain 阶段消费，
+                // 而 AfterTrain 阶段在 turn=N 的 NextTurn 阶段之后才轮到 turn=N+1，
+                // 会延迟一整个回合。
+                // RMJ 事件没有 player_select=true，可以直接 apply 而不需 Trainer。
+                // 事件 ID：401404(年1) / 401405(年2) / 401406(年3)，按 rmj_results[year_idx] 决定 result=2/1
+                if let Some(event) = find_rmj_event(year_idx) {
+                    let mut apply_rng = rand::rngs::StdRng::from_os_rng();
+                    info!(
+                        "+ 事件: #{} {} (回合 {} 末)",
+                        event.id,
+                        event.name,
+                        self.base.turn + 1
+                    );
+                    if let Err(e) = self.apply_event(&event, 0, &mut apply_rng) {
+                        log::warn!("RMJ 事件 #{} apply 失败: {e:?}", event.id);
+                    }
+                }
+                // RMJ 结算后 scenario_pt 归零，下一年重新累计
+                // 此时 rmj_results 已写入，下一年的 ramen_success_effect / ramen_fail_effect 已可读取
+                let pt_before_reset = self.ramen.scenario_pt;
+                self.ramen.scenario_pt = 0;
+                info!(
+                    "scenario_pt 已归零（结算前 PT={}，下年重新累计）",
+                    pt_before_reset
+                );
             }
 
             // 年度地区选择：回合23（第1年结束后）、回合47（第2年结束后）
@@ -248,6 +274,27 @@ impl Game for RamenGame {
             return story_events;
         }
 
+        // 全局剧本事件（400000400 马娘登场 / 4009 经典年新年 / 4010 古马年新年 等）
+        // 这些事件是 gamesystem 共享的（onsen/basic 也用），拉面杯需要按 Fixed 回合触发
+        let global_story_events: Vec<EventData> = global_events()
+            .story_events
+            .iter()
+            .filter_map(|e| match &e.trigger {
+                TriggerType::Random { .. } => Some(e.clone()),
+                TriggerType::Code => None,
+                TriggerType::Fixed { turns } => {
+                    if turns.contains(&self.base.turn) {
+                        Some(e.clone())
+                    } else {
+                        None
+                    }
+                }
+            })
+            .collect();
+        if !global_story_events.is_empty() {
+            return global_story_events;
+        }
+
         if !no_event_turns.contains(&self.base.turn) {
             // 友人出门事件判定
             if self.friend.out_state == FriendOutState::BeforeUnlock {
@@ -308,6 +355,30 @@ impl Game for RamenGame {
     }
 
     fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()> {
+        // RMJ 事件特殊处理：根据 rmj_results[year_idx] 选择 result=2 或 result=1 的分支
+        if let Some(year_idx) = rmj_event_year(event.id) {
+            if let Some(choice_group) = event.choices.first() {
+                if let Some(target) = select_rmj_choice_by_result(choice_group, self.ramen.rmj_results.get(year_idx).copied()) {
+                    info!(
+                        "RMJ 事件 #{} 应用 result={} 分支",
+                        event.id,
+                        target.result
+                    );
+                    self.base.uma.add_value(&target.value);
+                } else {
+                    warn!(
+                        "RMJ 事件 #{} 无法匹配 result 分支（rmj_results[{}]={:?}），使用默认分支",
+                        event.id,
+                        year_idx,
+                        self.ramen.rmj_results.get(year_idx)
+                    );
+                }
+            }
+            // 计数 +1（与 base.apply_event 行为一致）
+            self.base.events.entry(event.id).and_modify(|x| *x += 1).or_insert(1);
+            return Ok(());
+        }
+
         if let Some(result) = self.base.apply_event(event, choice, rng) {
             if let Some(person_index) = &event.person_index && result.value.friendship != 0 {
                 self.add_friendship(*person_index as usize, result.value.friendship);
@@ -703,7 +774,7 @@ impl RamenGame {
 
         // 生成回合前事件（含随机事件和强制事件）
         let mut events = self.generate_events(rng);
-        self.add_mandatory_events(&mut events);
+        self.add_mandatory_events(&mut events)?;
         for event in &events {
             self.run_event(event, trainer, rng)?;
         }
@@ -715,6 +786,30 @@ impl RamenGame {
                 if let Some(_option_trains) = options.get(sel) {
                     info!("超级拉面回合自动生效 (选项 {})", sel + 1);
                 }
+            }
+            // 应用 finals_effect.base 的 vital/motivation 恢复效果（每回合）
+            // + saihou（赛后加成）一次性应用：仅在进入超级拉面第一回合（turn=72）+saihou，
+            // 之后回合保留已生效值，不重复累加
+            let ramen_data = global!(RAMENDATA);
+            let finals_base = &ramen_data.finals_effect.base;
+            let value = ActionValue {
+                vital: finals_base.vital,
+                motivation: finals_base.motivation,
+                ..Default::default()
+            };
+            self.uma.add_value(&value);
+            if self.base.turn == 72 {
+                // 进入超级拉面第一回合时一次性加 saihou（之后回合不再累加）
+                self.uma.race_bonus += finals_base.saihou;
+                info!(
+                    "超级拉面自动恢复: 体力+{}, 干劲+{}, 赛后+{}（一次性）",
+                    finals_base.vital, finals_base.motivation, finals_base.saihou
+                );
+            } else {
+                info!(
+                    "超级拉面自动恢复: 体力+{}, 干劲+{}",
+                    finals_base.vital, finals_base.motivation
+                );
             }
         }
 
@@ -765,6 +860,10 @@ impl RamenGame {
             self.apply_action(&actions[0], rng)?;
             // race_turn 不进入 SpecialSelect/Train，直接跳到 AfterTrain
             self.stage = RamenStage::AfterTrain;
+            // 立即处理 AfterTrain 阶段遗留的 unresolved_events（如 race_career）
+            // 否则下次 next() 会跳过 run_after_train，直接到 NextTurn
+            self.run_after_train(trainer, rng)?;
+            self.stage = RamenStage::NextTurn;
             return Ok(());
         }
 
@@ -1018,20 +1117,115 @@ impl RamenGame {
         )
     }
 
-    /// 添加强制事件（友人事件、育成结束事件）
-    fn add_mandatory_events(&self, events: &mut Vec<EventData>) {
+    /// 添加强制事件（友人新年事件）
+    ///
+    /// 仅同步处理回合**开始时**发生的事件（push 到 `events`，立即 `run_event`）：
+    /// - `turn=24` 友人新年事件（友人解锁后才有）
+    ///
+    /// 回合**结束时**发生的事件改由本函数内部直接 push 到 `base.unresolved_events`，
+    /// 由 AfterTrain 阶段执行：
+    /// - `turn=48` 新年抽签 4011（`system_events["ticket"]`，按 prob 加权选 result 分支）
+    /// - `turn=77` 友人结束事件 + 育成结束事件 5011 + 401407
+    ///
+    /// 注：友人结束事件原本 push 到 `events` 在 Begin 阶段立即执行，但用户需求是"育成结束时（77 回合末尾）"
+    /// 触发，所以改为 push 到 `unresolved_events` 在 AfterTrain 阶段执行。
+    fn add_mandatory_events(&mut self, events: &mut Vec<EventData>) -> Result<()> {
         let ramen_data = global!(RAMENDATA);
         if self.friend.out_state == FriendOutState::AfterUnlock {
             if self.base.turn == 24 {
                 events.push(ramen_data.friend_events["newyear"].clone());
             } else if self.base.turn == 77 {
-                events.push(ramen_data.friend_events["end"].clone());
+                // 77 回合末尾：友人结束事件
+                self.base
+                    .unresolved_events
+                    .push(ramen_data.friend_events["end"].clone());
             }
         }
-        if self.base.turn == 77 {
-            events.push(system_event("ending").expect("ending event").clone());
+        // 48 回合结束：新年抽签 4011
+        if self.base.turn == 48 {
+            self.base
+                .unresolved_events
+                .push(system_event("ticket")?.clone());
         }
+        // 77 回合结束：育成结束事件 5011（ending）和 401407
+        if self.base.turn == 77 {
+            self.base
+                .unresolved_events
+                .push(system_event("ending").expect("ending event").clone());
+            if let Some(event) = find_scenario_event(401407) {
+                self.base.unresolved_events.push(event);
+            }
+        }
+        Ok(())
     }
+}
+
+/// 按年份查找对应的 RMJ 事件（401404 / 401405 / 401406）
+///
+/// 返回事件 clone，供 push 到 `unresolved_events`。
+/// 不存在时返回 None（数据缺失或年份越界）。
+fn find_rmj_event(year_idx: usize) -> Option<crate::gamedata::EventData> {
+    let ramen_data = global!(RAMENDATA);
+    let target_id = match year_idx {
+        0 => 401404,
+        1 => 401405,
+        2 => 401406,
+        _ => return None,
+    };
+    ramen_data
+        .scenario_events
+        .iter()
+        .find(|e| e.id == target_id)
+        .cloned()
+}
+
+/// 按 ID 在 scenario_events 中查找事件
+///
+/// 用于 push 未在 `add_mandatory_events` 处理的事件（如育成结束事件 401407）。
+fn find_scenario_event(target_id: u32) -> Option<crate::gamedata::EventData> {
+    let ramen_data = global!(RAMENDATA);
+    ramen_data
+        .scenario_events
+        .iter()
+        .find(|e| e.id == target_id)
+        .cloned()
+}
+
+/// 判断事件 ID 是否为 RMJ 结算事件，若是则返回对应的年份索引（0/1/2）
+///
+/// 成功/失败分支选择见 `select_rmj_choice_by_result`。
+fn rmj_event_year(event_id: u32) -> Option<usize> {
+    match event_id {
+        401404 => Some(0),
+        401405 => Some(1),
+        401406 => Some(2),
+        _ => None,
+    }
+}
+
+/// 按 RMJ 结算结果（success=true/false）选择对应 result 分支
+///
+/// - `choices` 通常是 RMJ 事件的 `choices[0]`（选项组），含 2 个分支：
+///   - `result=2`：成功（含大成功）
+///   - `result=1`：失败
+/// - `is_success`：来自 `rmj_results[year_idx]`，true 表示 result=2 分支，false 表示 result=1 分支
+///
+/// 选择规则：
+/// - 优先按 `result` 字段匹配（成功→2，失败→1）
+/// - 若无 `result` 字段匹配，则回退到第 0 个分支（防御性）
+fn select_rmj_choice_by_result(
+    choices: &[crate::gamedata::EventChoice],
+    is_success: Option<bool>,
+) -> Option<&crate::gamedata::EventChoice> {
+    if choices.is_empty() {
+        return None;
+    }
+    let target_result = match is_success {
+        Some(true) => 2,   // 成功 → result=2
+        Some(false) => 1,  // 失败 → result=1
+        None => return Some(&choices[0]), // 无结算结果时回退到第一个分支
+    };
+    choices.iter().find(|c| c.result == target_result).or(Some(&choices[0]))
 }
 
 // ========== 测试 ==========
@@ -1040,7 +1234,7 @@ impl RamenGame {
 mod tests {
     use super::*;
     use crate::{
-        gamedata::init_global,
+        gamedata::{init_global, ActionValue, EventChoice},
         trainer::RandomTrainer,
         utils::{get_workspace_root, init_logger, disable_log, enable_log},
     };
@@ -1772,6 +1966,446 @@ mod tests {
             matches!(game.stage, RamenStage::SpecialSelect),
             "三阶段路径下 RamenSelect → SpecialSelect"
         );
+
+        Ok(())
+    }
+
+    // ========== RMJ 结算事件 + 固定触发事件 测试 ==========
+
+    /// 验证 `select_rmj_choice_by_result` 的分支选择逻辑
+    #[test]
+    fn test_select_rmj_choice_by_result() {
+        let choices = vec![
+            EventChoice {
+                result: 2, // 成功
+                value: ActionValue { status_pt: [10, 10, 10, 10, 10, 100], vital: 33, ..Default::default() },
+                ..Default::default()
+            },
+            EventChoice {
+                result: 1, // 失败
+                value: ActionValue { status_pt: [5, 5, 5, 5, 5, 50], vital: 30, ..Default::default() },
+                ..Default::default()
+            },
+        ];
+
+        // 成功（rmj_results=true）→ result=2 分支
+        let picked = select_rmj_choice_by_result(&choices, Some(true)).unwrap();
+        println!("成功分支 result={}, value={:?}", picked.result, picked.value);
+        assert_eq!(picked.result, 2);
+        assert_eq!(picked.value.status_pt[5], 100);
+
+        // 失败（rmj_results=false）→ result=1 分支
+        let picked = select_rmj_choice_by_result(&choices, Some(false)).unwrap();
+        println!("失败分支 result={}, value={:?}", picked.result, picked.value);
+        assert_eq!(picked.result, 1);
+        assert_eq!(picked.value.status_pt[5], 50);
+
+        // 无结算结果 → 回退到第一个分支
+        let picked = select_rmj_choice_by_result(&choices, None).unwrap();
+        println!("无结果分支 result={}, value={:?}", picked.result, picked.value);
+        assert_eq!(picked.result, 2);
+
+        // 空 choices
+        let picked = select_rmj_choice_by_result(&[], Some(true));
+        assert!(picked.is_none());
+        println!("空 choices 返回 None: {:?}", picked);
+    }
+
+    /// 验证 `rmj_event_year` 能正确返回年份索引
+    #[test]
+    fn test_rmj_event_year() {
+        assert_eq!(rmj_event_year(401404), Some(0));
+        assert_eq!(rmj_event_year(401405), Some(1));
+        assert_eq!(rmj_event_year(401406), Some(2));
+        assert_eq!(rmj_event_year(401407), None); // 育成结束事件不是 RMJ 事件
+        assert_eq!(rmj_event_year(0), None);
+        println!("rmj_event_year 映射验证通过");
+    }
+
+    /// 验证 RMJ 结算成功时，apply_event 选择 result=2 分支
+    #[test]
+    fn test_rmj_event_apply_success() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        // 把 vital 调到 0 避免上限截断干扰
+        game.uma.vital = 0;
+        // 设置 RMJ 成功状态
+        game.ramen.rmj_results = vec![true];
+
+        // 获取 401404 事件并 apply
+        let event = find_rmj_event(0).expect("401404 事件应存在");
+        let status_before = game.uma.five_status;
+        let pt_before = game.uma.skill_pt;
+        let vital_before = game.uma.vital;
+        println!(
+            "应用前: status={:?}, PT={}, vital={}",
+            status_before, pt_before, vital_before
+        );
+
+        let mut rng = StdRng::seed_from_u64(42);
+        game.apply_event(&event, 0, &mut rng)?;
+
+        let status_after = game.uma.five_status;
+        let pt_after = game.uma.skill_pt;
+        let vital_after = game.uma.vital;
+        println!(
+            "应用后: status={:?}, PT={}, vital={}",
+            status_after, pt_after, vital_after
+        );
+
+        // 成功分支应该：速+10, 耐+10, 力+10, 根+10, 智+10, pt+100, vital+33
+        for i in 0..5 {
+            assert_eq!(
+                status_after[i] - status_before[i],
+                10,
+                "属性 {i} 增量应为 10"
+            );
+        }
+        assert_eq!(pt_after - pt_before, 100);
+        assert_eq!(vital_after - vital_before, 33);
+        println!("RMJ 成功分支效果验证通过");
+
+        Ok(())
+    }
+
+    /// 验证 RMJ 结算失败时，apply_event 选择 result=1 分支
+    #[test]
+    fn test_rmj_event_apply_fail() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        // 把 vital 调到 0 避免上限截断干扰
+        game.uma.vital = 0;
+        // 设置 RMJ 失败状态
+        game.ramen.rmj_results = vec![false];
+
+        let event = find_rmj_event(0).expect("401404 事件应存在");
+        let status_before = game.uma.five_status;
+        let pt_before = game.uma.skill_pt;
+        let vital_before = game.uma.vital;
+        println!(
+            "RMJ 失败前: status={:?}, PT={}, vital={}",
+            status_before, pt_before, vital_before
+        );
+
+        let mut rng = StdRng::seed_from_u64(42);
+        game.apply_event(&event, 0, &mut rng)?;
+
+        let status_after = game.uma.five_status;
+        let pt_after = game.uma.skill_pt;
+        let vital_after = game.uma.vital;
+        println!(
+            "RMJ 失败后: status={:?}, PT={}, vital={}",
+            status_after, pt_after, vital_after
+        );
+
+        // 失败分支应该：速+5, 耐+5, 力+5, 根+5, 智+5, pt+50, vital+30
+        for i in 0..5 {
+            assert_eq!(
+                status_after[i] - status_before[i],
+                5,
+                "属性 {i} 增量应为 5"
+            );
+        }
+        assert_eq!(pt_after - pt_before, 50);
+        assert_eq!(vital_after - vital_before, 30);
+        println!("RMJ 失败分支效果验证通过");
+
+        Ok(())
+    }
+
+    /// 验证 RMJ 结算后立即 apply 对应事件（在 turn=23 末触发，而非 turn=24 末）
+    #[test]
+    fn test_rmj_event_immediate_apply_at_turn_23() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        // 把 vital 调到 0 避免上限截断干扰
+        game.uma.vital = 0;
+        // 手动模拟 turn=23 RMJ 结算
+        game.base.turn = 23;
+        game.stage = RamenStage::NextTurn;
+
+        // RMJ 结算前：unresolved 应该为空
+        assert!(game.base.unresolved_events.is_empty());
+
+        let pt_before = game.uma.skill_pt;
+        let status_before = game.uma.five_status;
+
+        // 触发 next() 中的 RMJ 结算逻辑
+        // 注意：turn=23 的 RMJ 结算后会进入 RegionSelect 阶段（不是 advance_turn）
+        game.next();
+        println!("RMJ 结算后 turn={}, stage={:?}", game.base.turn, game.stage);
+
+        // 验证 RMJ 已结算（rmj_results 写入）
+        assert_eq!(game.ramen.rmj_results, vec![false], "默认 PT=0 < 1500 应失败");
+
+        // turn=23 的 RMJ 结算后会进入 RegionSelect 阶段（地区选择是回合 23 末的特殊阶段）
+        assert!(
+            matches!(game.stage, RamenStage::RegionSelect),
+            "RMJ 后应进入 RegionSelect 阶段（turn=23 末）"
+        );
+
+        // 验证 RMJ 失败分支已立即应用：pt 增加 50
+        let pt_after = game.uma.skill_pt;
+        println!("RMJ 结算前 PT={}, 结算后 PT={}", pt_before, pt_after);
+        assert_eq!(pt_after - pt_before, 50, "RMJ 失败分支应加 50pt");
+
+        // 验证 status[0] 增加 5（RMJ 失败分支）
+        assert_eq!(game.uma.five_status[0] - status_before[0], 5);
+
+        println!("RMJ 事件在 turn=23 末立即 apply 验证通过");
+
+        Ok(())
+    }
+
+    /// 验证 RMJ 结算后 scenario_pt 归零，下一年重新累计
+    #[test]
+    fn test_scenario_pt_reset_after_rmj() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        // 模拟 turn=23 的 RMJ 结算：先设置 scenario_pt = 2500
+        game.base.turn = 23;
+        game.stage = RamenStage::NextTurn;
+        game.ramen.scenario_pt = 2500;
+        let pt_before = game.ramen.scenario_pt;
+        println!("RMJ 结算前 scenario_pt = {}", pt_before);
+
+        // 触发 next() 中的 RMJ 结算逻辑
+        game.next();
+
+        // 验证 scenario_pt 已归零
+        assert_eq!(
+            game.ramen.scenario_pt, 0,
+            "RMJ 结算后 scenario_pt 应归零（实际 {}）",
+            game.ramen.scenario_pt
+        );
+        println!("RMJ 结算后 scenario_pt = {}（归零成功）", game.ramen.scenario_pt);
+
+        Ok(())
+    }
+
+    /// 验证 generate_events 在 turn=0 时返回 400000400 马娘登场事件
+    #[test]
+    fn test_generate_events_uma_debut() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        let mut rng = StdRng::seed_from_u64(42);
+        // turn=0 应触发马娘登场
+        game.base.turn = 0;
+        let events = game.generate_events(&mut rng);
+        println!("turn=0 事件数: {}, IDs: {:?}", events.len(), events.iter().map(|e| e.id).collect::<Vec<_>>());
+        assert!(!events.is_empty(), "turn=0 应有事件");
+        assert_eq!(events[0].id, 400000400, "turn=0 第一个事件应是马娘登场");
+
+        Ok(())
+    }
+
+    /// 验证 generate_events 在 turn=24 时返回 4009 经典年新年事件
+    #[test]
+    fn test_generate_events_classic_newyear() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        let mut rng = StdRng::seed_from_u64(42);
+        game.base.turn = 24;
+        let events = game.generate_events(&mut rng);
+        println!("turn=24 事件数: {}, IDs: {:?}", events.len(), events.iter().map(|e| e.id).collect::<Vec<_>>());
+        assert!(!events.is_empty(), "turn=24 应有事件");
+        assert_eq!(events[0].id, 4009, "turn=24 第一个事件应是经典年新年");
+
+        Ok(())
+    }
+
+    /// 验证 generate_events 在 turn=48 时返回 4010 古马年新年事件
+    #[test]
+    fn test_generate_events_ancient_newyear() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        let mut rng = StdRng::seed_from_u64(42);
+        game.base.turn = 48;
+        let events = game.generate_events(&mut rng);
+        println!("turn=48 事件数: {}, IDs: {:?}", events.len(), events.iter().map(|e| e.id).collect::<Vec<_>>());
+        assert!(!events.is_empty(), "turn=48 应有事件");
+        assert_eq!(events[0].id, 4010, "turn=48 第一个事件应是古马年新年");
+
+        Ok(())
+    }
+
+    /// 验证 add_mandatory_events 在 turn=48 时将 ticket(4011) push 到 unresolved_events
+    #[test]
+    fn test_add_mandatory_events_ticket_at_48() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 48;
+        let mut events = vec![];
+        game.add_mandatory_events(&mut events)?;
+        // turn=48 没有友人解锁就没有友人事件
+        println!("turn=48 同步事件数: {}, unresolved 数: {}", events.len(), game.base.unresolved_events.len());
+        // 4011 (ticket) 应在 unresolved_events 中
+        assert!(game.base.unresolved_events.iter().any(|e| e.id == 4011));
+        println!("turn=48 ticket(4011) 已在 unresolved_events 中");
+
+        Ok(())
+    }
+
+    /// 验证 add_mandatory_events 在 turn=77 时将 ending(5011) 和 401407 push 到 unresolved_events
+    #[test]
+    fn test_add_mandatory_events_ending_at_77() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 77;
+        let mut events = vec![];
+        game.add_mandatory_events(&mut events)?;
+        println!("turn=77 同步事件数: {}, unresolved 数: {}", events.len(), game.base.unresolved_events.len());
+
+        // ending(5011) 和 401407 应在 unresolved_events 中
+        let unresolved_ids: Vec<u32> = game.base.unresolved_events.iter().map(|e| e.id).collect();
+        println!("turn=77 unresolved_events IDs: {:?}", unresolved_ids);
+        assert!(unresolved_ids.contains(&5011), "5011 应在 unresolved_events");
+        assert!(unresolved_ids.contains(&401407), "401407 应在 unresolved_events");
+
+        Ok(())
+    }
+
+    /// 验证超级拉面回合（turn=72-77）的 vital/motivation 每回合自动恢复
+/// + saihou（赛后加成）仅 turn=72 一次性 +100（之后回合不重复累加）
+    #[test]
+    fn test_super_ramen_base_effect_vital_motivation() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        // 跳到 URA 第一个回合（turn=72）
+        game.base.turn = 72;
+        game.add_friend_and_npcs()?;
+        // 设置 super_ramen 选项（必要条件之一）
+        game.ramen.super_ramen = Some(1);
+
+        // 清零关键字段以便观察增量
+        game.uma.vital = 50;
+        game.uma.motivation = 2;
+        let race_bonus_before = game.uma.race_bonus;
+        let vital_before = game.uma.vital;
+        let motivation_before = game.uma.motivation;
+
+        // 调用 run_begin（vital/motivation + race_bonus 一次性+100）
+        let trainer = RandomTrainer;
+        let mut rng = StdRng::from_os_rng();
+        game.run_begin(&trainer, &mut rng)?;
+
+        let race_bonus_after_run_begin = game.uma.race_bonus;
+        let vital_after = game.uma.vital;
+        let motivation_after = game.uma.motivation;
+        println!(
+            "超级拉面前: vital={}, motivation={}, race_bonus={}",
+            vital_before, motivation_before, race_bonus_before
+        );
+        println!(
+            "超级拉面 run_begin 后: vital={}, motivation={}, race_bonus={}",
+            vital_after, motivation_after, race_bonus_after_run_begin
+        );
+
+        // 验证 turn=72：vital+20, motivation+1, race_bonus+100（一次性）
+        assert_eq!(vital_after - vital_before, 20, "vital 应 +20");
+        assert_eq!(motivation_after - motivation_before, 1, "motivation 应 +1");
+        assert_eq!(
+            race_bonus_after_run_begin - race_bonus_before,
+            100,
+            "turn=72 race_bonus 应一次性 +100"
+        );
+
+        println!("超级拉面 turn=72 一次性恢复 + vital/motivation 每回合恢复验证通过");
+
+        Ok(())
+    }
+
+    /// 验证 saihou 仅在 turn=72 一次性 +100，turn=73-77 不再累加
+    ///
+    /// 模拟 turn=72-75 连续运行，观察 race_bonus 只在 turn=72 +100，后续回合不变。
+    #[test]
+    fn test_super_ramen_saihou_one_time_only() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.add_friend_and_npcs()?;
+        game.ramen.super_ramen = Some(1);
+
+        let race_bonus_initial = game.uma.race_bonus;
+        println!("初始 race_bonus: {}", race_bonus_initial);
+
+        let trainer = RandomTrainer;
+        // 模拟连续多个 URA 回合（turn=72-75），观察 race_bonus 增量
+        for turn in 72..=75 {
+            game.base.turn = turn;
+            // 重新设置 vital/motivation 以避免上限截断干扰
+            game.uma.vital = 50;
+            game.uma.motivation = 2;
+
+            let race_bonus_before = game.uma.race_bonus;
+            let mut rng = StdRng::from_os_rng();
+            game.run_begin(&trainer, &mut rng)?;
+            let race_bonus_after = game.uma.race_bonus;
+            let expected_increment = if turn == 72 { 100 } else { 0 };
+            println!(
+                "turn={} 前 race_bonus={}, 后 race_bonus={}, 期望增量={}",
+                turn, race_bonus_before, race_bonus_after, expected_increment
+            );
+            assert_eq!(
+                race_bonus_after - race_bonus_before,
+                expected_increment,
+                "turn={} race_bonus 增量应={}",
+                turn,
+                expected_increment
+            );
+        }
+
+        // 最终 race_bonus 应为 initial + 100（仅 turn=72 加了一次）
+        assert_eq!(
+            game.uma.race_bonus,
+            race_bonus_initial + 100,
+            "连续 4 回合 URA 后 race_bonus 仅 +100"
+        );
+
+        println!("saihou 一次性 +100（不跨回合累积）验证通过");
 
         Ok(())
     }
