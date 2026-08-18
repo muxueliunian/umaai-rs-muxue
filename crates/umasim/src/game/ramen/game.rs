@@ -204,6 +204,7 @@ impl Game for RamenGame {
                 self.ramen.pending_special_targets,
                 can_friend_outing,
                 is_ill,
+                self.is_xiahesu(),
             )),
             // 其他阶段的 list_actions 保留旧行为（虽然外部不会在此阶段调）
             _ => {
@@ -216,6 +217,7 @@ impl Game for RamenGame {
                     &available_ramens,
                     can_friend_outing,
                     is_ill,
+                    self.is_xiahesu(),
                 ))
             }
         }
@@ -355,7 +357,9 @@ impl Game for RamenGame {
             if lock {
                 self.deck[person_index as usize].is_locked = true;
             }
-            Ok(eff.deyilv)
+            // 卡得意率 + 剧本得意率总加成（参见 calc_scenario_deyilv）
+            let scenario_deyilv = super::effects::calc_scenario_deyilv(self);
+            Ok(eff.deyilv + scenario_deyilv as f32)
         } else {
             Ok(0.0)
         }
@@ -1324,6 +1328,61 @@ mod tests {
             game.train_level(4)
         );
         println!("\n{}", game.explain_distribution()?);
+
+        Ok(())
+    }
+
+    /// 验证 RamenGame::deyilv 返回"卡 deyilv + 剧本 deyilv 总加成"
+    ///
+    /// 关键点：
+    /// - 普通回合：剧本 deyilv = pt_effect(当前档) + rmj_results[year-1] success/fail
+    /// - 超级拉面：剧本 deyilv = pt_effect(最后一档) + rmj_results[2] success/fail
+    /// - 调用方拿到这个值后，会作为 distribute_person 的训练位置权重加成
+    #[test]
+    fn test_ramen_deyilv_includes_scenario_bonus() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        // ========== 普通回合（year 2, PT=1000, RMJ 成功） ==========
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 30; // year 2
+        game.add_friend_and_npcs()?; // person[0..5] 是支援卡
+        game.ramen.scenario_pt = 1000;
+        game.ramen.rmj_results = vec![true]; // year 1 RMJ 成功
+
+        // 卡 deyilv 来自 calc_training_effect，剧本 deyilv = pt(1000档=63) + rmj_success[0]=80 = 143
+        let person_idx = 0;
+        let card_deyilv_only = game.deck[person_idx].effect.deyilv;
+        let actual_deyilv = game.deyilv(person_idx as i32)?;
+        println!(
+            "year2, PT=1000, RMJ成功: card_deyilv_only={} 实际 deyilv={}",
+            card_deyilv_only, actual_deyilv
+        );
+        // 期望：actual_deyilv = card_deyilv_only + 143
+        assert_eq!(actual_deyilv, card_deyilv_only + 143.0);
+
+        // ========== 超级拉面（turn=72, PT=5000, RMJ 都成功） ==========
+        let mut game2 = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game2.base.turn = 72;
+        game2.add_friend_and_npcs()?;
+        game2.ramen.scenario_pt = 5000;
+        game2.ramen.rmj_results = vec![true, true, true];
+
+        let card_deyilv_only2 = game2.deck[person_idx].effect.deyilv;
+        let actual_deyilv2 = game2.deyilv(person_idx as i32)?;
+        println!(
+            "超级拉面, PT=5000, RMJ都成功: card_deyilv_only={} 实际 deyilv={}",
+            card_deyilv_only2, actual_deyilv2
+        );
+        // 期望：actual_deyilv = card_deyilv_only + (pt(5000档=80) + rmj_success[2]=250) = +330
+        assert_eq!(actual_deyilv2, card_deyilv_only2 + 330.0);
+
+        // ========== person_index >= 6 返回 0 ==========
+        let actual = game2.deyilv(6)?;
+        assert_eq!(actual, 0.0);
+        println!("person_index >= 6: deyilv={actual}");
 
         Ok(())
     }

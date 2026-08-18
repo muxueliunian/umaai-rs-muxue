@@ -16,7 +16,7 @@ use rand::{Rng, rngs::StdRng, seq::IndexedRandom};
 use serde::{Deserialize, Serialize};
 
 use super::{Operation, TrainingType};
-use super::rules::{consume_for_ramen, calc_ramen_pt_gain, fill_gauge_after_train};
+use super::rules::{consume_for_ramen, calc_ramen_pt_gain, fill_gauge_after_train, fill_gauge_after_non_train};
 use super::effects::{calc_ramen_training_effect, apply_ramen_training_value};
 use crate::game::{ActionEnum, BaseAction, FriendOutState, PersonType};
 use crate::game::traits::Game;
@@ -231,14 +231,18 @@ impl ActionEnum for RamenAction {
                     }
                 }
 
+                let is_xiahesu = game.is_xiahesu();
+
                 match self.operation {
                     Operation::Train(train) => {
                         // 拉面羁绊效果必须在训练前生效（影响闪耀判定）
                         self.apply_ramen_friendship(game)?;
                         self.do_train(game, train as usize, rng)?;
+                        // 训练分支：fill_feeling_gauge 已在 do_train 内统一处理（含 is_xiahesu）
                     }
                     Operation::FriendOuting => {
                         self.do_friend_outing(game)?;
+                        self.fill_gauge_non_train(game, is_xiahesu)?;
                     }
                     Operation::RegionSelect(regions) => {
                         game.ramen.selected_regions = regions;
@@ -247,10 +251,35 @@ impl ActionEnum for RamenAction {
                     Operation::StageOnly => {
                         // Train 阶段不应收到 StageOnly 操作；若出现则忽略
                     }
-                    op => {
-                        if let Some(base_action) = op.to_base_action() {
+                    Operation::Rest => {
+                        if let Some(base_action) = self.operation.to_base_action() {
                             base_action.apply(&mut game.base, rng)?;
                         }
+                        // 夏合宿休息自动治病（等同 Clinic 效果）
+                        if is_xiahesu {
+                            game.uma.flags.ill = false;
+                            game.uma.flags.bad_trainer = false;
+                            info!(">> 夏合宿休息：自动治病");
+                        }
+                        self.fill_gauge_non_train(game, is_xiahesu)?;
+                    }
+                    Operation::NormalOuting => {
+                        if let Some(base_action) = self.operation.to_base_action() {
+                            base_action.apply(&mut game.base, rng)?;
+                        }
+                        self.fill_gauge_non_train(game, is_xiahesu)?;
+                    }
+                    Operation::Race => {
+                        if let Some(base_action) = self.operation.to_base_action() {
+                            base_action.apply(&mut game.base, rng)?;
+                        }
+                        self.fill_gauge_non_train(game, is_xiahesu)?;
+                    }
+                    Operation::Clinic => {
+                        if let Some(base_action) = self.operation.to_base_action() {
+                            base_action.apply(&mut game.base, rng)?;
+                        }
+                        // 按设计：治病动作不获得诀窍槽
                     }
                 }
                 Ok(())
@@ -260,15 +289,41 @@ impl ActionEnum for RamenAction {
                 if let Some(ramen_idx) = self.ramen {
                     self.apply_ramen(game, ramen_idx, rng)?;
                 }
+                let is_xiahesu = game.is_xiahesu();
                 match self.operation {
                     Operation::RegionSelect(regions) => {
                         game.ramen.selected_regions = regions;
                         info!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
                     }
                     Operation::StageOnly => {}
+                    Operation::Rest => {
+                        if let Some(base_action) = self.operation.to_base_action() {
+                            base_action.apply(&mut game.base, rng)?;
+                        }
+                        if is_xiahesu {
+                            game.uma.flags.ill = false;
+                            game.uma.flags.bad_trainer = false;
+                            info!(">> 夏合宿休息：自动治病");
+                        }
+                        self.fill_gauge_non_train(game, is_xiahesu)?;
+                    }
+                    Operation::Clinic => {
+                        if let Some(base_action) = self.operation.to_base_action() {
+                            base_action.apply(&mut game.base, rng)?;
+                        }
+                    }
                     op => {
                         if let Some(base_action) = op.to_base_action() {
                             base_action.apply(&mut game.base, rng)?;
+                        }
+                        // 其他非训练动作（比赛/普通外出/友人出行）按需补 fill_gauge
+                        match op {
+                            Operation::Race
+                            | Operation::NormalOuting
+                            | Operation::FriendOuting => {
+                                self.fill_gauge_non_train(game, is_xiahesu)?;
+                            }
+                            _ => {}
                         }
                     }
                 }
@@ -673,8 +728,8 @@ impl RamenAction {
         // 处理羁绊和后续事件
         self.handle_post_train(game, train, rng)?;
 
-        // 诀窍槽填充
-        self.fill_feeling_gauge(game, train, params)?;
+        // 诀窍槽填充（含夏合宿特殊判定）
+        self.fill_feeling_gauge(game, train, params, game.is_xiahesu())?;
 
         Ok(())
     }
@@ -848,6 +903,7 @@ impl RamenAction {
         game: &mut super::RamenGame,
         train: usize,
         params: &TrainParams,
+        is_xiahesu: bool,
     ) -> Result<()> {
         if let Some(train_feelings) = game.ramen.train_feeling_type {
             let base_dist = super::rules::calc_gauge_base_distribution(&game.ramen.selected_regions);
@@ -866,8 +922,23 @@ impl RamenAction {
                 train_feelings[train],
                 train_bonus,
                 params.is_shining,
+                is_xiahesu,
             );
         }
+        Ok(())
+    }
+
+    /// 填充诀窍槽（非训练动作：比赛/休息/外出/友人出行）
+    ///
+    /// 仅按基础值填充；夏合宿时三种槽直接全 MAX。
+    /// 复用 `calc_gauge_base_distribution` 保持与训练分支一致的基础分配。
+    fn fill_gauge_non_train(
+        &self,
+        game: &mut super::RamenGame,
+        is_xiahesu: bool,
+    ) -> Result<()> {
+        let base_dist = super::rules::calc_gauge_base_distribution(&game.ramen.selected_regions);
+        fill_gauge_after_non_train(&mut game.ramen, &base_dist, is_xiahesu);
         Ok(())
     }
 }
@@ -907,9 +978,14 @@ pub fn list_ramen_choices(available_ramens: &[usize]) -> Vec<Option<usize>> {
 /// 返回所有可用的基础操作。
 ///
 /// # 参数
-/// - `can_friend_outing`: 是否可以选择友人出行
+/// - `can_friend_outing`: 是否可以选择友人出行（基础判定，未叠加夏令营限制）
 /// - `is_ill`: 是否生病
-pub fn list_operations(can_friend_outing: bool, is_ill: bool) -> Vec<Operation> {
+/// - `is_xiahesu`: 是否处于夏合宿回合
+///
+/// 夏合宿禁用规则（与 `BasicGame::list_actions` 一致）：
+/// - 不允许普通外出、友人出行
+/// - 不允许治病（夏合宿休息会自动治病）
+pub fn list_operations(can_friend_outing: bool, is_ill: bool, is_xiahesu: bool) -> Vec<Operation> {
     let mut ops = vec![
         Operation::Train(TrainingType::Speed),
         Operation::Train(TrainingType::Stamina),
@@ -918,12 +994,14 @@ pub fn list_operations(can_friend_outing: bool, is_ill: bool) -> Vec<Operation> 
         Operation::Train(TrainingType::Wisdom),
         Operation::Race,
         Operation::Rest,
-        Operation::NormalOuting,
     ];
-    if can_friend_outing {
+    if !is_xiahesu {
+        ops.push(Operation::NormalOuting);
+    }
+    if can_friend_outing && !is_xiahesu {
         ops.push(Operation::FriendOuting);
     }
-    if is_ill {
+    if is_ill && !is_xiahesu {
         ops.push(Operation::Clinic);
     }
     ops
@@ -935,15 +1013,17 @@ pub fn list_operations(can_friend_outing: bool, is_ill: bool) -> Vec<Operation> 
 ///
 /// # 参数
 /// - `available_ramens`: 当前可以吃的面
-/// - `can_friend_outing`: 是否可以选择友人出行
+/// - `can_friend_outing`: 是否可以选择友人出行（基础判定，未叠加夏令营限制）
 /// - `is_ill`: 是否生病
+/// - `is_xiahesu`: 是否处于夏合宿回合
 pub fn list_all_actions(
     available_ramens: &[usize],
     can_friend_outing: bool,
     is_ill: bool,
+    is_xiahesu: bool,
 ) -> Vec<RamenAction> {
     let ramen_choices = list_ramen_choices(available_ramens);
-    let operations = list_operations(can_friend_outing, is_ill);
+    let operations = list_operations(can_friend_outing, is_ill, is_xiahesu);
 
     let mut actions = Vec::new();
     for ramen in &ramen_choices {
@@ -1006,8 +1086,9 @@ pub fn list_train_actions(
     pending_targets: [i32; 3],
     can_friend_outing: bool,
     is_ill: bool,
+    is_xiahesu: bool,
 ) -> Vec<RamenAction> {
-    let operations = list_operations(can_friend_outing, is_ill);
+    let operations = list_operations(can_friend_outing, is_ill, is_xiahesu);
     operations
         .into_iter()
         .map(|op| {
@@ -1151,14 +1232,24 @@ mod tests {
     #[test]
     fn test_list_operations() {
         // 基础情况
-        let ops = list_operations(false, false);
+        let ops = list_operations(false, false, false);
         println!("基础操作: {} 个", ops.len());
         assert_eq!(ops.len(), 8); // 5训练+比赛+休息+普通外出
 
         // 有友人出行和治病
-        let ops = list_operations(true, true);
+        let ops = list_operations(true, true, false);
         println!("有友人+治病: {} 个", ops.len());
         assert_eq!(ops.len(), 10); // 5训练+比赛+休息+普通外出+友人出行+治病
+
+        // 夏合宿：禁用普通外出、友人出行、治病
+        let ops = list_operations(false, false, true);
+        println!("夏合宿 无友人无生病: {} 个", ops.len());
+        assert_eq!(ops.len(), 7); // 5训练+比赛+休息
+
+        // 夏合宿 + 有友人 + 生病：仍只有 7 个
+        let ops = list_operations(true, true, true);
+        println!("夏合宿 有友人+生病: {} 个", ops.len());
+        assert_eq!(ops.len(), 7);
     }
 
     #[test]
@@ -1168,20 +1259,20 @@ mod tests {
         let _ = init_logger("test", "info");
         let _ = init_global();
 
-        // 无可用面，无友人，无生病
-        let actions = list_all_actions(&[], false, false);
+        // 无可用面，无友人，无生病，非夏合宿
+        let actions = list_all_actions(&[], false, false, false);
         println!("无可用面: {} 个动作", actions.len());
         // 1吃面选择 * 8操作 = 8
         assert_eq!(actions.len(), 8);
 
         // 有3种可用面
-        let actions = list_all_actions(&[0, 1, 2], false, false);
+        let actions = list_all_actions(&[0, 1, 2], false, false, false);
         println!("有3种可用面: {} 个动作", actions.len());
         // 4吃面选择 * 8操作 = 32
         assert_eq!(actions.len(), 32);
 
         // 有友人出行和治病，3种可用面
-        let actions = list_all_actions(&[0, 1, 2], true, true);
+        let actions = list_all_actions(&[0, 1, 2], true, true, false);
         println!("有友人+治病+3种面: {} 个动作", actions.len());
         // 4吃面选择 * 10操作 = 40
         assert_eq!(actions.len(), 40);
@@ -1307,7 +1398,7 @@ mod tests {
 
     #[test]
     fn test_list_train_actions_carries_pending() -> anyhow::Result<()> {
-        let actions = list_train_actions(Some(2), [1, 0, 0], false, false);
+        let actions = list_train_actions(Some(2), [1, 0, 0], false, false, false);
         println!("带 pending 的 Train 阶段: {actions:#?}");
         // 8 个 operation
         assert_eq!(actions.len(), 8);
@@ -1318,15 +1409,19 @@ mod tests {
         }
 
         // 不吃面 + 全 targets=[0,0,0]
-        let actions = list_train_actions(None, [0, 0, 0], false, false);
+        let actions = list_train_actions(None, [0, 0, 0], false, false, false);
         for a in &actions {
             assert_eq!(a.ramen, None);
             assert_eq!(a.special_targets, Some([0, 0, 0]));
         }
 
         // 有友人 + 治病
-        let actions = list_train_actions(None, [0, 0, 0], true, true);
+        let actions = list_train_actions(None, [0, 0, 0], true, true, false);
         assert_eq!(actions.len(), 10);
+
+        // 夏合宿：禁用普通外出/友人/治病
+        let actions = list_train_actions(None, [0, 0, 0], true, true, true);
+        assert_eq!(actions.len(), 7);
 
         Ok(())
     }

@@ -149,17 +149,47 @@
 
 ---
 
+## distribute_person 中"不出现"判定受得意率影响
+
+- **日期**：2026-08-19
+- **状态**：待解决
+- **问题描述**：当前 `Game::distribute_person`（`traits.rs:192`）将"不出现"判定和"训练位置分配"混在一起，不在率 = `absent_rate / (500 + absent_rate + deyilv)`，导致得意率会影响"不出现"概率。按剧本原始规则，"不出现"概率应不受得意率影响，得意率只影响训练位置的权重分配。
+- **排查过程**：
+  - 用户给出剧本原始算法：
+    1. 用基础权重 [100,100,100,100,100,absent_rate] 判定"不出现"，概率 = `absent_rate / (500 + absent_rate)`（**不含得意率**）
+    2. 判定为出现后，按 [100+deyilv, 100, 100, 100, 100]（不含"不出现"项）随机分配训练位置
+  - 当前算法：
+    - 不在率 = `absent_rate / (500 + absent_rate + deyilv)`（含得意率）
+    - 训练位置按 [100+deyilv, 100, 100, 100, 100, absent_rate]（含"不出现"项）分配
+  - 关键差异：得意率会拉高"不出现"判定概率（deyilv 越大，不出现概率越低）——这是错误的
+- **解决方案**：将 `distribute_person` 改为两步算法：
+  1. 先用基础权重（不含 deyilv）判定"是否不出现"
+  2. 判定为出现后，按训练位置权重（含 deyilv）随机分配训练位置
+- **备注**：用户本次确认暂不动 absent_rate 相关逻辑（涉及 `absent_rate_drop` 等其他领域知识，留待后续）。本次只修复 RamenGame::deyilv 缺剧本加成的问题。`distribute_person` 修正留待后续 issue。
+
+---
+
 ## 夏合宿期间诀窍槽加成未实现
 - **日期**：2026-08-17
-- **状态**：待解决
+- **状态**：已解决
 - **问题描述**：夏合宿期间（回合36-39和60-63），全部诀窍槽必定为+7，但当前未实现。同时，夏合宿期间不允许普通和友人外出。
 - **排查过程**：
   - ramen_memo_cn.md 中记载：夏合宿期间全部训练等级为5，不会发生支援卡事件或掉心情事件
   - 但未记载诀窍槽+7的规则
   - 用户指出夏合宿期间全部诀窍槽必定为+7
   - 当前 `fill_feeling_gauge()` 函数未处理夏合宿的特殊规则
-- **解决方案**：需要在 `fill_feeling_gauge()` 中添加夏合宿判断，如果是夏合宿则诀窍槽直接+7
-- **备注**：夏合宿回合为36-39和60-63，需要检查 `is_xiahesu()` 函数的实现
+- **解决方案**：
+  - `rules.rs` 新增私有 `fill_gauge_xiahesu_max`：三种槽各自补到 GAUGE_LIMIT，溢出自动 +1 诀窍（带新友人时）
+  - `fill_gauge_after_train` 增加 `is_xiahesu` 参数，夏合宿时走全 MAX 路径
+  - 新增 `fill_gauge_after_non_train`：比赛/休息/外出/友人出行的统一入口
+  - `RamenAction::apply` 的非训练分支在 base action apply 后调用 fill_gauge_non_train
+  - 休息 + 夏合宿自动清除 ill 和 bad_trainer flag（等同 Clinic 效果），因此夏合宿禁用 Clinic
+  - `list_operations` 增加 `is_xiahesu` 参数：夏合宿时不返回 NormalOuting/FriendOuting/Clinic
+  - `list_train_actions`/`list_all_actions`/`list_actions` 同步透传 is_xiahesu
+- **备注**：
+  - 日文原始规则见 `ramen_memo.md:133-135`「全習得ゲージMAX」（带新友人）
+  - 治病的 apply 按用户确认不调用 fill_gauge_after_non_train
+  - 已加 5 个单元测试覆盖全 MAX / 正常路径；端到端 77 回合流程跑通
 
 ---
 

@@ -225,6 +225,51 @@ pub fn calc_ramen_training_effect(
     effect
 }
 
+/// 计算当前回合生效的剧本得意率总加成
+///
+/// 按剧本原始规则：剧本得意率只和支援卡的得意率相加（参见 `ramen_memo_cn.md`）。
+/// 本函数仅汇总**对训练分布生效**的剧本得意率来源：
+/// - `ramen_pt_effect`：常驻生效
+/// - `ramen_success_effect` / `ramen_fail_effect`：RMJ 结算后常驻
+///
+/// **不包含** `ramen_basic_effect`（全部为 0）和 `ramen_region_effect`（无 deyilv 字段）。
+///
+/// 用于 `RamenGame::deyilv`，与 `calc_finals_effect` / `calc_normal_effect` 中的
+/// deyilv 计算保持一致（**超级拉面直接复用 `calc_finals_effect`**）。
+///
+/// # 参数
+/// - `game`: 拉面杯游戏状态
+///
+/// # 返回
+/// 当前回合的剧本得意率总加成（i32，可直接 + 到支援卡 deyilv 上）
+pub fn calc_scenario_deyilv(game: &RamenGame) -> i32 {
+    let ramen_data = global!(RAMENDATA);
+    let year_idx = (game.current_year() - 1) as usize;
+
+    if game.is_super_ramen_turn() {
+        // 超级拉面：复用 calc_finals_effect（最后一档 pt + rmj_results[2]）
+        calc_finals_effect(game, year_idx).deyilv
+    } else {
+        // 普通回合：pt_effect(当前档) + rmj_results[year-1]
+        // 这里 calc_normal_effect 是训练位置相关的，单独算 deyilv 更直接
+        let mut deyilv = 0;
+        let pt_tier = find_pt_effect_tier(game.ramen.scenario_pt);
+        deyilv += ramen_data.ramen_pt_effect[pt_tier].deyilv;
+        if year_idx >= 1 {
+            let prev_idx = year_idx - 1;
+            if let Some(&success) = game.ramen.rmj_results.get(prev_idx) {
+                let rmj_effect = if success {
+                    &ramen_data.ramen_success_effect[prev_idx]
+                } else {
+                    &ramen_data.ramen_fail_effect[prev_idx]
+                };
+                deyilv += rmj_effect.deyilv;
+            }
+        }
+        deyilv
+    }
+}
+
 /// 应用拉面杯训练效果计算最终训练数值
 ///
 /// 计算公式：
@@ -534,6 +579,114 @@ mod tests {
         println!("  status={status_val} pt={pt_val}");
         println!("  => 期望: status=120, pt=120");
 
+        Ok(())
+    }
+
+    // ========== calc_scenario_deyilv 测试 ==========
+
+    /// 普通回合：PT 1000 + 无 RMJ → 仅 pt_effect(PT=1000档) 的 deyilv
+    #[test]
+    fn test_calc_scenario_deyilv_normal_pt_only() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        let mut game = make_test_game();
+        game.base.turn = 5; // year 1
+        game.ramen.scenario_pt = 1000;
+        // rmj_results 为空（year 1）
+
+        let deyilv = calc_scenario_deyilv(&game);
+        // pt_min=1000 的档位: deyilv=63
+        println!("year1, PT=1000, 无 RMJ: scenario_deyilv={deyilv}");
+        assert_eq!(deyilv, 63);
+        Ok(())
+    }
+
+    /// 普通回合：PT 1000 + RMJ 成功 → pt_effect + rmj_success[0].deyilv
+    #[test]
+    fn test_calc_scenario_deyilv_normal_with_rmj_success() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        let mut game = make_test_game();
+        game.base.turn = 30; // year 2
+        game.ramen.scenario_pt = 1000;
+        game.ramen.rmj_results = vec![true]; // year 1 RMJ 成功
+
+        let deyilv = calc_scenario_deyilv(&game);
+        // pt_effect(PT=1000).deyilv = 63
+        // rmj_success[0].deyilv = 80
+        // 总计 = 63 + 80 = 143
+        println!("year2, PT=1000, RMJ成功: scenario_deyilv={deyilv}");
+        assert_eq!(deyilv, 143);
+        Ok(())
+    }
+
+    /// 普通回合：RMJ 失败 → pt_effect + rmj_fail[year-1].deyilv
+    #[test]
+    fn test_calc_scenario_deyilv_normal_with_rmj_fail() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        let mut game = make_test_game();
+        game.base.turn = 30; // year 2
+        game.ramen.scenario_pt = 1000;
+        game.ramen.rmj_results = vec![false]; // year 1 RMJ 失败
+
+        let deyilv = calc_scenario_deyilv(&game);
+        // pt_effect(PT=1000).deyilv = 63
+        // rmj_fail[0].deyilv = 30
+        println!("year2, PT=1000, RMJ失败: scenario_deyilv={deyilv}");
+        assert_eq!(deyilv, 93); // 63 + 30
+        Ok(())
+    }
+
+    /// 超级拉面：PT 5000 + RMJ 成功 → pt_effect(最后一档) + rmj_success[2].deyilv
+    #[test]
+    fn test_calc_scenario_deyilv_super_ramen() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        let mut game = make_test_game();
+        game.base.turn = 72; // 超级拉面回合（URA）
+        game.ramen.scenario_pt = 5000;
+        game.ramen.rmj_results = vec![true, true, true]; // 前三年都成功
+
+        let deyilv = calc_scenario_deyilv(&game);
+        // pt_effect 最后一档(PT>=5000).deyilv = 80
+        // rmj_success[2].deyilv = 250
+        // 总计 = 80 + 250 = 330
+        println!("超级拉面 turn=72, PT=5000, RMJ成功: scenario_deyilv={deyilv}");
+        assert_eq!(deyilv, 330);
+        Ok(())
+    }
+
+    /// 超级拉面：RMJ 失败 → pt_effect(最后一档) + rmj_fail[2].deyilv
+    #[test]
+    fn test_calc_scenario_deyilv_super_ramen_rmj_fail() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        let mut game = make_test_game();
+        game.base.turn = 73;
+        game.ramen.scenario_pt = 5000;
+        game.ramen.rmj_results = vec![true, true, false]; // year 3 RMJ 失败
+
+        let deyilv = calc_scenario_deyilv(&game);
+        // pt_effect 最后一档.deyilv = 80
+        // rmj_fail[2].deyilv = 150
+        println!("超级拉面 turn=73, PT=5000, RMJ失败: scenario_deyilv={deyilv}");
+        assert_eq!(deyilv, 230); // 80 + 150
         Ok(())
     }
 }

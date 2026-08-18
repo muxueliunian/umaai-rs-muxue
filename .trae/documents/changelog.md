@@ -2,53 +2,26 @@
 
 本文件用于简要记录每次任务的修改内容。
 
-## 2026-08-19
+## 2026-08-18
+
+### 拉面杯训练分布剧本得意率加成修复
+
+`RamenGame::deyilv` 此前只返回卡的 deyilv，未加剧本加成。修正为：`effects.rs` 新增 `calc_scenario_deyilv` 汇总 `pt_effect + rmj_effect` 的 deyilv；`RamenGame::deyilv` 返回"卡 deyilv + 剧本 deyilv"。新增 6 个测试覆盖普通回合/超级拉面/RMJ 成功失败等场景。`Game::distribute_person` 中"不出现"判定仍受得意率影响的小问题留待后续，详见 issues.md。
+
+### 夏令营期间拉面杯规则实现
+
+落实夏合宿期间（回合36-39和60-63）的三条特殊规则：①三种诀窍全 MAX（带新友人）；②禁用普通外出/友人出行/治病；③休息自动清除 `ill`/`bad_trainer` flag。新增 `fill_gauge_after_non_train` 统一处理比赛/休息/外出/友人出行的诀窍槽基础值填充；`list_operations` / `list_train_actions` 增加 `is_xiahesu` 参数。`Operation::Clinic` 按设计不获得诀窍槽。详见 issues.md「夏合宿期间诀窍槽加成未实现」。
 
 ### 拉面杯合并决策接口（两阶段聚合）
 
-**目标：** 为未来在线搜索/MctsTrainer 提供"选择拉面前"+"选择训练前"两阶段交互所需的合并决策路径。HandwrittenTrainer 等仍保留标准三阶段，粒度选择权交给 Trainer。
-
-**核心改动（方案 E，按 issues.md「拉面杯合并决策接口（两阶段聚合）」定案）：**
-- `RamenState` 新增 `combined_decision: bool` 标记位，`clear_pending()` 同步清空
-- `RamenAction` 新增 `combined_select(ramen_idx, targets)` 构造方法（不吃面强制全零 targets）
-- `action.rs` 新增 `list_combined_ramen_select_actions`：返回 RamenSelect × SpecialSelect 笛卡尔积候选（3 面全富余下 27 个）
-- `RamenGame`（仅具体类，不动 Game trait）新增 `list_combined_ramen_select_actions` 与 `apply_combined_ramen_decision`：一次性写 pending + 设 combined_decision 标记，**不直接设 stage**
-- `Game::next()` 在 RamenSelect 阶段优先检查 `combined_decision`：true 直接推 Train（跳过 SpecialSelect），否则按现有 `pending_ramen` 逻辑
-- `apply_combined_ramen_decision` 校验 stage=RamenSelect 且 targets 在 `list_special_targets_for` 合法集合内
-
-**测试与稳定性：**
-- action.rs 新增 3 个单元测试：`combined_select_normalizes_targets_when_no_ramen`、`combined_select_keeps_targets_when_eating`、`list_combined_ramen_select_actions_full/no_available`
-- game.rs 新增 4 个端到端测试：`combined_decision_path_skips_special_select`、`combined_decision_path_no_ramen`、`combined_decision_invalid_targets_rejected`、`three_stage_path_unaffected_by_combined_flag`
-- ramen 单测 64 个全过；workspace 全测单线程 78 个全过
-
-**文档与 issues.md：**
-- issues.md 新增「拉面杯合并决策接口（两阶段聚合）」一节，记录方案对比与定案要点
-- MctsTrainer 的 top-N + adaptive UCB 搜索策略仅记录在 issues.md，本次未实现
-
-## 2026-08-18
+为未来在线搜索/MctsTrainer 提供"选面+吃法"一次性决策的合并路径：方案 E 在 `RamenGame`（不动 Game trait）新增 `list_combined_ramen_select_actions` / `apply_combined_ramen_decision`；`RamenState` 加 `combined_decision` 标记位让 `Game::next()` 在 RamenSelect 阶段跳过 SpecialSelect 直接推 Train。粒度选择权交给 Trainer（HandwrittenTrainer 走三阶段，MctsTrainer 走合并）。详见 issues.md「拉面杯合并决策接口（两阶段聚合）」定案。
 
 ### 拉面杯三阶段决策重构（隐藏风味显式化）
 
-**目标：** 解决 `apply_ramen` 硬编码 `special_targets = [0,0,0]` 的问题，让 Trainer 显式决策"是否用隐藏风味 / 怎么用"。
+将 `apply_ramen` 中硬编码的 `special_targets = [0,0,0]` 改为 Trainer 显式决策：`RamenStage` 拆为 `RamenSelect` → `SpecialSelect` → `Train` 三阶段；新增 `list_special_targets_for` 生成隐藏风味用法的候选集合；`RamenAction` 新增 `special_targets` 字段和 `StageOnly` 占位 operation。详见 issues.md「拉面杯动作阶段扩展：隐藏风味决策」定案记录。
 
-**核心改动（定案：阶段机三阶段，与 `issues.md`「拉面杯动作阶段扩展：隐藏风味决策」定案一致）：**
-- 新增公共前置 `list_special_targets_for(state, ramen_idx)`（rules.rs）：从 `min_needed = max(0, recipe - stock)` 出发，剩余预算内分配，输出按 `sum(t)` 升序的合法 `targets` 候选（库存紧 1~6 种，全富余 9~10 种）
-- `Operation` 新增 `StageOnly` 占位变体；`RamenAction` 新增 `special_targets: Option<[i32;3]>` 字段；新增 `ramen_select`/`special_select` 构造方法
-- `RamenStage` 拆为 `RamenSelect`（选面）→ `SpecialSelect`（选隐藏风味用法）→ `Train`（选训练），每个阶段一次 `run_stage` 调用，符合线上版 AI「吃面前 / 吃面后训练前」两个独立 stage 的需求
-- `list_actions` 按 stage 分发：`list_ramen_select_actions`、`list_special_select_actions`、`list_train_actions`；`get_available_ramens` 改为"候选非空即可选"（即允许"用隐藏风味可达"的面）
-- `RamenAction::apply` 按 stage 路由：阶段阶段仅写 pending；Train 阶段真执行（用 `pending_special_targets`）；race_turn 短路，operation 非 StageOnly 时直接执行
-- `Game::next()` 在 RamenSelect 阶段按 `pending_ramen` 决定推 SpecialSelect（吃了面）或 Train（不吃面）
-- `RamenState` 新增 `pending_ramen` / `pending_special_targets` 与 `clear_pending()`；回合边界（Begin / NextTurn）清空
-
-**测试与稳定性：**
-- 新增 `list_special_targets_for` 6 个单元测试（全富余 9 种、最小必要替换、不可做、无特殊风味、含 0 维度、升序校验），全部通过
-- 新增 `test_three_stage_decision_flow` 验证三阶段衔接与 pending 字段传递
-- 同步把 `init_global` / `init_logger` / `init_onsen_data` / `init_ramen_data` / `event.rs` / `gamedata/mod.rs` 中的 `set().expect()` 改为幂等早退，让 cargo test 不再因 OnceLock 重复 set 而级联失败（35 个测试从失败变为 70 通过 0 失败）
-- `test_ramen_silent_loop` 等回归测试全部通过
-
-**issues.md 同步：**
-- 「拉面杯动作阶段扩展：隐藏风味决策」一节重写为定案记录（状态改为"已定案（阶段机三阶段）"）
-- 第 84 行"特殊吃面决策"子条目同步标注为已解决，附跳转指向定案节
+- 新增 7 个单元测试覆盖特殊风味决策、回归测试全过
+- 同步修复 `init_*` 系列函数 `set().expect()` → 幂等早退（解决 OnceLock 重复 set 级联失败的旧 issue）
 
 ## 2026-08-17
 

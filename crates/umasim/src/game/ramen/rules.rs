@@ -500,19 +500,44 @@ pub fn apply_friendship_gauge_bonus(state: &mut RamenState) {
     }
 }
 
+/// 夏合宿"全 MAX"：三种槽都直接补到 `GAUGE_LIMIT`，溢出自动 +1 诀窍。
+///
+/// 按 `ramen_memo.md` 原始规则：带新友人(30305)时夏合宿"全習得ゲージMAX"。
+/// 不区分基础值/训练加成/友情加成——所有类型一律填满。
+fn fill_gauge_xiahesu_max(state: &mut RamenState) {
+    for i in 0..3 {
+        if let Ok(ft) = FeelingType::try_from(i as i32) {
+            // 补差额即可：`add_gauge` 内部在达到上限时清零 +1 诀窍
+            let need = GAUGE_LIMIT - state.feeling_slot[i];
+            if need > 0 {
+                add_gauge(state, ft, need);
+            }
+        }
+    }
+}
+
 /// 处理训练后的诀窍槽填充：基础值 + 训练加成 + 友情加成。
 ///
 /// - `base_dist`: 三种类型的基础分配量
 /// - `train_type`: 本回合训练角标（A/B/C）
 /// - `train_bonus`: 训练额外加成量
 /// - `is_shining`: 是否为友情训练
+/// - `is_xiahesu`: 是否处于夏合宿回合
+///
+/// 夏合宿特殊规则：无论基础值/训练加成/友情加成如何分配，三种槽一律直接填满
+/// 到上限（参见 `fill_gauge_xiahesu_max`）。
 pub fn fill_gauge_after_train(
     state: &mut RamenState,
     base_dist: &[i32; 3],
     train_type: FeelingType,
     train_bonus: i32,
-    is_shining: bool
+    is_shining: bool,
+    is_xiahesu: bool,
 ) {
+    if is_xiahesu {
+        fill_gauge_xiahesu_max(state);
+        return;
+    }
     // 1. 基础值
     for i in 0..3 {
         if let Ok(ft) = FeelingType::try_from(i as i32) {
@@ -524,6 +549,30 @@ pub fn fill_gauge_after_train(
     // 3. 友情训练加成
     if is_shining {
         apply_friendship_gauge_bonus(state);
+    }
+}
+
+/// 处理非训练动作（比赛/休息/外出/友人出行/治病）后的诀窍槽填充：仅基础值。
+///
+/// - `base_dist`: 三种类型的基础分配量
+/// - `is_xiahesu`: 是否处于夏合宿回合
+///
+/// 夏合宿特殊规则：三种槽一律直接填满到上限（参见 `fill_gauge_xiahesu_max`）。
+///
+/// 注：治病的调用方不应使用本函数（按用户确认，治病不获得诀窍槽）。
+pub fn fill_gauge_after_non_train(
+    state: &mut RamenState,
+    base_dist: &[i32; 3],
+    is_xiahesu: bool,
+) {
+    if is_xiahesu {
+        fill_gauge_xiahesu_max(state);
+        return;
+    }
+    for i in 0..3 {
+        if let Ok(ft) = FeelingType::try_from(i as i32) {
+            add_gauge(state, ft, base_dist[i]);
+        }
     }
 }
 
@@ -1103,5 +1152,128 @@ mod tests {
             assert_eq!(sums, sorted, "recipe[{idx}] 排序错误");
         }
         Ok(())
+    }
+
+    // ========== 夏合宿 + 训练 / 非训练 填充测试 ==========
+
+    /// 夏合宿"全 MAX"：三种槽都补到 GAUGE_LIMIT，溢出自动 +1 诀窍
+    #[test]
+    fn test_fill_gauge_after_train_xiahesu_max() {
+        let mut state = RamenState::default();
+        // 初始槽值 [0, 3, 6]
+        state.feeling_slot = [0, 3, 6];
+        // 初始库存 [0, 0, 0]
+        state.feeling_stock = [0, 0, 0];
+        println!(
+            "初始: 槽 {:?} 库存 {:?}",
+            state.feeling_slot, state.feeling_stock
+        );
+
+        // 夏合宿触发 fill_gauge_after_train
+        fill_gauge_after_train(
+            &mut state,
+            &[5, 4, 1],
+            FeelingType::A,
+            4,
+            false,
+            true, // is_xiahesu
+        );
+
+        println!(
+            "夏合宿 fill_gauge_after_train 后: 槽 {:?} 库存 {:?}",
+            state.feeling_slot, state.feeling_stock
+        );
+
+        // 三种槽都填到上限后清零，每种 +1 诀窍
+        assert_eq!(state.feeling_slot, [0, 0, 0]);
+        assert_eq!(state.feeling_stock, [1, 1, 1]);
+    }
+
+    /// 非夏合宿 fill_gauge_after_train：走原有"基础值+训练加成+友情加成"路径
+    #[test]
+    fn test_fill_gauge_after_train_normal() {
+        let mut state = RamenState::default();
+        state.feeling_slot = [0, 0, 0];
+        state.feeling_stock = [0, 0, 0];
+
+        // base_dist=[5,4,1], train_type=C, train_bonus=3, is_shining=false
+        fill_gauge_after_train(
+            &mut state,
+            &[5, 4, 1],
+            FeelingType::C,
+            3,
+            false,
+            false, // is_xiahesu = false
+        );
+
+        // A=5, B=4, C=1+3=4，都没有到上限
+        assert_eq!(state.feeling_slot, [5, 4, 4]);
+        assert_eq!(state.feeling_stock, [0, 0, 0]);
+
+        // 友情训练：三种各 +2，上限 7
+        let mut state2 = RamenState::default();
+        state2.feeling_slot = [5, 4, 4];
+        fill_gauge_after_train(
+            &mut state2,
+            &[0, 0, 0],
+            FeelingType::A,
+            0,
+            true, // 友情训练
+            false,
+        );
+        assert_eq!(state2.feeling_slot, [7, 6, 6]);
+    }
+
+    /// 非训练动作 + 夏合宿：三种槽直接 +MAX
+    #[test]
+    fn test_fill_gauge_after_non_train_xiahesu() {
+        let mut state = RamenState::default();
+        state.feeling_slot = [1, 2, 3];
+        state.feeling_stock = [0, 0, 0];
+
+        // 即使 base_dist 全 0，夏合宿时也强制全 MAX
+        fill_gauge_after_non_train(&mut state, &[0, 0, 0], true);
+
+        println!(
+            "夏合宿 fill_gauge_after_non_train 后: 槽 {:?} 库存 {:?}",
+            state.feeling_slot, state.feeling_stock
+        );
+        assert_eq!(state.feeling_slot, [0, 0, 0]);
+        assert_eq!(state.feeling_stock, [1, 1, 1]);
+    }
+
+    /// 非训练动作 + 非夏合宿：仅基础值填充
+    #[test]
+    fn test_fill_gauge_after_non_train_normal() {
+        let mut state = RamenState::default();
+        state.feeling_slot = [0, 0, 0];
+        state.feeling_stock = [0, 0, 0];
+
+        // base_dist=[5, 4, 1]
+        fill_gauge_after_non_train(&mut state, &[5, 4, 1], false);
+
+        println!(
+            "非夏合宿 fill_gauge_after_non_train 后: 槽 {:?} 库存 {:?}",
+            state.feeling_slot, state.feeling_stock
+        );
+        assert_eq!(state.feeling_slot, [5, 4, 1]);
+        assert_eq!(state.feeling_stock, [0, 0, 0]);
+    }
+
+    /// 夏合宿 fill_gauge_after_non_train：部分槽已接近上限，验证自动溢出 +1 诀窍
+    #[test]
+    fn test_fill_gauge_after_non_train_xiahesu_partial() {
+        let mut state = RamenState::default();
+        state.feeling_slot = [5, 6, 7]; // C 已满
+        state.feeling_stock = [2, 2, 2];
+
+        fill_gauge_after_non_train(&mut state, &[0, 0, 0], true);
+
+        // C 已满：add_gauge(0, 0) = 0，不会重复清零
+        // A: 5+2=7 -> +1 诀窍 -> 0
+        // B: 6+1=7 -> +1 诀窍 -> 0
+        // C: 7+0=7 -> 不变（已满）
+        assert_eq!(state.feeling_slot, [0, 0, 7]);
+        assert_eq!(state.feeling_stock, [3, 3, 2]);
     }
 }
