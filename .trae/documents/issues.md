@@ -152,7 +152,7 @@
 ## 夏合宿期间诀窍槽加成未实现
 - **日期**：2026-08-17
 - **状态**：待解决
-- **问题描述**：夏合宿期间（回合36-39和60-63），全部诀窍槽必定为+7，但当前未实现
+- **问题描述**：夏合宿期间（回合36-39和60-63），全部诀窍槽必定为+7，但当前未实现。同时，夏合宿期间不允许普通和友人外出。
 - **排查过程**：
   - ramen_memo_cn.md 中记载：夏合宿期间全部训练等级为5，不会发生支援卡事件或掉心情事件
   - 但未记载诀窍槽+7的规则
@@ -191,3 +191,41 @@
   - **定案：阶段机三阶段** —— `RamenStage` 拆为 `RamenSelect`（选面）→ `SpecialSelect`（选诀窍用法）→ `Train`（选训练），不动 `Trainer` trait。理由：该维度规模波动大（1~6 ↔ 9~10 种）且"省哪类诀窍"有战略含义（影响后续做面），峰值只有树形分层能消化；与 `RegionSelect` 阶段同模式，MCTS/`run_stage` 循环天然适配
 - **落地要点**：`RamenGame` 增加 pending（`pending_ramen`、`pending_special_targets`），`apply_ramen` 改从 pending 读 targets；新增 `list_special_targets_for(state, ramen_idx) -> Vec<[i32; 3]>`（从 `min_needed` 出发、剩余预算内分配），`get_available_ramens` 改为"候选非空即可选"；`SpecialSelect` 候选含 `[0,0,0]`（吃面但不省诀窍）与"改为不吃面"选项，保证完备；选"不吃面"时短路跳过该阶段
 - **备注**：与第 84 行「特殊吃面决策」子条目呼应，两条目已同步标注已解决
+
+---
+
+## 拉面杯合并决策接口（两阶段聚合）
+
+- **日期**：2026-08-18
+- **状态**：已定案（方案 E，待落地）
+- **问题描述**：未来在线搜索（umaai）的交互只需"选择拉面前 / 选择训练前"两个状态——玩家一次给出"选面+吃法"决策，再给训练决策。但当前三阶段阶段机（`RamenSelect`→`SpecialSelect`→`Train`）要求 Trainer 在 RamenSelect 阶段只决策 ramen，SpecialSelect 阶段才决策 targets。这与"玩家决策不可拆分"的真实交互不一致，MctsTrainer 无法在不打破决策分布的前提下做完整搜索。
+- **Trainer 粒度偏好分析**：
+  - RandomTrainer：随机，无所谓
+  - HandwrittenTrainer / ManualTrainer：**倾向三阶段**——策略代码易表达"先选面→再选吃法→最后选训练"的固定流程；候选少、决策聚焦
+  - MctsTrainer + umaai：**必须两阶段聚合**——"选面+选吃法"是玩家不可拆分的一次决策；搜索必须按真实决策分布（同时考虑 ramen 和 targets）展开
+  - 结论：**粒度选择权交给 Trainer**，不是 Game 硬编码
+- **方案对比**：
+  - **A：Game 加模式开关（`combine_ramen_decision: bool`）**：Game list_actions 在开关打开时返回聚合候选。缺点是 Game 接口被开关污染，三/两阶段路径在 list_actions / apply / next 多处并存
+  - **D：Trainer 内连续两次决策**（Game 零改动）：MctsTrainer 在 RamenSelect 阶段手动循环两次（apply ramen → next → apply targets → next）。缺点是每个 (ramen, targets) 组合评估需要 2 次 apply + 2 次 list_actions + 2 次 next，MCTS 深度搜索场景浪费明显
+  - **E：Game 加"合并决策"接口（推荐）**：在 RamenGame 上新增两个方法 `list_combined_ramen_select_actions` 和 `apply_combined_ramen_decision`，Trainer 自主选择走三阶段路径或合并路径。next() 仍负责推进，RamenState 加 `combined_decision: bool` 标记让 next() 在 RamenSelect 阶段跳过 SpecialSelect
+  - **F：阶段机加 CombinedRamenSelect 变体**：阶段枚举膨胀，三/两阶段代码路径完全分离
+- **定案：方案 E**。理由：
+  1. Game 接口最小扩展（仅 RamenGame 加 2 方法，不动 Game trait，避免污染通用接口）
+  2. Trainer 粒度自由：RandomTrainer / HandwrittenTrainer 走三阶段原路径不变；MctsTrainer 走合并路径一次 apply 评估一个聚合组合
+  3. 阶段机保持纯粹：仍是 RamenSelect / SpecialSelect / Train 三阶段，只是允许 Trainer 走"快捷路径"
+  4. MCTS 搜索效率高：聚合组合只需 1 次 apply
+- **落地要点**：
+  1. `RamenAction` 新增 `combined_select(ramen_idx, targets)` 构造方法；约定 `ramen = None` 时强制 `targets = [0,0,0]`（即"不吃面"等价于"吃面 + targets=[0,0,0]"在合并决策视角下）
+  2. `RamenGame`（仅 `RamenGame`，不动 `Game` trait）新增两个方法：
+     - `pub fn list_combined_ramen_select_actions(&self) -> Vec<RamenAction>`：返回 RamenSelect × SpecialSelect 笛卡尔积的聚合候选；不吃面 + 每个面的所有合法 targets
+     - `pub fn apply_combined_ramen_decision(&mut self, ramen: Option<usize>, targets: [i32; 3]) -> Result<()>`：写 `pending_ramen` + `pending_special_targets`，设置 `combined_decision = true`，**不直接设 stage**（保留 next() 推进语义，避免后续 next 混乱）
+  3. `RamenState` 新增字段 `combined_decision: bool`，并在 `clear_pending()` 中一并清空
+  4. `Game::next()` 在 RamenSelect 阶段检查 `combined_decision`：若 true 则直接推到 Train（不进入 SpecialSelect）；否则按现有 `pending_ramen` 逻辑
+  5. Trainer trait 不变；MctsTrainer 在实现合并决策时调用上述两个新方法
+  6. 现有 RamenSelect / SpecialSelect 路径（list_ramen_select_actions、list_special_select_actions、apply 中的 pending 写入）保持不变，三阶段行为完全向后兼容
+- **MctsTrainer 搜索策略（仅记录，不实现）**：聚合候选生成后做 top-N 截断（`top_n: usize`，默认 3-5）+ adaptive UCB：
+  - 第一阶段（探查）：所有候选均匀 rollout K 次获得初始均值
+  - 第二阶段（深入）：只对 top-K' 候选用 PUCT 选择做深度搜索
+  - 配置项：`exploration_rounds`、`exploitation_top_k`、`cpuct`
+  - 实现细节留待"MctsTrainer 实现"阶段
+- **备注**：方案 E 的两个新方法仅放在 RamenGame（具体类），不放在 Game trait，避免污染通用接口（与 `list_ramen_select_actions` / `list_special_select_actions` 同样仅 RamenGame 调用保持一致）

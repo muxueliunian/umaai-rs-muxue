@@ -60,6 +60,14 @@ pub struct RamenState {
     pub pending_ramen: Option<usize>,
     /// 当前回合已选定的隐藏风味用法（`SpecialSelect` 阶段写入，`Train` 阶段消费）
     pub pending_special_targets: [i32; 3],
+    /// 是否走"合并决策"路径（Trainer 在 `RamenSelect` 阶段一次性给出 ramen + targets）
+    ///
+    /// - true：`apply_combined_ramen_decision` 一次性写完两个 pending 字段；
+    ///   `Game::next()` 在 RamenSelect 阶段看到此标记直接推 `Train`，跳过 `SpecialSelect`
+    /// - false（默认）：走标准三阶段路径（next() 按 `pending_ramen` 决定 SpecialSelect / Train）
+    ///
+    /// 由 `clear_pending()` 一并清空，确保不跨回合残留。
+    pub combined_decision: bool,
 }
 
 /// 拉面效果合并（基础效果 + 地区效果 + 超级拉面效果 + Pt常驻效果）
@@ -169,9 +177,11 @@ impl RamenState {
     /// 调用时机：
     /// - `Begin` 阶段开始时（清理上一回合残留）
     /// - `Train` 阶段结束后（防御性清理，避免 pending 跨回合保留）
+    /// - `NextTurn` 阶段（回合边界清空）
     pub fn clear_pending(&mut self) {
         self.pending_ramen = None;
         self.pending_special_targets = [0, 0, 0];
+        self.combined_decision = false;
     }
 }
 

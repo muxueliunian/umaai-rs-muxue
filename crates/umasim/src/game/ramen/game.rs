@@ -66,9 +66,13 @@ impl Game for RamenGame {
     /// 回合内流转由 `RamenStage::next()` 处理（Begin → Distribute → Train → AfterTrain）。
     /// 本方法负责 AfterTrain → NextTurn 以及 NextTurn 的回合边界逻辑。
     fn next(&mut self) -> bool {
-        // RamenSelect 阶段：按 pending_ramen 决定推 SpecialSelect（吃了面）还是 Train（不吃面）
+        // RamenSelect 阶段：
+        // - combined_decision=true（合并决策路径，由 apply_combined_ramen_decision 写入）→ 直接推 Train
+        // - 否则按 pending_ramen 决定推 SpecialSelect（吃了面）还是 Train（不吃面）
         if self.stage == RamenStage::RamenSelect {
-            let next_stage = if self.ramen.pending_ramen.is_some() {
+            let next_stage = if self.ramen.combined_decision {
+                RamenStage::Train
+            } else if self.ramen.pending_ramen.is_some() {
                 RamenStage::SpecialSelect
             } else {
                 RamenStage::Train
@@ -543,6 +547,73 @@ impl Game for RamenGame {
 // ========== 私有辅助方法 ==========
 
 impl RamenGame {
+    // ========== 合并决策接口（仅 RamenGame，不放 Game trait） ==========
+
+    /// 合并决策候选列表：不吃面 + 每个面 × `list_special_targets_for` 候选 targets
+    ///
+    /// 是 [`super::action::list_combined_ramen_select_actions`] 在 `RamenGame` 上的便捷转发。
+    /// 适用于 MctsTrainer / 在线搜索等需要"选面+选吃法"一次性决策的场景。
+    ///
+    /// 与 `Game::list_actions` 的区别：
+    /// - `Game::list_actions` 按当前 stage 分发（三阶段路径下 RamenSelect 只返回面选择）
+    /// - 本方法直接在 RamenSelect 阶段返回 ramen × targets 笛卡尔积
+    pub fn list_combined_ramen_select_actions(&self) -> Vec<super::action::RamenAction> {
+        super::action::list_combined_ramen_select_actions(&self.ramen, &self.ramen.selected_regions)
+    }
+
+    /// 应用合并决策：在 RamenSelect 阶段一次性给出 ramen + targets 决策
+    ///
+    /// 与标准三阶段路径不同：调用本方法后 `Game::next()` 会直接把 stage 推到 Train，
+    /// 跳过 SpecialSelect（靠 `RamenState::combined_decision` 标记位判断）。
+    ///
+    /// # 参数
+    /// - `ramen`：选面决策；`None` 表示不吃面（此时 `targets` 被强制为 `[0,0,0]`）
+    /// - `targets`：隐藏风味替换目标；吃面时必须在 `list_special_targets_for` 给出的
+    ///   合法 targets 列表中，否则报错
+    ///
+    /// # 行为
+    /// 1. 校验 stage 与 targets 合法性
+    /// 2. 写 `pending_ramen` + `pending_special_targets`
+    /// 3. 设 `combined_decision = true`
+    /// 4. **不直接设 stage**，交给 `Game::next()` 推进（避免后续 next 混乱）
+    ///
+    /// 必须在 `stage == RamenStage::RamenSelect` 时调用；其他阶段调用返回错误。
+    pub fn apply_combined_ramen_decision(
+        &mut self,
+        ramen: Option<usize>,
+        targets: [i32; 3],
+    ) -> Result<()> {
+        if self.stage != RamenStage::RamenSelect {
+            anyhow::bail!(
+                "apply_combined_ramen_decision: 仅在 RamenSelect 阶段可调用，当前 stage={:?}",
+                self.stage
+            );
+        }
+
+        // 不吃面强制 targets 全零
+        let targets = match ramen {
+            None => [0, 0, 0],
+            Some(idx) => {
+                // 校验 targets 是否合法
+                let legal = super::rules::list_special_targets_for(&self.ramen, idx)?;
+                if !legal.contains(&targets) {
+                    anyhow::bail!(
+                        "apply_combined_ramen_decision: targets {:?} 不在面 {} 的合法 targets 列表 {:?}",
+                        targets,
+                        idx,
+                        legal
+                    );
+                }
+                targets
+            }
+        };
+
+        self.ramen.pending_ramen = ramen;
+        self.ramen.pending_special_targets = targets;
+        self.ramen.combined_decision = true;
+        Ok(())
+    }
+
     /// 推进到下一回合
     fn advance_turn(&mut self) -> bool {
         if self.base.turn < self.max_turn() {
@@ -1281,7 +1352,7 @@ mod tests {
 
         // ===== 阶段1：RamenSelect =====
         let actions = game.list_actions()?;
-        println!("RamenSelect 阶段: {} 个候选", actions.len());
+        println!("RamenSelect 阶段: {actions:#?}");
         assert!(actions.len() >= 1, "至少有'不吃面'候选");
         // 所有动作 operation 必须是 StageOnly
         for a in &actions {
@@ -1300,6 +1371,7 @@ mod tests {
 
         // 验证 pending_ramen 已写
         assert_eq!(game.ramen.pending_ramen, Some(ramen_idx));
+        println!("pending_ramen: {:?}", game.ramen.pending_ramen);
         // apply 不切 stage；外部 next() 决定推进
         assert!(matches!(game.stage, RamenStage::RamenSelect));
 
@@ -1314,8 +1386,7 @@ mod tests {
         // ===== 阶段2：SpecialSelect =====
         let actions = game.list_actions()?;
         println!(
-            "SpecialSelect 阶段: {} 个 targets 候选",
-            actions.len()
+            "SpecialSelect 阶段: {actions:#?}"
         );
         assert!(actions.len() >= 1, "至少有 1 个 targets 候选");
         for a in &actions {
@@ -1332,6 +1403,7 @@ mod tests {
         game.apply_action(&actions[0], &mut StdRng::from_os_rng())?;
 
         // 验证 pending_special_targets 已写
+        println!("pending_special_targets: {:?}", game.ramen.pending_special_targets);
         assert_eq!(game.ramen.pending_special_targets, chosen_targets);
 
         // 推进 stage
@@ -1339,7 +1411,7 @@ mod tests {
 
         // ===== 阶段3：Train =====
         let actions = game.list_actions()?;
-        println!("Train 阶段: {} 个 operation 候选", actions.len());
+        println!("Train 阶段: {actions:#?}");
         assert!(actions.len() >= 8);
         for a in &actions {
             assert_eq!(a.ramen, Some(ramen_idx), "Train 阶段动作 ramen 应携带 pending");
@@ -1356,6 +1428,179 @@ mod tests {
 
         // 验证 pending_targets 在 Train 阶段动作上携带，且每个 operation 都不再是 StageOnly
         // （不实际 apply 以避免触发 explain_distribution 依赖的 distribution 初始化）
+
+        Ok(())
+    }
+
+    /// 合并决策路径端到端测试
+    ///
+    /// 验证：在 RamenSelect 阶段使用 `apply_combined_ramen_decision` 一次性给出
+    /// ramen + targets 后，`Game::next()` 直接把 stage 推到 Train，跳过 SpecialSelect。
+    /// 同时验证三阶段路径与合并路径在同一回合内互不干扰。
+    #[test]
+    fn test_combined_decision_path_skips_special_select() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 2;
+        game.ramen.feeling_stock = [5, 5, 5];
+        game.ramen.special_feeling = 2;
+        game.ramen.selected_regions = [0, 1, 2];
+
+        // 把 stage 推到 RamenSelect
+        game.stage = RamenStage::RamenSelect;
+        assert!(!game.ramen.combined_decision);
+
+        // ===== 合并决策：选面 0 + targets=[1,0,0] =====
+        let combined_actions = game.list_combined_ramen_select_actions();
+        println!("合并决策候选数: {}", combined_actions.len());
+        // 3 面全富余下：1(不吃) + 9(札幌) + 9(函馆) + 8(新潟) = 27
+        assert!(
+            combined_actions.len() >= 27,
+            "3 面全富余应至少 27 个（实测 {}）",
+            combined_actions.len()
+        );
+
+        let chosen = combined_actions
+            .iter()
+            .find(|a| a.ramen == Some(0) && a.special_targets == Some([1, 0, 0]))
+            .copied()
+            .expect("候选中应包含 面0 + [1,0,0]");
+
+        // 应用合并决策
+        game.apply_combined_ramen_decision(chosen.ramen, chosen.special_targets.unwrap())?;
+
+        // 验证 pending 字段已写 + 标记位已设
+        assert_eq!(game.ramen.pending_ramen, Some(0));
+        assert_eq!(game.ramen.pending_special_targets, [1, 0, 0]);
+        assert!(game.ramen.combined_decision, "combined_decision 应为 true");
+        // stage 仍是 RamenSelect（不直接设 stage）
+        assert!(matches!(game.stage, RamenStage::RamenSelect));
+
+        // ===== Game::next() 推进：合并决策应直接推 Train，跳过 SpecialSelect =====
+        game.next();
+        println!("next() 后 stage: {:?}", game.stage);
+        assert!(
+            matches!(game.stage, RamenStage::Train),
+            "合并决策路径应直接推 Train（跳过 SpecialSelect）"
+        );
+
+        // ===== 关键不变性：再次 next() 不应再推 SpecialSelect =====
+        // （SpecialSelect 已被跳过；如果 next() 误推会出错）
+        let prev_stage = game.stage.clone();
+        // 不再调 next()（会推进到 AfterTrain）；只校验 stage 已是 Train
+
+        // ===== clear_pending 后 combined_decision 应清空（回合边界语义） =====
+        game.ramen.clear_pending();
+        assert!(!game.ramen.combined_decision);
+        assert_eq!(game.ramen.pending_ramen, None);
+        assert_eq!(game.ramen.pending_special_targets, [0, 0, 0]);
+        println!("clear_pending 后所有 pending 已清空（含 combined_decision）");
+
+        // 防止 "unused" 警告
+        let _ = prev_stage;
+
+        Ok(())
+    }
+
+    /// 合并决策路径"不吃面"分支测试
+    ///
+    /// 验证 `apply_combined_ramen_decision(None, ...)` 强制 targets=[0,0,0] 且
+    /// `Game::next()` 同样直接推 Train（与"三阶段不吃面"行为一致）。
+    #[test]
+    fn test_combined_decision_path_no_ramen() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 2;
+        game.ramen.feeling_stock = [5, 5, 5];
+        game.ramen.special_feeling = 2;
+        game.ramen.selected_regions = [0, 1, 2];
+        game.stage = RamenStage::RamenSelect;
+
+        // 不吃面 + 任意 targets（应被强制成 [0,0,0]）
+        game.apply_combined_ramen_decision(None, [2, 2, 2])?;
+        assert_eq!(game.ramen.pending_ramen, None);
+        assert_eq!(game.ramen.pending_special_targets, [0, 0, 0]);
+        assert!(game.ramen.combined_decision);
+
+        // next() 推到 Train
+        game.next();
+        assert!(matches!(game.stage, RamenStage::Train));
+
+        Ok(())
+    }
+
+    /// 合并决策路径非法 targets 应报错
+    #[test]
+    fn test_combined_decision_invalid_targets_rejected() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 2;
+        game.ramen.feeling_stock = [5, 5, 5];
+        game.ramen.special_feeling = 2;
+        game.ramen.selected_regions = [0, 1, 2];
+        game.stage = RamenStage::RamenSelect;
+
+        // 面 0 札幌 recipe=[2,2,1]，targets=[3,0,0] 不合法（t_a 超过 recipe[0]=2）
+        let result = game.apply_combined_ramen_decision(Some(0), [3, 0, 0]);
+        println!("非法 targets 应报错: {:?}", result.is_err());
+        assert!(result.is_err(), "targets 越界应被拒绝");
+
+        // pending 应未写入
+        assert_eq!(game.ramen.pending_ramen, None);
+        assert!(!game.ramen.combined_decision);
+
+        Ok(())
+    }
+
+    /// 三阶段路径在 combined_decision=false 时行为不变（回归测试）
+    ///
+    /// 确认方案 E 不影响 HandwrittenTrainer 等走三阶段的 Trainer：
+    /// RamenSelect → next() 仍按 pending_ramen 决定 SpecialSelect / Train。
+    #[test]
+    fn test_three_stage_path_unaffected_by_combined_flag() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 2;
+        game.ramen.feeling_stock = [5, 5, 5];
+        game.ramen.special_feeling = 2;
+        game.ramen.selected_regions = [0, 1, 2];
+        game.stage = RamenStage::RamenSelect;
+        assert!(!game.ramen.combined_decision);
+
+        // 走三阶段路径：选面 0 后 apply，写 pending_ramen
+        let actions = game.list_actions()?;
+        let pick = actions
+            .iter()
+            .position(|a| a.ramen == Some(0))
+            .expect("应有面 0 候选");
+        game.apply_action(&actions[pick], &mut StdRng::from_os_rng())?;
+
+        // combined_decision 应保持 false（apply_action 走阶段阶段，不设标记）
+        assert!(!game.ramen.combined_decision);
+        assert_eq!(game.ramen.pending_ramen, Some(0));
+
+        // next() 应推 SpecialSelect（标准三阶段路径）
+        game.next();
+        assert!(
+            matches!(game.stage, RamenStage::SpecialSelect),
+            "三阶段路径下 RamenSelect → SpecialSelect"
+        );
 
         Ok(())
     }

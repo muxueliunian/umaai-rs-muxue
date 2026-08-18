@@ -2,6 +2,29 @@
 
 本文件用于简要记录每次任务的修改内容。
 
+## 2026-08-19
+
+### 拉面杯合并决策接口（两阶段聚合）
+
+**目标：** 为未来在线搜索/MctsTrainer 提供"选择拉面前"+"选择训练前"两阶段交互所需的合并决策路径。HandwrittenTrainer 等仍保留标准三阶段，粒度选择权交给 Trainer。
+
+**核心改动（方案 E，按 issues.md「拉面杯合并决策接口（两阶段聚合）」定案）：**
+- `RamenState` 新增 `combined_decision: bool` 标记位，`clear_pending()` 同步清空
+- `RamenAction` 新增 `combined_select(ramen_idx, targets)` 构造方法（不吃面强制全零 targets）
+- `action.rs` 新增 `list_combined_ramen_select_actions`：返回 RamenSelect × SpecialSelect 笛卡尔积候选（3 面全富余下 27 个）
+- `RamenGame`（仅具体类，不动 Game trait）新增 `list_combined_ramen_select_actions` 与 `apply_combined_ramen_decision`：一次性写 pending + 设 combined_decision 标记，**不直接设 stage**
+- `Game::next()` 在 RamenSelect 阶段优先检查 `combined_decision`：true 直接推 Train（跳过 SpecialSelect），否则按现有 `pending_ramen` 逻辑
+- `apply_combined_ramen_decision` 校验 stage=RamenSelect 且 targets 在 `list_special_targets_for` 合法集合内
+
+**测试与稳定性：**
+- action.rs 新增 3 个单元测试：`combined_select_normalizes_targets_when_no_ramen`、`combined_select_keeps_targets_when_eating`、`list_combined_ramen_select_actions_full/no_available`
+- game.rs 新增 4 个端到端测试：`combined_decision_path_skips_special_select`、`combined_decision_path_no_ramen`、`combined_decision_invalid_targets_rejected`、`three_stage_path_unaffected_by_combined_flag`
+- ramen 单测 64 个全过；workspace 全测单线程 78 个全过
+
+**文档与 issues.md：**
+- issues.md 新增「拉面杯合并决策接口（两阶段聚合）」一节，记录方案对比与定案要点
+- MctsTrainer 的 top-N + adaptive UCB 搜索策略仅记录在 issues.md，本次未实现
+
 ## 2026-08-18
 
 ### 拉面杯三阶段决策重构（隐藏风味显式化）

@@ -31,6 +31,9 @@ use crate::utils::{global_events, system_event, system_event_prob};
 /// - `SpecialSelect` 阶段：`ramen = pending`、`special_targets` 字段有意义，`operation = StageOnly`
 /// - `Train` 阶段：`ramen`/`special_targets` 为 pending 拷贝，`operation` 为真实操作
 ///
+/// 合并决策路径下，`combined_select` 构造的阶段阶段动作同时承载 `ramen` 和 `special_targets`，
+/// Trainer 在 `RamenSelect` 阶段一次性给出两个决策，由 `apply_combined_ramen_decision` 处理。
+///
 /// `apply` 按当前 `game.stage` 路由处理：阶段阶段动作仅切阶段并写入 pending，
 /// Train 阶段动作才真执行吃面 + 基础操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +84,23 @@ impl RamenAction {
     pub fn special_select(ramen_idx: usize, targets: [i32; 3]) -> Self {
         Self {
             ramen: Some(ramen_idx),
+            special_targets: Some(targets),
+            operation: Operation::StageOnly,
+        }
+    }
+
+    /// 创建"合并决策"阶段动作（一次承载 ramen + targets 两个决策）
+    ///
+    /// 约定：`ramen_idx = None` 时强制 `targets = [0,0,0]`（即"不吃面"在合并决策视角下
+    /// 与"吃面 + 全零 targets"等价，但保持 ramen=None 以便 Trainer/日志清晰识别）。
+    pub fn combined_select(ramen_idx: Option<usize>, targets: [i32; 3]) -> Self {
+        let targets = if ramen_idx.is_none() {
+            [0, 0, 0]
+        } else {
+            targets
+        };
+        Self {
+            ramen: ramen_idx,
             special_targets: Some(targets),
             operation: Operation::StageOnly,
         }
@@ -1001,6 +1021,38 @@ pub fn list_train_actions(
         .collect()
 }
 
+/// 合并决策阶段的候选动作：不吃面 + 每个面 × `list_special_targets_for` 候选 targets
+///
+/// 返回所有 (ramen_idx, special_targets) 笛卡尔积的 `RamenAction`，每个的 `operation = StageOnly`。
+///
+/// 适用场景：在线搜索/未来 MctsTrainer 等需要"选面+选吃法"一次性决策的 Trainer。
+/// 调用方使用本函数生成候选后，应通过 `RamenGame::apply_combined_ramen_decision`
+/// （而非 `apply_action`）应用选中的合并决策。
+///
+/// 与三阶段路径的关系：
+/// - 标准三阶段（HandwrittenTrainer 等）：RamenSelect → SpecialSelect → Train，分别调用
+///   `list_ramen_select_actions` / `list_special_select_actions` / `list_train_actions`
+/// - 合并路径（本函数）：RamenSelect 直接列出 ramen × targets 笛卡尔积，一次决策
+///
+/// 候选数估算：1（不吃）+ Σ 各面 `list_special_targets_for` 长度。
+/// 库存紧张时每个面仅 1~6 种，全富余时 9~10 种；3 面全富余时峰值约 28~31 个。
+pub fn list_combined_ramen_select_actions(
+    state: &super::RamenState,
+    selected_regions: &[usize; 3],
+) -> Vec<RamenAction> {
+    use super::rules::list_special_targets_for;
+
+    let mut actions = vec![RamenAction::combined_select(None, [0, 0, 0])]; // 不吃面
+    for &region_id in selected_regions {
+        // 任一 targets 候选非空即该面可选；与 `get_available_ramens` 判定一致
+        let targets_vec = list_special_targets_for(state, region_id).unwrap_or_default();
+        for t in targets_vec {
+            actions.push(RamenAction::combined_select(Some(region_id), t));
+        }
+    }
+    actions
+}
+
 /// 获取当年可用的面（存在合法 `special_targets` 即可选）。
 ///
 /// 与之前用 `can_make_ramen(recipe, &[0,0,0])` 过滤不同：本函数委托给
@@ -1239,7 +1291,7 @@ mod tests {
         state.special_feeling = 2;
 
         let actions = list_special_select_actions(&state, 0)?;
-        println!("札幌全富余 special=2: {} 个候选", actions.len());
+        println!("札幌全富余 special=2: {actions:?}");
         // 9 种：1 (sum=0) + 3 (sum=1) + 5 (sum=2) = 9
         assert_eq!(actions.len(), 9);
         // 所有动作 ramen=Some(0)、operation=StageOnly
@@ -1256,7 +1308,7 @@ mod tests {
     #[test]
     fn test_list_train_actions_carries_pending() -> anyhow::Result<()> {
         let actions = list_train_actions(Some(2), [1, 0, 0], false, false);
-        println!("带 pending 的 Train 阶段: {} 个动作", actions.len());
+        println!("带 pending 的 Train 阶段: {actions:#?}");
         // 8 个 operation
         assert_eq!(actions.len(), 8);
         // 每个动作 ramen=Some(2)、special_targets=Some([1,0,0])
@@ -1275,6 +1327,84 @@ mod tests {
         // 有友人 + 治病
         let actions = list_train_actions(None, [0, 0, 0], true, true);
         assert_eq!(actions.len(), 10);
+
+        Ok(())
+    }
+
+    // ========== 合并决策候选生成测试 ==========
+
+    #[test]
+    fn test_combined_select_normalizes_targets_when_no_ramen() {
+        // 不吃面时 targets 强制 [0,0,0]
+        let a = RamenAction::combined_select(None, [1, 2, 3]);
+        println!("不吃面 + 任意 targets: {a}");
+        assert_eq!(a.ramen, None);
+        assert_eq!(a.special_targets, Some([0, 0, 0]));
+        assert!(matches!(a.operation, Operation::StageOnly));
+    }
+
+    #[test]
+    fn test_combined_select_keeps_targets_when_eating() {
+        // 吃面时 targets 保留
+        let a = RamenAction::combined_select(Some(5), [1, 0, 1]);
+        println!("吃面5 + targets=[1,0,1]: {a}");
+        assert_eq!(a.ramen, Some(5));
+        assert_eq!(a.special_targets, Some([1, 0, 1]));
+        assert!(matches!(a.operation, Operation::StageOnly));
+    }
+
+    #[test]
+    fn test_list_combined_ramen_select_actions_full() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut state = RamenState::default();
+        state.feeling_stock = [5, 5, 5]; // 全够
+        state.special_feeling = 2;
+
+        let actions = list_combined_ramen_select_actions(&state, &[0, 1, 2]);
+        println!("合并决策候选 (3面全富余): {} 个", actions.len());
+        // 不吃面 1 + 札幌(2,2,1) 9 + 函馆(1,2,2) 9 + 新潟(3,1,1) 8 = 27
+        // （新潟的 t_b/t_c 上限为 1，max sum=2 ≤ budget=2 时 [3,0,0] 已超 2 被排除）
+        assert_eq!(actions.len(), 27);
+
+        // 第一个一定是不吃面
+        assert_eq!(actions[0].ramen, None);
+        assert_eq!(actions[0].special_targets, Some([0, 0, 0]));
+
+        // 不吃面动作的唯一性
+        let no_ramen_count = actions.iter().filter(|a| a.ramen.is_none()).count();
+        assert_eq!(no_ramen_count, 1);
+
+        // 各面 targets 数：札幌 9、函馆 9、新潟 8
+        let expected_per = [9usize, 9, 8];
+        for (region, &expected) in [0usize, 1, 2].iter().zip(expected_per.iter()) {
+            let count = actions
+                .iter()
+                .filter(|a| a.ramen == Some(*region))
+                .count();
+            println!("面 {region} 候选数: {count}");
+            assert_eq!(count, expected, "面 {region} 候选数应 = {expected}");
+        }
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_list_combined_ramen_select_actions_no_available() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        // 全空 + 无隐藏风味：所有面都不可做
+        let state = RamenState::default();
+        let actions = list_combined_ramen_select_actions(&state, &[0, 1, 2]);
+        println!("全空候选: {actions:?}");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].ramen, None);
 
         Ok(())
     }
