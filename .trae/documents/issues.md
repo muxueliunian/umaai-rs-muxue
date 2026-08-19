@@ -64,3 +64,14 @@
   - 已顺带修复 umaai 的 Linux 构建：winscribe 改为仅在 `cfg(windows)` 目标下作为 build-dependency；build.rs 的 Windows 资源编译逻辑用 `#[cfg(windows)]` 包裹；`windows` crate 及其依赖链（windows-future 0.3.2 与 windows-core 0.62.2 不兼容，Linux 上编译失败）改为 `cfg(windows)` 限定依赖；补声明 Linux 专用的 `libc` 依赖；Linux 版 `get_stack_size` 补 `pub` 修饰
 - **解决方案**：暂不处理，待用户明确图标使用场景（桌面菜单展示或二进制自包含）后再实施
 - **备注**：umaai 为 CLI + TUI 程序（clap + ratatui），桌面图标应用场景有限
+
+---
+
+## constants.json 排名数据需人工更新
+
+- **日期**：2026-08-19
+- **状态**：待解决（待人工更新）
+- **问题描述**：constants.json 中的 `rank_scores`、`rank_names`、`five_status_final_score` 为游戏排名相关数据，当前数值可能已过期，需要稍后按最新游戏版本人工核对更新
+- **排查过程**：配置系统整理（Phase 2）甄别 constants.json 各项归属时确认：这三项属固定游戏数据、不随剧本变化，保留在 constants.json，由人工更新
+- **解决方案**：待用户准备最新数据后更新三个数组
+- **备注**：与配置整理方案一致，见 .trae/documents/config_refactor_plan.md
