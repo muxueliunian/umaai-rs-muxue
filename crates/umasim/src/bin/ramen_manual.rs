@@ -59,14 +59,14 @@ fn main() -> Result<()> {
     if game_config.scenario != "ramen" {
         return Err(anyhow!(
             "ramen_manual 要求 scenario = \"ramen\"，当前 game_config.toml 中为 {:?}\n\
-             请修改 game_config.toml：scenario = \"ramen\"",
+            请修改 game_config.toml：scenario = \"ramen\"",
             game_config.scenario
         ));
     }
     if game_config.trainer != "manual" {
         return Err(anyhow!(
             "ramen_manual 要求 trainer = \"manual\"，当前 game_config.toml 中为 {:?}\n\
-             请修改 game_config.toml：trainer = \"manual\"",
+            请修改 game_config.toml：trainer = \"manual\"",
             game_config.trainer
         ));
     }

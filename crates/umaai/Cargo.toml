@@ -35,6 +35,7 @@ rand.workspace = true
 rand_distr.workspace = true
 rayon.workspace = true
 serde.workspace = true
+ratatui.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
