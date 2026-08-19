@@ -53,6 +53,20 @@
 - `test_ramen_silent_loop` 验证 All 路径不变（端到端 77 回合）
 - TOML 精简：`default_config.toml` 247→约170 行，`game_config.toml` 60→33 行；onsen 配置（`onsen_order` / `mcts_selected_onsen`）移到文件末尾并标注"Phase 6 预期删除"
 
+### 配置系统 Phase 2 步骤 4：加载集中化
+
+- 路径常量：`DEFAULT_CONFIG_REL_PATH` / `USER_CONFIG_REL_PATH` / `DATA_DIR_REL_PATH` / `ENV_DATA_DIR`（`UMAI_DATA_DIR` 覆盖 data 根目录绝对路径）
+- `resolve_data_dir()` / `resolve_default_config_path()` / `resolve_user_config_path()`：路径解析集中
+- `validate_game_config()`：统一校验 scenario/trainer 枚举、cards 长度、ramen_region_fixed 长度（fixed 策略时）
+- `load_game_config()` 改为：先打 info 日志、再读 default、再按路径存在性读 user（缺失时构造兜底 OverrideGameConfig，不阻塞启动）
+- 4 个单元测试覆盖：scenario 枚举、trainer 枚举、ramen_region_fixed 长度、路径解析
+
+### 配置系统 Phase 2 步骤 7：文档收尾
+
+- `project_context.md` 新增"配置系统（Phase 2 已完成）"章节：覆盖配置加载入口、五个子配置结构、用户可调项迁移、拉面杯地区选择策略、温泉遗留段
+- `ramen_refactor_development_plan.md` 执行检查清单标记 Phase 2 步骤 1-5/7 完成
+- 新增 5 个 Phase 2 相关测试（`test_validate_game_config_*` + `test_resolve_default_config_path`），全部通过；`test_ramen_silent_loop` 端到端 77 回合验证 All 路径不变
+
 ## 2026-08-18
 
 ### 剧本 PT 每年归零

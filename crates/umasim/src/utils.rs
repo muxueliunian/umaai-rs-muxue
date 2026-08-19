@@ -10,11 +10,15 @@ use anyhow::{Result, anyhow};
 use colored::Colorize;
 use comfy_table::Table;
 use flexi_logger::{DeferredNow, Duplicate, FileSpec, LogSpecification, style};
-use log::{Record, error};
+use log::{Record, error, info};
 use serde::Serialize;
 
 use crate::{
-    gamedata::{EventCollection, EventData, GAMECONSTANTS, GAMEDATA, GameConfig, LOGGER, OverrideGameConfig},
+    gamedata::{
+        EventCollection, EventData, GAMECONSTANTS, GAMEDATA, GameConfig, LOGGER,
+        MctsConfig, OverrideConfig, OverrideGameConfig,
+    },
+    game::onsen::OnsenOrder,
     global
 };
 
@@ -289,13 +293,157 @@ pub fn split_status(status_pt: &Array6) -> Result<(&Array5, i32)> {
     Ok((left, right))
 }
 
+// ========== 路径常量（Phase 2 步骤 4：加载集中化） ==========
+//
+// 路径解析优先级（从高到低）：
+//   1. 环境变量 `UMAI_DATA_DIR`：data 根目录（含 gamedata/default_config.toml）
+//   2. 工作目录下 `gamedata/default_config.toml`（默认）
+//
+// 用户配置 `game_config.toml` 始终位于工作目录根（Phase 6 可考虑移至 `UMAI_DATA_DIR`）。
+
+/// 默认配置（开发者默认值）相对于 data 根目录的相对路径
+pub const DEFAULT_CONFIG_REL_PATH: &str = "default_config.toml";
+/// 用户配置（覆盖层）相对于工作目录的相对路径
+pub const USER_CONFIG_REL_PATH: &str = "../game_config.toml";
+/// data 根目录（gamedata/）相对于工作目录的相对路径
+pub const DATA_DIR_REL_PATH: &str = "gamedata";
+/// 环境变量名：覆盖 data 根目录的绝对路径
+pub const ENV_DATA_DIR: &str = "UMAI_DATA_DIR";
+
+/// 解析 data 根目录绝对路径：优先用环境变量 `UMAI_DATA_DIR`，否则用工作目录 + `gamedata/`
+pub fn resolve_data_dir() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var(ENV_DATA_DIR) {
+        std::path::PathBuf::from(p)
+    } else {
+        std::path::PathBuf::from(DATA_DIR_REL_PATH)
+    }
+}
+
+/// 解析默认配置绝对路径
+pub fn resolve_default_config_path() -> std::path::PathBuf {
+    resolve_data_dir().join(DEFAULT_CONFIG_REL_PATH)
+}
+
+/// 解析用户配置绝对路径
+pub fn resolve_user_config_path() -> std::path::PathBuf {
+    std::env::current_dir().unwrap_or_default().join(USER_CONFIG_REL_PATH)
+}
+
+/// 校验 GameConfig 关键字段（Phase 2 步骤 4：加载集中化）
+///
+/// 业务模块不应自行校验字段格式；统一在此处报错。当前覆盖：
+/// - `scenario`：枚举合法性
+/// - `trainer`：枚举合法性
+/// - `cards`：长度 = 6
+/// - `ramen_region_fixed`（fixed 策略时）：长度 = 1
+pub fn validate_game_config(config: &GameConfig) -> Result<()> {
+    match config.scenario.as_str() {
+        "basic" | "onsen" | "ramen" => {}
+        other => anyhow::bail!("未知 scenario={other:?}，应为 basic | onsen | ramen"),
+    }
+    match config.trainer.as_str() {
+        "manual" | "random" | "handwritten" | "collector" | "neuralnet" | "mcts" => {}
+        other => anyhow::bail!("未知 trainer={other:?}"),
+    }
+    if config.cards.len() != 6 {
+        anyhow::bail!("cards 长度应为 6，实际 {}", config.cards.len());
+    }
+    if matches!(
+        config.ramen_region_strategy,
+        crate::gamedata::RamenRegionStrategy::Fixed
+    ) {
+        match &config.ramen_region_fixed {
+            Some(fixed) if fixed.len() == 1 => {}
+            Some(fixed) => anyhow::bail!(
+                "ramen_region_strategy=fixed 但 ramen_region_fixed 长度 = {}（应为 1）",
+                fixed.len()
+            ),
+            None => anyhow::bail!("ramen_region_strategy=fixed 但未设置 ramen_region_fixed"),
+        }
+    }
+    Ok(())
+}
+
 /// 载入 gamedata/default_config.toml, 和 game_config.toml 合并
 pub fn load_game_config() -> Result<GameConfig> {
-    let def_file = fs_err::read_to_string("gamedata/default_config.toml")?;
+    let def_path = resolve_default_config_path();
+    info!("载入默认配置: {}", def_path.display());
+    let def_file = fs_err::read_to_string(&def_path)?;
     let default_config: GameConfig = toml::from_str(&def_file)?;
-    let cfg_file = fs_err::read_to_string("game_config.toml")?;
-    let override_config: OverrideGameConfig = toml::from_str(&cfg_file)?;
-    let ret = override_config.merge(&default_config);
-    //println!("{ret:#?}");
-    Ok(ret)
+
+    let cfg_path = resolve_user_config_path();
+    let override_config: OverrideGameConfig = if cfg_path.exists() {
+        info!("载入用户配置: {}", cfg_path.display());
+        let cfg_file = fs_err::read_to_string(&cfg_path)?;
+        toml::from_str(&cfg_file)?
+    } else {
+        info!(
+            "用户配置不存在（{}），使用默认配置 + OverrideGameConfig 兜底",
+            cfg_path.display()
+        );
+        OverrideGameConfig {
+            onsen_order: OnsenOrder::default(),
+            config_override: OverrideConfig {
+                extra_count: [0; 6],
+                mcts_selected_onsen: false,
+                log_level: "info".to_string(), // 兜底，merge 后会被 default 覆盖
+                num_threads: 0,
+                mcts_turn_bonus: None,
+                pt_favor_rate: None,
+                race_grades: None
+            },
+            mcts: MctsConfig::default()
+        }
+    };
+
+    let merged = override_config.merge(&default_config);
+    validate_game_config(&merged)?;
+    Ok(merged)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_validate_game_config_scenario_enum() {
+        let mut cfg = GameConfig::default_for_init();
+        cfg.scenario = "ramen".to_string();
+        assert!(validate_game_config(&cfg).is_ok());
+
+        cfg.scenario = "bogus".to_string();
+        assert!(validate_game_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_validate_game_config_trainer_enum() {
+        let mut cfg = GameConfig::default_for_init();
+        cfg.trainer = "manual".to_string();
+        assert!(validate_game_config(&cfg).is_ok());
+
+        cfg.trainer = "unknown".to_string();
+        assert!(validate_game_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_validate_game_config_ramen_region_fixed_length() {
+        use crate::gamedata::RamenRegionStrategy;
+        let mut cfg = GameConfig::default_for_init();
+        cfg.ramen_region_strategy = RamenRegionStrategy::Fixed;
+        cfg.ramen_region_fixed = Some(vec![[0, 1, 2]]);
+        assert!(validate_game_config(&cfg).is_ok());
+
+        cfg.ramen_region_fixed = Some(vec![[0, 1, 2], [3, 4, 5]]); // 长度=2，应拒绝
+        assert!(validate_game_config(&cfg).is_err());
+
+        cfg.ramen_region_fixed = None;
+        assert!(validate_game_config(&cfg).is_err());
+    }
+
+    #[test]
+    fn test_resolve_default_config_path() {
+        let p = resolve_default_config_path();
+        // 默认相对路径应以 "gamedata/default_config.toml" 结尾
+        assert!(p.ends_with("default_config.toml"));
+    }
 }

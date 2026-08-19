@@ -155,3 +155,34 @@
 ### HandwrittenTrainer / MctsTrainer
 - **定义位置**：`crates/umasim/src/trainer/handwritten_trainer.rs`、`mcts_trainer.rs`
 - 当前实现仍绑定旧温泉杯（`impl Trainer<OnsenGame>`），尚未适配 RamenGame；拉面杯决策粒度设计：HandwrittenTrainer 走三阶段（RamenSelect→SpecialSelect→Train），MctsTrainer 走合并决策路径（`list_combined_ramen_select_actions` + `apply_combined_ramen_decision`，方案 E）
+
+## 配置系统（Phase 2 已完成）
+
+### 配置加载入口
+- `crates/umasim/src/utils.rs::load_game_config()`：统一读取 `gamedata/default_config.toml` + `game_config.toml`，merge 后调用 `validate_game_config` 校验
+- 路径解析：`resolve_default_config_path()`（环境变量 `UMAI_DATA_DIR` > 工作目录 + `gamedata/`）；`resolve_user_config_path()`
+- 用户配置不存在时自动用兜底 `OverrideGameConfig`，不会阻塞启动
+
+### 五个子配置结构（渐进式分组）
+- `SimulationConfig`：剧本/训练员/马娘/卡组/模拟次数
+- `SearchConfig`：MCTS + 用户可调搜索项（`mcts_turn_bonus` / `pt_favor_rate` / `race_grades`）
+- `PolicyConfig`：拉面杯地区/超级拉面选择策略
+- `OutputConfig`：日志级别（统计级别后续步骤接入）
+- `DeveloperConfig`：collector + 线程数
+- `GameConfig` 保留聚合壳 + `simulation()` / `search()` / `policy()` / `output()` / `dev()` 访问器；调用点可逐步迁移到子配置访问
+
+### 用户可调项迁移（步骤 1）
+- `mcts_turn_bonus` / `pt_favor_rate` / `race_grades` 从 `gamedata/constants.json` 迁出到 `gamedata/default_config.toml` 顶层；`game_config.toml` 可选覆盖
+- `five_status_limit_base` 隔离到 `gamedata/scenario_ramen.json`（拉面杯覆盖）；basic/onsen 继续使用 `GAMECONSTANTS.five_status_limit_base`
+- `no_event_turns` 保留为公共数据（constants.json）
+- `rank_scores` / `rank_names` / `five_status_final_score` 待人工更新（见 issues.md）
+
+### 拉面杯地区选择策略（步骤 5）
+- `ramen_region_strategy = "all" | "fixed"`：默认 `"all"`（枚举所有组合）；`"fixed"` 跳过 120 组合枚举
+- `ramen_region_fixed = [[id1, id2, id3]]`：长度 = 1，仅当 `fixed` 策略时生效
+- **仅第3年（year_idx=2）生效**；第1/2年固定走 all 枚举
+- 策略路由在 `RamenGame::run_region_select` 中按 `year_idx` 判定
+
+### 温泉遗留段
+- `onsen_order` / `mcts_selected_onsen` 等温泉专属配置移到 `default_config.toml` / `game_config.toml` 文件末尾，标注"Phase 6 预期删除"
+- `game_config.toml` `[onsen_order]` / `[config_override]` 段保留（OverrideGameConfig 解析依赖）
