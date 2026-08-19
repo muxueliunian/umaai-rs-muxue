@@ -165,6 +165,10 @@ pub struct RamenScenarioData {
     /// 友人事件
     #[serde(default)]
     pub friend_events: HashMap<String, EventData>,
+    /// 五维属性上限（拉面杯剧本覆盖，Phase 2 步骤 1 从 constants.json 隔离）
+    /// basic/onsen 仍使用 `GAMECONSTANTS.five_status_limit_base`；拉面杯使用此字段
+    #[serde(default)]
+    pub five_status_limit_base: Option<[i32; 5]>,
 }
 
 impl RamenScenarioData {

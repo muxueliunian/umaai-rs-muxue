@@ -57,6 +57,13 @@
 
 新增"选面+吃法"一次性决策的合并路径，决策粒度交给训练员选择（三阶段或合并），为在线搜索预留。
 
+### 配置系统 Phase 2 步骤 1：用户可调项迁移
+
+- `mcts_turn_bonus` / `pt_favor_rate` / `race_grades` 从 `gamedata/constants.json` 迁出到 `gamedata/default_config.toml`（顶层），`game_config.toml` 可覆盖
+- `five_status_limit_base` 从 constants.json 隔离到 `gamedata/scenario_ramen.json`（拉面杯剧本覆盖），basic/onsen 继续使用全局默认；`no_event_turns` 保留为公共数据
+- 引入 `init_global_with_config(&GameConfig)`：把用户可调项注入 `GAMECONSTANTS`，所有现有引用点不变；旧 `init_global()` 保留为兜底重载
+- 4 个入口（umasim/umaai/analyzer/ramen_manual）改用 `init_global_with_config`
+
 ### 三阶段决策重构（隐藏风味显式化）
 
 隐藏诀窍用法改为显式决策：动作阶段扩展为"选面 → 选诀窍用法 → 训练"三阶段；同步修复全局初始化幂等问题。

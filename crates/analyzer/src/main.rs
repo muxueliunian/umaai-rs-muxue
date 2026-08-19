@@ -9,7 +9,7 @@ use rand::{SeedableRng, rngs::StdRng};
 use umaai::protocol::{GameStatus, GameStatusOnsen, onsen::serialize_game};
 use umasim::{
     game::{Game, InheritInfo, onsen::game::OnsenGame},
-    gamedata::{GAMECONSTANTS, init_global},
+    gamedata::{GAMECONSTANTS, init_global_with_config},
     global,
     search::SearchConfig,
     trainer::*,
@@ -91,7 +91,7 @@ async fn main() -> Result<()> {
     init_logger("analyzer", &game_config.log_level)?;
 
     // 3. 再初始化全局数据
-    init_global()?;
+    init_global_with_config(&game_config)?;
 
     // 如果指定了文件名，则载入游戏
     let mut load_game = None;

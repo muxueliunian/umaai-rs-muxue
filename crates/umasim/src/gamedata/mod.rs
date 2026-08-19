@@ -131,12 +131,41 @@ pub static GAMEDATA: OnceLock<GameData> = OnceLock::new();
 pub static GAMECONSTANTS: OnceLock<GameConstants> = OnceLock::new();
 pub static LOGGER: OnceLock<Mutex<LoggerHandle>> = OnceLock::new();
 
+/// 初始化全局游戏数据。
+///
+/// Phase 2 步骤 1（2026-08-19）：`mcts_turn_bonus` / `pt_favor_rate` / `race_grades`
+/// 已从 `gamedata/constants.json` 迁出到 `gamedata/default_config.toml`（可由
+/// `game_config.toml` 覆盖）。`init_global` 现在接受 `&GameConfig`，把用户可调项
+/// 注入 `GAMECONSTANTS`，保持 `global!(GAMECONSTANTS).xxx` 引用点不变。
+///
+/// 旧的无参签名保留为便捷重载，但只能在已加载过 `GameConfig` 后调用（仅用兜底默认值）。
+/// 入口应优先使用 `init_global_with_config(&GameConfig)`。
 pub fn init_global() -> Result<()> {
-    // 幂等：已初始化过则直接返回，允许测试套件中重复调用
+    // 幂等：已初始化过则直接返回
     if GAMECONSTANTS.get().is_some() && GAMEDATA.get().is_some() {
         return Ok(());
     }
-    let _ = GAMECONSTANTS.set(GameConstants::load()?);
+    // 兜底：使用 GameConfig::default() 提供的默认用户可调值
+    init_global_with_config(&GameConfig::default_for_init())
+}
+
+/// 带 GameConfig 的初始化：注入用户可调项（mcts_turn_bonus / pt_favor_rate / race_grades）
+/// 到 `GAMECONSTANTS`，供 `global!(GAMECONSTANTS)` 读取。
+pub fn init_global_with_config(config: &GameConfig) -> Result<()> {
+    // 幂等
+    if GAMECONSTANTS.get().is_some() && GAMEDATA.get().is_some() {
+        return Ok(());
+    }
+    // 加载 GameConstants（基础部分），再注入用户可调项
+    let mut constants = GameConstants::load()?;
+    // 注入用户可调项（来源 GameConfig，默认/用户覆盖）
+    // 注意：若后续需要把 race_grades/mcts_turn_bonus 完全从 GameConstants 移除，
+    // 改为新建全局或扩展其他结构。当前为了保持所有 `cons.race_grades` 等引用点不变，
+    // 选择注入式实现（Phase 2 步骤 1 临时方案）。
+    constants.race_grades = config.race_grades.clone();
+    constants.mcts_turn_bonus = config.mcts_turn_bonus;
+    constants.pt_favor_rate = config.pt_favor_rate;
+    let _ = GAMECONSTANTS.set(constants);
     let _ = GAMEDATA.set(GameData::load()?);
     onsen::init_onsen_data()?;
     ramen::init_ramen_data()?;

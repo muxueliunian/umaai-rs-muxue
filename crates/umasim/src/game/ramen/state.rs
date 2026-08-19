@@ -11,6 +11,8 @@ use super::{FeelingType, RamenStage};
 use super::rules::NPC_CHARA_IDS;
 use crate::game::{BaseGame, BasePerson, InheritInfo, PersonType};
 use crate::game::traits::Game;
+use crate::global;
+use crate::gamedata::ramen::RAMENDATA;
 
 /// 拉面杯专用状态
 ///
@@ -207,9 +209,16 @@ impl RamenGame {
             current_effect: RamenEffect::default(),
             deck_can_split: false
         };
-        // 上限规范化
-        for i in 0..5 {
-            ret.uma.five_status_limit[i] = ret.uma.five_status_limit[i].min(2800);
+        // 五维属性上限：拉面杯剧本数据覆盖（Phase 2 步骤 1：从 constants.json 隔离到 scenario_ramen）
+        // 若 scenario_ramen.json 未提供该字段，回退到全局默认值（防御）
+        if let Some(limit) = global!(RAMENDATA).five_status_limit_base {
+            for i in 0..5 {
+                ret.uma.five_status_limit[i] = limit[i].min(2800);
+            }
+        } else {
+            for i in 0..5 {
+                ret.uma.five_status_limit[i] = ret.uma.five_status_limit[i].min(2800);
+            }
         }
         // 携带4种卡以上才能分身
         ret.deck_can_split = ret.card_type_count.iter().filter(|x| **x > 0).count() >= 4;

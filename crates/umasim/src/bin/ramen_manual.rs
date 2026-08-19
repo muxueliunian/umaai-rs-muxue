@@ -40,7 +40,7 @@ use umasim::{
         Game, InheritInfo,
         ramen::RamenGame,
     },
-    gamedata::{GAMECONSTANTS, init_global},
+    gamedata::{GAMECONSTANTS, init_global_with_config},
     global,
     trainer::ManualTrainer,
     utils::{init_logger_stdout, load_game_config},
@@ -76,7 +76,7 @@ fn main() -> Result<()> {
     // - inquire 默认从 /dev/tty 读取，与 stdout 日志互不干扰
     // - 不写文件，需要持久化日志可用 shell 重定向: `cargo run --bin ramen_manual --release 2>&1 | tee ramen.log`
     init_logger_stdout("ramen_manual", &game_config.log_level)?;
-    init_global()?;
+    init_global_with_config(&game_config)?;
 
     // 5. 提取配置（只关心我们支持的字段，其他字段忽略）
     let uma_id = game_config.uma;

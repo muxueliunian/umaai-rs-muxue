@@ -11,7 +11,7 @@ use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use umasim::{
     game::{Game, InheritInfo, Trainer, basic::BasicGame, onsen::game::OnsenGame},
-    gamedata::{GAMECONSTANTS, GameConfig, init_global},
+    gamedata::{GAMECONSTANTS, GameConfig, init_global_with_config},
     global,
     sample_collector::GameSample,
     trainer::*,
@@ -238,7 +238,7 @@ async fn main() -> Result<()> {
     init_logger("umasim", &game_config.log_level)?;
 
     // 3. 再初始化全局数据
-    init_global()?;
+    init_global_with_config(&game_config)?;
     info!(
         "{}",
         format!("工作线程数: {}", game_config.collector.threads).bright_yellow()

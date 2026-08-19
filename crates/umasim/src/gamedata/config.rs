@@ -39,7 +39,8 @@ pub struct GameConstants {
     pub no_event_turns: Vec<i32>,
     /// 基础Hint率
     pub base_hint_rate: f64,
-    /// 每回合的比赛等级
+    /// 每回合的比赛等级（Phase 2 步骤 1：从 constants.json 迁出；由 init_global_with_config 注入；serde skip 不再从 constants.json 读取）
+    #[serde(default, skip)]
     pub race_grades: Vec<i32>,
     /// 休息结果分布 +30=18%,+50=57%,+70=25%
     pub rest_probs: Vec<i32>,
@@ -47,11 +48,13 @@ pub struct GameConstants {
     pub hint_event_value: Vec<Array6>,
     /// 每张卡最大提供Hint等级
     pub max_hint_per_card: i32,
-    /// PT特化时，PT评分倍数
+    /// PT特化时，PT评分倍数（Phase 2 步骤 1：从 constants.json 迁出；serde skip）
+    #[serde(default, skip)]
     pub pt_favor_rate: f32,
     /// PT特化时，超过1200的属性压缩系数
     pub five_status_favor_rate: Vec<f32>,
-    /// 蒙特卡洛每回合比手写逻辑增加的分数, 用于修正估分
+    /// 蒙特卡洛每回合比手写逻辑增加的分数（Phase 2 步骤 1：从 constants.json 迁出；serde skip）
+    #[serde(default, skip)]
     pub mcts_turn_bonus: i32
 }
 
@@ -498,7 +501,68 @@ pub struct GameConfig {
     #[serde(default)]
     pub mcts_selected_onsen: bool,
     /// 蒙特卡洛输出评分还是PT重视结果
-    pub mcts_selection: String
+    pub mcts_selection: String,
+    /// 蒙特卡洛每回合期望得分加成（搜索启发式参数；Phase 2 步骤 1 从 constants.json 迁出）
+    #[serde(default = "default_mcts_turn_bonus")]
+    pub mcts_turn_bonus: i32,
+    /// PT 偏好评分倍率（与 mcts_selection 联用；Phase 2 步骤 1 从 constants.json 迁出）
+    #[serde(default = "default_pt_favor_rate")]
+    pub pt_favor_rate: f32,
+    /// 比赛等级表（72 项，对应回合 0-71；URA 回合 72-77 固定 G1 不在此表）
+    /// 默认值与迁出前 constants.json 一致；用户可在 game_config.toml 顶层覆盖
+    #[serde(default = "default_race_grades")]
+    pub race_grades: Vec<i32>
+}
+
+fn default_mcts_turn_bonus() -> i32 {
+    70
+}
+
+fn default_pt_favor_rate() -> f32 {
+    8.0
+}
+
+fn default_race_grades() -> Vec<i32> {
+    // 与迁出前 constants.json race_grades 一致（72 项）
+    // 注意：此默认值与 gamedata/default_config.toml 中的 race_grades 保持一致；
+    // 仅当 default_config.toml 缺该字段时（异常情况）才使用此处兜底
+    vec![
+        0,0,0,0,0,0,0,0,0,0,0,4,0,3,4,3,3,4,3,3,2,3,1,1,3,4,3,4,2,2,1,2,1,1,1,1,
+        1,3,3,3,3,1,1,1,1,1,2,1,2,3,1,1,2,1,2,1,1,2,1,1,3,3,3,3,3,1,2,1,1,1,2,1
+    ]
+}
+
+impl GameConfig {
+    /// 为 `init_global()` 兜底提供的默认值（不依赖任何 TOML 文件）
+    ///
+    /// 仅在测试或调试场景无 `load_game_config()` 结果时使用；正常入口
+    /// 必须先 `load_game_config()` 拿到完整 `GameConfig` 后调用
+    /// `init_global_with_config(&config)`。
+    ///
+    /// 注意：部分字段（uma/cards/blue_count/extra_count/onsen_order/mcts_selection）
+    /// 没有合理兜底值，调用方应确保只在已显式构造过 `GameConfig` 的场景才用本函数。
+    pub fn default_for_init() -> Self {
+        Self {
+            scenario: default_scenario(),
+            log_level: default_log_level(),
+            trainer: default_trainer(),
+            neuralnet_model_path: default_neuralnet_model_path(),
+            simulation_count: default_simulation_count(),
+            // 无合理兜底的字段：用 0/默认值占位，调用方不应依赖这些值
+            uma: 0,
+            cards: [0; 6],
+            blue_count: [0; 5],
+            extra_count: [0; 6],
+            onsen_order: OnsenOrder::default(),
+            collector: CollectorConfig::default(),
+            mcts: MctsConfig::default(),
+            mcts_selected_onsen: false,
+            mcts_selection: "score".to_string(),
+            mcts_turn_bonus: default_mcts_turn_bonus(),
+            pt_favor_rate: default_pt_favor_rate(),
+            race_grades: default_race_grades()
+        }
+    }
 }
 
 fn default_scenario() -> String {
@@ -540,7 +604,16 @@ pub struct OverrideConfig {
     /// 日志级别
     pub log_level: String,
     /// 线程数
-    pub num_threads: usize
+    pub num_threads: usize,
+    /// 蒙特卡洛每回合期望得分加成（可选覆盖；Phase 2 步骤 1 引入）
+    #[serde(default)]
+    pub mcts_turn_bonus: Option<i32>,
+    /// PT 偏好评分倍率（可选覆盖；Phase 2 步骤 1 引入）
+    #[serde(default)]
+    pub pt_favor_rate: Option<f32>,
+    /// 比赛等级表 72 项（可选覆盖；Phase 2 步骤 1 引入）
+    #[serde(default)]
+    pub race_grades: Option<Vec<i32>>
 }
 
 impl OverrideGameConfig {
@@ -554,6 +627,15 @@ impl OverrideGameConfig {
         ret.mcts.search_n = self.mcts.search_n;
         ret.mcts.radical_factor_max = self.mcts.radical_factor_max;
         ret.collector.threads = self.config_override.num_threads;
+        if let Some(v) = self.config_override.mcts_turn_bonus {
+            ret.mcts_turn_bonus = v;
+        }
+        if let Some(v) = self.config_override.pt_favor_rate {
+            ret.pt_favor_rate = v;
+        }
+        if let Some(v) = self.config_override.race_grades {
+            ret.race_grades = v;
+        }
         ret
     }
 }

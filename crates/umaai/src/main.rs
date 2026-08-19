@@ -21,7 +21,7 @@ use umasim::{
         Trainer,
         onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame}
     },
-    gamedata::init_global,
+    gamedata::{init_global, init_global_with_config},
     neural::{Evaluator, NeuralNetEvaluator},
     search::SearchConfig,
     trainer::MctsTrainer,
@@ -136,6 +136,7 @@ async fn main_guard() -> Result<()> {
     let mcts_config = SearchConfig::new_game_config(&game_config);
     // 2. 根据配置初始化日志，设置工作线程
     init_logger("umaai", &game_config.log_level)?;
+    init_global_with_config(&game_config)?;
     info!(
         "{}",
         format!("工作线程数: {}", game_config.collector.threads).bright_yellow()
@@ -146,7 +147,7 @@ async fn main_guard() -> Result<()> {
     //info!("search_config = {mcts_config:?}");
 
     // 3. 再初始化全局数据
-    init_global()?;
+    init_global_with_config(&game_config)?;
 
     // ctrl-s handler
     tokio::spawn(async move {
