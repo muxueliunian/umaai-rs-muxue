@@ -1,3 +1,23 @@
+# ===== Phase 2 配置系统整理（2026-08-19）=====
+# 本文件按职责分为五个子配置段（语义层，对应 Rust 侧 GameConfig 的
+# simulation()/search()/policy()/output()/dev() 方法）：
+#
+#   [simulation] 剧本/训练员/马娘/卡组/模拟次数
+#                 (scenario, trainer, uma, cards, blue_count, extra_count, simulation_count)
+#   [search]     MCTS/神经网络/用户可调搜索项
+#                 (mcts, mcts_selection, neuralnet_model_path,
+#                  mcts_turn_bonus, pt_favor_rate, race_grades)
+#   [policy]     拉面杯地区/超级拉面选择策略（步骤 5 接入）
+#                 (ramen_region_strategy, ramen_region_fixed)
+#   [output]     日志级别/统计级别（步骤 3 后续）
+#                 (log_level)
+#   [dev]        collector/线程数等开发者选项
+#                 (collector.*, collector.threads)
+#
+# 注：serde 当前仍按顶层平铺字段解析（GameConfig 聚合壳），段结构为
+# 组织概念。后续步骤（如 Phase 2 步骤 3 后续、步骤 4 加载集中化）可
+# 选择性把字段搬入对应 [xxx] 段并实现段结构解析。
+#
 # ---- 用户可调配置（从 constants.json 迁移过来，2026-08-19 Phase 2 步骤 1）----
 # 注释掉即恢复开发默认；game_config.toml 顶层可直接覆盖
 

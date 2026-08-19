@@ -30,6 +30,21 @@
 - project_context.md 按当前代码实况更新（拉面杯模块结构、测试与训练员章节），移除已知问题章节
 - 原 issues.md 归档至 archive/issues_2026-08-19.md，新建 issues.md 保留当前未解决条目
 
+### 配置系统 Phase 2 步骤 1：用户可调项迁移
+
+- `mcts_turn_bonus` / `pt_favor_rate` / `race_grades` 从 `gamedata/constants.json` 迁出到 `gamedata/default_config.toml`（顶层），`game_config.toml` 可覆盖
+- `five_status_limit_base` 从 constants.json 隔离到 `gamedata/scenario_ramen.json`（拉面杯剧本覆盖），basic/onsen 继续使用全局默认；`no_event_turns` 保留为公共数据
+- 引入 `init_global_with_config(&GameConfig)`：把用户可调项注入 `GAMECONSTANTS`，所有现有引用点不变；旧 `init_global()` 保留为兜底重载
+- 4 个入口（umasim/umaai/analyzer/ramen_manual）改用 `init_global_with_config`
+
+### 配置系统 Phase 2 步骤 2+3：GameConfig 子配置分组 + serde skip 注释强化
+
+- 定义五个职责子结构：`SimulationConfig` / `SearchConfig` / `PolicyConfig` / `OutputConfig` / `DeveloperConfig`，分别承载剧本与训练员、搜索参数、策略参数、输出与开发者项
+- `GameConfig` 保留聚合壳，新增 `simulation()` / `search()` / `policy()` / `output()` / `dev()` 访问器；业务模块可逐步迁移到子配置访问，调用点零改动
+- `GameConstants` 中步骤 1 迁出的三个字段（`race_grades` / `pt_favor_rate` / `mcts_turn_bonus`）加 `#[serde(default, skip)]` 并附文档化注释说明"运行时由 `init_global_with_config` 注入"；后续若需彻底移除字段，再统一迁移引用点
+- `PolicyConfig` 当前为空（占位），步骤 5 将接入拉面杯地区/超级拉面选择策略
+- `default_config.toml` / `game_config.toml` 顶部加"配置段"导航注释（serde 仍按顶层平铺解析，段结构为组织概念）
+
 ## 2026-08-18
 
 ### 剧本 PT 每年归零
@@ -56,13 +71,6 @@
 ### 合并决策接口（两阶段聚合）
 
 新增"选面+吃法"一次性决策的合并路径，决策粒度交给训练员选择（三阶段或合并），为在线搜索预留。
-
-### 配置系统 Phase 2 步骤 1：用户可调项迁移
-
-- `mcts_turn_bonus` / `pt_favor_rate` / `race_grades` 从 `gamedata/constants.json` 迁出到 `gamedata/default_config.toml`（顶层），`game_config.toml` 可覆盖
-- `five_status_limit_base` 从 constants.json 隔离到 `gamedata/scenario_ramen.json`（拉面杯剧本覆盖），basic/onsen 继续使用全局默认；`no_event_turns` 保留为公共数据
-- 引入 `init_global_with_config(&GameConfig)`：把用户可调项注入 `GAMECONSTANTS`，所有现有引用点不变；旧 `init_global()` 保留为兜底重载
-- 4 个入口（umasim/umaai/analyzer/ramen_manual）改用 `init_global_with_config`
 
 ### 三阶段决策重构（隐藏风味显式化）
 

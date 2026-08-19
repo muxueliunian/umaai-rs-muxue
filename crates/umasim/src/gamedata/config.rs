@@ -39,7 +39,19 @@ pub struct GameConstants {
     pub no_event_turns: Vec<i32>,
     /// 基础Hint率
     pub base_hint_rate: f64,
-    /// 每回合的比赛等级（Phase 2 步骤 1：从 constants.json 迁出；由 init_global_with_config 注入；serde skip 不再从 constants.json 读取）
+    // ========== 步骤 1 迁出字段（Phase 2） ==========
+    // 以下三个字段已从 `gamedata/constants.json` 迁出到 `gamedata/default_config.toml`
+    // （顶层 + `game_config.toml` 可覆盖）。`#[serde(default, skip)]` 表示：
+    // - `skip`：serde 反序列化时忽略（避免旧 `constants.json` 残留字段引发反序列化错误）
+    // - `default`：若字段缺失给一个类型默认值（Vec→空 vec，f32/i32→0）
+    // - **运行时注入**：`init_global_with_config(&GameConfig)` 在 `constants.json` 加载后，
+    //   把 `GameConfig` 中用户可调值（mcts_turn_bonus / pt_favor_rate / race_grades）
+    //   注入到这里。所有现有 `global!(GAMECONSTANTS).race_grades` 等引用点保持不变。
+    // - **后续步骤**：若需要彻底从 `GameConstants` 移除这三个字段（改为独立全局或扩展其他结构），
+    //   再统一迁移引用点（mcts_trainer、uma.rs:calc_score_with_pt_favor、base/action.rs:race_grade 等）。
+
+    /// 每回合的比赛等级（72 项；URA 回合 72-77 固定 G1 不在此表）
+    /// 默认值来源："game_config.toml" → "default_config.toml" → `default_race_grades()`
     #[serde(default, skip)]
     pub race_grades: Vec<i32>,
     /// 休息结果分布 +30=18%,+50=57%,+70=25%
@@ -48,12 +60,14 @@ pub struct GameConstants {
     pub hint_event_value: Vec<Array6>,
     /// 每张卡最大提供Hint等级
     pub max_hint_per_card: i32,
-    /// PT特化时，PT评分倍数（Phase 2 步骤 1：从 constants.json 迁出；serde skip）
+    /// PT 特化时，PT 评分倍数（与 `mcts_selection` 联用）
+    /// 默认值来源："game_config.toml" → "default_config.toml" → `default_pt_favor_rate()`
     #[serde(default, skip)]
     pub pt_favor_rate: f32,
     /// PT特化时，超过1200的属性压缩系数
     pub five_status_favor_rate: Vec<f32>,
-    /// 蒙特卡洛每回合比手写逻辑增加的分数（Phase 2 步骤 1：从 constants.json 迁出；serde skip）
+    /// 蒙特卡洛每回合比手写逻辑增加的分数（搜索启发式）
+    /// 默认值来源："game_config.toml" → "default_config.toml" → `default_mcts_turn_bonus()`
     #[serde(default, skip)]
     pub mcts_turn_bonus: i32
 }
@@ -563,6 +577,125 @@ impl GameConfig {
             race_grades: default_race_grades()
         }
     }
+
+    /// 仿真参数：剧本、训练员、马娘、卡组、模拟次数
+    pub fn simulation(&self) -> SimulationConfig {
+        SimulationConfig {
+            scenario: self.scenario.clone(),
+            trainer: self.trainer.clone(),
+            uma: self.uma,
+            cards: self.cards,
+            blue_count: self.blue_count,
+            extra_count: self.extra_count,
+            simulation_count: self.simulation_count
+        }
+    }
+
+    /// 搜索参数：MCTS、神经网络、用户可调搜索项（mcts_turn_bonus / pt_favor_rate / race_grades）
+    pub fn search(&self) -> SearchConfig {
+        SearchConfig {
+            mcts: self.mcts.clone(),
+            mcts_selection: self.mcts_selection.clone(),
+            neuralnet_model_path: self.neuralnet_model_path.clone(),
+            mcts_turn_bonus: self.mcts_turn_bonus,
+            pt_favor_rate: self.pt_favor_rate,
+            race_grades: self.race_grades.clone()
+        }
+    }
+
+    /// 策略参数：拉面杯地区/超级拉面选择策略等（步骤 5 接入）
+    pub fn policy(&self) -> PolicyConfig {
+        PolicyConfig {
+            // 步骤 5：拉面杯地区选择策略
+            // ramen_region_strategy / ramen_region_fixed 等接入后在此构造
+        }
+    }
+
+    /// 输出参数：日志级别、统计级别等
+    pub fn output(&self) -> OutputConfig {
+        OutputConfig {
+            log_level: self.log_level.clone()
+            // 步骤 3 后续：统计级别（None / Summary / Turn / Detailed）等
+        }
+    }
+
+    /// 开发者参数：collector 数据收集、线程数等
+    pub fn dev(&self) -> DeveloperConfig {
+        DeveloperConfig {
+            collector: self.collector.clone(),
+            num_threads: self.collector.threads
+        }
+    }
+}
+
+// ========== 五个子配置结构（Phase 2 步骤 2+3） ==========
+//
+// 设计目的：业务代码可按需通过 `game_config.simulation()` / `.search()` 等访问子配置，
+// 避免直接依赖整个 `GameConfig`。渐进式保留 `GameConfig` 聚合壳，子结构由方法按需构造（拷贝）。
+// 后续步骤可逐步将业务模块从 `game_config.xxx` 迁移到 `game_config.simulation().xxx`。
+
+/// 仿真参数（剧本/训练员/马娘/卡组/模拟次数）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SimulationConfig {
+    /// 剧本类型: "basic" | "onsen" | "ramen"
+    pub scenario: String,
+    /// 训练员类型: "manual" | "random" | "handwritten" | "collector" | "neuralnet" | "mcts"
+    pub trainer: String,
+    /// 马娘 ID
+    pub uma: u32,
+    /// 卡组（6 张支援卡 ID）
+    pub cards: [u32; 6],
+    /// 种马蓝因子个数
+    pub blue_count: Array5,
+    /// 种马额外属性
+    pub extra_count: Array6,
+    /// 模拟次数（默认 1 次）
+    pub simulation_count: usize
+}
+
+/// 搜索参数（MCTS、神经网络、用户可调搜索项）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SearchConfig {
+    /// MCTS 详细参数
+    pub mcts: MctsConfig,
+    /// MCTS 优先选择评分还是 PT
+    pub mcts_selection: String,
+    /// neuralnet ONNX 模型路径
+    pub neuralnet_model_path: String,
+    /// 蒙特卡洛每回合期望得分加成（用户可调）
+    pub mcts_turn_bonus: i32,
+    /// PT 偏好评分倍率（用户可调）
+    pub pt_favor_rate: f32,
+    /// 比赛等级表 72 项（用户可调）
+    pub race_grades: Vec<i32>
+}
+
+/// 策略参数（手写/未来模型策略参数）
+///
+/// 步骤 5 将接入拉面杯地区选择策略（`ramen_region_strategy` / `ramen_region_fixed`）
+/// 和超级拉面选择策略。当前结构体仅占位。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct PolicyConfig {
+    // 占位字段。后续步骤 5 接入：
+    // - ramen_region_strategy: "all" | "fixed"
+    // - ramen_region_fixed: Option<Vec<[usize; 3]>>（三年固定地区组合）
+}
+
+/// 输出参数（日志、统计级别等）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OutputConfig {
+    /// 日志级别: "debug" | "off" | "info" | "trace"
+    pub log_level: String
+    // 步骤 3 后续：统计级别（None / Summary / Turn / Detailed）
+}
+
+/// 开发者参数（collector、线程数、调试开关）
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DeveloperConfig {
+    /// 训练数据收集（collector）配置
+    pub collector: CollectorConfig,
+    /// 线程数
+    pub num_threads: usize
 }
 
 fn default_scenario() -> String {
