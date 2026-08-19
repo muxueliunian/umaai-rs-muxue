@@ -17,9 +17,9 @@ extra_count = [10, 0, 0, 20, 20, 40]
 search_n = 12288
 radical_factor_max = 1.4
 
-# ---------- 拉面杯地区选择策略（顶层覆盖）----------
-# ramen_region_strategy = "fixed"   # "all"（枚举）/"fixed"（固定三年组合）
-# ramen_region_fixed = [[0, 3, 6], [5, 7, 9], [10, 12, 14]]
+# ---------- 拉面杯第3年地区选择策略（顶层覆盖；fixed 仅第3年生效）----------
+# ramen_region_strategy = "fixed"   # "all"（默认）/"fixed"（仅第3年，跳过 120 组合枚举）
+# ramen_region_fixed = [[10, 12, 14]]   # 仅当 fixed 时生效，长度必须 = 1
 
 
 # ============================================================

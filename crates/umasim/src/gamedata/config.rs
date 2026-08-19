@@ -526,14 +526,15 @@ pub struct GameConfig {
     /// 默认值与迁出前 constants.json 一致；用户可在 game_config.toml 顶层覆盖
     #[serde(default = "default_race_grades")]
     pub race_grades: Vec<i32>,
-    /// 拉面杯地区选择策略（Phase 2 步骤 5 接入）
-    /// - "all"：枚举所有合法组合交给 Trainer（默认）
-    /// - "fixed"：按 `ramen_region_fixed` 三年固定组合，跳过枚举
+    /// 拉面杯**第3年**地区选择策略（Phase 2 步骤 5 接入）
+    /// - "all"：枚举第3年所有合法组合（120 个）交给 Trainer（默认）
+    /// - "fixed"：按 `ramen_region_fixed[0]` 单组合，跳过枚举
+    /// 第1/2年固定走 all 枚举（不在本策略范围内）
     #[serde(default)]
     pub ramen_region_strategy: RamenRegionStrategy,
-    /// 三年固定地区组合（`Fixed` 策略时生效）
+    /// 第3年固定地区组合（`Fixed` 策略时生效；长度必须 = 1）
     ///
-    /// 例如 `[[0,3,6],[5,7,9],[10,12,14]]`：三年各选一组固定地区
+    /// 例如 `[[10, 12, 14]]`：第3年固定选 [10,12,14]
     #[serde(default)]
     pub ramen_region_fixed: Option<Vec<[usize; 3]>>
 }
@@ -684,8 +685,10 @@ pub struct SearchConfig {
 
 /// 拉面杯地区选择策略（Phase 2 步骤 5 接入）
 ///
-/// - `All`：枚举所有合法组合交给 Trainer（默认；第3年120组合可能导致动作空间爆炸）
-/// - `Fixed`：按 `ramen_region_fixed` 三年固定组合，跳过枚举；用于避免第3年120组合性能问题
+/// 仅对**第3年**生效（解决 C(10,3)=120 组合的性能问题）。第1/2年固定走 all 枚举。
+///
+/// - `All`：枚举第3年所有合法组合（120 个）交给 Trainer（默认）
+/// - `Fixed`：按 `ramen_region_fixed[0]` 指定的3个地区选区，跳过枚举
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
 pub enum RamenRegionStrategy {
     #[default]
@@ -697,14 +700,14 @@ pub enum RamenRegionStrategy {
 
 /// 策略参数（手写/未来模型策略参数）
 ///
-/// 当前承载拉面杯地区选择策略；后续扩展可加入超级拉面选择策略、未来模型策略参数等。
+/// 当前承载拉面杯第3年地区选择策略；后续扩展可加入超级拉面选择策略、未来模型策略参数等。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PolicyConfig {
-    /// 拉面杯地区选择策略
+    /// 拉面杯第3年地区选择策略
     pub ramen_region_strategy: RamenRegionStrategy,
-    /// 三年固定地区组合（`Fixed` 策略时生效；长度应为 3，每项为 3 个地区 id）
+    /// 第3年固定地区组合（`Fixed` 策略时生效；长度必须 = 1，每项为 3 个地区 id）
     ///
-    /// 例如 `[[0,3,6],[5,7,9],[10,12,14]]`：第1年选 [0,3,6]、第2年选 [5,7,9]、第3年选 [10,12,14]
+    /// 例如 `[[10, 12, 14]]`：第3年固定选 [10,12,14]
     pub ramen_region_fixed: Option<Vec<[usize; 3]>>
 }
 
