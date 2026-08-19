@@ -127,7 +127,7 @@ pub enum Operation {
     Clinic,
     /// 地区选择（选择3个地区）
     RegionSelect([usize; 3]),
-    /// 阶段阶段动作占位（仅承载本阶段决策，不执行任何 operation）
+    /// 中间步骤动作占位（仅承载本阶段决策，不执行任何 operation）
     ///
     /// 用于 `RamenSelect`/`SpecialSelect` 阶段的 `RamenAction`，这些阶段的决策
     /// 仅体现在 `ramen` 或 `special_targets` 字段上，不需要真正的基础操作。

@@ -305,11 +305,13 @@ pub trait Game: Clone {
     }
     /// provided: 指定训练的彩圈个数
     fn shining_count(&self, train: usize) -> usize {
-        self.distribution()[train]
-            .iter()
-            .filter(|index| **index >= 0) // 过滤掉分身（负数）和空位（-1）
-            .filter(|index| self.is_shining_at(**index as usize, train))
-            .count()
+        // 防御：distribution 未初始化时返回 0
+        self.distribution().get(train)
+            .map(|d| d.iter()
+                .filter(|index| **index >= 0) // 过滤掉分身（负数）和空位（-1）
+                .filter(|index| self.is_shining_at(**index as usize, train))
+                .count())
+            .unwrap_or(0)
     }
     // 训练相关
     /// 设施等级 getter
@@ -333,14 +335,18 @@ pub trait Game: Clone {
         if train >= 5 {
             return Err(anyhow!("训练类型错误: {train}"));
         }
-        for index in &self.distribution()[train] {
-            if *index >= 0 && *index < 6 {
-                let card = &self.deck()[*index as usize];
-                let (mut effect, _) = card.calc_training_effect(self, train as i32)?;
-                if !self.is_shining_at(*index as usize, train) {
-                    effect.youqing = 0.0;
+        // 防御：distribution 未初始化时（如测试或 ground 阶段触发）返回空 buff
+        let train_dist = self.distribution().get(train);
+        if let Some(indices) = train_dist {
+            for index in indices {
+                if *index >= 0 && *index < 6 {
+                    let card = &self.deck()[*index as usize];
+                    let (mut effect, _) = card.calc_training_effect(self, train as i32)?;
+                    if !self.is_shining_at(*index as usize, train) {
+                        effect.youqing = 0.0;
+                    }
+                    ret = ret.add(&effect);
                 }
-                ret = ret.add(&effect);
             }
         }
         Ok(ret)
@@ -357,10 +363,10 @@ pub trait Game: Clone {
             return Err(anyhow!("训练类型错误: {train}"));
         }
         // 人数, 包括NPC和分身, 排除掉理事长和记者
-        let person_count = self.distribution()[train]
-            .iter()
-            .filter(|p| **p != 6 && **p != 7)
-            .count();
+        // 防御：distribution 未初始化时返回 0 人数
+        let person_count = self.distribution().get(train)
+            .map(|d| d.iter().filter(|p| **p != 6 && **p != 7).count())
+            .unwrap_or(0);
         // 基础值
         let basic_value = &self.training_basic_value()[train][train_level];
         let basic_motivation = ((self.uma().motivation - 3) * 10) as f32;

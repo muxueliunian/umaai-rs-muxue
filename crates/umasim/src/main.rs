@@ -410,7 +410,7 @@ async fn main() -> Result<()> {
                     if simulation_count > 1 {
                         println!("警告: 手动训练员不支持多次模拟，仅运行1次");
                     }
-                    let trainer = ManualTrainer;
+                    let trainer = ManualTrainer::new();
                     let result = match game_config.scenario.as_str() {
                         "onsen" => {
                             run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)

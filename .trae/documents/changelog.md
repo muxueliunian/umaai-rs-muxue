@@ -2,6 +2,63 @@
 
 本文件用于简要记录每次任务的修改内容。
 
+## 2026-08-19
+
+### 拉面杯三阶段决策重构：吃面效果立即落地
+
+落实"Trainer 选完（是否吃面）+（是否使用隐藏诀窍）后，立即消耗诀窍 / 拉面效果生效 / 生成分身"的需求，让玩家在选训练动作前能看到完整 buff 和 distribution。
+
+**核心改动**：
+- **新增 `RamenGame::ground_ramen_effects(rng)` 公共方法**：整合所有"吃面后立即生效"的效果——消耗诀窍、PT 增量、`current_ramen`、地区拉面分身、羁绊效果、显示 `explain_ramen_info()` + `explain_distribution()`
+- **阶段过渡时自动触发**：
+  - 三阶段路径：`SpecialSelect → Train` 过渡时（`Game::next()`）
+  - 合并决策路径：`RamenSelect → Train`（`combined_decision=true`）时
+- **Train 阶段简化**：移除原 `RamenAction::apply_ramen` / `apply_ramen_friendship` / `distribute_clones`，统一搬到 `RamenGame` 上（`apply_ramen_friendship`、`distribute_region_clones`）；Train 阶段 `apply_action` 只执行 `operation`
+- **`list_train_actions` 简化签名**：不再带 `pending_ramen` / `pending_targets`，只生成 operation-only `RamenAction::new(op)`
+- **`RamenAction::new(op)` 新构造函数**（等价于 `no_ramen`），Train 动作 `ramen`/`special_targets` 字段统一为 None
+
+**外部接口支持**：通信模块可直接调用 `RamenGame::ground_ramen_effects(rng)` 落地"已吃面但未训练"的中间状态，无需走 RamenSelect/SpecialSelect 流程。
+
+**防御性修改**：`explain_distribution` / `default_calc_training_buff` / `default_calc_training_value` / `shining_count` 在 `distribution` 未初始化时安全返回，避免 `ground_ramen_effects` 在 distribute 之前触发时 panic。
+
+**测试更新**：`test_three_stage_decision_flow` 验证 Train 动作 ramen/special_targets 已为 None（已 ground）；`test_list_train_actions_no_ramen_field` 替代旧 `test_list_train_actions_carries_pending`。
+
+### 拉面杯 hint_special 全员触发 + hint_count_bonus 保留
+
+落实 issues.md「basic_effect.hint_special 尚未处理」：
+
+- **`distribute_hint`**：在 hint_special 生效时，强制将 `at_trains` 训练位置的所有 PersonType::Card 支援卡的 `is_hint` 设为 true
+- **新增辅助函数**：`calc_hint_special_active`（吃面 + 第3年 + 支援卡种类≥4）、`calc_hint_special_at_trains`（地区拉面的 at_trains）、`is_hint_special_active_for_train`
+- **`handle_hint_event`**：hint_special 路径下依次触发 hint_persons 中所有 PersonType::Card 的 hint 事件，每个支援卡按各自 `1 + hint_count_bonus` 次触发（保留温泉杯逻辑）
+- **抽取 `push_hint_event` 辅助函数**：复用 hint事件生成逻辑（含 `hint_level / total_hints` 上限处理）
+- 新增 5 个单元测试覆盖各种生效场景
+
+### ManualTrainer 玩家测试 + 拉面杯完整流程测试
+
+- **`ManualTrainer` 改造**：新增 `mock_inputs` 队列（`Rc<RefCell<VecDeque<String>>>`）和 `FallbackMode` 枚举（`Interactive` / `PickFirst`）
+  - `ManualTrainer::new()`：真实玩家模式（inquire 终端交互）
+  - `ManualTrainer::with_mock_inputs(inputs)`：测试模式，mock 队列优先消费，耗尽后 fallback 到 PickFirst（选第一个候选）
+- **`utils.rs`**：新增 `init_logger_stdout` 函数，仅输出到 stdout 不写文件（玩家测试场景，与 inquire TUI 不冲突）
+- **新增独立 bin `ramen_manual`**：`cargo run --release --bin ramen_manual` 启动一局拉面杯，玩家通过 inquire 真实选择动作
+- 新增 2 个测试：`test_manual_trainer_full_game`（完整 77 回合流程跑通）+ `test_manual_trainer_hint_special_path`（第3年路径验证）
+
+### 并发测试 init_logger 竞争问题修复
+
+落实 issues.md「测试批量运行时的全局状态问题」：
+
+- **问题根因**：`init_logger` 存在 TOCTOU 竞争——多个测试并行调用时，`LOGGER.get().is_some()` 检查通过后其他线程抢先 `set()`，后续线程调用 `flexi_logger.start()` 触发 "logger already initialized" 报错
+- **`utils.rs` 修复**：
+  - 新增 `LOGGER_INIT_DONE: AtomicBool` 记录 log crate 是否已成功 start
+  - 新增 `INIT_LOCK: OnceLock<Mutex<()>>` 串行化整个初始化过程
+  - 快速路径：已初始化直接 return；慢速路径：持锁 + 双重检查
+  - `disable_log` / `enable_log` 增加 `if let Some(LOGGER.get())` 保护，未初始化时安全 return
+- 所有 110 个测试在 release 模式下 3 次连续运行均稳定通过
+
+### 文案修正：StageOnly 显示 "阶段阶段" → "下一步"，但注释为“中间步骤”
+
+- `Operation::StageOnly` 的 Display 输出 `<阶段阶段>` 改为 `<下一步>`（修复玩家测试时inquire菜单显示空字符串的误解）
+- 同步更新 action.rs / mod.rs / trainer/mod.rs 中 10 处 "阶段阶段" 注释为 "中间步骤"
+
 ## 2026-08-18
 
 ### scenario_pt 每年初归零
