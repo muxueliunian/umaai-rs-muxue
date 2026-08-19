@@ -14,7 +14,7 @@ log_level = "info"
 simulation_count = 1
 
 # 马娘ID 参考umaDB.json
-uma = 106302
+uma = 102601
 
 # 蒙特卡洛优先选择评分("score")还是PT("pt")
 mcts_selection = "score"
@@ -22,7 +22,7 @@ mcts_selection = "score"
 # 卡组(ID, 突破等级, 参考gamedata/cardDB.json)
 # 温泉剧本需要包含友人卡 (chara_id = 9050)
 # 21110 [力]美妙姿势 [速]气槽 [速]东海帝王 [耐]机伶金花  [根]黄金旅程 [友]保科健子 score_mean_threshold = 60000 choice_score_mean_threshold = 62000
-cards = [302834, 302824, 302754, 302744, 302644, 302764]
+#cards = [302834, 302824, 302754, 302744, 302644, 302764]
 # 20111 [速]气槽 [速]东海帝王 [力]美妙姿势 [根]黄金旅程 [智]谋勇兼备 [友]保科健子 score_mean_threshold = 58500 choice_score_mean_threshold = 60500
 #cards = [302824, 302754, 302834, 302644, 302484, 302764]
 # 21101 [速]气槽 [速]东海帝王 [耐]机伶金花 [力]美妙姿势 [智]谋勇兼备 [友]保科健子 score_mean_threshold = 58000 choice_score_mean_threshold = 60000
@@ -30,10 +30,14 @@ cards = [302834, 302824, 302754, 302744, 302644, 302764]
 # 32000 [速]爱慕律动 [速]气槽 [速]东海帝王 [耐]机伶金花 [耐]超常骏骥 [友]保科健子 score_mean_threshold = 58500 choice_score_mean_threshold = 60500
 #cards = [302654, 302824, 302754, 302744, 302794, 302764]
 
+# 拉面杯推荐卡组（与单元测试一致）
+# [速]杏目, [智]青春永驻, [耐]名将怒涛, [速]洛林军歌, [速]里见光钻, [友]骏川手纲
+cards = [302424, 302894, 303044, 302924, 303024, 303054]
+
 # 种马蓝因子个数 [速度, 耐力, 力量, 根性, 智力]
 blue_count = [12, 0, 0, 0, 6]
 
-scenario = "onsen"
+scenario = "ramen"
 
 # 训练员类型:
 #   "manual"      - 手动选择（交互式，不支持多次模拟）
@@ -42,7 +46,7 @@ scenario = "onsen"
 #   "collector"   - 样本收集器（用于生成神经网络训练数据）
 #   "neuralnet"   - 神经网络训练员（使用 ONNX 模型进行决策）
 #   "mcts"        - 蒙特卡洛训练员（使用手写逻辑+mcts进行决策）
-trainer = "handwritten"
+trainer = "manual"
 
 # neuralnet ONNX 模型路径
 neuralnet_model_path = "saved_models/onsen_v18/model.onnx"

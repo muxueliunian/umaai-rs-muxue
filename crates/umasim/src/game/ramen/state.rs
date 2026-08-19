@@ -188,10 +188,16 @@ impl RamenState {
 impl RamenGame {
     /// 创建新的拉面杯游戏实例
     pub fn newgame(uma_id: u32, deck_ids: &[u32; 6], inherit: InheritInfo) -> Result<Self> {
-        // 检测卡组是否携带新友人卡(30305)
-        let has_new_friend = deck_ids.iter().any(|&id| id / 10 == 30305);
+        // 检测卡组是否携带新友人卡(card_id=30305，rank=1-4，即 idrank 303051-303054)
+        // 注意：旧实现 `id / 10 == 30305` 会误判 rank=0（303050）和 rank=5-9（303055-303059）
+        let has_new_friend = deck_ids.iter().any(|&idrank| {
+            let rank = idrank % 10;
+            idrank / 10 == 30305 && (1..=4).contains(&rank)
+        });
         if !has_new_friend {
-            anyhow::bail!("卡组未携带新友人卡(id:30305)，拉面杯模拟器仅支持新友人卡组");
+            anyhow::bail!(
+                "卡组未携带新友人卡(idrank=303051-303054，card_id=30305)，拉面杯模拟器仅支持新友人卡组"
+            );
         }
         let mut ret = RamenGame {
             base: BaseGame::new(uma_id, deck_ids, inherit)?,

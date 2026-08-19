@@ -23,8 +23,9 @@
   - `cardDB.json`：支援卡数据
   - `scenario_onsen.json`：温泉剧本配置
   - `scenario_ramen.json`：拉面剧本配置
+  - `text_data_dict.json`：文本数据字典
   - `default_config.toml`：默认游戏配置
-  - `game_config.toml`：用户自定义游戏配置
+- `game_config.toml`（工作空间根目录）：用户自定义游戏配置
 
 ### 游戏常量
 - 回合数默认从0开始，特殊情况下会说明从1开始
@@ -34,12 +35,13 @@
 
 ### 脚本工具
 - `scripts/`目录包含Python脚本工具
-- 主要用于数据导出和处理
+- 主要用于数据导出和处理（如 `scripts/export_support_card/`）
 
 ## 开发环境
 
 ### 操作系统
-- Windows
+- 以 Windows 为主
+- umaai 已支持 Ubuntu/Linux 构建（`winscribe`/`windows` 依赖以 `cfg(windows)` 限定）
 
 ### Shell
 - PowerShell
@@ -48,107 +50,108 @@
 
 ### 模拟游戏流程测试
 - 位置：`crates/umasim/src/game/ramen/game.rs`
-- 使用 `test_ramen_silent_loop` 测试用例验证完整的拉面剧本游戏流程
-- 该测试关闭日志（`disable_log`）运行完整游戏，仅输出育成配置和最终结果，适合作为端到端的流程验证
-- 运行命令：`cargo nextest run -p umasim test_ramen_silent_loop`（或 `cargo test -p umasim test_ramen_silent_loop`）
+- `test_ramen_silent_loop`：完整拉面剧本 77 回合静默流程（关闭日志，仅输出育成配置和最终结果），端到端流程验证
+- `test_manual_trainer_full_game`：ManualTrainer（mock 输入 + PickFirst fallback）完整 77 回合流程
+- `test_manual_trainer_hint_special_path`：第3年 hint_special 路径验证
+- 运行命令：`cargo test -p umasim <测试名>`（release 模式）
+
+### 玩家手动测试程序
+- `crates/umasim/src/bin/ramen_manual.rs`：`cargo run --release --bin ramen_manual`
+- 通过 inquire 终端交互逐动作/事件选择，验证游戏机制实际表现
+- 读取 `game_config.toml`（强制 `scenario = "ramen"`、`trainer = "manual"`；卡组必须含新友人卡 303051-303054）
 
 ## 拉面杯模块结构
 
 ### 模块入口（mod.rs）
-- `RamenStage`：回合阶段枚举（Begin/Distribute/Train/AfterTrain/NextTurn/RegionSelect/SuperRamenSelect/Settlement）
+- `RamenStage`：回合阶段枚举（Begin/Distribute/RamenSelect/SpecialSelect/Train/AfterTrain/NextTurn/RegionSelect/SuperRamenSelect/Settlement）
 - `FeelingType`：诀窍类型（A/B/C）
 - `TrainingType`：训练类型（Speed/Stamina/Power/Guts/Wisdom）
-- `Operation`：基础操作（Train/Race/Rest/NormalOuting/FriendOuting/Clinic/RegionSelect([usize; 3])）
+- `Operation`：基础操作（Train/Race/Rest/NormalOuting/FriendOuting/Clinic/RegionSelect([usize; 3])/StageOnly）
 
 ### 核心类型（state.rs）
 - `RamenGame`: 拉面杯游戏主状态，通过Deref暴露BaseGame
-- `RamenState`: 拉面杯专用状态（诀窍、隐藏风味、剧本PT等）
-  - `train_level_bonus`: 训练等级剧本加成字段
-  - `deck_can_split`: 支援卡种类>=4时为true，用于判断分身条件
+  - `newgame()`：校验卡组必须含新友人卡（idrank 303051-303054，rank=1-4）
+- `RamenState`: 拉面杯专用状态
+  - 诀窍系统：`feeling_stock`/`feeling_slot`/`feeling_queue`
+  - 隐藏风味：`special_feeling`
+  - 地区拉面：`selected_regions`/`current_ramen`
+  - 剧本进度：`scenario_pt`/`rmj_results`/`train_level_bonus`/`super_ramen`
+  - 剧本计数器：`eat_count`/`train_feeling_type`
+  - 三阶段决策 pending：`pending_ramen`/`pending_special_targets`/`combined_decision`（由 `clear_pending()` 一并清空）
 - `RamenEffect`: 效果合并（基础+地区+超级拉面+PT常驻）
-- 辅助方法：`add_friend_and_npcs()`、`add_reporter()`、`add_person()`
-- `init_feeling_stocks()`: 诀窍初始化方法
-- `add_friendship()`: NPC不增加羁绊
+- 辅助方法：`add_friend_and_npcs()`、`add_reporter()`、`add_person()`、`init_feeling_stocks()`、`add_friendship()`（NPC不增加羁绊）
 
 ### Game trait 实现（game.rs）
-- 阶段流转：`RamenStage::next()` 负责回合内，`Game::next()` 负责跨阶段
-- `init_persons()`：开局仅加入非友人卡 + 理事长
-- `run_stage()`：分发到各阶段处理函数（run_begin/run_distribute/run_train/run_after_train 等）
-- `run_region_select()`：年度地区选择（第1年在回合2 Begin阶段，第2/3年在回合23/47 NextTurn阶段）
-- `explain_ramen_info()`：格式化拉面杯剧本信息（包含拉面效果、诀窍、PT等）
-- `init_feeling_stocks()`：诀窍值初始化/重置
-- `distribute_hint()` override：应用剧本Hint率加成
-- `calc_hint_bonus_pct()`：计算剧本Hint加成
-- `list_actions()`：生成所有吃面/不吃面 × 操作的组合动作
-- `generate_events()`：复用 BasicGame 随机事件
-- 动态人头管理：`manage_persons_on_turn_start()`
-- `update_refresh_mind()`：更新休息心得效果
-- `is_shining_at()` override：闪耀判定（支援卡只能在得意训练位置闪耀）
+- 阶段流转：`RamenStage::next()` 负责回合内，`Game::next()` 负责跨阶段（三阶段 RamenSelect→SpecialSelect→Train；合并决策时跳过 SpecialSelect 直接落地吃面效果）
+- `run_stage()`：分发到各阶段处理函数（run_begin/run_distribute/run_ramen_select/run_special_select/run_train/run_after_train 等）
+- `ground_ramen_effects(rng)`：吃面效果立即落地（消耗诀窍、PT 增量、current_ramen、地区分身、羁绊、显示），阶段过渡时自动触发，也可由通信模块直接调用
+- `list_combined_ramen_select_actions()` / `apply_combined_ramen_decision()`：合并决策接口（RamenSelect×SpecialSelect 聚合，为未来 MctsTrainer 预留）
+- `deyilv()` override：卡得意率 + 剧本得意率加成（`calc_scenario_deyilv`）
+- `distribute_hint()` override：应用剧本Hint率加成；hint_special 生效时强制全部支援卡出 Hint（`calc_hint_special_active`/`calc_hint_special_at_trains`/`is_hint_special_active_for_train`）
+- `is_shining_at()` override：支援卡只能在得意训练位置闪耀
+- `calc_training_value()`：两阶段训练数值计算（卡 buff 约束后叠加拉面 buff）
+- `generate_events()`：剧本事件（Random/Fixed）→ 全局 Fixed 事件（400000400/4009/4010）→ 友人事件 → 基础随机事件；固定事件（ticket@48、ending@77）
+- 动态人头管理：`manage_persons_on_turn_start()`、`update_refresh_mind()`
 
 ### 动作定义（action.rs）
-- `RamenAction`: 拉面杯动作（ramen + operation）
-- `ActionEnum` 实现：吃面与训练严格分阶段执行
-- `apply_ramen()`：吃面处理（消耗诀窍、获得PT、分身分配）
+- `RamenAction`: 三阶段承载结构（`ramen` + `special_targets` + `operation`），`apply` 按当前 stage 路由
+  - 构造器：`new(operation)`（Train 阶段 operation-only）、`with_ramen`、`combined_select`
+  - RamenSelect/SpecialSelect 中间步骤动作写 pending；Train 阶段动作只执行 operation（拉面效果已由 `ground_ramen_effects` 落地）
 - `do_train()`：训练执行（拆分为多个辅助函数）
-- `do_friend_outing`：友人出行（使用拉面杯事件 + 隐藏风味）
-- RegionSelect动作处理
-- `TrainParams`：训练参数缓存结构
-- `distribute_clones()`：地区拉面分身分配（每个at_trains位置随机选一个不重复的支援卡）
 - `distribute_super_ramen_clones()`：超级拉面分身分配（随机选择训练位置，失败则重试）
 - `try_add_clone()`：尝试添加分身（处理满员和挤NPC逻辑）
-- `apply_ramen_friendship()`：训练前应用拉面羁绊效果
+- `TrainParams`：训练参数缓存结构
 
 ### 规则函数（rules.rs）
-- 诀窍系统：add_gauge、add_feeling、calc_gauge_base_distribution
-- 做面/吃面：can_make_ramen、consume_for_ramen、calc_ramen_pt_gain
-- RMJ结算：check_rmj（返回RmjResult枚举）
-- 地区选择：get_region_range、validate_region_selection、get_region_combinations（生成所有3地区组合）
-- 分身规则：get_region_clone_trains、get_super_ramen_clone_train_options
-- 隐藏风味：get_turn_special_feeling
+- 诀窍系统：`add_gauge`、`add_feeling`、`calc_gauge_base_distribution`（floor + 消耗=1固定 + 最小已分配优先补足）
+- 做面/吃面：`can_make_ramen`、`consume_for_ramen`、`list_special_targets_for`、`calc_ramen_pt_gain`
+- RMJ结算：`check_rmj`（返回RmjResult枚举）
+- 地区选择：`get_region_range`、`get_region_combinations`、`validate_region_selection`、`calc_region_bonus`
+- 分身规则：`get_region_clone_trains`、`get_super_ramen_clone_train_options`
+- 隐藏风味：`get_turn_special_feeling`
+- 诀窍槽填充：`fill_gauge_after_train`、`fill_gauge_after_non_train`（夏合宿走 `fill_gauge_xiahesu_max` 全 MAX 路径）
+- 训练加成：`calc_train_feeling_bonus`、`apply_friendship_gauge_bonus`
 
 ### 效果计算（effects.rs）
 - `RamenTrainingEffect`: 合并所有来源的训练效果
-- `calc_ramen_training_effect`: 计算拉面杯训练效果
-- `calc_finals_effect`: 计算超级拉面回合效果（ramen_pt_effect、ramen_basic_effect按最高档，RMJ结算效果，finals_effect）
-- `calc_normal_effect`: 计算普通回合效果（PT常驻+RMJ常驻+吃面基础+地区效果）
+- `calc_ramen_training_effect`: 普通/超级拉面回合的训练效果总入口
+- `calc_finals_effect`: 超级拉面回合效果（ramen_pt_effect、ramen_basic_effect 按最高档，RMJ结算效果，finals_effect）
+- `calc_normal_effect`: 普通回合效果（PT常驻 + RMJ常驻 + 吃面基础 + 地区效果）
+- `calc_scenario_deyilv`: 剧本得意率总加成（pt_effect + rmj_effect）
 - `apply_ramen_training_value`: 应用训练效果计算数值
 
 ### 事件处理（events.rs）
 - `FriendEventState`: 友人事件状态管理
-- 训练角标分配：assign_train_feeling_type（每种诀窍至少出现1次）
+- `assign_train_feeling_type`: 训练角标分配（每种诀窍至少出现1次）
+- `push_hint_event`: hint 事件生成（含 hint_level/total_hints 上限处理）
 
 ### 策略（policy.rs）
 - `fixed_region_selection`: 地区选择策略（固定顺序）
 - `fixed_super_ramen_selection`: 超级拉面选择策略（固定选项二）
 
-## 已知问题（Issues）
-
-### 1. 训练数值不对，尤其是友情加成
-- 问题描述：训练数值计算可能不正确，特别是友情加成（youqing）的生效条件
-- 可能原因：
-  - 闪耀判定逻辑：支援卡只能在本体的得意训练位置闪耀
-  - 分身在非本体训练位置时不闪耀，友情加成不生效
-  - 需要检查 `is_shining_at()` 函数的实现
-
-### 2. 超级拉面得意率人物分配错误
-- 问题描述：超级拉面分身分配时，得意率（deyilv）的计算可能不正确
-- 可能原因：
-  - 分身分配算法：当前使用随机选择训练位置，失败则重试
-  - 需要检查是否应该按得意率权重分配
-  - 需要检查 `distribute_super_ramen_clones()` 函数的实现
-
 ## 训练员（Trainer）
 
 ### RandomTrainer（猴子训练员）
-- **定义位置**：`crates/umasim/src/trainer/mod.rs`
+- **定义位置**：`crates/umasim/src/trainer/mod.rs`（泛型 `Trainer<G>`）
 - **用途**：随机决策器，可用于测试和基线对比
 - **决策逻辑**：
   - 体力 < 45 → 优先休息（Sleep）
   - 心情 < 5 → 优先外出（NormalOuting/FriendOuting）
   - 否则 → 优先训练（Train）
-  - 都不满足 → 随机选择
+  - 都不满足 → 随机选择；三阶段决策中优先选有实质内容的候选（ramen 非 None 或 special_targets 非零），避免误选占位动作
 - **使用位置**：
   - `main.rs`：模拟运行时使用
-  - `game/base/basic.rs`：测试中使用
+  - `game/base/basic.rs`、ramen 测试中使用
 - **导入方式**：`use crate::trainer::RandomTrainer;`
 
+### ManualTrainer（玩家训练员）
+- **定义位置**：`crates/umasim/src/trainer/mod.rs`
+- **用途**：玩家手动选择动作/事件（inquire 终端交互）
+- **模式**：
+  - `ManualTrainer::new()`：真实玩家模式（Interactive）
+  - `ManualTrainer::with_mock_inputs(inputs)`：测试模式（mock 队列优先消费，耗尽后 fallback 到 PickFirst 选第一个候选）
+- **使用位置**：`crates/umasim/src/bin/ramen_manual.rs`、ramen 完整流程测试
+
+### HandwrittenTrainer / MctsTrainer
+- **定义位置**：`crates/umasim/src/trainer/handwritten_trainer.rs`、`mcts_trainer.rs`
+- 当前实现仍绑定旧温泉杯（`impl Trainer<OnsenGame>`），尚未适配 RamenGame；拉面杯决策粒度设计：HandwrittenTrainer 走三阶段（RamenSelect→SpecialSelect→Train），MctsTrainer 走合并决策路径（`list_combined_ramen_select_actions` + `apply_combined_ramen_decision`，方案 E）

@@ -1583,13 +1583,57 @@ mod tests {
         let reporter_count = game.persons.iter().filter(|p| p.person_type == PersonType::Reporter).count();
         let scenario_count = game.persons.iter().filter(|p| p.person_type == PersonType::ScenarioCard).count();
 
-        println!("支援卡: {}, 理事长: {}, NPC: {}, 记者: {}, 友人卡: {}", 
+        println!("支援卡: {}, 理事长: {}, NPC: {}, 记者: {}, 友人卡: {}",
                 card_count, yayoi_count, npc_count, reporter_count, scenario_count);
 
         assert_eq!(yayoi_count, 1, "开局应该有1个理事长");
         assert_eq!(npc_count, 0, "开局不应该有NPC");
         assert_eq!(reporter_count, 0, "开局不应该有记者");
         assert_eq!(scenario_count, 0, "开局不应该有友人卡");
+
+        Ok(())
+    }
+
+    /// 拉面杯要求卡组必须包含新友人卡（idrank 303051-303054，card_id=30305）
+    ///
+    /// 校验逻辑：
+    /// - 合法：idrank 满足 `idrank / 10 == 30305 && 1 <= rank <= 4`
+    /// - 非法：rank=0（303050）、rank=5-9（303055-303059）、或完全无 30305
+    #[test]
+    fn test_ramen_newgame_requires_new_friend() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        // 1. 不含新友人：应报错
+        let deck_no_friend = [302424, 302894, 303044, 302924, 303024, 302924];
+        let result = RamenGame::newgame(TEST_UMA_ID, &deck_no_friend, TEST_INHERIT);
+        println!("无友人卡组: {:?}", result.is_err());
+        assert!(result.is_err(), "卡组不含新友人应被拒绝");
+        let err = result.unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("新友人"), "错误消息应提示新友人: {msg}");
+
+        // 2. rank=0（idrank=303050）：应报错（旧实现会误判为合法）
+        let deck_rank0 = [302424, 302894, 303044, 302924, 303024, 303050];
+        let result = RamenGame::newgame(TEST_UMA_ID, &deck_rank0, TEST_INHERIT);
+        println!("rank=0 应被拒绝: {}", result.is_err());
+        assert!(result.is_err(), "rank=0 应被拒绝（突破等级非法）");
+
+        // 3. rank=5（idrank=303055）：应报错（rank 超出 [1,4]）
+        let deck_rank5 = [302424, 302894, 303044, 302924, 303024, 303055];
+        let result = RamenGame::newgame(TEST_UMA_ID, &deck_rank5, TEST_INHERIT);
+        println!("rank=5 应被拒绝: {}", result.is_err());
+        assert!(result.is_err(), "rank=5 应被拒绝（突破等级超出范围）");
+
+        // 4. 合法 rank=1-4：应成功
+        for rank in 1..=4u32 {
+            let idrank = 303050 + rank;
+            let deck = [302424, 302894, 303044, 302924, 303024, idrank];
+            let result = RamenGame::newgame(TEST_UMA_ID, &deck, TEST_INHERIT);
+            assert!(result.is_ok(), "rank={rank} (idrank={idrank}) 应合法");
+        }
 
         Ok(())
     }

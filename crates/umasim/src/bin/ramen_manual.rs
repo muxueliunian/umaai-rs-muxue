@@ -14,14 +14,24 @@
 //!
 //! # 配置
 //!
-//! - 卡组（6 张支援卡 ID）：直接修改 `DECK` 常量
-//! - 马娘 ID：直接修改 `UMA_ID` 常量
-//! - 继承属性：直接修改 `INHERIT` 常量
-//! - 随机种子：直接修改 `SEED` 常量
+//! 启动时会读取 `game_config.toml`（参考 `gamedata/default_config.toml`）。
+//! 本程序**只使用以下字段**（其他字段会被忽略或必须保持固定值）：
+//!
+//! - `log_level`：日志级别（`"info"` / `"debug"` / `"off"` 等）
+//! - `uma`：马娘 ID
+//! - `cards`：6 张支援卡 ID
+//! - `extra_count`：种马额外属性 `[速度, 耐力, 力量, 根性, 智力, 技能点]`
+//!
+//! 本程序**强制要求**以下字段为固定值（不一致会报错）：
+//!
+//! - `scenario = "ramen"`
+//! - `trainer = "manual"`
+//!
+//! 随机种子在 `SEED` 常量中定义（不放入 config）。
 
 use std::time::Instant;
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
 
@@ -33,51 +43,65 @@ use umasim::{
     gamedata::{GAMECONSTANTS, init_global},
     global,
     trainer::ManualTrainer,
-    utils::{check_working_dir, init_logger_stdout},
-};
-
-// ========== 测试用配置（按需修改） ==========
-
-/// 马娘 ID（默认：102601 美浦波旁）
-const UMA_ID: u32 = 102601;
-
-/// 测试用卡组（与单元测试一致）
-/// [速]杏目, [智]青春永驻, [耐]名将怒涛, [速]洛林军歌, [速]里见光钻, [友]骏川手纲
-const DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
-
-/// 继承属性
-const INHERIT: InheritInfo = InheritInfo {
-    blue_count: [15, 3, 0, 0, 0],
-    extra_count: [0, 30, 0, 0, 30, 30],
+    utils::{init_logger_stdout, load_game_config},
 };
 
 /// 随机种子（固定种子便于复现）
 const SEED: u64 = 20240816;
 
 fn main() -> Result<()> {
-    // 切换到工作目录（确保 gamedata 路径正确）
-    check_working_dir()?;
-    // 日志输出到 stdout（玩家场景）：
+    // 1. 加载 game_config.toml（与 default_config.toml 合并）
+    //    注意：本程序依赖从 workspace 根目录运行（与 umasim 主程序一致），
+    //    否则找不到 `gamedata/default_config.toml` 和 `game_config.toml`
+    let game_config = load_game_config()?;
+
+    // 3. 校验固定字段（scenario / trainer）
+    if game_config.scenario != "ramen" {
+        return Err(anyhow!(
+            "ramen_manual 要求 scenario = \"ramen\"，当前 game_config.toml 中为 {:?}\n\
+             请修改 game_config.toml：scenario = \"ramen\"",
+            game_config.scenario
+        ));
+    }
+    if game_config.trainer != "manual" {
+        return Err(anyhow!(
+            "ramen_manual 要求 trainer = \"manual\"，当前 game_config.toml 中为 {:?}\n\
+             请修改 game_config.toml：trainer = \"manual\"",
+            game_config.trainer
+        ));
+    }
+
+    // 4. 日志输出到 stdout（玩家场景）：
     // - 日志与 println! 一起显示，玩家直接看到训练/事件信息
     // - inquire 默认从 /dev/tty 读取，与 stdout 日志互不干扰
     // - 不写文件，需要持久化日志可用 shell 重定向: `cargo run --bin ramen_manual --release 2>&1 | tee ramen.log`
-    init_logger_stdout("ramen_manual", "info")?;
+    init_logger_stdout("ramen_manual", &game_config.log_level)?;
     init_global()?;
+
+    // 5. 提取配置（只关心我们支持的字段，其他字段忽略）
+    let uma_id = game_config.uma;
+    let deck = game_config.cards;
+    let inherit = InheritInfo {
+        blue_count: game_config.blue_count,
+        extra_count: game_config.extra_count,
+    };
 
     println!("╔══════════════════════════════════════════════╗");
     println!("║        拉面杯 ManualTrainer 玩家测试          ║");
     println!("╚══════════════════════════════════════════════╝");
     println!();
-    println!("马娘: {}", UMA_ID);
-    println!("卡组: {:?}", DECK);
+    println!("马娘: {}", uma_id);
+    println!("卡组: {:?}", deck);
+    println!("继承: blue={:?} extra={:?}", inherit.blue_count, inherit.extra_count);
     println!("种子: {}", SEED);
+    println!("日志: {}", game_config.log_level);
     println!();
     println!("提示：每次操作都会弹出 inquire 选择菜单");
     println!("      上下键移动，回车确认，Ctrl+C 中断");
     println!();
 
     let mut rng = StdRng::seed_from_u64(SEED);
-    let mut game = RamenGame::newgame(UMA_ID, &DECK, INHERIT)?;
+    let mut game = RamenGame::newgame(uma_id, &deck, inherit)?;
     let trainer = ManualTrainer::new();
 
     println!("=== 开局状态 ===");
