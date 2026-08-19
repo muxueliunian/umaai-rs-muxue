@@ -7,6 +7,10 @@ edition = "2024"
 name = "umasim"
 path = "src/main.rs"
 
+[[bin]]
+name = "ramen_manual"
+path = "src/bin/ramen_manual.rs"
+
 # [[bin]]
 # name = "generate_training_data"
 # path = "src/bin/generate_training_data.rs"
@@ -32,9 +36,9 @@ log.workspace = true
 notify.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
-ratatui.workspace = true
+#ratatui.workspace = true
 rayon.workspace = true
-salvo.workspace = true
+#salvo.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

@@ -68,16 +68,37 @@ impl Game for RamenGame {
     fn next(&mut self) -> bool {
         // RamenSelect 阶段：
         // - combined_decision=true（合并决策路径，由 apply_combined_ramen_decision 写入）→ 直接推 Train
+        //   并在切换时立即触发 ground_ramen_effects（合并决策已包含 ramen + targets 两个决策）
         // - 否则按 pending_ramen 决定推 SpecialSelect（吃了面）还是 Train（不吃面）
         if self.stage == RamenStage::RamenSelect {
-            let next_stage = if self.ramen.combined_decision {
-                RamenStage::Train
-            } else if self.ramen.pending_ramen.is_some() {
+            if self.ramen.combined_decision {
+                // 合并决策：先切到 Train，再立即 ground（避免下次 next() 还要检查 combined_decision）
+                self.stage = RamenStage::Train;
+                let mut apply_rng = rand::rngs::StdRng::from_os_rng();
+                if self.ground_ramen_effects(&mut apply_rng).is_err() {
+                    log::warn!("合并决策 ground_ramen_effects 失败");
+                }
+                self.ramen.combined_decision = false;
+                return true;
+            }
+            self.stage = if self.ramen.pending_ramen.is_some() {
                 RamenStage::SpecialSelect
             } else {
                 RamenStage::Train
             };
-            self.stage = next_stage;
+            return true;
+        }
+
+        // SpecialSelect → Train 转换时：触发吃面效果落地
+        // 此时 ramen（是否吃）+ special_targets（隐藏风味用法）都已确定，立即生效：
+        // 消耗诀窍 / PT 增量 / 生成分身 / 羁绊效果 / 显示 buff + distribution
+        // 这样玩家在选训练动作前能看到完整效果。
+        if self.stage == RamenStage::SpecialSelect {
+            let mut apply_rng = rand::rngs::StdRng::from_os_rng();
+            if self.ground_ramen_effects(&mut apply_rng).is_err() {
+                log::warn!("ground_ramen_effects 失败");
+            }
+            self.stage = RamenStage::Train;
             return true;
         }
 
@@ -226,8 +247,6 @@ impl Game for RamenGame {
                 super::action::list_special_select_actions(&self.ramen, ramen_idx)
             }
             RamenStage::Train => Ok(super::action::list_train_actions(
-                self.ramen.pending_ramen,
-                self.ramen.pending_special_targets,
                 can_friend_outing,
                 is_ill,
                 self.is_xiahesu(),
@@ -487,7 +506,17 @@ impl Game for RamenGame {
                 h.to_string()
             }
         }).collect();
-        let dist = &self.base.distribution;
+        // 防御：distribution 未初始化（dist.len() < 5）时填充空 vec，
+        // 避免 ground_ramen_effects 在 distribute 之前触发时 panic
+        let dist: Vec<Vec<i32>> = if self.base.distribution.len() < 5 {
+            let mut d = self.base.distribution.clone();
+            while d.len() < 5 {
+                d.push(vec![]);
+            }
+            d
+        } else {
+            self.base.distribution.clone()
+        };
         let mut rows = vec![];
         for i in 0..6 {
             let mut row = vec![];
@@ -626,6 +655,14 @@ impl Game for RamenGame {
             .iter()
             .map(|card| card.card_value().hint_prob_increase)
             .collect();
+        // hint_special 生效时，位于 at_trains 训练位置的所有支援卡 (PersonType::Card) is_hint 都强制为 true
+        // 生效条件：当前回合吃了面 + ramen_basic_effect[year].hint_special == true + 支援卡种类>=4
+        let hint_special_active = self.calc_hint_special_active();
+        let special_trains = if hint_special_active {
+            self.calc_hint_special_at_trains()
+        } else {
+            Default::default()
+        };
         for person in self.persons_mut() {
             if person.person_type() == PersonType::Card {
                 let card_bonus = (100 + hint_probs[person.person_index() as usize]) as f64 / 100.0;
@@ -633,7 +670,285 @@ impl Game for RamenGame {
                 person.set_hint(rng.random_bool(hint_prob));
             }
         }
+        // hint_special：强制设置 at_trains 训练位置所有支援卡的 is_hint
+        if hint_special_active && !special_trains.is_empty() {
+            // 复制 distribution 以避免借用冲突
+            let distribution: Vec<Vec<i32>> = self.distribution.clone();
+            for (train_idx, has_person) in distribution.iter().enumerate() {
+                if !special_trains.contains(&(train_idx as i32)) {
+                    continue;
+                }
+                for &person_index in has_person {
+                    if person_index < 0 {
+                        continue;
+                    }
+                    if let Some(p) = self.persons.get_mut(person_index as usize) {
+                        if p.person_type == PersonType::Card {
+                            p.set_hint(true);
+                        }
+                    }
+                }
+            }
+        }
         Ok(())
+    }
+}
+
+impl RamenGame {
+    /// 落地所有"吃面后立即生效"的效果
+    ///
+    /// 这是从原 `RamenAction::apply_ramen` + `apply_ramen_friendship` 抽出的统一入口，
+    /// 把"选面 + 选隐藏"两个 Trainer 决策之后**所有立即生效**的效果整合到一起。
+    ///
+    /// 调用时机：
+    /// - **三阶段路径**：`SpecialSelect → Train` 过渡时（`Game::next()` 自动触发）
+    /// - **合并决策路径**：`RamenSelect → Train` 过渡时（`combined_decision=true`，
+    ///   `Game::next()` 自动触发）
+    /// - **外部接口**：通信模块传入"已吃面但未训练"的中间状态时手动调用
+    ///
+    /// 立即生效的效果：
+    /// 1. **消耗诀窍**（`consume_for_ramen`）
+    /// 2. **PT 增量** + `eat_count += 1`
+    /// 3. **设置 `current_ramen`**
+    /// 4. **生成分身**（地区拉面 id >= 5 + `deck_can_split`）
+    /// 5. **羁绊效果**（吃面或超级拉面回合的 `ramen_basic_effect.friendship`）
+    /// 6. **打印 buff 摘要 + distribution**（让玩家在选训练前看到效果）
+    ///
+    /// **不执行 `operation`**（训练/比赛/休息等），这是 Train 阶段的职责。
+    /// 不执行事件（hint 等），事件在 Train 阶段的 `do_train` 中触发。
+    ///
+    /// # 参数
+    /// - `rng`：随机数生成器（分身分配使用）
+    pub fn ground_ramen_effects(&mut self, rng: &mut StdRng) -> Result<()> {
+        // 1. 消耗诀窍 + PT 增量 + current_ramen + 分身（仅当 pending_ramen.is_some()）
+        if let Some(ramen_idx) = self.ramen.pending_ramen {
+            let targets = self.ramen.pending_special_targets;
+            let used_special =
+                super::rules::consume_for_ramen(&mut self.ramen, ramen_idx, &targets)?;
+            self.ramen.current_ramen = Some(ramen_idx);
+
+            let year_idx = (self.current_year() - 1) as usize;
+            let pt_gain = super::rules::calc_ramen_pt_gain(year_idx, self.ramen.eat_count)?;
+            self.ramen.scenario_pt += pt_gain;
+            self.ramen.eat_count += 1;
+
+            log::info!(
+                ">> 吃面[{}] PT+{} (总计{}), 消耗隐藏风味{}",
+                ramen_idx,
+                pt_gain,
+                self.ramen.scenario_pt,
+                used_special
+            );
+
+            // 生成分身（id >= 5 + deck_can_split）
+            Self::distribute_region_clones(self, ramen_idx, rng)?;
+        }
+
+        // 2. 羁绊效果（吃面或超级拉面回合）
+        Self::apply_ramen_friendship(self)?;
+
+        // 3. 显示 buff + distribution（玩家在选训练前看到效果）
+        log::info!("---- 吃面后 ----");
+        let ramen_info = self.explain_ramen_info();
+        if !ramen_info.is_empty() {
+            log::info!("{}", ramen_info);
+        }
+        if let Ok(dist_info) = self.explain_distribution() {
+            log::info!("训练:\n{}", dist_info);
+        }
+
+        Ok(())
+    }
+
+    /// 拉面羁绊效果（吃面或超级拉面回合触发）
+    ///
+    /// 从原 `RamenAction::apply_ramen_friendship` 抽出，统一在 `ground_ramen_effects` 中调用。
+    /// 生效条件：`current_ramen.is_some()` 或超级拉面回合（72-77）。
+    fn apply_ramen_friendship(&mut self) -> Result<()> {
+        let eating = self.ramen.current_ramen.is_some();
+        let super_ramen = self.is_super_ramen_turn();
+        if !eating && !super_ramen {
+            return Ok(());
+        }
+        let year_idx = (self.current_year() - 1) as usize;
+        let ramen_data = global!(RAMENDATA);
+        if let Some(basic) = ramen_data.ramen_basic_effect.get(year_idx) {
+            if basic.friendship > 0 {
+                for i in 0..self.persons.len() {
+                    if matches!(
+                        self.persons[i].person_type,
+                        PersonType::Card | PersonType::ScenarioCard
+                    ) {
+                        self.add_friendship(i, basic.friendship);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// 分配地区拉面分身（id >= 5 时触发）
+    ///
+    /// 从原 `RamenAction::distribute_clones` 抽出并重命名（避免与
+    /// `distribute_super_ramen_clones` 混淆），统一在 `ground_ramen_effects` 中调用。
+    ///
+    /// 分身分配逻辑：
+    /// - 满员规则：每个训练位置最多 5 人；已满则优先挤掉 NPC
+    /// - 同一训练不能存在相同卡的 `Person` 和分身
+    /// - 分身不计算得意率，不包含友人卡
+    fn distribute_region_clones(
+        &mut self,
+        region_id: usize,
+        rng: &mut StdRng,
+    ) -> Result<()> {
+        let ramen_data = global!(RAMENDATA);
+        let region = &ramen_data.ramen_region_effect[region_id];
+
+        // 检查是否满足分身条件（id >= 5 且 card_type_count >= 4）
+        if region_id < 5 || !self.deck_can_split {
+            return Ok(());
+        }
+
+        let clone_trains = &region.at_trains;
+        if clone_trains.is_empty() {
+            return Ok(());
+        }
+
+        // 获取所有支援卡索引
+        let card_indices: Vec<i32> = (0..6i32)
+            .filter(|&i| self.persons[i as usize].person_type == PersonType::Card)
+            .collect();
+        if card_indices.is_empty() {
+            return Ok(());
+        }
+
+        // 对于 at_trains 中的每个训练位置，随机选择一个不重复的支援卡分配分身
+        for &train in clone_trains {
+            let train = train as usize;
+            if train >= 5 {
+                continue;
+            }
+
+            // 获取当前训练位置已有的人员（包括本体和分身）
+            let existing: std::collections::HashSet<i32> = self.base.distribution[train]
+                .iter()
+                .filter(|&&id| id >= 0)
+                .copied()
+                .collect();
+
+            let available: Vec<i32> = card_indices
+                .iter()
+                .filter(|&&idx| !existing.contains(&idx))
+                .copied()
+                .collect();
+
+            if available.is_empty() {
+                log::warn!(
+                    ">> 分身失败: {}训练无可用支援卡（所有支援卡已在该位置）",
+                    global!(GAMECONSTANTS).train_names[train]
+                );
+                continue;
+            }
+
+            // 随机选择一个不重复的支援卡
+            let person_idx = *available.choose(rng).unwrap();
+
+            // 检查当前训练位置的人数
+            let dist = &self.base.distribution[train];
+            let non_npc_count = dist
+                .iter()
+                .filter(|&&id| id >= 0 && self.persons[id as usize].person_type != PersonType::Npc)
+                .count();
+
+            if non_npc_count >= 5 {
+                // 已经有5个非NPC人物，不能创建分身
+                log::warn!(
+                    ">> 分身失败: {}训练已满5个非NPC人物，无法添加分身",
+                    global!(GAMECONSTANTS).train_names[train]
+                );
+                continue;
+            }
+
+            if dist.len() >= 5 {
+                // 已满5人，尝试挤掉NPC
+                if let Some(npc_pos) = dist.iter().position(|&id| {
+                    id >= 0 && self.persons[id as usize].person_type == PersonType::Npc
+                }) {
+                    let removed_id = self.base.distribution[train].remove(npc_pos);
+                    self.base.distribution[train].push(person_idx);
+                    log::warn!(
+                        ">> 分身挤掉NPC: {} -> {}训练 (挤掉{})",
+                        self.persons[person_idx as usize].short_name(),
+                        global!(GAMECONSTANTS).train_names[train],
+                        self.persons[removed_id as usize].short_name()
+                    );
+                } else {
+                    log::warn!(
+                        ">> 分身失败: {}训练已满5人且无NPC可挤，无法添加分身",
+                        global!(GAMECONSTANTS).train_names[train]
+                    );
+                }
+            } else {
+                // 未满5人，直接添加
+                self.base.distribution[train].push(person_idx);
+                log::info!(
+                    ">> 分身: {} -> {}训练",
+                    self.persons[person_idx as usize].short_name(),
+                    global!(GAMECONSTANTS).train_names[train]
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    /// 计算当前回合 hint_special 是否生效
+    ///
+    /// 生效条件：
+    /// - 当前回合吃了面（current_ramen.is_some()）
+    /// - ramen_basic_effect[year_idx].hint_special == true（仅第3年为 true）
+    /// - 支援卡种类 >= 4（card_type_count >= 4）
+    ///
+    /// 超级拉面期间虽然 basic.hint_special 也生效，但此时不进行 hint 判定（直接享受 final 效果），
+    /// 故此处判断为 false（不吃面时通过 current_ramen 短路掉即可）。
+    fn calc_hint_special_active(&self) -> bool {
+        if self.ramen.current_ramen.is_none() {
+            return false;
+        }
+        let ramen_data = global!(RAMENDATA);
+        let year_idx = (self.current_year() - 1) as usize;
+        if year_idx >= ramen_data.ramen_basic_effect.len() {
+            return false;
+        }
+        if !ramen_data.ramen_basic_effect[year_idx].hint_special {
+            return false;
+        }
+        // 支援卡种类 >= 4
+        self.card_type_count.iter().filter(|&&x| x > 0).count() >= 4
+    }
+
+    /// 计算当前回合 hint_special 生效的训练位置集合（地区拉面 at_trains）
+    fn calc_hint_special_at_trains(&self) -> Vec<i32> {
+        let ramen_data = global!(RAMENDATA);
+        if let Some(region_idx) = self.ramen.current_ramen {
+            if let Some(region) = ramen_data.ramen_region_effect.get(region_idx) {
+                return region.at_trains.clone();
+            }
+        }
+        Vec::new()
+    }
+
+    /// 判断 hint_special 是否对指定 train 生效
+    ///
+    /// 用于 `handle_hint_event` 中区分 hint_special 路径与常规路径：
+    /// hint_special 生效需要同时满足全局条件（吃面 + 第3年 + 支援卡种类>=4）
+    /// 以及该 train 在当前回合吃的地区拉面的 at_trains 列表中。
+    pub fn is_hint_special_active_for_train(&self, train: usize) -> bool {
+        if !self.calc_hint_special_active() {
+            return false;
+        }
+        let at_trains = self.calc_hint_special_at_trains();
+        at_trains.contains(&(train as i32))
     }
 }
 
@@ -1235,7 +1550,7 @@ mod tests {
     use super::*;
     use crate::{
         gamedata::{init_global, ActionValue, EventChoice},
-        trainer::RandomTrainer,
+        trainer::{ManualTrainer, RandomTrainer},
         utils::{get_workspace_root, init_logger, disable_log, enable_log},
     };
     use rand::SeedableRng;
@@ -1775,24 +2090,19 @@ mod tests {
         game.stage = RamenStage::Train;
 
         // ===== 阶段3：Train =====
+        // 重构后：Train 阶段动作不再携带 ramen/special_targets 字段
+        // （这两个字段已由 SpecialSelect → Train 过渡时的 ground_ramen_effects 落地）
         let actions = game.list_actions()?;
         println!("Train 阶段: {actions:#?}");
         assert!(actions.len() >= 8);
         for a in &actions {
-            assert_eq!(a.ramen, Some(ramen_idx), "Train 阶段动作 ramen 应携带 pending");
-            assert_eq!(
-                a.special_targets,
-                Some(chosen_targets),
-                "Train 阶段动作 special_targets 应携带 pending"
-            );
+            assert_eq!(a.ramen, None, "Train 阶段动作 ramen 应为空（已 ground）");
+            assert_eq!(a.special_targets, None, "Train 阶段动作 special_targets 应为空（已 ground）");
             assert!(
                 !matches!(a.operation, Operation::StageOnly),
                 "Train 阶段动作 operation 不应是 StageOnly"
             );
         }
-
-        // 验证 pending_targets 在 Train 阶段动作上携带，且每个 operation 都不再是 StageOnly
-        // （不实际 apply 以避免触发 explain_distribution 依赖的 distribution 初始化）
 
         Ok(())
     }
@@ -1956,7 +2266,7 @@ mod tests {
             .expect("应有面 0 候选");
         game.apply_action(&actions[pick], &mut StdRng::from_os_rng())?;
 
-        // combined_decision 应保持 false（apply_action 走阶段阶段，不设标记）
+        // combined_decision 应保持 false（apply_action 走中间步骤，不设标记）
         assert!(!game.ramen.combined_decision);
         assert_eq!(game.ramen.pending_ramen, Some(0));
 
@@ -2407,6 +2717,245 @@ mod tests {
 
         println!("saihou 一次性 +100（不跨回合累积）验证通过");
 
+        Ok(())
+    }
+
+    // ========== hint_special 单元测试 ==========
+
+    /// 创建一个 hint_special 相关测试用的 RamenGame
+    ///
+    /// 关键设置：deck_can_split=true（支援卡种类>=4），年份=3（hint_special=true）。
+    fn make_hint_special_test_game() -> RamenGame {
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)
+            .expect("newgame 失败");
+        // 设置为第三年且确保支援卡种类>=4
+        game.base.turn = 60; // year 3
+        game.deck_can_split = true;
+        game
+    }
+
+    /// 不吃面时 hint_special 不应生效
+    #[test]
+    fn test_hint_special_inactive_without_ramen() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let game = make_hint_special_test_game();
+        assert!(!game.calc_hint_special_active(),
+            "不吃面时 hint_special 必须为 false");
+        // 任何 train 都应返回 false
+        for train in 0..5 {
+            assert!(!game.is_hint_special_active_for_train(train),
+                "不吃面时 train={} 的 hint_special 必须为 false", train);
+        }
+        println!("不吃面时 hint_special 不生效 ✓");
+        Ok(())
+    }
+
+    /// 吃面但不是第3年时 hint_special 不应生效
+    #[test]
+    fn test_hint_special_inactive_year1_2() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = make_hint_special_test_game();
+        // year 1
+        game.base.turn = 5;
+        game.ramen.current_ramen = Some(5);
+        assert!(!game.calc_hint_special_active(),
+            "year1 吃面时 hint_special 必须为 false（basic.year0.hint_special=false）");
+
+        // year 2
+        game.base.turn = 30;
+        assert!(!game.calc_hint_special_active(),
+            "year2 吃面时 hint_special 必须为 false（basic.year1.hint_special=false）");
+
+        println!("year1/year2 吃面时 hint_special 不生效 ✓");
+        Ok(())
+    }
+
+    /// 第3年吃面时 hint_special 应生效
+    #[test]
+    fn test_hint_special_active_year3() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = make_hint_special_test_game();
+        game.base.turn = 60;
+        game.ramen.current_ramen = Some(5);
+        assert!(game.calc_hint_special_active(),
+            "year3 + 吃面 + 支援卡种类>=4 时 hint_special 应生效");
+
+        // 检查 at_trains 是否正确（region 5 的 at_trains）
+        let at_trains = game.calc_hint_special_at_trains();
+        println!("region 5 at_trains={:?}", at_trains);
+        // ramen_region_effect[5] 的 at_trains=[0,1,2,3,4]（全位置）
+        assert_eq!(at_trains, vec![0, 1, 2, 3, 4]);
+
+        // 所有 train 都应激活 hint_special
+        for train in 0..5 {
+            assert!(game.is_hint_special_active_for_train(train),
+                "全位置面时 train={} 应激活 hint_special", train);
+        }
+        println!("year3 + 全位置面 + 支援卡种类>=4 时 hint_special 对所有 train 生效 ✓");
+        Ok(())
+    }
+
+    /// hint_special 只在 at_trains 中的 train 生效
+    #[test]
+    fn test_hint_special_only_at_listed_trains() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = make_hint_special_test_game();
+        game.base.turn = 60;
+        // region 0 的 at_trains=[0]，只对速训练生效
+        game.ramen.current_ramen = Some(0);
+        assert!(game.calc_hint_special_active(),
+            "hint_special 应生效");
+
+        assert!(game.is_hint_special_active_for_train(0),
+            "train=0 在 at_trains=[0] 中应激活");
+        for train in 1..5 {
+            assert!(!game.is_hint_special_active_for_train(train),
+                "train={} 不在 at_trains=[0] 中应不激活", train);
+        }
+
+        let at_trains = game.calc_hint_special_at_trains();
+        println!("region 0 at_trains={:?}", at_trains);
+        println!("hint_special 仅在 at_trains 训练位置生效 ✓");
+        Ok(())
+    }
+
+    /// 支援卡种类 < 4 时 hint_special 不应生效
+    #[test]
+    fn test_hint_special_inactive_low_card_types() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        let mut game = make_hint_special_test_game();
+        game.base.turn = 60;
+        game.ramen.current_ramen = Some(5);
+        // 模拟支援卡种类 < 4（只有3种）
+        game.card_type_count = std::sync::Arc::new([1, 1, 1, 0, 0, 0, 0]);
+        game.deck_can_split = false;
+        assert!(!game.calc_hint_special_active(),
+            "支援卡种类<4 时 hint_special 必须为 false");
+        println!("支援卡种类<4 时 hint_special 不生效 ✓");
+        Ok(())
+    }
+
+    // ========== ManualTrainer 完整游戏测试 ==========
+
+    /// 使用 ManualTrainer 完成完整游戏的测试
+    ///
+    /// `ManualTrainer` 真实模式依赖 `inquire` 终端交互，不适合自动化测试。
+    /// 本测试使用 `ManualTrainer::with_mock_inputs(vec![])`（空队列 + PickFirst fallback）：
+    /// - mock 队列为空，所有决策自动选第一个候选
+    /// - 验证拉面杯从开局到育成的完整流程能跑通
+    /// - 这相当于"模拟一个总是选第一个候选的玩家"
+    #[test]
+    fn test_manual_trainer_full_game() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "error"); // 静默
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        // 空 mock 队列：所有决策走 PickFirst fallback（选第一个候选）
+        let trainer = ManualTrainer::with_mock_inputs(vec![]);
+        let mut rng = StdRng::seed_from_u64(20240816);
+
+        println!("=== ManualTrainer 完整游戏测试 ===");
+        println!("卡组: {:?}", TEST_DECK);
+        println!("种子: 20240816");
+
+        // 关闭日志运行游戏（拉面杯流程很长，日志会爆量）
+        disable_log();
+        game.run_full_game(&trainer, &mut rng)?;
+        enable_log();
+
+        // 验证游戏确实跑完了（最终回合应 == max_turn）
+        let max_turn = game.max_turn();
+        println!("\n=== 育成结果 ===");
+        println!("最终回合: {} (max_turn={})", game.turn(), max_turn);
+        assert_eq!(game.turn(), max_turn, "应跑完所有回合");
+
+        // 验证拉面杯特有状态
+        println!("剧本PT: {}", game.ramen.scenario_pt);
+        println!("RMJ结果: {:?}", game.ramen.rmj_results);
+        println!("地区选择: {:?}", game.ramen.selected_regions);
+        println!("超级拉面选择: {:?}", game.ramen.super_ramen);
+        println!("诀窍库存: A={} B={} C={}",
+            game.ramen.feeling_stock[0],
+            game.ramen.feeling_stock[1],
+            game.ramen.feeling_stock[2]);
+        println!("隐藏风味: {}", game.ramen.special_feeling);
+        let score = game.uma.calc_score();
+        println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
+
+        // 验证基础状态合理性
+        assert!(game.uma.vital >= 0, "体力应非负: {}", game.uma.vital);
+        assert!(score >= 0, "评分应非负: {score}");
+
+        println!("ManualTrainer 完整流程跑通 ✓");
+        Ok(())
+    }
+
+    /// 使用 ManualTrainer 测试 hint_special 路径（第3年 + 吃面 + 支援卡种类>=4）
+    ///
+    /// 主要验证 game 流程不会因为全员 hint 而 panic 或 deadlock。
+    #[test]
+    fn test_manual_trainer_hint_special_path() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "error");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        let trainer = ManualTrainer::with_mock_inputs(vec![]);
+        let mut rng = StdRng::seed_from_u64(20240817);
+
+        // 跳到第3年回合开始
+        game.add_friend_and_npcs()?;
+        game.add_reporter();
+        game.base.turn = 60; // year 3
+        game.deck_can_split = true;
+
+        disable_log();
+        // 跑几个回合观察 hint_special 流程
+        let mut turn_count = 0;
+        loop {
+            let max_turn = game.max_turn();
+            if game.turn() >= max_turn {
+                break;
+            }
+            turn_count += 1;
+            if turn_count > 5 {
+                // 限制回合数避免测试太长
+                break;
+            }
+            game.run_full_game(&trainer, &mut rng)?;
+            if game.turn() >= max_turn {
+                break;
+            }
+        }
+        enable_log();
+
+        println!("第3年跑完 {} 轮无 panic", turn_count);
+        println!("最终回合: {}, is_hint_special_active={}",
+            game.turn(), game.calc_hint_special_active());
+        println!("ManualTrainer + hint_special 路径未崩溃 ✓");
         Ok(())
     }
 }

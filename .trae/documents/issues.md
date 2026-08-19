@@ -19,28 +19,39 @@
 ## basic_effect.hint_special 尚未处理
 
 - **日期**：2026-08-19
-- **状态**：待解决
+- **状态**：已解决
 - **问题描述**：`RamenBasicEffect.hint_special`（第三年 `true`）表示"支援卡类型>=4 时，除友人/团队卡以外的所有支援卡都出现 Hint，且训练后发动所有的 Hint 事件"。当前代码在 `effects.rs` 的 `calc_finals_effect` / `calc_normal_effect` 中已经把 `basic.hint_special` 合并到 `RamenTrainingEffect.hint_special` 字段，但是没有下游消费者：`distribute_hint` 仅按 `hint` 加成概率判定单个支援卡是否出现 Hint，没有按 `hint_special` 强制所有非友人/团队支援卡出现 Hint 的逻辑；hint 事件触发逻辑也没有"训练后发动所有 Hint 事件"的处理。
 - **排查过程**：
   - `effects.rs:91, 167` 把 `basic.hint_special` 合并到 `effect.hint_special`，但只是布尔字段透传
   - `RamenGame::distribute_hint`（`game.rs:550`）只读取 `calc_hint_bonus_pct()` 的 hint 加成，不读取 `hint_special`
   - `handle_train_success` / hint 事件触发逻辑（`action.rs`）按单卡 hint 触发流程处理，未实现"训练后发动所有 Hint"
-- **解决方案**：待实现。在 `distribute_hint` 中：
-  1. 若 `effect.hint_special` 为真，则遍历所有支援卡（除友人/团队外），强制 `set_hint(true)`
-  2. 若已吃面，则训练后把所有"hint=true"的支援卡的 hint 事件加入 unresolved_events
-- **备注**：仅第三年生效（`ramen_basic_effect[2].hint_special = true`），生效范围与 hint_special 字段语义一致。
+- **解决方案**：
+  1. `RamenGame::distribute_hint` 在 hint_special 生效时，强制将 `at_trains` 训练位置的所有 PersonType::Card 支援卡的 `is_hint` 设为 true
+  2. `RamenGame::calc_hint_special_active` 判断生效条件：吃面 + 第3年 + 支援卡种类>=4
+  3. `RamenGame::calc_hint_special_at_trains` 获取当前回合生效的训练位置（地区拉面的 at_trains）
+  4. `RamenGame::is_hint_special_active_for_train(train)` 供 `handle_hint_event` 调用
+  5. `handle_hint_event` 在 hint_special 路径下：依次触发 hint_persons 中所有 PersonType::Card 的 hint 事件，每个支援卡按各自 `1 + hint_count_bonus` 次触发（保留温泉杯逻辑）
+  6. 抽取 `push_hint_event` 辅助函数复用 hint事件生成逻辑（含 `hint_level / total_hints` 上限处理）
+  7. 新增 5 个单元测试覆盖：不吃面/年1-2/年3/部分位置/支援卡种类<4
+- **备注**：仅第三年生效（`ramen_basic_effect[2].hint_special = true`），生效范围与 hint_special 字段语义一致；每个支援卡的 `hint_count_bonus` 独立判断，按各自的 `1 + bonus` 次触发。
 
 ---
 
 ## 测试批量运行时的全局状态问题
 - **日期**：2026-08-13
-- **状态**：基本解决
+- **状态**：已解决
 - **问题描述**：单独运行umasim的测试可以通过，但使用`cargo test -p umasim --lib`批量运行时部分测试失败
 - **排查过程**：
   - 已确认工作目录问题已通过get_workspace_root()解决
-  - 怀疑是测试间共享全局状态（如GAMECONSTANTS）导致的资源竞争或初始化顺序问题
-- **解决方案**：待进一步排查
-- **备注**：单个测试运行正常，可能需要检查全局变量的初始化和重置逻辑
+  - `init_logger` 的 TOCTOU 竞争：多个测试同时调用时，`LOGGER.get().is_some()` 检查通过后其他线程抢先 `set()`，后续线程调用 `flexi_logger.start()` 触发 "logger already initialized" 报错
+  - 之前的 "LOGGER OnceLock 已 set 失败但 LOGGER 仍为 None" 状态导致 log crate 全局状态被永久污染
+- **解决方案**：
+  - `utils.rs` 新增 `LOGGER_INIT_DONE: AtomicBool` 记录 log crate 是否已成功 start（不依赖 LOGGER 是否已 set）
+  - 新增 `INIT_LOCK: OnceLock<Mutex<()>>` 串行化整个初始化过程（持锁 + 双重检查）
+  - 快速路径：已初始化过直接 return Ok
+  - 慢速路径：持锁后双重检查，避免 log crate 被多次初始化
+  - `disable_log` / `enable_log` 增加 `if let Some(LOGGER.get())` 保护，LOGGER 未初始化时安全 return（不 panic）
+- **备注**：所有 110 个测试在 release 模式下 3 次连续运行均稳定通过
 
 ---
 

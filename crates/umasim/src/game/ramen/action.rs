@@ -16,7 +16,7 @@ use rand::{Rng, rngs::StdRng, seq::IndexedRandom};
 use serde::{Deserialize, Serialize};
 
 use super::{Operation, TrainingType};
-use super::rules::{consume_for_ramen, calc_ramen_pt_gain, fill_gauge_after_train, fill_gauge_after_non_train};
+use super::rules::{fill_gauge_after_train, fill_gauge_after_non_train};
 use super::effects::{calc_ramen_training_effect, apply_ramen_training_value};
 use crate::game::{ActionEnum, BaseAction, FriendOutState, PersonType};
 use crate::game::traits::Game;
@@ -31,10 +31,10 @@ use crate::utils::{global_events, system_event, system_event_prob};
 /// - `SpecialSelect` 阶段：`ramen = pending`、`special_targets` 字段有意义，`operation = StageOnly`
 /// - `Train` 阶段：`ramen`/`special_targets` 为 pending 拷贝，`operation` 为真实操作
 ///
-/// 合并决策路径下，`combined_select` 构造的阶段阶段动作同时承载 `ramen` 和 `special_targets`，
+/// 合并决策路径下，`combined_select` 构造的中间步骤动作同时承载 `ramen` 和 `special_targets`，
 /// Trainer 在 `RamenSelect` 阶段一次性给出两个决策，由 `apply_combined_ramen_decision` 处理。
 ///
-/// `apply` 按当前 `game.stage` 路由处理：阶段阶段动作仅切阶段并写入 pending，
+/// `apply` 按当前 `game.stage` 路由处理：中间步骤动作仅切阶段并写入 pending，
 /// Train 阶段动作才真执行吃面 + 基础操作。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RamenAction {
@@ -43,7 +43,7 @@ pub struct RamenAction {
     /// - Some(idx): 吃 ramen_region_effect[idx] 对应的地区拉面
     pub ramen: Option<usize>,
     /// 隐藏风味替换目标
-    /// - None: 不替换（吃面但不省诀窍，或阶段阶段未确定）
+    /// - None: 不替换（吃面但不省诀窍，或中间步骤未确定）
     /// - Some([tA, tB, tC]): 替换各类 `t[i]` 个普通诀窍
     pub special_targets: Option<[i32; 3]>,
     /// 基础操作
@@ -51,8 +51,12 @@ pub struct RamenAction {
 }
 
 impl RamenAction {
-    /// 创建不吃面 + 基础操作的动作
-    pub fn no_ramen(operation: Operation) -> Self {
+    /// 创建只承载基础操作的 Train 阶段动作
+    ///
+    /// 重构后，Train 阶段不再带 `ramen` 和 `special_targets` 字段（已由
+    /// `ground_ramen_effects` 落地）。`ramen = None`、`special_targets = None`，
+    /// 与 [`Self::no_ramen`] 语义一致，但命名更清晰。
+    pub fn new(operation: Operation) -> Self {
         Self {
             ramen: None,
             special_targets: None,
@@ -60,7 +64,12 @@ impl RamenAction {
         }
     }
 
-    /// 创建吃面 + 基础操作的动作
+    /// 创建不吃面 + 基础操作的动作（保留旧 API，等价于 [`Self::new`]）
+    pub fn no_ramen(operation: Operation) -> Self {
+        Self::new(operation)
+    }
+
+    /// 创建吃面 + 基础操作的动作（保留旧 API，用于合并决策 path 中间表示）
     pub fn with_ramen(ramen_idx: usize, operation: Operation) -> Self {
         Self {
             ramen: Some(ramen_idx),
@@ -125,10 +134,10 @@ impl Display for RamenAction {
                 let mut parts = Vec::new();
                 for (i, &n) in t.iter().enumerate() {
                     if n > 0 {
-                        parts.push(format!("{}{}", "ABC".chars().nth(i).unwrap(), n));
+                        parts.push(format!("{}x{}", "ABC".chars().nth(i).unwrap(), n));
                     }
                 }
-                format!("(替{})", parts.join("+"))
+                format!("(替换{})", parts.join("+"))
             }
             _ => String::new(),
         };
@@ -141,7 +150,7 @@ impl Display for RamenAction {
                     .unwrap_or("???");
                 format!("吃面/{name}{targets_text} + ")
             }
-            None => String::new(),
+            None => "不吃面".to_string(),
         };
         let op_text = match self.operation {
             Operation::Train(train) => {
@@ -160,9 +169,13 @@ impl Display for RamenAction {
                 }).collect();
                 format!("地区[{}]", names.join(","))
             }
-            Operation::StageOnly => "<阶段阶段>".to_string(),
+            Operation::StageOnly => "<下一步>".to_string(),
         };
-        write!(f, "{ramen_text}{op_text}")
+        if self.operation != Operation::StageOnly {
+            write!(f, "{op_text}")
+        } else {
+            write!(f, "{ramen_text}{op_text}")
+        }
     }
 }
 
@@ -197,20 +210,20 @@ impl ActionEnum for RamenAction {
             RamenStage::RamenSelect => {
                 // race_turn 短路：operation 非 StageOnly 表示 race turn 一体化执行
                 if !matches!(self.operation, Operation::StageOnly) {
-                    // 非阶段阶段动作（如 race_turn 的 Race）：直接执行 operation 并跳到 AfterTrain
+                    // 非中间步骤动作（如 race_turn 的 Race）：直接执行 operation 并跳到 AfterTrain
                     if let Some(base_action) = self.operation.to_base_action() {
                         base_action.apply(&mut game.base, rng)?;
                     }
                     game.stage = RamenStage::AfterTrain;
                     return Ok(());
                 }
-                // 阶段阶段：仅承载面选择，写 pending；Game::next() 会按 pending_ramen 推 SpecialSelect 或 Train
+                // 中间步骤：仅承载面选择，写 pending；Game::next() 会按 pending_ramen 推 SpecialSelect 或 Train
                 game.ramen.pending_ramen = self.ramen;
                 game.ramen.pending_special_targets = [0, 0, 0];
                 Ok(())
             }
             RamenStage::SpecialSelect => {
-                // 阶段阶段：仅承载隐藏风味用法，写 pending；Game::next() 推到 Train
+                // 中间步骤：仅承载隐藏风味用法，写 pending；Game::next() 推到 Train
                 let targets = self
                     .special_targets
                     .ok_or_else(|| anyhow::anyhow!("SpecialSelect 阶段动作应携带 special_targets"))?;
@@ -218,21 +231,9 @@ impl ActionEnum for RamenAction {
                 Ok(())
             }
             RamenStage::Train => {
-                // 真执行：吃面（用 pending_targets）+ 基础操作
-                if let Some(ramen_idx) = self.ramen {
-                    self.apply_ramen(game, ramen_idx, rng)?;
-                    // 拉面羁绊效果必须在训练前生效（影响闪耀判定）
-                    self.apply_ramen_friendship(game)?;
-                    info!("---- 吃面后 ----");
-                    let ramen_info = game.explain_ramen_info();
-                    if !ramen_info.is_empty() {
-                        info!("{}", ramen_info);
-                    }
-                    if let Ok(dist_info) = game.explain_distribution() {
-                        info!("训练:\n{}", dist_info);
-                    }
-                }
-
+                // 拉面效果已在 SpecialSelect → Train 过渡时由 `ground_ramen_effects()` 全部落地
+                // （消耗诀窍 / PT 增量 / current_ramen / 分身 / 羁绊 / 显示 buff+distribution）
+                // 此处只负责执行 operation（训练/比赛/休息等）
                 let is_xiahesu = game.is_xiahesu();
 
                 match self.operation {
@@ -285,10 +286,8 @@ impl ActionEnum for RamenAction {
                 Ok(())
             }
             // 其他阶段（如 RegionSelect）保持旧行为，按 operation 直接分发
+            // 拉面效果已由 ground_ramen_effects() 在阶段过渡时落地，此处不再重复
             _ => {
-                if let Some(ramen_idx) = self.ramen {
-                    self.apply_ramen(game, ramen_idx, rng)?;
-                }
                 let is_xiahesu = game.is_xiahesu();
                 match self.operation {
                     Operation::RegionSelect(regions) => {
@@ -338,148 +337,6 @@ impl ActionEnum for RamenAction {
 }
 
 impl RamenAction {
-    /// 阶段1：吃面处理
-    ///
-    /// 消耗诀窍、获得PT、设置当前拉面状态、触发分身分配。
-    /// 分身必须在此阶段分配，因为会影响后续训练的人头分布。
-    fn apply_ramen(
-        &self,
-        game: &mut super::RamenGame,
-        ramen_idx: usize,
-        rng: &mut StdRng,
-    ) -> Result<()> {
-        let _recipe = super::rules::get_recipe(ramen_idx)?;
-        // 隐藏风味用法来自 pending 阶段（SpecialSelect 已写入），未设置时默认为 [0,0,0]
-        let targets = game.ramen.pending_special_targets;
-        let used_special = consume_for_ramen(&mut game.ramen, ramen_idx, &targets)?;
-        game.ramen.current_ramen = Some(ramen_idx);
-
-        // 计算并增加剧本PT
-        let year_idx = (game.current_year() - 1) as usize;
-        let pt_gain = calc_ramen_pt_gain(year_idx, game.ramen.eat_count)?;
-        game.ramen.scenario_pt += pt_gain;
-        game.ramen.eat_count += 1;
-
-        info!(
-            ">> 吃面[{}] PT+{} (总计{}), 消耗隐藏风味{}",
-            ramen_idx, pt_gain, game.ramen.scenario_pt, used_special
-        );
-
-        // 分身分配（id >= 5 的地区拉面触发分身）
-        self.distribute_clones(game, ramen_idx, rng)?;
-
-        Ok(())
-    }
-
-    /// 分配地区拉面分身
-    ///
-    /// 地区拉面 id >= 5 时，会在指定训练位置分配额外的人头（分身）。
-    /// 分身不计算得意率，不包含友人卡。
-    ///
-    /// 满员规则：
-    /// - 每个训练位置最多5个人
-    /// - 如果已满5人，分身会优先"挤"掉NPC
-    /// - 如果已经包含5个非NPC的人物，则不能创建分身
-    ///
-    /// 分身分配逻辑：
-    /// - 对于 at_trains 中的每个训练位置，随机选择一个支援卡分配分身
-    fn distribute_clones(
-        &self,
-        game: &mut super::RamenGame,
-        region_id: usize,
-        rng: &mut StdRng,
-    ) -> Result<()> {
-        let ramen_data = global!(RAMENDATA);
-        let region = &ramen_data.ramen_region_effect[region_id];
-
-        // 检查是否满足分身条件（id >= 5 且 card_type_count >= 4）
-        if region_id < 5 || !game.deck_can_split {
-            return Ok(());
-        }
-
-        let clone_trains = &region.at_trains;
-        if clone_trains.is_empty() {
-            return Ok(());
-        }
-
-        // 获取所有支援卡索引
-        let card_indices: Vec<i32> = (0..6i32)
-            .filter(|&i| game.persons[i as usize].person_type == PersonType::Card)
-            .collect();
-        if card_indices.is_empty() {
-            return Ok(());
-        }
-
-        // 对于 at_trains 中的每个训练位置，随机选择一个不重复的支援卡分配分身
-        for &train in clone_trains {
-            let train = train as usize;
-            if train >= 5 {
-                continue;
-            }
-
-            // 获取当前训练位置已有的人员（包括本体和分身）
-            let existing: std::collections::HashSet<i32> = game.base.distribution[train]
-                .iter()
-                .filter(|&&id| id >= 0)
-                .copied()
-                .collect();
-
-            // 过滤掉已在该训练位置的支援卡
-            let available: Vec<i32> = card_indices.iter()
-                .filter(|&&idx| !existing.contains(&idx))
-                .copied()
-                .collect();
-
-            if available.is_empty() {
-                warn!(">> 分身失败: {}训练无可用支援卡（所有支援卡已在该位置）", 
-                    global!(GAMECONSTANTS).train_names[train]);
-                continue;
-            }
-
-            // 随机选择一个不重复的支援卡
-            let person_idx = *available.choose(rng).unwrap();
-
-            // 检查当前训练位置的人数
-            let dist = &game.base.distribution[train];
-            let non_npc_count = dist.iter()
-                .filter(|&&id| id >= 0 && game.persons[id as usize].person_type != PersonType::Npc)
-                .count();
-
-            if non_npc_count >= 5 {
-                // 已经有5个非NPC人物，不能创建分身
-                warn!(">> 分身失败: {}训练已满5个非NPC人物，无法添加分身", 
-                    global!(GAMECONSTANTS).train_names[train]);
-                continue;
-            }
-
-            if dist.len() >= 5 {
-                // 已满5人，尝试挤掉NPC
-                if let Some(npc_pos) = dist.iter().position(|&id| {
-                    id >= 0 && game.persons[id as usize].person_type == PersonType::Npc
-                }) {
-                    let removed_id = game.base.distribution[train].remove(npc_pos);
-                    game.base.distribution[train].push(person_idx);
-                    warn!(">> 分身挤掉NPC: {} -> {}训练 (挤掉{})", 
-                        game.persons[person_idx as usize].short_name(), 
-                        global!(GAMECONSTANTS).train_names[train],
-                        game.persons[removed_id as usize].short_name()
-                    );
-                } else {
-                    warn!(">> 分身失败: {}训练已满5人且无NPC可挤，无法添加分身", 
-                        global!(GAMECONSTANTS).train_names[train]);
-                }
-            } else {
-                // 未满5人，直接添加
-                game.base.distribution[train].push(person_idx);
-                info!(">> 分身: {} -> {}训练", 
-                    game.persons[person_idx as usize].short_name(), 
-                    global!(GAMECONSTANTS).train_names[train]);
-            }
-        }
-
-        Ok(())
-    }
-
     /// 超级拉面分身分配
     ///
     /// 触发条件：超级拉面回合且支援卡种类>=4
@@ -601,32 +458,6 @@ impl RamenAction {
                 global!(GAMECONSTANTS).train_names[train]);
         }
 
-        Ok(())
-    }
-
-    /// 训练前应用拉面羁绊效果
-    ///
-    /// `ramen_basic_effect.friendship` 对卡组所有支援卡生效（含友人卡，不含理事长/记者/NPC）。
-    /// 必须在训练前生效，因为羁绊值影响闪耀判定（friendship >= 80）。
-    ///
-    /// 生效条件：吃面回合（`current_ramen.is_some()`）或超级拉面回合（72-77）。
-    fn apply_ramen_friendship(&self, game: &mut super::RamenGame) -> Result<()> {
-        let eating = game.ramen.current_ramen.is_some();
-        let super_ramen = game.is_super_ramen_turn();
-        if !eating && !super_ramen {
-            return Ok(());
-        }
-        let year_idx = (game.current_year() - 1) as usize;
-        let ramen_data = global!(RAMENDATA);
-        if let Some(basic) = ramen_data.ramen_basic_effect.get(year_idx) {
-            if basic.friendship > 0 {
-                for i in 0..game.persons.len() {
-                    if matches!(game.persons[i].person_type, PersonType::Card | PersonType::ScenarioCard) {
-                        game.add_friendship(i, basic.friendship);
-                    }
-                }
-            }
-        }
         Ok(())
     }
 
@@ -832,7 +663,7 @@ impl RamenAction {
         }
 
         // Hint 事件
-        self.handle_hint_event(game, &hint_persons, rng)?;
+        self.handle_hint_event(game, train, &hint_persons, rng)?;
 
         // 额外训练事件（非合宿）
         let extra_train_prob = system_event_prob("extra_train")?;
@@ -855,23 +686,86 @@ impl RamenAction {
     }
 
     /// 处理 Hint 事件
+    ///
+    /// 行为：
+    /// - 当 hint_special 生效（且 train 在当前回合 at_trains 中）时：依次触发 hint_persons 中
+    ///   所有 PersonType::Card 的 hint 事件，每个支援卡触发 `1 + hint_count_bonus` 次
+    /// - 否则：从 hint_persons 中随机选一个触发 `1 + hint_count_bonus` 次（保留温泉杯逻辑）
     fn handle_hint_event(
         &self,
         game: &mut super::RamenGame,
+        train: usize,
         hint_persons: &[i32],
         rng: &mut StdRng,
     ) -> Result<()> {
-        if let Some(&p) = hint_persons.choose(rng) {
+        if hint_persons.is_empty() {
+            return Ok(());
+        }
+        // 判断 hint_special 是否对当前 train 生效
+        let hint_special_active = game.is_hint_special_active_for_train(train);
+        if hint_special_active {
+            // 依次触发 hint_persons 中所有 PersonType::Card 的 hint 事件
+            for &p in hint_persons {
+                if p < 0 || p as usize >= game.persons.len() {
+                    continue;
+                }
+                let person_index = p as usize;
+                if game.persons[person_index].person_type != PersonType::Card {
+                    continue;
+                }
+                let hint_count = if person_index < 6 {
+                    1 + game.deck[person_index].effect.hint_count_bonus
+                } else {
+                    1
+                };
+                for _ in 0..hint_count {
+                    self.push_hint_event(game, person_index, rng)?;
+                }
+            }
+        } else if let Some(&p) = hint_persons.choose(rng) {
             if p < 0 || p as usize >= game.persons.len() {
                 return Ok(());
             }
             let person_index = p as usize;
-            let attr_prob = system_event_prob("hint_attr")?;
-            let hint_level = if person_index < 6 {
-                1 + game.deck[person_index].card_value().hint_level
+            let hint_count = if person_index < 6 {
+                1 + game.deck[person_index].effect.hint_count_bonus
             } else {
                 1
             };
+            for _ in 0..hint_count {
+                self.push_hint_event(game, person_index, rng)?;
+            }
+        }
+        Ok(())
+    }
+
+    /// 推送一个 Hint 事件到 unresolved_events
+    ///
+    /// 支援卡根据 hint_level / total_hints 上限决定属性事件还是技能事件；
+    /// 非支援卡统一按 hint_level=1 处理。
+    fn push_hint_event(
+        &self,
+        game: &mut super::RamenGame,
+        person_index: usize,
+        rng: &mut StdRng,
+    ) -> Result<()> {
+        let attr_prob = system_event_prob("hint_attr")?;
+        let max_hint = global!(GAMECONSTANTS).max_hint_per_card;
+        if person_index < 6 {
+            // 支援卡 hint 等级上限：超过则只触发属性事件（不加技能）
+            let hint_level = (1 + game.deck[person_index].card_value().hint_level)
+                .min(5)
+                .min(max_hint - game.deck[person_index].total_hints);
+            let mut hint_event = if hint_level <= 0 || rng.random_bool(attr_prob) {
+                EventData::hint_attr_event(game.persons[person_index].train_type as usize, person_index)?
+            } else {
+                game.deck[person_index].total_hints += hint_level;
+                EventData::hint_skill_event(hint_level, person_index)
+            };
+            hint_event.name = format!("{} - {}", hint_event.name, game.deck[person_index].short_name());
+            game.base.unresolved_events.push(hint_event);
+        } else {
+            let hint_level = 1;
             let mut hint_event = if rng.random_bool(attr_prob) {
                 EventData::hint_attr_event(game.persons[person_index].train_type as usize, person_index)?
             } else {
@@ -1118,9 +1012,18 @@ pub fn list_special_select_actions(
 ///
 /// 每个候选动作的 `ramen = pending_ramen`、`special_targets = Some(pending_targets)`、
 /// `operation = Op`，`Display` 时呈现完整决策。
+/// Train 阶段的候选动作
+///
+/// **重构后**：Train 阶段只承载基础操作（训练/比赛/休息等），不再带 `ramen` 和
+/// `special_targets` 字段——这两个字段已在 `SpecialSelect → Train` 过渡由
+/// [`RamenGame::ground_ramen_effects`] 落地，玩家在选训练前已看到完整 buff 和 distribution。
+///
+/// 与三阶段流程的对应：
+/// - RamenSelect 阶段：`list_ramen_select_actions`（选面）
+/// - SpecialSelect 阶段：`list_special_select_actions`（选隐藏风味用法）
+/// - **过渡**（SpecialSelect → Train）：`ground_ramen_effects`（立即消耗 + 显示 buff）
+/// - Train 阶段：本函数（选基础操作）
 pub fn list_train_actions(
-    pending_ramen: Option<usize>,
-    pending_targets: [i32; 3],
     can_friend_outing: bool,
     is_ill: bool,
     is_xiahesu: bool,
@@ -1128,14 +1031,7 @@ pub fn list_train_actions(
     let operations = list_operations(can_friend_outing, is_ill, is_xiahesu);
     operations
         .into_iter()
-        .map(|op| {
-            let mut a = match pending_ramen {
-                None => RamenAction::no_ramen(op),
-                Some(idx) => RamenAction::with_ramen(idx, op),
-            };
-            a.special_targets = Some(pending_targets);
-            a
-        })
+        .map(RamenAction::new)
         .collect()
 }
 
@@ -1434,30 +1330,26 @@ mod tests {
     }
 
     #[test]
-    fn test_list_train_actions_carries_pending() -> anyhow::Result<()> {
-        let actions = list_train_actions(Some(2), [1, 0, 0], false, false, false);
-        println!("带 pending 的 Train 阶段: {actions:#?}");
+    fn test_list_train_actions_no_ramen_field() -> anyhow::Result<()> {
+        // 重构后：Train 阶段动作不再带 ramen / special_targets（已由 ground_ramen_effects 落地）
+
+        // 不吃面/吃面/夏合宿参数都不影响 candidates 数量和字段
+        let actions = list_train_actions(false, false, false);
+        println!("Train 阶段候选: {actions:#?}");
         // 8 个 operation
         assert_eq!(actions.len(), 8);
-        // 每个动作 ramen=Some(2)、special_targets=Some([1,0,0])
-        for a in &actions {
-            assert_eq!(a.ramen, Some(2));
-            assert_eq!(a.special_targets, Some([1, 0, 0]));
-        }
-
-        // 不吃面 + 全 targets=[0,0,0]
-        let actions = list_train_actions(None, [0, 0, 0], false, false, false);
+        // 每个动作 ramen=None、special_targets=None（不再有 pending 字段）
         for a in &actions {
             assert_eq!(a.ramen, None);
-            assert_eq!(a.special_targets, Some([0, 0, 0]));
+            assert_eq!(a.special_targets, None);
         }
 
         // 有友人 + 治病
-        let actions = list_train_actions(None, [0, 0, 0], true, true, false);
+        let actions = list_train_actions(true, true, false);
         assert_eq!(actions.len(), 10);
 
         // 夏合宿：禁用普通外出/友人/治病
-        let actions = list_train_actions(None, [0, 0, 0], true, true, true);
+        let actions = list_train_actions(true, true, true);
         assert_eq!(actions.len(), 7);
 
         Ok(())
