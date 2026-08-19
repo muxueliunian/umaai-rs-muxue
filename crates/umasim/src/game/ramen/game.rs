@@ -24,8 +24,8 @@ use crate::game::{
     uma::Uma,
 };
 use crate::gamedata::{
-    ActionValue, EventData, GAMECONSTANTS,
-    TriggerType, ramen::RAMENDATA,
+    ActionValue, EventData, GAMECONFIG, GAMECONSTANTS,
+    RamenRegionStrategy, TriggerType, ramen::RAMENDATA,
 };
 use crate::global;
 use crate::utils::{global_events, system_event, system_event_prob, AttributeArray};
@@ -1215,17 +1215,41 @@ impl RamenGame {
     fn run_region_select<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng, year_idx: usize) -> Result<()> {
         let ramen_data = global!(RAMENDATA);
         let year = year_idx + 1;
-        let combos = super::rules::get_region_combinations(year_idx)?;
-        info!("==== 第{}年 地区选择 ({}种组合) ====", year, combos.len());
-        for (i, combo) in combos.iter().enumerate() {
-            let names: Vec<&str> = combo.iter().filter_map(|&idx| {
-                ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str())
-            }).collect();
-            info!("  {}: {}", i + 1, names.join(", "));
+        let config = global!(GAMECONFIG);
+        // Phase 2 步骤 5：按策略路由
+        // - Fixed：跳过枚举，直接按 config.ramen_region_fixed[year_idx] 选区（避免第3年120组合性能问题）
+        // - All：枚举所有组合交给 Trainer（默认）
+        match config.ramen_region_strategy {
+            RamenRegionStrategy::Fixed => {
+                let fixed = config.ramen_region_fixed.as_ref().ok_or_else(|| {
+                    anyhow::anyhow!("ramen_region_strategy=fixed 但未设置 ramen_region_fixed")
+                })?;
+                if year_idx >= fixed.len() {
+                    anyhow::bail!("ramen_region_fixed 长度 {} 不足以覆盖 year_idx={}", fixed.len(), year_idx);
+                }
+                let combo = fixed[year_idx];
+                let names: Vec<&str> = combo.iter().filter_map(|&idx| {
+                    ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str())
+                }).collect();
+                info!("==== 第{}年 地区选择（Fixed 策略）: {} ====", year, names.join(", "));
+                let action = RamenAction::no_ramen(Operation::RegionSelect(combo));
+                self.apply_action(&action, rng)?;
+                Ok(())
+            }
+            crate::gamedata::RamenRegionStrategy::All => {
+                let combos = super::rules::get_region_combinations(year_idx)?;
+                info!("==== 第{}年 地区选择 ({}种组合) ====", year, combos.len());
+                for (i, combo) in combos.iter().enumerate() {
+                    let names: Vec<&str> = combo.iter().filter_map(|&idx| {
+                        ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str())
+                    }).collect();
+                    info!("  {}: {}", i + 1, names.join(", "));
+                }
+                let actions: Vec<RamenAction> = combos.iter().map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c))).collect();
+                let selection = trainer.select_action(self, &actions, rng)?;
+                self.apply_action(&actions[selection], rng)
+            }
         }
-        let actions: Vec<RamenAction> = combos.iter().map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c))).collect();
-        let selection = trainer.select_action(self, &actions, rng)?;
-        self.apply_action(&actions[selection], rng)
     }
 
     /// SuperRamenSelect 阶段：超级拉面选择
@@ -3000,6 +3024,41 @@ mod tests {
         println!("最终回合: {}, is_hint_special_active={}",
             game.turn(), game.calc_hint_special_active());
         println!("ManualTrainer + hint_special 路径未崩溃 ✓");
+        Ok(())
+    }
+
+    /// Phase 2 步骤 5：地区选择 `Fixed` 策略应直接应用 ramen_region_fixed[year_idx]，不枚举所有组合
+    #[test]
+    fn test_ramen_region_strategy_fixed_skips_enumeration() -> Result<()> {
+        use crate::gamedata::init_global_with_config;
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        // 构造 GameConfig：Fixed 策略 + 三年固定组合
+        let mut config = crate::gamedata::GameConfig::default_for_init();
+        config.scenario = "ramen".to_string();
+        config.trainer = "manual".to_string();
+        config.uma = TEST_UMA_ID;
+        config.cards = TEST_DECK;
+        config.blue_count = [12, 0, 0, 0, 6];
+        config.extra_count = [10, 0, 0, 20, 20, 40];
+        config.ramen_region_strategy = crate::gamedata::RamenRegionStrategy::Fixed;
+        config.ramen_region_fixed = Some(vec![[0, 3, 6], [5, 7, 9], [10, 12, 14]]);
+        let _ = init_global_with_config(&config);
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.add_friend_and_npcs()?;
+        // 直接进入第3年回合边界（23 已 RMJ 结算 → 地区选择）
+        game.base.turn = 23;
+        let mut rng = StdRng::seed_from_u64(20260819);
+        // 通过 Game::next 推到 RegionSelect 阶段（year_idx=0，对应第1年）
+        game.next();
+        if matches!(game.stage, RamenStage::RegionSelect) {
+            let trainer = ManualTrainer::with_mock_inputs(vec![]);
+            // run_region_select 应跳过枚举、直接用 fixed[0]
+            game.run_stage(&trainer, &mut rng)?;
+            assert_eq!(game.ramen.selected_regions, [0, 3, 6], "Fixed 策略应使用第1年固定地区 [0,3,6]");
+        }
         Ok(())
     }
 }

@@ -525,7 +525,17 @@ pub struct GameConfig {
     /// 比赛等级表（72 项，对应回合 0-71；URA 回合 72-77 固定 G1 不在此表）
     /// 默认值与迁出前 constants.json 一致；用户可在 game_config.toml 顶层覆盖
     #[serde(default = "default_race_grades")]
-    pub race_grades: Vec<i32>
+    pub race_grades: Vec<i32>,
+    /// 拉面杯地区选择策略（Phase 2 步骤 5 接入）
+    /// - "all"：枚举所有合法组合交给 Trainer（默认）
+    /// - "fixed"：按 `ramen_region_fixed` 三年固定组合，跳过枚举
+    #[serde(default)]
+    pub ramen_region_strategy: RamenRegionStrategy,
+    /// 三年固定地区组合（`Fixed` 策略时生效）
+    ///
+    /// 例如 `[[0,3,6],[5,7,9],[10,12,14]]`：三年各选一组固定地区
+    #[serde(default)]
+    pub ramen_region_fixed: Option<Vec<[usize; 3]>>
 }
 
 fn default_mcts_turn_bonus() -> i32 {
@@ -574,7 +584,9 @@ impl GameConfig {
             mcts_selection: "score".to_string(),
             mcts_turn_bonus: default_mcts_turn_bonus(),
             pt_favor_rate: default_pt_favor_rate(),
-            race_grades: default_race_grades()
+            race_grades: default_race_grades(),
+            ramen_region_strategy: RamenRegionStrategy::default(),
+            ramen_region_fixed: None
         }
     }
 
@@ -606,8 +618,8 @@ impl GameConfig {
     /// 策略参数：拉面杯地区/超级拉面选择策略等（步骤 5 接入）
     pub fn policy(&self) -> PolicyConfig {
         PolicyConfig {
-            // 步骤 5：拉面杯地区选择策略
-            // ramen_region_strategy / ramen_region_fixed 等接入后在此构造
+            ramen_region_strategy: self.ramen_region_strategy,
+            ramen_region_fixed: self.ramen_region_fixed.clone()
         }
     }
 
@@ -670,15 +682,30 @@ pub struct SearchConfig {
     pub race_grades: Vec<i32>
 }
 
+/// 拉面杯地区选择策略（Phase 2 步骤 5 接入）
+///
+/// - `All`：枚举所有合法组合交给 Trainer（默认；第3年120组合可能导致动作空间爆炸）
+/// - `Fixed`：按 `ramen_region_fixed` 三年固定组合，跳过枚举；用于避免第3年120组合性能问题
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize, Default)]
+pub enum RamenRegionStrategy {
+    #[default]
+    #[serde(rename = "all")]
+    All,
+    #[serde(rename = "fixed")]
+    Fixed
+}
+
 /// 策略参数（手写/未来模型策略参数）
 ///
-/// 步骤 5 将接入拉面杯地区选择策略（`ramen_region_strategy` / `ramen_region_fixed`）
-/// 和超级拉面选择策略。当前结构体仅占位。
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+/// 当前承载拉面杯地区选择策略；后续扩展可加入超级拉面选择策略、未来模型策略参数等。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PolicyConfig {
-    // 占位字段。后续步骤 5 接入：
-    // - ramen_region_strategy: "all" | "fixed"
-    // - ramen_region_fixed: Option<Vec<[usize; 3]>>（三年固定地区组合）
+    /// 拉面杯地区选择策略
+    pub ramen_region_strategy: RamenRegionStrategy,
+    /// 三年固定地区组合（`Fixed` 策略时生效；长度应为 3，每项为 3 个地区 id）
+    ///
+    /// 例如 `[[0,3,6],[5,7,9],[10,12,14]]`：第1年选 [0,3,6]、第2年选 [5,7,9]、第3年选 [10,12,14]
+    pub ramen_region_fixed: Option<Vec<[usize; 3]>>
 }
 
 /// 输出参数（日志、统计级别等）

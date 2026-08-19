@@ -45,6 +45,13 @@
 - `PolicyConfig` 当前为空（占位），步骤 5 将接入拉面杯地区/超级拉面选择策略
 - `default_config.toml` / `game_config.toml` 顶部加"配置段"导航注释（serde 仍按顶层平铺解析，段结构为组织概念）
 
+### 配置系统 Phase 2 步骤 5：拉面杯地区选择策略接入 + TOML 精简
+
+- `PolicyConfig` 新增 `ramen_region_strategy`（`"all"` / `"fixed"`）和 `ramen_region_fixed`（三年固定地区组合）字段
+- 新增 `GAMECONFIG: OnceLock<GameConfig>` 全局，`init_global_with_config` 注入；`RamenGame::run_region_select` 按策略路由：`Fixed` 跳过枚举直接用固定组合，`All` 保持原枚举行为
+- 新增 `test_ramen_region_strategy_fixed_skips_enumeration` 测试验证第3年性能优化路径；`test_ramen_silent_loop` 验证 All 路径不变
+- TOML 精简：`default_config.toml` 247→约170 行，`game_config.toml` 60→33 行；onsen 配置（`onsen_order` / `mcts_selected_onsen`）移到文件末尾并标注"Phase 6 预期删除"
+
 ## 2026-08-18
 
 ### 剧本 PT 每年归零

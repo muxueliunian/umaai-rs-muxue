@@ -129,6 +129,7 @@ mod tests {
 
 pub static GAMEDATA: OnceLock<GameData> = OnceLock::new();
 pub static GAMECONSTANTS: OnceLock<GameConstants> = OnceLock::new();
+pub static GAMECONFIG: OnceLock<GameConfig> = OnceLock::new();
 pub static LOGGER: OnceLock<Mutex<LoggerHandle>> = OnceLock::new();
 
 /// 初始化全局游戏数据。
@@ -169,5 +170,7 @@ pub fn init_global_with_config(config: &GameConfig) -> Result<()> {
     let _ = GAMEDATA.set(GameData::load()?);
     onsen::init_onsen_data()?;
     ramen::init_ramen_data()?;
+    // 注入 GameConfig 副本（Phase 2 步骤 5：策略模块读取 PolicyConfig 使用）
+    let _ = GAMECONFIG.set(config.clone());
     Ok(())
 }
