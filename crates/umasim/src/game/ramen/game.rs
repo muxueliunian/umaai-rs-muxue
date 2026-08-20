@@ -1587,7 +1587,7 @@ mod tests {
     use crate::{
         gamedata::{init_global, ActionValue, EventChoice},
         trainer::{ManualTrainer, RandomTrainer},
-        utils::{get_workspace_root, init_logger, disable_log, enable_log},
+        utils::{get_workspace_root, init_test_logger},
     };
     use rand::SeedableRng;
     use crate::game::ramen::events::assign_train_feeling_type;
@@ -1606,7 +1606,7 @@ mod tests {
     fn test_ramen_game_newgame() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -1639,7 +1639,7 @@ mod tests {
     fn test_ramen_newgame_requires_new_friend() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         // 1. 不含新友人：应报错
@@ -1678,7 +1678,7 @@ mod tests {
     fn test_ramen_game_full_loop() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -1711,7 +1711,7 @@ mod tests {
     fn test_ramen_silent_loop() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "error");  // 只输出错误
+        let _ = init_test_logger("error");  // 只输出错误
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -1722,10 +1722,9 @@ mod tests {
         println!("卡组: {:?}", TEST_DECK);
         println!("随机种子: {:?}", rng);
 
-        // 关闭日志运行游戏
-        disable_log();
+        // 测试场景下不再 disable_log：cargo test 已隔离，
+        // 日志输出到 stderr，按测试名天然不交错
         game.run_full_game(&trainer, &mut rng)?;
-        enable_log();
 
         // 输出最终结果
         println!("\n=== 育成结果 ===");
@@ -1753,7 +1752,7 @@ mod tests {
     fn test_train_param_decomposition() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -1840,7 +1839,7 @@ mod tests {
     fn test_random_event_generation() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         // 创建游戏实例
@@ -1912,7 +1911,7 @@ mod tests {
     fn test_random_distribution_training_value() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         // 1. 创建游戏并直接跳到回合 30（第二年）
@@ -2043,7 +2042,7 @@ mod tests {
     fn test_ramen_deyilv_includes_scenario_bonus() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         // ========== 普通回合（year 2, PT=1000, RMJ 成功） ==========
@@ -2096,7 +2095,7 @@ mod tests {
     fn test_three_stage_decision_flow() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2196,7 +2195,7 @@ mod tests {
     fn test_combined_decision_path_skips_special_select() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2269,7 +2268,7 @@ mod tests {
     fn test_combined_decision_path_no_ramen() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2297,7 +2296,7 @@ mod tests {
     fn test_combined_decision_invalid_targets_rejected() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2327,7 +2326,7 @@ mod tests {
     fn test_three_stage_path_unaffected_by_combined_flag() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2417,7 +2416,7 @@ mod tests {
     fn test_rmj_event_apply_success() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2467,7 +2466,7 @@ mod tests {
     fn test_rmj_event_apply_fail() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2516,7 +2515,7 @@ mod tests {
     fn test_rmj_event_immediate_apply_at_turn_23() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2564,7 +2563,7 @@ mod tests {
     fn test_scenario_pt_reset_after_rmj() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2594,7 +2593,7 @@ mod tests {
     fn test_generate_events_uma_debut() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2614,7 +2613,7 @@ mod tests {
     fn test_generate_events_classic_newyear() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2633,7 +2632,7 @@ mod tests {
     fn test_generate_events_ancient_newyear() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2652,7 +2651,7 @@ mod tests {
     fn test_add_mandatory_events_ticket_at_48() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2673,7 +2672,7 @@ mod tests {
     fn test_add_mandatory_events_ending_at_77() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2697,7 +2696,7 @@ mod tests {
     fn test_super_ramen_base_effect_vital_motivation() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2752,7 +2751,7 @@ mod tests {
     fn test_super_ramen_saihou_one_time_only() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2819,7 +2818,7 @@ mod tests {
     fn test_hint_special_inactive_without_ramen() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let game = make_hint_special_test_game();
@@ -2839,7 +2838,7 @@ mod tests {
     fn test_hint_special_inactive_year1_2() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = make_hint_special_test_game();
@@ -2863,7 +2862,7 @@ mod tests {
     fn test_hint_special_active_year3() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = make_hint_special_test_game();
@@ -2892,7 +2891,7 @@ mod tests {
     fn test_hint_special_only_at_listed_trains() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = make_hint_special_test_game();
@@ -2920,7 +2919,7 @@ mod tests {
     fn test_hint_special_inactive_low_card_types() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut game = make_hint_special_test_game();
@@ -2948,7 +2947,7 @@ mod tests {
     fn test_manual_trainer_full_game() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "error"); // 静默
+        let _ = init_test_logger("error"); // 静默
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -2960,10 +2959,8 @@ mod tests {
         println!("卡组: {:?}", TEST_DECK);
         println!("种子: 20240816");
 
-        // 关闭日志运行游戏（拉面杯流程很长，日志会爆量）
-        disable_log();
+        // 测试场景下不再 disable_log：cargo test 已隔离
         game.run_full_game(&trainer, &mut rng)?;
-        enable_log();
 
         // 验证游戏确实跑完了（最终回合应 == max_turn）
         let max_turn = game.max_turn();
@@ -2999,7 +2996,7 @@ mod tests {
     fn test_manual_trainer_hint_special_path() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "error");
+        let _ = init_test_logger("error");
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -3012,7 +3009,7 @@ mod tests {
         game.base.turn = 60; // year 3
         game.deck_can_split = true;
 
-        disable_log();
+        // 测试场景下不再 disable_log：cargo test 已隔离
         // 跑几个回合观察 hint_special 流程
         let mut turn_count = 0;
         loop {
@@ -3030,7 +3027,6 @@ mod tests {
                 break;
             }
         }
-        enable_log();
 
         println!("第3年跑完 {} 轮无 panic", turn_count);
         println!("最终回合: {}, is_hint_special_active={}",
@@ -3045,7 +3041,7 @@ mod tests {
         use crate::gamedata::init_global_with_config;
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         // 即使设为 Fixed 策略，第1/2年也应走 all 枚举（不会被 fixed 覆盖）
         let mut config = crate::gamedata::GameConfig::default_for_init();
         config.scenario = "ramen".to_string();
@@ -3080,7 +3076,7 @@ mod tests {
     fn test_skip_ramen_select_for_turn_0_1_and_super_ramen() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         // 验证 1：回合 0（剧本机制未启用）应跳过 RamenSelect

@@ -1114,13 +1114,13 @@ pub fn get_available_ramens(
 mod tests {
     use super::*;
     use super::super::RamenState;
-    use crate::{gamedata::init_global, utils::{get_workspace_root, init_logger}};
+    use crate::{gamedata::init_global, utils::{get_workspace_root, init_test_logger}};
 
     #[test]
     fn test_ramen_action_display() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let a1 = RamenAction::no_ramen(Operation::Train(TrainingType::Speed));
@@ -1212,7 +1212,7 @@ mod tests {
     fn test_list_all_actions() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         // 无可用面，无友人，无生病，非夏合宿（允许比赛）
@@ -1245,7 +1245,7 @@ mod tests {
     fn test_get_available_ramens() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let selected_regions = [0, 1, 2];
@@ -1284,7 +1284,7 @@ mod tests {
     fn test_list_ramen_select_actions_full() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut state = RamenState::default();
@@ -1313,7 +1313,7 @@ mod tests {
     fn test_list_ramen_select_actions_no_available() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let state = RamenState::default(); // 库存全 0
@@ -1330,7 +1330,7 @@ mod tests {
     fn test_list_special_select_actions_uses_special_targets() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut state = RamenState::default();
@@ -1404,7 +1404,7 @@ mod tests {
     fn test_list_combined_ramen_select_actions_full() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         let mut state = RamenState::default();
@@ -1443,7 +1443,7 @@ mod tests {
     fn test_list_combined_ramen_select_actions_no_available() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let _ = init_global();
 
         // 全空 + 无隐藏风味：所有面都不可做

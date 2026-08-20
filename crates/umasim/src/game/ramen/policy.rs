@@ -36,13 +36,13 @@ pub fn fixed_super_ramen_selection() -> Result<Vec<i32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{gamedata::init_global, utils::{get_workspace_root, init_logger}};
+    use crate::{gamedata::init_global, utils::{get_workspace_root, init_test_logger}};
 
     #[test]
     fn test_fixed_region_selection() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // 第 1 年：选择 [0, 1, 2]
@@ -71,7 +71,7 @@ mod tests {
     fn test_fixed_super_ramen_selection() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let sel = fixed_super_ramen_selection()?;

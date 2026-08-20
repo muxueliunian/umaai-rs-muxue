@@ -278,13 +278,13 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::{gamedata::*, utils::{init_logger, get_workspace_root}};
+    use crate::{gamedata::*, utils::{get_workspace_root, init_test_logger}};
 
     #[test]
     fn test_explain() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
         let mut game = BaseGame::default();
         game.uma.uma_id = 101901;
@@ -299,7 +299,7 @@ mod tests {
     fn test_newgame() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
         let game = BaseGame::new(101901, &[302424, 302464, 302484, 302564, 302574, 302644], InheritInfo {
             blue_count: [15, 3, 0, 0, 0],
@@ -430,7 +430,7 @@ mod tests {
 
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // 构造带友人卡的 BaseGame（302574 是 hotaku 友人）
@@ -486,7 +486,7 @@ mod tests {
 
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // 不带友人卡的卡组：5 张普通支援卡 + 1 张 type<5 支援卡（没有友人）

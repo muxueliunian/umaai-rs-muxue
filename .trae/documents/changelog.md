@@ -4,6 +4,10 @@
 
 ## 2026-08-20
 
+### 测试日志简化（Phase 3 阶段 0）
+
+新增 `init_test_logger(spec)`，测试场景下只输出 stderr 不写文件；将 100+ 处测试中的 `init_logger("test", ...)` 迁移到 `init_test_logger(...)`；删除测试中 3 处 `disable_log/enable_log` 调用（cargo test 已天然隔离）。详见 `log_refactor_plan.md` 阶段 0。`info!`/`warn!` 调用完全保留，业务 binary 的 `init_logger` 三版本不变。
+
 ### 友人事件词条生效修复
 
 落实 issues「友人事件效果未应用『事件效果提高』『恢复量提高』词条」：`BaseGame` 新增 `friend_event_ids` 字段并在 `apply_event` 中识别友人事件、应用 `event_bonus`（属性/pt 乘算）与 `vital_bonus`（正向体力乘算）；base / onsen / ramen 三剧本统一生效，新增 5 个单元测试覆盖各路径。

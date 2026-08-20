@@ -73,7 +73,7 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::utils::{init_logger, make_table, get_workspace_root};
+    use crate::utils::{get_workspace_root, init_test_logger, make_table};
 
     #[test]
     fn test_uma_data() -> Result<()> {
@@ -100,7 +100,7 @@ mod tests {
     fn test_consts() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         let consts = GameConstants::load()?;
         println!("{:?}", consts);
 
@@ -113,7 +113,7 @@ mod tests {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         let _ = GAMECONSTANTS.set(GameConstants::load()?);
-        let _ = init_logger("test", "info");
+        let _ = init_test_logger("info");
         let mut free_race = FreeRaceData {
             start_turn: 24,
             end_turn: 47,

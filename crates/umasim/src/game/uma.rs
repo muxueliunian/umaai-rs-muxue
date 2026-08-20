@@ -293,13 +293,13 @@ mod tests {
 
     use super::*;
     use crate::gamedata::init_global;
-    use crate::utils::get_workspace_root;
+    use crate::utils::{get_workspace_root, init_test_logger};
 
     #[test]
     fn test_uma() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let uma = Uma::new(101901)?;
@@ -311,7 +311,7 @@ mod tests {
     fn test_win_races() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let mut uma = Uma::new(101901)?;

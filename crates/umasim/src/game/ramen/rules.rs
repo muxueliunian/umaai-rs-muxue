@@ -600,13 +600,13 @@ pub fn fill_gauge_after_non_train(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{gamedata::init_global, utils::{get_workspace_root, init_logger}};
+    use crate::{gamedata::init_global, utils::{get_workspace_root, init_test_logger}};
 
     #[test]
     fn test_gauge_base_distribution() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
         // ramen_memo 中"使用新友人"(base_sum=10) 的全部算例
         // 地区索引: 札幌=0, 函馆=1, 新潟=2, 福岛=3, 东京=4, 中山=5, 中京=6, 京都=7, 小仓=9
@@ -695,7 +695,7 @@ mod tests {
     fn test_can_make_ramen() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // 获取配方
@@ -732,7 +732,7 @@ mod tests {
     fn test_consume_for_ramen() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let mut state = RamenState::default();
@@ -768,7 +768,7 @@ mod tests {
     fn test_consume_for_ramen_errors() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let mut state = RamenState::default();
@@ -798,7 +798,7 @@ mod tests {
     fn test_calc_ramen_pt_gain() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // gain_pt_base = [300, 400, 500], gain_pt_delta = [30, 40, 50]
@@ -840,7 +840,7 @@ mod tests {
     fn test_check_rmj() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let ramen_data = global!(RAMENDATA);
@@ -995,7 +995,7 @@ mod tests {
     fn test_get_region_clone_trains() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // 地区 5 (中山): at_trains = [0,1,2,3,4]
@@ -1024,7 +1024,7 @@ mod tests {
     fn test_get_super_ramen_clone_train_options() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let options = get_super_ramen_clone_train_options()?;
@@ -1066,7 +1066,7 @@ mod tests {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         init_global()?;
-        let _ = crate::utils::init_logger("test", "info");
+        let _ = crate::utils::init_test_logger("info");
         // 札幌 (idx=0) recipe = [2,2,1]，全富余 9 种
         let state = make_state_for_targets([5, 5, 5], 4);
         let targets = list_special_targets_for(&state, 0)?;
@@ -1089,7 +1089,7 @@ mod tests {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         init_global()?;
-        let _ = crate::utils::init_logger("test", "info");
+        let _ = crate::utils::init_test_logger("info");
         // recipe[2] = [3,1,1]（用户例子 A3B1C1），库存 A 缺 1 个
         let state = make_state_for_targets([2, 5, 5], 4);
         let targets = list_special_targets_for(&state, 2)?;
@@ -1109,7 +1109,7 @@ mod tests {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         init_global()?;
-        let _ = crate::utils::init_logger("test", "info");
+        let _ = crate::utils::init_test_logger("info");
         // A3B1C1，库存 A=0（缺 3 个），special=1：need_sum=3 > budget=1 → 不可做
         let state = make_state_for_targets([0, 5, 5], 1);
         let targets = list_special_targets_for(&state, 2)?;
@@ -1123,7 +1123,7 @@ mod tests {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         init_global()?;
-        let _ = crate::utils::init_logger("test", "info");
+        let _ = crate::utils::init_test_logger("info");
         // 札幌 [2,2,1]，全够，special=0：仅 [0,0,0]
         let state = make_state_for_targets([5, 5, 5], 0);
         let targets = list_special_targets_for(&state, 0)?;
@@ -1137,7 +1137,7 @@ mod tests {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         init_global()?;
-        let _ = crate::utils::init_logger("test", "info");
+        let _ = crate::utils::init_test_logger("info");
         // recipe[7] = [0, 3, 2]（含 0 维度），全富余
         let state = make_state_for_targets([5, 5, 5], 4);
         let targets = list_special_targets_for(&state, 7)?;
@@ -1156,7 +1156,7 @@ mod tests {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         init_global()?;
-        let _ = crate::utils::init_logger("test", "info");
+        let _ = crate::utils::init_test_logger("info");
         // 遍历所有合法 recipe_idx，检查排序
         let state = make_state_for_targets([5, 5, 5], 4);
         let ramen_data = global!(RAMENDATA);

@@ -333,7 +333,7 @@ mod tests {
     use super::*;
     use crate::game::ramen::RamenState;
     use crate::gamedata::init_global;
-    use crate::utils::{get_workspace_root, init_logger};
+    use crate::utils::{get_workspace_root, init_test_logger};
 
     /// 创建一个用于测试的 RamenGame 实例
     fn make_test_game() -> RamenGame {
@@ -350,7 +350,7 @@ mod tests {
     fn test_calc_effect_pt_only() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // 不吃面、非超级拉面回合、无RMJ结果
@@ -372,7 +372,7 @@ mod tests {
     fn test_calc_effect_with_eating() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let ramen_data = global!(RAMENDATA);
@@ -406,7 +406,7 @@ mod tests {
     fn test_calc_effect_rmj_success() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // year 2, RMJ year 1 成功
@@ -429,7 +429,7 @@ mod tests {
     fn test_calc_effect_super_ramen() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // 超级拉面回合
@@ -454,7 +454,7 @@ mod tests {
     fn test_calc_effect_super_ramen_with_split() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // 超级拉面回合 + deck_can_split = true
@@ -480,7 +480,7 @@ mod tests {
     fn test_calc_effect_non_shining() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         // 非友情训练时 youqing 应为 0
@@ -503,7 +503,7 @@ mod tests {
     fn test_apply_training_value_status() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
 
         // 属性训练: lower=50, xunlian=20, youqing=10, pt_bonus=0
         let effect = RamenTrainingEffect {
@@ -526,7 +526,7 @@ mod tests {
     fn test_apply_training_value_pt() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
 
         // PT训练: lower=50, xunlian=20, youqing=10, pt_bonus=50
         let effect = RamenTrainingEffect {
@@ -549,7 +549,7 @@ mod tests {
     fn test_apply_training_value_upper_limit() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
 
         // 上层数值超过上限时应被截断
         let effect = RamenTrainingEffect {
@@ -576,7 +576,7 @@ mod tests {
     fn test_apply_training_value_lower_cap() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
 
         // lower_value 超过 100 时应被截断到 100
         let effect = RamenTrainingEffect {
@@ -602,7 +602,7 @@ mod tests {
     fn test_calc_scenario_deyilv_normal_pt_only() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let mut game = make_test_game();
@@ -622,7 +622,7 @@ mod tests {
     fn test_calc_scenario_deyilv_normal_with_rmj_success() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let mut game = make_test_game();
@@ -644,7 +644,7 @@ mod tests {
     fn test_calc_scenario_deyilv_normal_with_rmj_fail() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let mut game = make_test_game();
@@ -665,7 +665,7 @@ mod tests {
     fn test_calc_scenario_deyilv_super_ramen() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let mut game = make_test_game();
@@ -687,7 +687,7 @@ mod tests {
     fn test_calc_scenario_deyilv_super_ramen_rmj_fail() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
 
         let mut game = make_test_game();

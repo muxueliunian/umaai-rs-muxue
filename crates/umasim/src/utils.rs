@@ -131,6 +131,48 @@ pub fn init_logger_stdout(app: &str, spec: &str) -> Result<()> {
     result
 }
 
+/// 测试场景专用 logger：只输出到 stderr，不写文件。
+///
+/// 与 `init_logger` 的区别：
+/// - 不写文件（避免大量测试日志堆积 `logs/test_<date>.log`）
+/// - 输出到 stderr 由 cargo test 默认按测试名隔离捕获（天然不会交错）
+///
+/// 与生产 `init_logger` 共用：
+/// - 共享全局 `LOGGER` 单例（`OnceLock<Mutex<LoggerHandle>>`）
+/// - 并行测试首次 init 串行化由现有 `INIT_LOCK` + `LOGGER_INIT_DONE` 双重检查锁保证
+///
+/// 适用场景：仅在 `#[cfg(test)]` 模块中使用。业务 binary（umaai、ramen_manual 等）
+/// 继续使用 `init_logger` / `init_logger_with` / `init_logger_stdout`。
+pub fn init_test_logger(spec: &str) -> Result<()> {
+    // 快速路径：已初始化过则直接返回（与 init_logger_with 相同的 fast path）
+    if LOGGER.get().is_some() || LOGGER_INIT_DONE.load(Ordering::Acquire) {
+        return Ok(());
+    }
+    // 串行化初始化：避免并行测试同时调用 start() 导致 log crate 重复初始化
+    let lock = INIT_LOCK.get_or_init(|| Mutex::new(()));
+    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
+
+    // 双重检查：持锁状态下再次检查
+    if LOGGER.get().is_some() || LOGGER_INIT_DONE.load(Ordering::Acquire) {
+        return Ok(());
+    }
+
+    let result: Result<()> = (|| {
+        let logger = flexi_logger::Logger::try_with_str(spec)?
+            .format_for_stderr(log_format)
+            .log_to_stderr()      // ⚠️ 只 stderr，不写文件
+            .start()?;
+        // LOGGER.set 可能失败（被其他线程抢先），但只要 start 成功，log crate 已被初始化
+        let _ = LOGGER.set(Mutex::new(logger));
+        Ok(())
+    })();
+    // start 成功则标记 LOG_CRATE 已初始化，后续调用直接 return Ok
+    if result.is_ok() {
+        LOGGER_INIT_DONE.store(true, Ordering::Release);
+    }
+    result
+}
+
 pub fn disable_log() {
     // LOGGER 未初始化时直接返回（init_logger 之前/之后/被 reset 都可能触发）
     if let Some(logger) = LOGGER.get() {

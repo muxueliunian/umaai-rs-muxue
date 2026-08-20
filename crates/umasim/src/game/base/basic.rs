@@ -581,13 +581,13 @@ mod tests {
     use rand::SeedableRng;
 
     use super::*;
-    use crate::{global, trainer::RandomTrainer, utils::*};
+    use crate::{global, trainer::RandomTrainer, utils::{get_workspace_root, init_test_logger}};
 
     #[test]
     fn test_newgame() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        init_logger("test", "info")?;
+        init_test_logger("info")?;
         init_global()?;
         let mut game = BasicGame::newgame(101901, &[302424, 302464, 302484, 302564, 302574, 302644], InheritInfo {
             blue_count: [15, 3, 0, 0, 0],

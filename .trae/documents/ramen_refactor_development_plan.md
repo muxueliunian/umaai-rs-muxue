@@ -551,12 +551,7 @@ Detailed    收集所有候选动作评估
 - [x] 1b - 实现核心游戏机制（诀窍系统、做面/吃面、RMJ 结算、地区选择、分身等）
 - [x] 1c - 实现动作预览和手写策略
 - [x] 1d - 跑通拉面杯最小闭环（回合 0-77 完整流程）
-- [x] 整理用户/开发者/运行时配置（Phase 2 步骤 1-5 + 步骤 7 完成；步骤 4 加载集中化完成）。
-  - 步骤 1：用户可调项（mcts_turn_bonus/pt_favor_rate/race_grades）从 constants.json 迁出到 default_config.toml
-  - 步骤 2+3：GameConfig 五个子配置结构 + 访问器；serde skip 注释强化
-  - 步骤 4：路径常量 + 环境变量 + 集中校验
-  - 步骤 5：拉面杯地区选择策略接入（仅第3年 Fixed 生效）；TOML 精简（onsen 末尾）
-  - 步骤 7：项目文档收尾（project_context.md 加 Phase 2 章节）
+- [x] 整理用户/开发者/运行时配置（Phase 2 全部子步骤完成，详见 `config_refactor_plan.md` 与 `project_context.md` Phase 2 章节）。
 - [ ] 建立结构化事件、用户视图、诊断日志和统计级别。
 - [ ] 明确并整理 `umasim`、`umaai`、`analyzer` 依赖边界。
 - [ ] 建立批量模拟和性能基准。
