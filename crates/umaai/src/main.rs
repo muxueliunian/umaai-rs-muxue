@@ -22,10 +22,10 @@ use umasim::{
         onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame}
     },
     gamedata::{init_global, init_global_with_config},
-    neural::{Evaluator, NeuralNetEvaluator},
+    neural::Evaluator,
     search::SearchConfig,
     trainer::MctsTrainer,
-    utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause, disable_log, enable_log}
+    utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause}
 };
 
 use crate::{
@@ -95,12 +95,14 @@ pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mu
 
         // 选择温泉券时需要继续给出训练推荐
         if game.stage == OnsenTurnStage::Bathing {
-            disable_log();
+            // 日志控制说明：旧实现曾用 `disable_log()/enable_log()` 临时抑制温泉券期间
+            // 的训练搜索日志。Phase 3 后规则层日志已通过 `diag` feature 编译期裁剪
+            // （搜索 rollout 默认不产生 `info!` / `diag!`），无需运行期切换。这里直接
+            // 走完整搜索流程，日志静默由 diag 特性保证。
             if action == OnsenAction::UseTicket(true) {
                 game.do_use_ticket(rng)?;
             }
             game.next();
-            enable_log();
 
             info!("{}", "正在计算训练...".bright_black());
             let actions = game.list_actions()?;
@@ -167,7 +169,17 @@ async fn main_guard() -> Result<()> {
     // 这个设置在AI模式下不生效
     trainer.mcts_selection = "score".to_string();
 
-    // P3-MVP：leaf eval 评估器开关（用于 A/B 对照）
+    // Phase 4 feature 拆分后，onnx 评估器路径已 cfg gate 到 `onnx` feature。
+    // 当前通道层不依赖 onnx（不需要 tract-onnx 巨大依赖链），强制走 MctsTrainer
+    // 默认的 handwritten leaf eval（FlatSearch::new() 默认就是 Handwritten）。
+    // 后续若恢复 nn leaf，可在此处重新启用 cfg(feature = "onnx") 分支。
+    let _rollout_evaluator = game_config.mcts.rollout_evaluator.as_str();
+    let _neuralnet_model_path = game_config.neuralnet_model_path.as_str();
+    let _max_depth = game_config.mcts.max_depth;
+    // 始终强制 handwritten（保持与原 "handwritten" 分支一致的行为）
+    trainer.search = trainer.search.with_leaf_evaluator_handwritten();
+    /*
+    // 原始 leaf eval 开关（已注释，等 onnx feature 真正启用时再恢复）：
     match game_config.mcts.rollout_evaluator.as_str() {
         "handwritten" => {
             trainer.search = trainer.search.with_leaf_evaluator_handwritten();
@@ -188,7 +200,7 @@ async fn main_guard() -> Result<()> {
             if !Path::new(model_path).exists() {
                 return Err(anyhow!("mcts.rollout_evaluator=\"nn\" 但模型文件不存在: {model_path}"));
             }
-            // 先验证模型可加载（避免“以为开了 NN 实际没开”的伪对照）
+            // 先验证模型可加载（避免"以为开了 NN 实际没开"的伪对照）
             let _ = NeuralNetEvaluator::load(model_path)?;
             trainer.search = trainer.search.with_leaf_evaluator_nn(model_path.to_string());
         }
@@ -198,6 +210,7 @@ async fn main_guard() -> Result<()> {
             ));
         }
     }
+    */
 
     // E4：leaf eval 微批大小（batch=1 等价于逐样本推理；batch>1 才会启用 infer_batch）
     trainer.search = trainer

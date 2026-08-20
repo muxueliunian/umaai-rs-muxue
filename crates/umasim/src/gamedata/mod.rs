@@ -1,8 +1,10 @@
-use std::{
-    collections::BTreeMap, sync::{Mutex, OnceLock}
-};
+use std::collections::BTreeMap;
+use std::sync::OnceLock;
+#[cfg(feature = "cli")]
+use std::sync::Mutex;
 
 use anyhow::{Result, anyhow};
+#[cfg(feature = "cli")]
 use flexi_logger::LoggerHandle;
 use log::info;
 use serde::de::DeserializeOwned;
@@ -73,8 +75,11 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::utils::{get_workspace_root, init_test_logger, make_table};
+    use crate::utils::get_workspace_root;
+    #[cfg(feature = "cli")]
+    use crate::utils::{init_test_logger, make_table};
 
+    #[cfg(feature = "cli")]
     #[test]
     fn test_uma_data() -> Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -96,6 +101,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn test_consts() -> Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -108,6 +114,7 @@ mod tests {
         Ok(())
     }
 
+    #[cfg(feature = "cli")]
     #[test]
     fn test_turn_mask() -> Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -130,6 +137,11 @@ mod tests {
 pub static GAMEDATA: OnceLock<GameData> = OnceLock::new();
 pub static GAMECONSTANTS: OnceLock<GameConstants> = OnceLock::new();
 pub static GAMECONFIG: OnceLock<GameConfig> = OnceLock::new();
+/// 全局 LoggerHandle（仅 cli feature 下编译）。
+///
+/// 仅 `utils::init_logger*` 写入，core-only 构建不使用，故 cfg gate。
+/// core-only 消费者（如 .so/嵌入式）若需要日志，直接使用 `log` crate 自行配置即可。
+#[cfg(feature = "cli")]
 pub static LOGGER: OnceLock<Mutex<LoggerHandle>> = OnceLock::new();
 
 /// 初始化全局游戏数据。

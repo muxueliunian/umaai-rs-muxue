@@ -2,6 +2,7 @@ use std::ops::{Deref, DerefMut};
 
 use anyhow::{Result, anyhow};
 use colored::Colorize;
+#[cfg(feature = "cli")]
 use comfy_table::{ColumnConstraint, Table, Width};
 use rand::{
     Rng,
@@ -1595,47 +1596,75 @@ impl Game for OnsenGame {
             }
             rows.push(row)
         }
-        let mut table = Table::new();
-        table.set_header(headers.clone()).add_rows(rows).set_width(80);
-        for col in table.column_iter_mut() {
-            col.set_constraint(ColumnConstraint::Absolute(Width::Percentage(20)));
-        }
-        let mut lines = vec![self.explain()?, table.to_string()];
-        for train in 0..5 {
-            let buffs = self.calc_training_buff(train)?;
-            let fail_rate = self.calc_training_failure_rate(&buffs, train);
-            let value = self.calc_training_value(&buffs, train)?;
-            let dig = self
-                .calc_dig_value(&OnsenAction::Train(train as i32))
-                .map(|x| format!("挖: {x:?}"))
-                .unwrap_or_default();
-            if fail_rate > 0.0 {
-                lines.push(format!(
-                    "{} {} 失败率: {}% {dig}",
-                    headers[train],
-                    value.explain(),
-                    fail_rate
-                ));
-            } else {
-                lines.push(format!("{} {} {dig}", headers[train], value.explain()));
+        // cli 下输出完整表格 + 温泉挖掘价值；core-only 下输出简化文本（不含挖掘计算）
+        #[cfg(feature = "cli")]
+        {
+            let mut table = Table::new();
+            table.set_header(headers.clone()).add_rows(rows).set_width(80);
+            for col in table.column_iter_mut() {
+                col.set_constraint(ColumnConstraint::Absolute(Width::Percentage(20)));
             }
-        }
-        let mut others = vec![];
-        for action in [
-            OnsenAction::FriendOuting,
-            OnsenAction::NormalOuting,
-            OnsenAction::Race,
-            OnsenAction::Sleep,
-            OnsenAction::PR
-        ] {
-            if let Some(dig) = self.calc_dig_value(&action) {
-                others.push(format!("{} 挖: {:?}", action, dig));
+            let mut lines = vec![self.explain()?, table.to_string()];
+            for train in 0..5 {
+                let buffs = self.calc_training_buff(train)?;
+                let fail_rate = self.calc_training_failure_rate(&buffs, train);
+                let value = self.calc_training_value(&buffs, train)?;
+                let dig = self
+                    .calc_dig_value(&OnsenAction::Train(train as i32))
+                    .map(|x| format!("挖: {x:?}"))
+                    .unwrap_or_default();
+                if fail_rate > 0.0 {
+                    lines.push(format!(
+                        "{} {} 失败率: {}% {dig}",
+                        headers[train],
+                        value.explain(),
+                        fail_rate
+                    ));
+                } else {
+                    lines.push(format!("{} {} {dig}", headers[train], value.explain()));
+                }
             }
+            let mut others = vec![];
+            for action in [
+                OnsenAction::FriendOuting,
+                OnsenAction::NormalOuting,
+                OnsenAction::Race,
+                OnsenAction::Sleep,
+                OnsenAction::PR
+            ] {
+                if let Some(dig) = self.calc_dig_value(&action) {
+                    others.push(format!("{} 挖: {:?}", action, dig));
+                }
+            }
+            if !others.is_empty() {
+                lines.push(others.join(" | "));
+            }
+            Ok(lines.join("\n"))
         }
-        if !others.is_empty() {
-            lines.push(others.join(" | "));
+        #[cfg(not(feature = "cli"))]
+        {
+            // core-only 简化文本：忽略温泉挖掘计算（onsen 剧本 Phase 6 删除）
+            let mut lines = vec![self.explain()?];
+            for (i, row) in rows.iter().enumerate() {
+                lines.push(format!("[{}] {}", i, row.join(" ")));
+            }
+            for train in 0..5 {
+                let buffs = self.calc_training_buff(train)?;
+                let fail_rate = self.calc_training_failure_rate(&buffs, train);
+                let value = self.calc_training_value(&buffs, train)?;
+                if fail_rate > 0.0 {
+                    lines.push(format!(
+                        "{} {} 失败率: {}%",
+                        headers[train],
+                        value.explain(),
+                        fail_rate
+                    ));
+                } else {
+                    lines.push(format!("{} {}", headers[train], value.explain()));
+                }
+            }
+            Ok(lines.join("\n"))
         }
-        Ok(lines.join("\n"))
     }
 
     fn calc_training_value(&self, buffs: &CardTrainingEffect, train: usize) -> Result<ActionValue> {

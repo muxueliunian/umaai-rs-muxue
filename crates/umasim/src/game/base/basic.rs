@@ -6,6 +6,7 @@ use std::{
 };
 
 use anyhow::{Result, anyhow};
+#[cfg(feature = "cli")]
 use comfy_table::{ColumnConstraint, Table, Width};
 use enum_iterator::Sequence;
 use rand::{Rng, rngs::StdRng, seq::IndexedRandom};
@@ -510,23 +511,45 @@ impl Game for BasicGame {
             }
             rows.push(row)
         }
-        let mut table = Table::new();
-        table.set_header(headers.clone()).add_rows(rows).set_width(80);
-        for col in table.column_iter_mut() {
-            col.set_constraint(ColumnConstraint::Absolute(Width::Percentage(20)));
-        }
-        let mut lines = vec![table.to_string()];
-        for train in 0..5 {
-            let buffs = self.calc_training_buff(train)?;
-            let fail_rate = self.calc_training_failure_rate(&buffs, train);
-            let value = self.calc_training_value(&buffs, train)?;
-            if fail_rate > 0.0 {
-                lines.push(format!("{} {} 失败率: {}%", headers[train], value.explain(), fail_rate));
-            } else {
-                lines.push(format!("{} {}", headers[train], value.explain()));
+        // cli 下输出完整表格，core-only 下输出简化文本
+        #[cfg(feature = "cli")]
+        {
+            let mut table = Table::new();
+            table.set_header(headers.clone()).add_rows(rows).set_width(80);
+            for col in table.column_iter_mut() {
+                col.set_constraint(ColumnConstraint::Absolute(Width::Percentage(20)));
             }
+            let mut lines = vec![table.to_string()];
+            for train in 0..5 {
+                let buffs = self.calc_training_buff(train)?;
+                let fail_rate = self.calc_training_failure_rate(&buffs, train);
+                let value = self.calc_training_value(&buffs, train)?;
+                if fail_rate > 0.0 {
+                    lines.push(format!("{} {} 失败率: {}%", headers[train], value.explain(), fail_rate));
+                } else {
+                    lines.push(format!("{} {}", headers[train], value.explain()));
+                }
+            }
+            Ok(lines.join("\n"))
         }
-        Ok(lines.join("\n"))
+        #[cfg(not(feature = "cli"))]
+        {
+            let mut lines = vec![];
+            for (i, row) in rows.iter().enumerate() {
+                lines.push(format!("[{}] {}", i, row.join(" ")));
+            }
+            for train in 0..5 {
+                let buffs = self.calc_training_buff(train)?;
+                let fail_rate = self.calc_training_failure_rate(&buffs, train);
+                let value = self.calc_training_value(&buffs, train)?;
+                if fail_rate > 0.0 {
+                    lines.push(format!("{} {} 失败率: {}%", headers[train], value.explain(), fail_rate));
+                } else {
+                    lines.push(format!("{} {}", headers[train], value.explain()));
+                }
+            }
+            Ok(lines.join("\n"))
+        }
     }
     // getters
     fn persons(&self) -> &[Self::Person] {

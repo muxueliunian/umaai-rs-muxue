@@ -28,6 +28,10 @@
 //! - `trainer = "manual"`
 //!
 //! 每次运行从系统熵源生成随机种子（密码学种子，不打印、不复现）。
+//!
+//! 此 binary 仅在 cli + diag feature 下编译（Cargo.toml 中
+//! `required-features = ["cli", "diag"]`）。文件级 cfg gate 防止误用其他 cfg 组合。
+#![cfg(all(feature = "cli", feature = "diag"))]
 
 use std::time::Instant;
 

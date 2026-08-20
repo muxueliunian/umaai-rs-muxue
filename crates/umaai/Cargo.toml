@@ -17,10 +17,13 @@ windows = { version = "0.62.2", features = ["Win32", "Win32_System", "Win32_Syst
 libc = "0.2.189"
 
 [dependencies]
-# AI 助手 binary：不需要规则层诊断日志，关掉 `diag` feature 以避免无谓的开销与日志噪音。
-# 不用 workspace = true 是因为 cargo 不允许子 crate 覆盖 workspace 依赖的 default-features；
-# 直接 path 引入并显式声明 default-features = false 是 cargo 1.97 下的合规做法。
-umasim = { path = "../umasim", default-features = false }
+# AI 助手 binary：PC 通道层需要终端交互与彩色输出，启用 cli。
+# 不需要规则层诊断日志（diag! 宏体编译期裁剪），关掉 diag feature 以减少噪音与开销。
+# 当前通道层不依赖 onnx（MCTS 走 handwritten leaf eval，对应源码在 main.rs 中已注释），
+# 不引入 tract-onnx 巨大依赖链。
+# 用 features 列表而非 workspace = true，因为 cargo 不允许子 crate 覆盖 workspace 依赖的
+# default-features；显式 path + features 是 cargo 1.97 下的合规做法。
+umasim = { path = "../umasim", default-features = false, features = ["cli"] }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true

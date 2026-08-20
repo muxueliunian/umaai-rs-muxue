@@ -6,11 +6,14 @@ edition = "2024"
 [[bin]]
 name = "umasim"
 path = "src/main.rs"
+# umasim binary 是终端交互入口，需要 cli
+required-features = ["cli"]
 
 [[bin]]
 name = "ramen_manual"
 path = "src/bin/ramen_manual.rs"
-required-features = ["diag"]
+# ramen_manual 走 inquire 终端交互 + diag 日志
+required-features = ["cli", "diag"]
 
 # [[bin]]
 # name = "generate_training_data"
@@ -20,46 +23,78 @@ required-features = ["diag"]
 # name = "generate_mean_filtered_data"
 # path = "src/bin/generate_mean_filtered_data.rs"
 
-# diag feature 控制 output::diag! 宏的编译期可用性：
-# - default = ["diag"]        本 crate 默认开（含 ramen_manual 等需看规则日志的 binary）
-# - diag = []                  仅为一个 cfg 开关，无运行时依赖
+# Feature 设计（与 .trae/documents/umaai-rs-上游重构需求与三层架构建议.md §R2 对齐）：
+# - core（无条件可用）：serde / serde_json / rand / rayon / anyhow / toml / chrono /
+#   bincode / hashbrown / thiserror / fs-err / log 等平台无关核心。
+# - diag：output::diag! 宏的 cfg 开关（详见 log_refactor_plan.md §3.2 / §6）。
+#   关闭方式：依赖方写 `umasim = { path = "../umasim", default-features = false }`，
+#   编译时 `diag!` 宏的整个调用体被 `#[cfg(feature = "diag")]` 消除，零运行时开销。
+# - cli：终端交互与 UI（inquire / comfy-table / flexi_logger / indicatif 等，PC 现有行为，
+#   default 默认开启）。**colored 无条件加载**（见下），不属于 cli feature：
+#   - colored 非 Windows 平台是纯 std 实现（无 build.rs、无平台 API），Android / 嵌入式
+#     交叉编译不会失败；运行时按 `is_terminal()` + `NO_COLOR` / `CLICOLOR` 自动决定是否
+#     输出 ANSI，非 tty 环境（如 Android logcat）默认无色。
+#   - `no-color` feature：把 `colored/no-color` 启用，**编译期**完全去除 ANSI 输出。
+#     适合日志重定向 / CI / 嵌入式 / Android 等不支持 ANSI 颜色的场景。
+#     业务代码不需要任何 cfg gate，colored 自己处理。
+#   - onnx：神经网络评估器（暂不使用，预留给 Phase 5+ 模型推理）。
 #
-# 关闭方式：依赖方写 `umasim = { path = "../umasim", default-features = false }`，编译
-# 时 `diag!` 宏的整个调用体被 `#[cfg(feature = "diag")]` 消除，零运行时开销。
-# 设计依据：.trae/documents/log_refactor_plan.md §3.2 / §6
+# 验收标准：
+# - cargo build --release（PC）：行为与重构前一致；
+# - cargo build --release --no-default-features：仅 core + diag + colored（零 UI/ONNX 依赖），
+#   下游可在此基础上 --target aarch64-linux-android 验证交叉编译；
+# - cargo build --release --features no-color：编译期无颜色（同 NO_COLOR=1 运行期效果）。
 [features]
-default = ["diag"]
+default = ["cli", "diag"]
 diag = []
+cli = [
+    "dep:inquire",
+    "dep:comfy-table",
+    "dep:flexi_logger",
+    "dep:env_logger",
+    "dep:indicatif",
+    "dep:text-to-ascii-art",
+    "dep:clap",
+    "dep:tokio",
+]
+# 启用 colored crate 自带的 no-color feature（编译期无 ANSI 输出）。
+# 业务调用点不需要 cfg gate，colored 内部把所有 Colorize 方法返回纯字符串。
+# colored 无条件加载，此 feature 独立于 cli，可单独或与 cli 组合使用。
+no-color = ["colored/no-color"]
+onnx = ["dep:tract-onnx"]
 
 [dependencies]
+# ---- 核心依赖（无条件编译）----
 anyhow.workspace = true
 bincode.workspace = true
 chrono.workspace = true
-clap.workspace = true
-colored.workspace = true
-comfy-table.workspace = true
 enum-iterator.workspace = true
-env_logger.workspace = true
 fs-err.workspace = true
 hashbrown.workspace = true
-indicatif.workspace = true
-inquire.workspace = true
 log.workspace = true
-notify.workspace = true
 rand.workspace = true
 rand_distr.workspace = true
-#ratatui.workspace = true
 rayon.workspace = true
-#salvo.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 toml.workspace = true
-flexi_logger.workspace = true
-# ONNX 推理
-tract-onnx.workspace = true
-ndarray.workspace = true
 int-enum = "1.2.0"
 parse-display = "0.11.0"
+# colored 无条件加载：消除 cli 关闭时的大量双版本 cfg gate 重复代码。
+# 非 Windows 平台是纯 std 实现（详见顶部 feature 注释），Android / 嵌入式编译无风险。
+colored.workspace = true
 
+# ---- cli 依赖（仅 feature = "cli" 时编译）----
+inquire = { workspace = true, optional = true }
+comfy-table = { workspace = true, optional = true }
+flexi_logger = { workspace = true, optional = true }
+env_logger = { workspace = true, optional = true }
+indicatif = { workspace = true, optional = true }
+text-to-ascii-art = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+tokio = { workspace = true, optional = true }
+
+# ---- onnx 依赖（仅 feature = "onnx" 时编译；当前无任何模块 use，仅预留给 Phase 5+）----
+# tract-onnx 0.22 自带 tract_ndarray，不需要额外 ndarray 依赖（greps 已确认）。
+tract-onnx = { workspace = true, optional = true }

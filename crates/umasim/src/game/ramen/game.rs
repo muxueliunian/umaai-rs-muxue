@@ -7,6 +7,7 @@
 //! - `Game::next()`：负责跨阶段流转（AfterTrain → NextTurn → Begin/特殊阶段）
 
 use anyhow::{Result, anyhow};
+#[cfg(feature = "cli")]
 use comfy_table::{ColumnConstraint, Table, Width};
 use rand::prelude::IndexedRandom;
 use rand::{Rng, SeedableRng, rngs::StdRng};
@@ -552,68 +553,27 @@ impl Game for RamenGame {
             }
             rows.push(row);
         }
-        let mut table = Table::new();
-        table.set_header(headers.clone()).add_rows(rows).set_width(80);
-        for col in table.column_iter_mut() {
-            col.set_constraint(ColumnConstraint::Absolute(Width::Percentage(20)));
-        }
-        let mut lines = vec![table.to_string()];
-        for train in 0..5 {
-            let buffs = self.calc_training_buff(train)?;
-            let fail_rate = self.calc_training_failure_rate(&buffs, train);
-            let base_value = self.calc_training_value(&buffs, train)?;
-            let is_shining = self.shining_count(train) > 0;
-            let header = &headers[train];
-
-            if !show_ramen {
-                // 剧本机制未开启 或 URA回合：只显示基础训练数值和失败率
-                if fail_rate > 0.0 {
-                    lines.push(format!("{} {} 失败率: {}%", header, base_value.explain(), fail_rate));
-                } else {
-                    lines.push(format!("{} {}", header, base_value.explain()));
-                }
-            } else {
-                // 普通回合：显示训练数值（包含拉面效果）+ 失败率 + 诀窍槽明细
-                // calc_training_value 内部已经完成两阶段计算（含拉面 buff），
-                // 直接使用 status_pt[train] 和 status_pt[5] 即可
-                let ramen_effect = calc_ramen_training_effect(self, train, is_shining);
-                let effective_fail = (fail_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0)
-                    .min(100.0).max(0.0);
-
-                let value = ActionValue {
-                    status_pt: base_value.status_pt,
-                    vital: base_value.vital,
-                    motivation: base_value.motivation,
-                    ..Default::default()
-                };
-
-                // 诀窍槽加成明细
-                let support_count = dist[train].iter()
-                    .filter(|&&p| p >= 0 && (p as usize) < self.persons.len()
-                        && self.persons[p as usize].person_type == crate::game::PersonType::Card)
-                    .count();
-                let npc_count = dist[train].iter()
-                    .filter(|&&p| p >= 0 && (p as usize) < self.persons.len()
-                        && self.persons[p as usize].person_type == crate::game::PersonType::Npc)
-                    .count();
-                let train_feeling_bonus = super::rules::calc_train_feeling_bonus(support_count, npc_count);
-                let base_dist = super::rules::calc_gauge_base_distribution(&self.ramen.selected_regions);
-                let feeling_type = self.ramen.train_feeling_type.map(|types| types[train]);
-
-                let gauge_a = base_dist[0] + if feeling_type == Some(super::FeelingType::A) { train_feeling_bonus } else { 0 } + if is_shining { 2 } else { 0 };
-                let gauge_b = base_dist[1] + if feeling_type == Some(super::FeelingType::B) { train_feeling_bonus } else { 0 } + if is_shining { 2 } else { 0 };
-                let gauge_c = base_dist[2] + if feeling_type == Some(super::FeelingType::C) { train_feeling_bonus } else { 0 } + if is_shining { 2 } else { 0 };
-
-                let gauge_detail = format!("诀窍槽 A+{} B+{} C+{}", gauge_a, gauge_b, gauge_c);
-
-                if effective_fail > 0.0 {
-                    lines.push(format!("{} {} 失败率: {}% {}", header, value.explain(), effective_fail, gauge_detail));
-                } else {
-                    lines.push(format!("{} {} {}", header, value.explain(), gauge_detail));
-                }
+        // cli 下输出完整表格；core-only 下退化为简化文本（保留训练 + 失败率计算）
+        #[cfg(feature = "cli")]
+        {
+            let mut table = Table::new();
+            table.set_header(headers.clone()).add_rows(rows).set_width(80);
+            for col in table.column_iter_mut() {
+                col.set_constraint(ColumnConstraint::Absolute(Width::Percentage(20)));
             }
+            let mut lines = vec![table.to_string()];
+            self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
+            Ok(lines.join("\n"))
         }
-        Ok(lines.join("\n"))
+        #[cfg(not(feature = "cli"))]
+        {
+            let mut lines = vec![];
+            for (i, row) in rows.iter().enumerate() {
+                lines.push(format!("[{}] {}", i, row.join(" ")));
+            }
+            self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
+            Ok(lines.join("\n"))
+        }
     }
 
     fn calc_training_value(&self, buffs: &crate::game::CardTrainingEffect, train: usize) -> Result<ActionValue> {
@@ -1507,6 +1467,69 @@ impl RamenGame {
                 .push(system_event("ending").expect("ending event").clone());
             if let Some(event) = find_scenario_event(401407) {
                 self.base.unresolved_events.push(event);
+            }
+        }
+        Ok(())
+    }
+
+    /// 收集每回合训练数值 + 失败率 +（拉面回合）诀窍槽明细到 `lines`。
+    ///
+    /// 被 `explain_distribution` 在 cli / core 两种模式下复用，避免重复实现。
+    /// 作为 inherent 方法（不属于 `Game` trait），保证 `Game::explain_distribution` 内
+    /// 通过 `self.collect_train_lines(...)` 调用时优先匹配 inherent 实现。
+    fn collect_train_lines(
+        &self, lines: &mut Vec<String>, headers: &[String], dist: &[Vec<i32>], show_ramen: bool
+    ) -> Result<()> {
+        for train in 0..5 {
+            let buffs = self.calc_training_buff(train)?;
+            let fail_rate = self.calc_training_failure_rate(&buffs, train);
+            let base_value = self.calc_training_value(&buffs, train)?;
+            let is_shining = self.shining_count(train) > 0;
+            let header = &headers[train];
+
+            if !show_ramen {
+                // 剧本机制未开启 或 URA回合：只显示基础训练数值和失败率
+                if fail_rate > 0.0 {
+                    lines.push(format!("{} {} 失败率: {}%", header, base_value.explain(), fail_rate));
+                } else {
+                    lines.push(format!("{} {}", header, base_value.explain()));
+                }
+            } else {
+                // 普通回合：显示训练数值（包含拉面效果）+ 失败率 + 诀窍槽明细
+                let ramen_effect = calc_ramen_training_effect(self, train, is_shining);
+                let effective_fail = (fail_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0)
+                    .min(100.0).max(0.0);
+
+                let value = ActionValue {
+                    status_pt: base_value.status_pt,
+                    vital: base_value.vital,
+                    motivation: base_value.motivation,
+                    ..Default::default()
+                };
+
+                let support_count = dist[train].iter()
+                    .filter(|&&p| p >= 0 && (p as usize) < self.persons.len()
+                        && self.persons[p as usize].person_type == crate::game::PersonType::Card)
+                    .count();
+                let npc_count = dist[train].iter()
+                    .filter(|&&p| p >= 0 && (p as usize) < self.persons.len()
+                        && self.persons[p as usize].person_type == crate::game::PersonType::Npc)
+                    .count();
+                let train_feeling_bonus = super::rules::calc_train_feeling_bonus(support_count, npc_count);
+                let base_dist = super::rules::calc_gauge_base_distribution(&self.ramen.selected_regions);
+                let feeling_type = self.ramen.train_feeling_type.map(|types| types[train]);
+
+                let gauge_a = base_dist[0] + if feeling_type == Some(super::FeelingType::A) { train_feeling_bonus } else { 0 } + if is_shining { 2 } else { 0 };
+                let gauge_b = base_dist[1] + if feeling_type == Some(super::FeelingType::B) { train_feeling_bonus } else { 0 } + if is_shining { 2 } else { 0 };
+                let gauge_c = base_dist[2] + if feeling_type == Some(super::FeelingType::C) { train_feeling_bonus } else { 0 } + if is_shining { 2 } else { 0 };
+
+                let gauge_detail = format!("诀窍槽 A+{} B+{} C+{}", gauge_a, gauge_b, gauge_c);
+
+                if effective_fail > 0.0 {
+                    lines.push(format!("{} {} 失败率: {}% {}", header, value.explain(), effective_fail, gauge_detail));
+                } else {
+                    lines.push(format!("{} {} {}", header, value.explain(), gauge_detail));
+                }
             }
         }
         Ok(())

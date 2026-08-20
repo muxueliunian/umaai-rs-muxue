@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 use std::rc::Rc;
 
 use anyhow::Result;
+#[cfg(feature = "cli")]
 use inquire::Select;
 use log::info;
 use rand::{Rng, prelude::StdRng, seq::SliceRandom};
@@ -171,6 +172,7 @@ impl<G: Game> Trainer<G> for ManualTrainer {
         }
         match self.fallback {
             FallbackMode::PickFirst => self.fallback_pick_first(actions.len(), "动作"),
+            #[cfg(feature = "cli")]
             FallbackMode::Interactive => {
               //  println!("{actions:#?}");
                 let selected = Select::new("请选择:", actions.to_vec())
@@ -180,6 +182,13 @@ impl<G: Game> Trainer<G> for ManualTrainer {
                     .iter()
                     .position(|x| *x == selected)
                     .ok_or_else(|| anyhow::anyhow!("未找到该动作: {selected}"))
+            }
+            #[cfg(not(feature = "cli"))]
+            FallbackMode::Interactive => {
+                Err(anyhow::anyhow!(
+                    "ManualTrainer::Interactive 需要 cli feature（inquire 终端交互）；\
+                     当前编译未启用 cli，请改用 ManualTrainer::with_mock_inputs(..)"
+                ))
             }
         }
     }
@@ -198,12 +207,20 @@ impl<G: Game> Trainer<G> for ManualTrainer {
         }
         match self.fallback {
             FallbackMode::PickFirst => self.fallback_pick_first(explain.len(), "事件选项"),
+            #[cfg(feature = "cli")]
             FallbackMode::Interactive => {
                 let selected = Select::new("请选择:", explain.clone()).prompt()?;
                 explain
                     .iter()
                     .position(|x| x == &selected)
                     .ok_or_else(|| anyhow::anyhow!("未找到该选项: {selected}"))
+            }
+            #[cfg(not(feature = "cli"))]
+            FallbackMode::Interactive => {
+                Err(anyhow::anyhow!(
+                    "ManualTrainer::Interactive 需要 cli feature（inquire 终端交互）；\
+                     当前编译未启用 cli，请改用 ManualTrainer::with_mock_inputs(..)"
+                ))
             }
         }
     }

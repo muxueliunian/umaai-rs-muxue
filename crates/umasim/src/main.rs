@@ -1,10 +1,18 @@
 //! umaai-rs - Rewrite UmaAI in Rust
 //!
 //! author: curran
+//!
+//! 此 binary 仅在 cli feature 下编译（Cargo.toml 中 `required-features = ["cli"]`）。
+//! 启用 `no-color` feature 时彩色输出由 `colored/no-color` 在编译期去除，
+//! 业务代码不需要任何 cfg gate。
+#![cfg(feature = "cli")]
+
 use std::time::Instant;
 
 use anyhow::Result;
+#[cfg(feature = "cli")]
 use colored::Colorize;
+#[cfg(feature = "cli")]
 use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
@@ -368,9 +376,13 @@ async fn main() -> Result<()> {
                                     "mcts.rollout_evaluator=\"nn\" 但模型文件不存在: {model_path}"
                                 ));
                             }
-                            // 先验证模型可加载（避免“以为开了 NN 实际没开”的伪对照）
-                            let _ = umasim::neural::NeuralNetEvaluator::load(model_path)?;
-                            trainer.search = trainer.search.with_leaf_evaluator_nn(model_path.to_string());
+                            // 先验证模型可加载（避免"以为开了 NN 实际没开"的伪对照）
+                            // 仅 onnx feature 下可用
+                            #[cfg(feature = "onnx")]
+                            {
+                                let _ = umasim::neural::NeuralNetEvaluator::load(model_path)?;
+                                trainer.search = trainer.search.with_leaf_evaluator_nn(model_path.to_string());
+                            }
                         }
                         other => {
                             return Err(anyhow::anyhow!(
@@ -385,6 +397,7 @@ async fn main() -> Result<()> {
                         "onsen" => {
                             let r = run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)?;
                             if game_config.mcts.rollout_evaluator == "nn" && game_config.mcts.max_depth > 0 {
+                                #[cfg(feature = "onnx")]
                                 if let Some(s) = trainer.search.leaf_nn_stats() {
                                     println!(
                                         "[NN][leaf] stats: model_loads={}, infer_batches={}, infer_calls={}, infer_errors={}, infer_time_ms_total={:.2}",

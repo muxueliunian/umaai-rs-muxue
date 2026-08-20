@@ -23,8 +23,9 @@ use crate::{
         InheritInfo,
         Trainer,
         onsen::{action::OnsenAction, game::OnsenGame}
-    }, gamedata::{EventChoice, EventData, GAMECONSTANTS}, global, neural::{Evaluator, HandwrittenEvaluator}, search::{FlatSearch, SearchConfig, SearchOutput}, utils::format_luck
+    }, gamedata::{EventChoice, EventData, GAMECONSTANTS}, global, neural::{Evaluator, HandwrittenEvaluator}, search::{FlatSearch, SearchConfig, SearchOutput}
 };
+use crate::utils::format_luck;
 
 /// MCTS 训练员
 ///
@@ -104,19 +105,16 @@ impl MctsTrainer {
             blue_count: game.inherit.blue_count.clone(),
             extra_count: game.inherit.extra_count.clone()
         };
-        info!(
-            "{}",
-            format!(
-                r#"-------- 开始新游戏 --------
+        let msg = format!(
+            r#"-------- 开始新游戏 --------
 模拟参数(可用 UmaSim 模拟本局):
 uma_id = {}
 cards = {deck:?}
 blue_count = {inherit:?}
 温泉使用蒙特卡洛搜索: {}"#,
-                game.uma.uma_id, self.mcts_onsen
-            )
-            .bright_yellow()
+            game.uma.uma_id, self.mcts_onsen
         );
+        info!("{}", msg.bright_yellow());
         self.reset();
     }
 

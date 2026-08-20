@@ -4,6 +4,33 @@
 
 ## 2026-08-20
 
+### colored 无条件加载（消除双版本 cfg gate 重复代码）
+
+上一轮 `no-color` feature 适配在 11 个文件中留下了约 25 处 `#[cfg(feature = "cli")]` / `#[cfg(not(feature = "cli"))]` 纯彩色双版本分支。本轮把 `colored` 从 `cli` feature 移出、改为无条件依赖：
+
+- **colored 无条件加载**：非 Windows 平台是纯 std 实现（无 build.rs、无平台 API），Android / 嵌入式交叉编译无失败风险；运行时按 `is_terminal()` + `NO_COLOR` 自动决定是否输出 ANSI，非 tty 环境默认无色
+- **删除重复分支**：9 个文件约 20 处纯彩色双版本（`format_luck` / `format_score` / `explain` / `diag!` / `info!` 等）合并为单版本；comfy-table（表格渲染）与 inquire（终端交互）相关 gate 保留
+- **`no-color` 语义不变**：`no-color = ["colored/no-color"]` 编译期无色能力保留，与 cli 解耦
+- **顺手清理**：core-only 构建的 unused import warning（utils.rs / gamedata/mod.rs）
+- **验证**：四种编译组合（默认 / no-color / core+diag / umaai）通过，`cargo tree` 确认 core+diag 下 colored 无条件编译，136 个测试全部通过
+
+### Phase 4 步骤1：依赖边界整理 + feature 拆分
+
+落实 `ramen_refactor_development_plan.md` Phase 4 中"先治理依赖，再决定是否新增公共 crate"的子步骤。
+
+- **删除 analyzer crate**：`crates/analyzer` 整体删除（已不需要）；`Cargo.toml` 的 `workspace.members` 移除对应条目
+- **umasim feature 三层设计**：default = `cli` + `diag`；新增 `onnx`（tract-onnx）、`no-color`（`colored/no-color`，采纳用户建议，用 colored 自带 feature 替代手写双版本 cfg gate）；cli 是 UI 容器（含 inquire / colored / comfy-table / flexi_logger / tokio 等）
+- **跨平台 / 编译目标**：
+  - PC 默认：`cargo build`（彩色 + diag）
+  - PC 编译期无色：`cargo build --features no-color`（`colored/no-color` 生效，零 ANSI 输出）
+  - 嵌入式 / Android 交叉编译基础：`cargo build --no-default-features --features diag`（零 terminal / UI / ONNX 依赖）
+- **cfg gate 治理**：15+ 个源文件中所有彩色 / inquire / comfy-table / flexi_logger 调用按 feature 维度加 `#[cfg(...)]` 守卫；cli 关闭时退化为纯文本分支（约25 处彩色调用加 cli / not cli 双版本 cfg gate）
+- **bin/umaai 训练员**：移除 `disable_log` / `enable_log` 调用（已由 `diag` feature 编译期裁剪取代）；MctsTrainer 注释掉 nn 分支（`NeuralNetEvaluator` 与 `with_leaf_evaluator_nn` 整个 match 块），强制走 `with_leaf_evaluator_handwritten()` 默认路径
+- **umaai 依赖瘦身**：`umasim` 依赖的 features 从 `["cli", "onnx"]` 改为 `["cli"]`，去除 tract-onnx 巨大依赖链
+- **神经网络模块**：`neural::NeuralNetEvaluator` 与 `ThreadLocalNeuralNetLeafEvaluator` 等 cfg gate 到 `onnx` feature；`FlatSearch::with_leaf_evaluator_nn` / `leaf_nn_stats` / `SimOutcome` / `simulate_until_terminal_or_leaf` 等同样 cfg gate，core-only 构建完全跳过 nn 路径
+- **跨 crate 验证**：四种编译组合全部通过（PC 默认 / PC 无色 / core + diag / umaai）
+- **方案 B 备忘**：当前 feature 划分已实现 R2 的全部目标（--no-default-features 产出纯平台无关核心），暂时不需要抽出 `umasim-core` crate；若后续出现稳定的"必共享"类型集合再考虑
+
 ### 日志模块重构（Phase 3 / 阶段 1 + 阶段 2）
 
 **阶段 1 骨架**：`umasim::output` 模块（`DecisionInfo` / `diag!` 宏 / `GameView` 骨架）；`Trainer` trait 加默认 `last_decision()`；umasim 加 `diag` 编译期 feature（`ramen_manual required-features`；`umaai` / `analyzer` `default-features = false`）。详见 `log_refactor_plan.md` §7.1。10 个新测试通过、旧测试无 regression。

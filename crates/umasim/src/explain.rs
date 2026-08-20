@@ -32,6 +32,9 @@ impl Explain {
         s
     }
 
+    /// 带裁剪上限 + 终端彩色高亮的五维状态。
+    ///
+    /// colored 无条件加载；启用 `no-color` feature 时输出纯文本（保留 cutted 行为）。
     pub fn five_status_cutted(stats: &Array5) -> String {
         let mut s = String::new();
         for (i, stat) in stats.iter().enumerate() {

@@ -10,6 +10,9 @@
 //! - scoreMean = VALUE_MEAN + VALUE_SCALE * output[58]
 //! - scoreStdev = STDEV_SCALE * abs(output[59])
 //! - value = VALUE_MEAN + VALUE_SCALE * output[60]
+//!
+//! 整个模块仅在 `onnx` feature 下编译（参见 `Cargo.toml` 与 `neural/mod.rs`）。
+//! 启用方法：`--features onnx` 或 `default-features = false, features = ["onnx"]`。
 
 use std::{
     cell::RefCell,

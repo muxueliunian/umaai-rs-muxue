@@ -37,9 +37,9 @@ impl BathingInfo {
             "Buff未生效".to_string()
         };
         let super_text = if self.is_super_ready {
-            "超回复".bright_yellow()
+            "超回复".bright_yellow().to_string()
         } else {
-            "普通".bright_black()
+            "普通".bright_black().to_string()
         };
         format!("温泉券: {}, {}, {}", self.ticket_num, buff_text, super_text)
     }

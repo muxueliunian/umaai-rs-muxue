@@ -1,22 +1,29 @@
-use std::{
-    io::Write,
-    sync::{Mutex, OnceLock},
-};
+#[cfg(feature = "cli")]
+use std::io::Write;
+#[cfg(feature = "cli")]
+use std::sync::{Mutex, OnceLock};
 
 use anyhow::{Result, anyhow};
 use colored::Colorize;
+#[cfg(feature = "cli")]
 use comfy_table::Table;
+#[cfg(feature = "cli")]
 use flexi_logger::{DeferredNow, Duplicate, FileSpec, style};
-use log::{Record, error, info};
+#[cfg(feature = "cli")]
+use log::Record;
+use log::{error, info};
+#[cfg(feature = "cli")]
 use serde::Serialize;
 
 use crate::{
     gamedata::{
-        EventCollection, EventData, GAMECONSTANTS, GAMEDATA, GameConfig, LOGGER,
-        MctsConfig, OverrideConfig, OverrideGameConfig,
+        EventCollection, EventData, GAMECONSTANTS, GAMEDATA, GameConfig, MctsConfig, OverrideConfig,
+        OverrideGameConfig,
     },
     game::onsen::OnsenOrder,
 };
+#[cfg(feature = "cli")]
+use crate::gamedata::LOGGER;
 
 pub type Array5 = [i32; 5];
 pub type Array6 = [i32; 6];
@@ -31,8 +38,12 @@ pub type Array6 = [i32; 6];
 /// `LOGGER_INIT_RESULT` 是占位 type（()），用于触发 OnceLock 的"只设一次"机制——
 /// init 闭包真正返回的 `Result<()>` 失败信息通过 `expect()` 内部 panic：
 /// log crate 启动失败属于 fatal，进程应立即退出，吞错反而难调。
+///
+/// 仅在 `cli` feature 下编译；core-only 构建（嵌入式/Android target）不需要此全局。
+#[cfg(feature = "cli")]
 static LOGGER_INIT: OnceLock<()> = OnceLock::new();
 
+#[cfg(feature = "cli")]
 pub fn log_format(w: &mut dyn Write, _now: &mut DeferredNow, record: &Record) -> Result<(), std::io::Error> {
     let level = record.level();
     write!(
@@ -44,6 +55,7 @@ pub fn log_format(w: &mut dyn Write, _now: &mut DeferredNow, record: &Record) ->
 }
 
 /// 初始化日志系统（默认：写文件 + stderr）
+#[cfg(feature = "cli")]
 pub fn init_logger(app: &str, spec: &str) -> Result<()> {
     init_logger_with(app, spec, true)
 }
@@ -52,6 +64,7 @@ pub fn init_logger(app: &str, spec: &str) -> Result<()> {
 ///
 /// - `duplicate_stderr=true`：写文件 + stderr（默认）
 /// - `duplicate_stderr=false`：只写文件，不占用 stderr（TUI 兼容）
+#[cfg(feature = "cli")]
 pub fn init_logger_with(app: &str, spec: &str, duplicate_stderr: bool) -> Result<()> {
     LOGGER_INIT.get_or_init(|| {
         let logger = flexi_logger::Logger::try_with_str(spec)
@@ -82,6 +95,7 @@ pub fn init_logger_with(app: &str, spec: &str, duplicate_stderr: bool) -> Result
 ///
 /// `app` 参数保留以维持公开签名稳定（与 `init_logger_with` 一致），但 stdout
 /// 模式不写文件，实际不使用。
+#[cfg(feature = "cli")]
 pub fn init_logger_stdout(_app: &str, spec: &str) -> Result<()> {
     LOGGER_INIT.get_or_init(|| {
         let logger = flexi_logger::Logger::try_with_str(spec)
@@ -107,6 +121,7 @@ pub fn init_logger_stdout(_app: &str, spec: &str) -> Result<()> {
 ///
 /// 适用场景：仅在 `#[cfg(test)]` 模块中使用。业务 binary（umaai、ramen_manual 等）
 /// 继续使用 `init_logger` / `init_logger_with` / `init_logger_stdout`。
+#[cfg(feature = "cli")]
 pub fn init_test_logger(spec: &str) -> Result<()> {
     LOGGER_INIT.get_or_init(|| {
         let logger = flexi_logger::Logger::try_with_str(spec)
@@ -154,7 +169,8 @@ pub fn get_workspace_root() -> Result<std::path::PathBuf> {
     Ok(workspace_root.to_path_buf())
 }
 
-/// 检测终端类型
+/// 检测终端类型（Windows 平台彩色提示）
+#[cfg(feature = "cli")]
 pub fn check_windows_terminal() -> Result<()> {
     if !std::env::var("WT_SESSION").is_ok() {
         println!(
@@ -170,12 +186,22 @@ pub fn check_windows_terminal() -> Result<()> {
     Ok(())
 }
 
+/// 非 cli 模式下的 stub（保持公开签名稳定，调用方无需 cfg gate）
+#[cfg(not(feature = "cli"))]
+pub fn check_windows_terminal() -> Result<()> {
+    Ok(())
+}
+
+/// 等待用户按 Enter 键继续（cli 容器，含 colored / comfy-table 等所有 CLI 子模块）
+#[cfg(feature = "cli")]
 pub fn pause() -> Result<()> {
     println!("按任意键继续...");
     std::io::stdin().read_line(&mut String::new())?;
     Ok(())
 }
 
+/// 把可序列化数组渲染为表格字符串（cli 容器，含 comfy-table）
+#[cfg(feature = "cli")]
 pub fn make_table<T: Serialize>(data: &[T]) -> Result<Table> {
     let mut table = Table::new();
     table.set_truncation_indicator("...");
@@ -192,6 +218,10 @@ pub fn make_table<T: Serialize>(data: &[T]) -> Result<Table> {
     Ok(table)
 }
 
+/// 把"运气值"格式化为带颜色的字符串
+///
+/// colored 无条件加载；启用 `no-color` feature 时 `colored::Colorize` 编译期为
+/// 纯字符串输出，业务代码不需要 cfg gate。
 pub fn format_luck(prefix: &str, luck: f64) -> String {
     let luck_str = if luck < 0.0 {
         format!("{luck:.0}")

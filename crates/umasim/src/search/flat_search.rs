@@ -21,15 +21,16 @@ use crate::{
     }, gamedata::EventChoice, neural::{
         Evaluator,
         HandwrittenEvaluator,
-        ThreadLocalNeuralNetLeafEvaluator,
-        ThreadLocalNeuralNetLeafStatsSnapshot,
         ValueOutput
     }
 };
+#[cfg(feature = "onnx")]
+use crate::neural::{ThreadLocalNeuralNetLeafEvaluator, ThreadLocalNeuralNetLeafStatsSnapshot};
 
 #[derive(Clone)]
 enum LeafEvaluator {
     Handwritten,
+    #[cfg(feature = "onnx")]
     NeuralNet(ThreadLocalNeuralNetLeafEvaluator)
 }
 
@@ -37,6 +38,7 @@ impl LeafEvaluator {
     fn name(&self) -> &'static str {
         match self {
             LeafEvaluator::Handwritten => "handwritten",
+            #[cfg(feature = "onnx")]
             LeafEvaluator::NeuralNet(_) => "nn"
         }
     }
@@ -44,6 +46,7 @@ impl LeafEvaluator {
     fn evaluate(&self, rollout_evaluator: &HandwrittenEvaluator, game: &OnsenGame) -> ValueOutput {
         match self {
             LeafEvaluator::Handwritten => rollout_evaluator.evaluate(game),
+            #[cfg(feature = "onnx")]
             LeafEvaluator::NeuralNet(nn) => nn.evaluate(game)
         }
     }
@@ -84,6 +87,9 @@ impl FlatSearch {
     }
 
     /// 设置 leaf eval 为神经网络（用于 max_depth>0 截断估值）
+    ///
+    /// 仅在 `onnx` feature 下可用；core-only 构建调用会编译错误（编译器提示）。
+    #[cfg(feature = "onnx")]
     pub fn with_leaf_evaluator_nn(mut self, model_path: impl Into<String>) -> Self {
         self.leaf_evaluator = LeafEvaluator::NeuralNet(ThreadLocalNeuralNetLeafEvaluator::new(model_path));
         self
@@ -107,6 +113,7 @@ impl FlatSearch {
     }
 
     /// E4 调试：获取 leaf NN 推理统计（仅当 leaf evaluator 为 nn 时存在）
+    #[cfg(feature = "onnx")]
     pub fn leaf_nn_stats(&self) -> Option<ThreadLocalNeuralNetLeafStatsSnapshot> {
         match &self.leaf_evaluator {
             LeafEvaluator::NeuralNet(nn) => Some(nn.stats()),
@@ -119,6 +126,7 @@ impl FlatSearch {
         true
     }
 
+    #[cfg(feature = "onnx")]
     fn leaf_nn(&self) -> Option<&ThreadLocalNeuralNetLeafEvaluator> {
         match &self.leaf_evaluator {
             LeafEvaluator::NeuralNet(nn) => Some(nn),
@@ -286,6 +294,8 @@ impl FlatSearch {
             // 对选中的动作搜索一组（并行）
             let action = &actions[best_action_idx];
             // E4：nn leaf 时，rollout 收集 leaf features -> infer_batch -> 写入结果
+            // 仅 onnx feature 下启用 nn leaf 微批；core-only 构建走 handwritten 默认路径
+            #[cfg(feature = "onnx")]
             if self.config.max_depth > 0 && self.leaf_nn().is_some() && self.rollout_batch_size > 1 {
                 let nn = self.leaf_nn().expect("nn");
 
@@ -350,30 +360,33 @@ impl FlatSearch {
                         }
                     }
                 }
+                // nn leaf 微批路径已完成本组搜索，跳过默认循环
+                total_n += group_size as f64;
+                continue;
+            }
+            // 默认循环：handwritten 评估（onnx 关闭时也走这条）
+            let scores: Vec<_> = if use_parallel {
+                (0..group_size)
+                    .into_par_iter()
+                    // E4.3-7)：每个 worker 只初始化一次 RNG，避免 tight loop 里反复 from_os_rng()
+                    .map_init(|| StdRng::from_os_rng(), |rng, _| self.simulate(game, action, rng).ok())
+                    .filter_map(|x| x)
+                    .collect()
             } else {
-                let scores: Vec<_> = if use_parallel {
-                    (0..group_size)
-                        .into_par_iter()
-                        // E4.3-7)：每个 worker 只初始化一次 RNG，避免 tight loop 里反复 from_os_rng()
-                        .map_init(|| StdRng::from_os_rng(), |rng, _| self.simulate(game, action, rng).ok())
-                        .filter_map(|x| x)
-                        .collect()
-                } else {
-                    // 单线程分支：复用同一个 RNG，避免每次 rollout 都 from_os_rng() 的高开销
-                    let mut out = Vec::with_capacity(group_size);
-                    let mut thread_rng = StdRng::from_os_rng();
-                    for _ in 0..group_size {
-                        if let Ok(v) = self.simulate(game, action, &mut thread_rng) {
-                            out.push(v);
-                        }
+                // 单线程分支：复用同一个 RNG，避免每次 rollout 都 from_os_rng() 的高开销
+                let mut out = Vec::with_capacity(group_size);
+                let mut thread_rng = StdRng::from_os_rng();
+                for _ in 0..group_size {
+                    if let Ok(v) = self.simulate(game, action, &mut thread_rng) {
+                        out.push(v);
                     }
-                    out
-                };
-
-                for score in scores {
-                    action_results[best_action_idx].0.add(score.0);
-                    action_results[best_action_idx].1.add(score.1);
                 }
+                out
+            };
+
+            for score in scores {
+                action_results[best_action_idx].0.add(score.0);
+                action_results[best_action_idx].1.add(score.1);
             }
 
             total_n += group_size as f64;
@@ -502,7 +515,9 @@ impl FlatSearch {
         &self, game: &OnsenGame, action: &OnsenAction, n: usize, rng: &mut StdRng, result: &mut ActionResult,
         result_pt: &mut ActionResult
     ) -> Result<()> {
-        // 仅 nn leaf + max_depth>0 才走微批；否则保持旧行为
+        // 仅 nn leaf + max_depth>0 才走微批；否则保持旧行为（handwritten 默认循环）
+        // onnx feature 关闭时直接走默认循环，避免对 leaf_nn 的引用。
+        #[cfg(feature = "onnx")]
         if self.config.max_depth > 0 && self.leaf_nn().is_some() && self.rollout_batch_size > 1 {
             let nn = self.leaf_nn().expect("nn");
             let mut pending_features: Vec<f32> = Vec::with_capacity(self.rollout_batch_size * 1121);
@@ -543,18 +558,19 @@ impl FlatSearch {
                 pending_features.clear();
                 pending_pt_bias.clear();
             }
-            Ok(())
-        } else {
-            for _ in 0..n {
-                if let Ok(score) = self.simulate(game, action, rng) {
-                    result.add(score.0);
-                    result_pt.add(score.1);
-                }
-            }
-            Ok(())
+            return Ok(());
         }
+        // 默认循环：handwritten 评估（onnx 关闭时也走这条）
+        for _ in 0..n {
+            if let Ok(score) = self.simulate(game, action, rng) {
+                result.add(score.0);
+                result_pt.add(score.1);
+            }
+        }
+        Ok(())
     }
 
+    #[cfg(feature = "onnx")]
     fn simulate_until_terminal_or_leaf(
         &self, game: &OnsenGame, action: &OnsenAction, rng: &mut StdRng
     ) -> Result<SimOutcome> {
@@ -658,6 +674,7 @@ impl FlatSearch {
     }
 }
 
+#[cfg(feature = "onnx")]
 enum SimOutcome {
     Terminal { score: f64, score_pt: f64 },
     Leaf { features: Vec<f32>, pt_bias: f64 }
