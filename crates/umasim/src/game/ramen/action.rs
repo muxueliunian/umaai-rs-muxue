@@ -916,16 +916,28 @@ pub fn list_ramen_choices(available_ramens: &[usize]) -> Vec<Option<usize>> {
 /// 夏合宿禁用规则（与 `BasicGame::list_actions` 一致）：
 /// - 不允许普通外出、友人出行
 /// - 不允许治病（夏合宿休息会自动治病）
-pub fn list_operations(can_friend_outing: bool, is_ill: bool, is_xiahesu: bool) -> Vec<Operation> {
+///
+/// 回合 0-12 不允许自选比赛（`can_race = turn > 12`，即回合 13 起才允许），
+/// 避免 Train 阶段候选菜单给 Trainer 提供不可执行的自选比赛选项。
+/// 注：回合从 0 开始算，回合 11 为出道赛（生涯比赛，不走自选分支），
+/// 回合 12 无可用自选比赛，最早回合 13 起允许自选比赛。
+pub fn list_operations(
+    can_friend_outing: bool,
+    is_ill: bool,
+    is_xiahesu: bool,
+    can_race: bool,
+) -> Vec<Operation> {
     let mut ops = vec![
         Operation::Train(TrainingType::Speed),
         Operation::Train(TrainingType::Stamina),
         Operation::Train(TrainingType::Power),
         Operation::Train(TrainingType::Guts),
         Operation::Train(TrainingType::Wisdom),
-        Operation::Race,
-        Operation::Rest,
     ];
+    if can_race {
+        ops.push(Operation::Race);
+    }
+    ops.push(Operation::Rest);
     if !is_xiahesu {
         ops.push(Operation::NormalOuting);
     }
@@ -947,14 +959,16 @@ pub fn list_operations(can_friend_outing: bool, is_ill: bool, is_xiahesu: bool) 
 /// - `can_friend_outing`: 是否可以选择友人出行（基础判定，未叠加夏令营限制）
 /// - `is_ill`: 是否生病
 /// - `is_xiahesu`: 是否处于夏合宿回合
+/// - `can_race`: 是否允许比赛（回合 0-12 为 false，回合 13 起为 true）
 pub fn list_all_actions(
     available_ramens: &[usize],
     can_friend_outing: bool,
     is_ill: bool,
     is_xiahesu: bool,
+    can_race: bool,
 ) -> Vec<RamenAction> {
     let ramen_choices = list_ramen_choices(available_ramens);
-    let operations = list_operations(can_friend_outing, is_ill, is_xiahesu);
+    let operations = list_operations(can_friend_outing, is_ill, is_xiahesu, can_race);
 
     let mut actions = Vec::new();
     for ramen in &ramen_choices {
@@ -1023,12 +1037,16 @@ pub fn list_special_select_actions(
 /// - SpecialSelect 阶段：`list_special_select_actions`（选隐藏风味用法）
 /// - **过渡**（SpecialSelect → Train）：`ground_ramen_effects`（立即消耗 + 显示 buff）
 /// - Train 阶段：本函数（选基础操作）
+///
+/// # 参数
+/// - `can_race`: 是否允许比赛（回合 0-12 为 false，回合 13 起为 true）
 pub fn list_train_actions(
     can_friend_outing: bool,
     is_ill: bool,
     is_xiahesu: bool,
+    can_race: bool,
 ) -> Vec<RamenAction> {
-    let operations = list_operations(can_friend_outing, is_ill, is_xiahesu);
+    let operations = list_operations(can_friend_outing, is_ill, is_xiahesu, can_race);
     operations
         .into_iter()
         .map(RamenAction::new)
@@ -1164,25 +1182,30 @@ mod tests {
 
     #[test]
     fn test_list_operations() {
-        // 基础情况
-        let ops = list_operations(false, false, false);
+        // 基础情况（允许比赛）
+        let ops = list_operations(false, false, false, true);
         println!("基础操作: {} 个", ops.len());
         assert_eq!(ops.len(), 8); // 5训练+比赛+休息+普通外出
 
-        // 有友人出行和治病
-        let ops = list_operations(true, true, false);
+        // 有友人出行和治病（允许比赛）
+        let ops = list_operations(true, true, false, true);
         println!("有友人+治病: {} 个", ops.len());
         assert_eq!(ops.len(), 10); // 5训练+比赛+休息+普通外出+友人出行+治病
 
-        // 夏合宿：禁用普通外出、友人出行、治病
-        let ops = list_operations(false, false, true);
+        // 夏合宿：禁用普通外出、友人出行、治病（允许比赛）
+        let ops = list_operations(false, false, true, true);
         println!("夏合宿 无友人无生病: {} 个", ops.len());
         assert_eq!(ops.len(), 7); // 5训练+比赛+休息
 
-        // 夏合宿 + 有友人 + 生病：仍只有 7 个
-        let ops = list_operations(true, true, true);
+        // 夏合宿 + 有友人 + 生病：仍只有 7 个（允许比赛）
+        let ops = list_operations(true, true, true, true);
         println!("夏合宿 有友人+生病: {} 个", ops.len());
         assert_eq!(ops.len(), 7);
+
+        // 回合 0-12 不允许比赛：少了"比赛"操作，少 1 个
+        let ops = list_operations(false, false, false, false);
+        println!("基础操作(禁赛): {} 个", ops.len());
+        assert_eq!(ops.len(), 7); // 5训练+休息+普通外出
     }
 
     #[test]
@@ -1192,20 +1215,20 @@ mod tests {
         let _ = init_logger("test", "info");
         let _ = init_global();
 
-        // 无可用面，无友人，无生病，非夏合宿
-        let actions = list_all_actions(&[], false, false, false);
+        // 无可用面，无友人，无生病，非夏合宿（允许比赛）
+        let actions = list_all_actions(&[], false, false, false, true);
         println!("无可用面: {} 个动作", actions.len());
         // 1吃面选择 * 8操作 = 8
         assert_eq!(actions.len(), 8);
 
-        // 有3种可用面
-        let actions = list_all_actions(&[0, 1, 2], false, false, false);
+        // 有3种可用面（允许比赛）
+        let actions = list_all_actions(&[0, 1, 2], false, false, false, true);
         println!("有3种可用面: {} 个动作", actions.len());
         // 4吃面选择 * 8操作 = 32
         assert_eq!(actions.len(), 32);
 
-        // 有友人出行和治病，3种可用面
-        let actions = list_all_actions(&[0, 1, 2], true, true, false);
+        // 有友人出行和治病，3种可用面（允许比赛）
+        let actions = list_all_actions(&[0, 1, 2], true, true, false, true);
         println!("有友人+治病+3种面: {} 个动作", actions.len());
         // 4吃面选择 * 10操作 = 40
         assert_eq!(actions.len(), 40);
@@ -1333,8 +1356,8 @@ mod tests {
     fn test_list_train_actions_no_ramen_field() -> anyhow::Result<()> {
         // 重构后：Train 阶段动作不再带 ramen / special_targets（已由 ground_ramen_effects 落地）
 
-        // 不吃面/吃面/夏合宿参数都不影响 candidates 数量和字段
-        let actions = list_train_actions(false, false, false);
+        // 不吃面/吃面/夏合宿参数都不影响 candidates 数量和字段（允许比赛）
+        let actions = list_train_actions(false, false, false, true);
         println!("Train 阶段候选: {actions:#?}");
         // 8 个 operation
         assert_eq!(actions.len(), 8);
@@ -1344,12 +1367,12 @@ mod tests {
             assert_eq!(a.special_targets, None);
         }
 
-        // 有友人 + 治病
-        let actions = list_train_actions(true, true, false);
+        // 有友人 + 治病（允许比赛）
+        let actions = list_train_actions(true, true, false, true);
         assert_eq!(actions.len(), 10);
 
-        // 夏合宿：禁用普通外出/友人/治病
-        let actions = list_train_actions(true, true, true);
+        // 夏合宿：禁用普通外出/友人/治病（允许比赛）
+        let actions = list_train_actions(true, true, true, true);
         assert_eq!(actions.len(), 7);
 
         Ok(())

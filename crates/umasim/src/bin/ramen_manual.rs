@@ -27,7 +27,7 @@
 //! - `scenario = "ramen"`
 //! - `trainer = "manual"`
 //!
-//! 随机种子在 `SEED` 常量中定义（不放入 config）。
+//! 每次运行从系统熵源生成随机种子（密码学种子，不打印、不复现）。
 
 use std::time::Instant;
 
@@ -45,9 +45,6 @@ use umasim::{
     trainer::ManualTrainer,
     utils::{init_logger_stdout, load_game_config},
 };
-
-/// 随机种子（固定种子便于复现）
-const SEED: u64 = 20240816;
 
 fn main() -> Result<()> {
     // 1. 加载 game_config.toml（与 default_config.toml 合并）
@@ -93,14 +90,13 @@ fn main() -> Result<()> {
     println!("马娘: {}", uma_id);
     println!("卡组: {:?}", deck);
     println!("继承: blue={:?} extra={:?}", inherit.blue_count, inherit.extra_count);
-    println!("种子: {}", SEED);
     println!("日志: {}", game_config.log_level);
     println!();
     println!("提示：每次操作都会弹出 inquire 选择菜单");
     println!("      上下键移动，回车确认，Ctrl+C 中断");
     println!();
 
-    let mut rng = StdRng::seed_from_u64(SEED);
+    let mut rng = StdRng::from_os_rng();
     let mut game = RamenGame::newgame(uma_id, &deck, inherit)?;
     let trainer = ManualTrainer::new();
 

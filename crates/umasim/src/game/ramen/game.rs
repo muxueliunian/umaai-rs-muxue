@@ -103,7 +103,16 @@ impl Game for RamenGame {
         }
 
         // 回合内普通阶段：委托给 RamenStage::next()
-        if let Some(next_stage) = self.stage.next() {
+        if let Some(mut next_stage) = self.stage.next() {
+            // 短路：回合 0-1（剧本机制未启用）或超级拉面回合(72-77，超级拉面自动生效)
+            // 直接跳过 RamenSelect/SpecialSelect，只把训练选择权交给 Trainer
+            // （Distribute → Train，省略 RamenSelect 中间步骤）。
+            if self.stage == RamenStage::Distribute
+                && next_stage == RamenStage::RamenSelect
+                && (self.base.turn < 2 || self.is_super_ramen_turn())
+            {
+                next_stage = RamenStage::Train;
+            }
             self.stage = next_stage;
             return true;
         }
@@ -229,7 +238,9 @@ impl Game for RamenGame {
         // 按当前阶段返回候选动作
         match self.stage {
             RamenStage::RamenSelect => {
-                // 拉面回合（turn >= 2 且非超级拉面回合）才有面可选；其他时段只显示"不吃"
+                // 拉面回合（turn >= 2 且非超级拉面回合）才有面可选；其他时段只显示"不吃"。
+                // 注：`Game::next()` 已在 Distribute 阶段将回合 0-1 / 超级拉面回合直接跳到 Train，
+                // 不会进入本分支；此处保留作为防御性回退（应对外部直接 set stage 的场景）。
                 if self.base.turn >= 2 && !self.is_super_ramen_turn() {
                     Ok(super::action::list_ramen_select_actions(
                         &self.ramen,
@@ -250,6 +261,7 @@ impl Game for RamenGame {
                 can_friend_outing,
                 is_ill,
                 self.is_xiahesu(),
+                self.base.turn > 12,
             )),
             // 其他阶段的 list_actions 保留旧行为（虽然外部不会在此阶段调）
             _ => {
@@ -263,6 +275,7 @@ impl Game for RamenGame {
                     can_friend_outing,
                     is_ill,
                     self.is_xiahesu(),
+                    self.base.turn > 12,
                 ))
             }
         }
@@ -2087,8 +2100,8 @@ mod tests {
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
-        // 跳到回合 2 强制 selected_regions 已设且库存足够
-        game.base.turn = 2;
+        // 跳到回合 13：turn >= 2 才有吃面选择，turn > 12 才允许比赛
+        game.base.turn = 13;
         // 直接给一个够库存的状态（手动跳过 RegionSelect 等阶段）
         game.ramen.feeling_stock = [5, 5, 5];
         game.ramen.special_feeling = 2;
@@ -3088,6 +3101,94 @@ mod tests {
         // 第1年（year_idx=0）：Fixed 策略应不生效，走 all 枚举（默认选 [0,1,2]）
         game.run_region_select(&trainer, &mut rng, 0)?;
         assert_eq!(game.ramen.selected_regions, [0, 1, 2], "第1年 Fixed 策略应仍走 all 枚举（fixed 仅第3年生效）");
+        Ok(())
+    }
+
+    /// 回合 0-1 / 超级拉面回合应跳过 RamenSelect/SpecialSelect，直接从 Distribute 跳到 Train
+    ///
+    /// 短路规则：
+    /// - turn < 2：剧本机制未启用，无法吃面
+    /// - turn ∈ [72, 77]：超级拉面自动生效
+    /// 其他回合仍走 Distribute → RamenSelect → SpecialSelect → Train
+    #[test]
+    fn test_skip_ramen_select_for_turn_0_1_and_super_ramen() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_logger("test", "info");
+        let _ = init_global();
+
+        // 验证 1：回合 0（剧本机制未启用）应跳过 RamenSelect
+        {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.add_friend_and_npcs()?;
+            game.base.turn = 0;
+            game.stage = RamenStage::Distribute;
+            Game::next(&mut game);
+            assert_eq!(
+                game.stage,
+                RamenStage::Train,
+                "回合 0 应从 Distribute 直接跳到 Train（跳过 RamenSelect）"
+            );
+        }
+
+        // 验证 2：回合 1（仍剧本机制未启用）应跳过 RamenSelect
+        {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.add_friend_and_npcs()?;
+            game.base.turn = 1;
+            game.stage = RamenStage::Distribute;
+            Game::next(&mut game);
+            assert_eq!(
+                game.stage,
+                RamenStage::Train,
+                "回合 1 应从 Distribute 直接跳到 Train（跳过 RamenSelect）"
+            );
+        }
+
+        // 验证 3：回合 2（剧本机制启用）应正常走 RamenSelect
+        {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.add_friend_and_npcs()?;
+            game.base.turn = 2;
+            game.stage = RamenStage::Distribute;
+            Game::next(&mut game);
+            assert_eq!(
+                game.stage,
+                RamenStage::RamenSelect,
+                "回合 2 应正常从 Distribute 走到 RamenSelect"
+            );
+        }
+
+        // 验证 4：超级拉面回合(72-77)应跳过 RamenSelect
+        for turn in [72, 73, 74, 75, 76, 77] {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.add_friend_and_npcs()?;
+            game.base.turn = turn;
+            game.stage = RamenStage::Distribute;
+            Game::next(&mut game);
+            assert_eq!(
+                game.stage,
+                RamenStage::Train,
+                "回合 {} 应从 Distribute 直接跳到 Train（超级拉面自动生效）",
+                turn
+            );
+        }
+
+        // 验证 5：回合 71（仍正常吃面）应正常走 RamenSelect
+        {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.add_friend_and_npcs()?;
+            game.base.turn = 71;
+            game.stage = RamenStage::Distribute;
+            Game::next(&mut game);
+            assert_eq!(
+                game.stage,
+                RamenStage::RamenSelect,
+                "回合 71 应正常从 Distribute 走到 RamenSelect（超级拉面尚未生效）"
+            );
+        }
+
+        println!("回合 0/1/72-77 短路规则全部通过 ✓");
         Ok(())
     }
 }

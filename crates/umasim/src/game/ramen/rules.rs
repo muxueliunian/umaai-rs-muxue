@@ -7,6 +7,7 @@ use anyhow::Result;
 
 use super::{FeelingType, RamenState};
 use crate::{gamedata::ramen::RAMENDATA, global};
+use log::info;
 
 /// 诀窍总上限
 pub const FEELING_LIMIT: i32 = 10;
@@ -234,6 +235,19 @@ pub fn consume_for_ramen(
             );
         }
     }
+    // 消耗前快照：便于排查"消耗大于库存"
+    let before_stock = state.feeling_stock;
+    let before_special = state.special_feeling;
+    info!(
+        ">> 吃面消耗前: 配方={:?}, 隐藏风味替换={:?}, 净消耗={:?}, 库存 A={} B={} C={}, 隐藏风味={}",
+        recipe,
+        special_targets,
+        net,
+        before_stock[0],
+        before_stock[1],
+        before_stock[2],
+        before_special,
+    );
     // 消耗诀窍
     for i in 0..3 {
         state.feeling_stock[i] -= net[i];
@@ -250,6 +264,13 @@ pub fn consume_for_ramen(
         }
     });
     state.special_feeling -= total_special;
+    info!(
+        ">> 吃面消耗后: 库存 A={} B={} C={}, 隐藏风味={}",
+        state.feeling_stock[0],
+        state.feeling_stock[1],
+        state.feeling_stock[2],
+        state.special_feeling,
+    );
     Ok(total_special)
 }
 

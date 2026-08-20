@@ -75,3 +75,27 @@
 - **排查过程**：配置系统整理（Phase 2）甄别 constants.json 各项归属时确认：这三项属固定游戏数据、不随剧本变化，保留在 constants.json，由人工更新
 - **解决方案**：待用户准备最新数据后更新三个数组
 - **备注**：与配置整理方案一致，见 .trae/documents/config_refactor_plan.md
+
+---
+
+## 友人事件效果未应用「事件效果提高」「恢复量提高」词条
+
+- **日期**：2026-08-19
+- **状态**：待解决（用户要求先记录，暂不改）
+- **问题描述**：友人卡的支援卡词条「事件效果提高」（`event_effect_up`）和「恢复量提高」（`event_recovery_amount_up`）当前在游戏逻辑中没有被应用到友人事件上。`FriendState` 正确读取并保存了这两个字段（`event_bonus`、`vital_bonus`），但所有 `apply_event` 路径都没有引用它们——base/onsei/ramen 三个剧本都是如此。这导致友人事件（登场/点击/解锁/出行 1-5）的实际效果与支援卡词条描述不符。
+- **排查过程**：
+  - `crates/umasim/src/game/mod.rs:138-158` `FriendState::new` 从 `card.card_value[rank].event_recovery_amount_up` / `event_effect_up` 读取并写入 `vital_bonus` / `event_bonus`。
+  - 全仓 grep `event_bonus` / `vital_bonus` / `event_effect_up` / `event_recovery_amount_up`（排除 `features[...]` 神经网络特征值）：
+    - `event_effect_up` / `event_recovery_amount_up` 只出现在 `FriendState::new` 的读取、`SupportCardValue::explain`（仅打印描述）、`onsen/game.rs:1328-1329`（神经网络特征归一化）
+    - `friend.vital_bonus` / `friend.event_bonus` 在游戏逻辑（`apply_event` 路径）**完全无引用**
+  - `apply_event` 调用链：
+    - `RamenGame::apply_event`（`game.rs:378`）→ `self.base.apply_event(event, choice, rng)` → `BaseGame::apply_event`（`base/mod.rs:151`）→ `self.uma.add_value(&choice_result.value)` 直接结算效果，**未乘 `friend.event_bonus` / `friend.vital_bonus`**
+    - `OnsenGame::apply_event` / `BasicGame::apply_event` 同理，未引用 friend bonus
+  - 影响范围：所有剧本（包括拉面杯、温泉、基础）的友人事件；只有 `FriendCardState` 为 `SSR`/`R` 的卡组才会触发
+- **解决方案**：用户已确认精确语义，方案如下：
+  1. **作用范围**：仅对友人事件（`friend_events["first"]` / `["click"]` / `["out"]` / `["outing1-5"]`，id 8303051xx）生效，不影响支援卡随机事件
+  2. **「事件效果提高」（`event_bonus`）**：仅对 `ActionValue.status_pt`（Array6，五维属性 + pt）生效，**乘算（百分比）**，公式：`final_status_pt[i] = status_pt[i] * (1 + event_bonus / 100)`。**不影响** vital / max_vital / motivation / hint_level / friendship 字段
+  3. **「恢复量提高」（`vital_bonus`）**：仅对 `ActionValue.vital` 字段生效，**乘算（百分比）**，公式：`final_vital = vital * (1 + vital_bonus / 100)`。**不影响**其他字段
+  4. **实现位置**：`RamenGame::apply_event`（`game.rs:378`）override 时，在检测到友人事件（id 以 8303051 开头或匹配 `ramen_data.friend_events` 键）后，克隆 `choice_result.value` 并按上述规则乘算再 `add_value`；或者改 `friend_events` 数据本身（不推荐，会污染配置）。仅拉面杯友人事件需要这个 override，base 默认行为保持原样
+  5. **温泉/基础剧本**：本次仅排查拉面杯问题，暂不涉及；如需统一修复，需在 `OnsenGame::apply_event` / `BasicGame::apply_event` 同样处理
+- **备注**：用户明确要求先记录，**暂不实施修复**。语义已确定，待后续单独任务实施。

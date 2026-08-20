@@ -87,10 +87,9 @@ rollout_evaluator = "handwritten"
 # ---------- policy（拉面杯第3年地区选择策略，Phase 2 步骤 5 接入）----------
 # 仅对第3年生效（解决 C(10,3)=120 组合性能问题）；第1/2年固定走 all 枚举。
 # ramen_region_strategy: "all"（默认；枚举 120 组合）| "fixed"（按 ramen_region_fixed 单组合，跳过枚举）
-ramen_region_strategy = "all"
-# ramen_region_fixed = [[y3地区id1, y3地区id2, y3地区id3]]  长度必须 = 1
-# 仅当 ramen_region_strategy="fixed" 时生效；默认留空由用户在 game_config.toml 覆盖
-# ramen_region_fixed = [[10, 11, 12]]
+ramen_region_strategy = "fixed"
+# 仅当 ramen_region_strategy="fixed" 时生效
+ramen_region_fixed = [[11, 14, 15]]
 
 # ---------- output ----------
 log_level = "info"
