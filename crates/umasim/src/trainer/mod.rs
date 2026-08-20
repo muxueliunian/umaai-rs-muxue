@@ -8,7 +8,7 @@ use log::info;
 use rand::{Rng, prelude::StdRng, seq::SliceRandom};
 
 use crate::{
-    game::{ActionEnum, BaseAction, Game, Trainer}, gamedata::{ActionValue, EventChoice}
+    game::{ActionEnum, BaseAction, Game, Trainer}, gamedata::EventChoice
 };
 
 // 导出手写逻辑训练员、数据收集训练员、神经网络训练员和 MCTS 训练员

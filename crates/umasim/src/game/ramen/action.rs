@@ -16,13 +16,13 @@ use serde::{Deserialize, Serialize};
 
 use super::{Operation, TrainingType};
 use super::rules::{fill_gauge_after_train, fill_gauge_after_non_train};
-use super::effects::{calc_ramen_training_effect, apply_ramen_training_value};
+use super::effects::calc_ramen_training_effect;
 use crate::diag;
 use crate::game::{ActionEnum, BaseAction, FriendOutState, PersonType};
 use crate::game::traits::Game;
-use crate::gamedata::{ActionValue, GAMECONSTANTS, ramen::RAMENDATA, EventData};
+use crate::gamedata::{GAMECONSTANTS, ramen::RAMENDATA, EventData};
 use crate::global;
-use crate::utils::{global_events, system_event, system_event_prob};
+use crate::utils::{system_event, system_event_prob};
 
 /// 拉面杯动作
 ///
@@ -589,7 +589,6 @@ impl RamenAction {
         Ok(TrainParams {
             buffs,
             is_shining,
-            ramen_effect,
             failure_rate,
         })
     }
@@ -880,8 +879,6 @@ struct TrainParams {
     buffs: crate::game::CardTrainingEffect,
     /// 是否友情训练
     is_shining: bool,
-    /// 拉面训练效果
-    ramen_effect: super::effects::RamenTrainingEffect,
     /// 失败率（百分比）
     failure_rate: f32,
 }

@@ -15,7 +15,7 @@ use std::sync::{
 
 use anyhow::{Result, anyhow};
 use colored::Colorize;
-use log::{info, warn};
+use log::info;
 use rand::prelude::StdRng;
 
 use crate::{
@@ -23,7 +23,7 @@ use crate::{
         InheritInfo,
         Trainer,
         onsen::{action::OnsenAction, game::OnsenGame}
-    }, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, LOGGER}, global, neural::{Evaluator, HandwrittenEvaluator}, search::{FlatSearch, SearchConfig, SearchOutput}, utils::format_luck
+    }, gamedata::{EventChoice, EventData, GAMECONSTANTS}, global, neural::{Evaluator, HandwrittenEvaluator}, search::{FlatSearch, SearchConfig, SearchOutput}, utils::format_luck
 };
 
 /// MCTS 训练员

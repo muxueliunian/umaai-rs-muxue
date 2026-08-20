@@ -9,7 +9,7 @@ use crate::{
     game::UmaFlags,
     gamedata::{GAMECONSTANTS, GAMEDATA},
     global,
-    utils::{Array6, get_workspace_root}
+    utils::Array6
 };
 
 /// 事件触发类型
@@ -308,6 +308,7 @@ pub struct EventCollection {
 mod tests {
     use super::*;
     use crate::gamedata::{GameConstants, GAMECONSTANTS, load_json};
+    use crate::utils::get_workspace_root;
 
     /// 从workspace根目录的gamedata/events.json载入EventCollection，并分别explain各类事件
     ///

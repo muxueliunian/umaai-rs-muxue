@@ -1,9 +1,6 @@
 use std::{
     io::Write,
-    sync::{
-        Mutex, OnceLock,
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::{Mutex, OnceLock},
 };
 
 use anyhow::{Result, anyhow};
@@ -19,29 +16,22 @@ use crate::{
         MctsConfig, OverrideConfig, OverrideGameConfig,
     },
     game::onsen::OnsenOrder,
-    global
 };
 
 pub type Array5 = [i32; 5];
 pub type Array6 = [i32; 6];
 
-/// 记录 `flexi_logger::start()` 是否已成功调用过
+/// 串行化首次 `flexi_logger::start()` 调用
 ///
-/// 仅用于解决 `cargo test` 并行运行时的 TOCTOU 竞争问题：
-/// 多个测试同时调用 `init_logger`，但 log crate 全局状态只能初始化一次。
-/// 单纯依赖 `LOGGER.get().is_some()` 检查存在竞争窗口
-/// （A 线程 `get()` 返回 None 后被 B 线程 `set()` 抢先，
-/// 然后 A 调用 `start()` 会触发 "logger already initialized" 报错）。
+/// 历史背景：早期用 `INIT_LOCK: Mutex<()>` + `LOGGER_INIT_DONE: AtomicBool`
+/// 双重检查保护并行测试下的 flexi_logger 全局只能 init 一次的竞争。
+/// 现已统一用 `std::sync::OnceLock::get_or_init` 替代——`OnceLock` 本身用 atomic 实现
+/// "run-once + 同步"语义，比手写 Mutex + Atomic 更简洁。
 ///
-/// 设置为 true 后，后续 `init_logger` 直接返回 Ok，不再调用 `start()`。
-static LOGGER_INIT_DONE: AtomicBool = AtomicBool::new(false);
-
-/// 串行化 `init_logger` 的初始化过程
-///
-/// 在持锁状态下检查 `LOGGER_INIT_DONE`/`LOGGER` 并执行 `start()`，
-/// 保证 log crate 全局状态只被第一个线程初始化一次，
-/// 其他线程观察到 `LOGGER_INIT_DONE = true` 后直接返回 Ok。
-static INIT_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+/// `LOGGER_INIT_RESULT` 是占位 type（()），用于触发 OnceLock 的"只设一次"机制——
+/// init 闭包真正返回的 `Result<()>` 失败信息通过 `expect()` 内部 panic：
+/// log crate 启动失败属于 fatal，进程应立即退出，吞错反而难调。
+static LOGGER_INIT: OnceLock<()> = OnceLock::new();
 
 pub fn log_format(w: &mut dyn Write, _now: &mut DeferredNow, record: &Record) -> Result<(), std::io::Error> {
     let level = record.level();
@@ -63,38 +53,22 @@ pub fn init_logger(app: &str, spec: &str) -> Result<()> {
 /// - `duplicate_stderr=true`：写文件 + stderr（默认）
 /// - `duplicate_stderr=false`：只写文件，不占用 stderr（TUI 兼容）
 pub fn init_logger_with(app: &str, spec: &str, duplicate_stderr: bool) -> Result<()> {
-    // 快速路径：已初始化过则直接返回
-    if LOGGER.get().is_some() || LOGGER_INIT_DONE.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    // 串行化初始化：避免并行测试同时调用 start() 导致 log crate 重复初始化
-    let lock = INIT_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-
-    // 双重检查：持锁状态下再次检查
-    if LOGGER.get().is_some() || LOGGER_INIT_DONE.load(Ordering::Acquire) {
-        return Ok(());
-    }
-
-    let result: Result<()> = (|| {
-        let logger = flexi_logger::Logger::try_with_str(spec)?
+    LOGGER_INIT.get_or_init(|| {
+        let logger = flexi_logger::Logger::try_with_str(spec)
+            .expect("log spec 解析失败")
             .format_for_stderr(log_format)
             .log_to_file(FileSpec::default().directory("logs").basename(app));
         let logger = if duplicate_stderr {
-            logger.duplicate_to_stderr(Duplicate::All).start()?
+            logger.duplicate_to_stderr(Duplicate::All).start()
         } else {
             // 只输出到文件，不干扰 stderr（TUI 玩家测试场景）
-            logger.start()?
-        };
+            logger.start()
+        }
+        .expect("flexi_logger start 失败（log crate 全局不可重复 init）");
         // LOGGER.set 可能失败（被其他线程抢先），但只要 start 成功，log crate 已被初始化
         let _ = LOGGER.set(Mutex::new(logger));
-        Ok(())
-    })();
-    // start 成功则标记 LOG_CRATE 已初始化，后续调用直接 return Ok
-    if result.is_ok() {
-        LOGGER_INIT_DONE.store(true, Ordering::Release);
-    }
-    result
+    });
+    Ok(())
 }
 
 /// 初始化日志系统：只输出到 stdout，不写文件
@@ -105,30 +79,20 @@ pub fn init_logger_with(app: &str, spec: &str, duplicate_stderr: bool) -> Result
 ///
 /// 注意：flexi_logger 的 `log_to_stdout` 与 `log_to_file` 互斥，
 /// 所以 stdout 模式不写文件，调用方需自行处理日志持久化（如重定向 shell 输出）。
-pub fn init_logger_stdout(app: &str, spec: &str) -> Result<()> {
-    // 快速路径：已初始化过则直接返回
-    if LOGGER.get().is_some() || LOGGER_INIT_DONE.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    let lock = INIT_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-
-    if LOGGER.get().is_some() || LOGGER_INIT_DONE.load(Ordering::Acquire) {
-        return Ok(());
-    }
-
-    let result: Result<()> = (|| {
-        let logger = flexi_logger::Logger::try_with_str(spec)?
+///
+/// `app` 参数保留以维持公开签名稳定（与 `init_logger_with` 一致），但 stdout
+/// 模式不写文件，实际不使用。
+pub fn init_logger_stdout(_app: &str, spec: &str) -> Result<()> {
+    LOGGER_INIT.get_or_init(|| {
+        let logger = flexi_logger::Logger::try_with_str(spec)
+            .expect("log spec 解析失败")
             .format_for_stdout(log_format)
             .log_to_stdout()
-            .start()?;
+            .start()
+            .expect("flexi_logger start 失败");
         let _ = LOGGER.set(Mutex::new(logger));
-        Ok(())
-    })();
-    if result.is_ok() {
-        LOGGER_INIT_DONE.store(true, Ordering::Release);
-    }
-    result
+    });
+    Ok(())
 }
 
 /// 测试场景专用 logger：只输出到 stderr，不写文件。
@@ -144,33 +108,17 @@ pub fn init_logger_stdout(app: &str, spec: &str) -> Result<()> {
 /// 适用场景：仅在 `#[cfg(test)]` 模块中使用。业务 binary（umaai、ramen_manual 等）
 /// 继续使用 `init_logger` / `init_logger_with` / `init_logger_stdout`。
 pub fn init_test_logger(spec: &str) -> Result<()> {
-    // 快速路径：已初始化过则直接返回（与 init_logger_with 相同的 fast path）
-    if LOGGER.get().is_some() || LOGGER_INIT_DONE.load(Ordering::Acquire) {
-        return Ok(());
-    }
-    // 串行化初始化：避免并行测试同时调用 start() 导致 log crate 重复初始化
-    let lock = INIT_LOCK.get_or_init(|| Mutex::new(()));
-    let _guard = lock.lock().unwrap_or_else(|e| e.into_inner());
-
-    // 双重检查：持锁状态下再次检查
-    if LOGGER.get().is_some() || LOGGER_INIT_DONE.load(Ordering::Acquire) {
-        return Ok(());
-    }
-
-    let result: Result<()> = (|| {
-        let logger = flexi_logger::Logger::try_with_str(spec)?
+    LOGGER_INIT.get_or_init(|| {
+        let logger = flexi_logger::Logger::try_with_str(spec)
+            .expect("log spec 解析失败")
             .format_for_stderr(log_format)
             .log_to_stderr()      // ⚠️ 只 stderr，不写文件
-            .start()?;
+            .start()
+            .expect("flexi_logger start 失败");
         // LOGGER.set 可能失败（被其他线程抢先），但只要 start 成功，log crate 已被初始化
         let _ = LOGGER.set(Mutex::new(logger));
-        Ok(())
-    })();
-    // start 成功则标记 LOG_CRATE 已初始化，后续调用直接 return Ok
-    if result.is_ok() {
-        LOGGER_INIT_DONE.store(true, Ordering::Release);
-    }
-    result
+    });
+    Ok(())
 }
 
 /// 把当前工作目录修改为exe所在目录
