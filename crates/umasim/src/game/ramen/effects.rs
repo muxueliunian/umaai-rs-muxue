@@ -313,7 +313,7 @@ pub fn apply_ramen_training_value(
     let pt_upper = pt_upper_raw.min(pt_limit);
 
     // 调试日志：打印约束前后的 upper/lower 值（排查训练数值不对时使用）
-    log::info!(
+    crate::diag!(
         "  apply_ramen_training_value: lower={} (raw={}) \
          xunlian={} youqing={} pt_bonus={} status_limit={} pt_limit={}\n    \
          属性: status_upper_raw={} -> status_limit={} -> status_upper={} (最终={})\n    \

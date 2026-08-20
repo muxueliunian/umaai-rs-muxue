@@ -282,7 +282,7 @@ impl RamenGame {
                 self.deck[person_index].friendship = new_value;
             }
             if old_value < 100 {
-                log::info!(
+                crate::diag!(
                     "{} 羁绊+{} (={})",
                     self.persons[person_index].short_name(),
                     value,

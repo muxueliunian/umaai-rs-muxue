@@ -11,13 +11,13 @@
 use std::fmt::Display;
 
 use anyhow::{Result, anyhow};
-use log::{info, warn};
 use rand::{Rng, rngs::StdRng, seq::IndexedRandom};
 use serde::{Deserialize, Serialize};
 
 use super::{Operation, TrainingType};
 use super::rules::{fill_gauge_after_train, fill_gauge_after_non_train};
 use super::effects::{calc_ramen_training_effect, apply_ramen_training_value};
+use crate::diag;
 use crate::game::{ActionEnum, BaseAction, FriendOutState, PersonType};
 use crate::game::traits::Game;
 use crate::gamedata::{ActionValue, GAMECONSTANTS, ramen::RAMENDATA, EventData};
@@ -247,7 +247,7 @@ impl ActionEnum for RamenAction {
                     }
                     Operation::RegionSelect(regions) => {
                         game.ramen.selected_regions = regions;
-                        info!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
+                        diag!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
                     }
                     Operation::StageOnly => {
                         // Train 阶段不应收到 StageOnly 操作；若出现则忽略
@@ -260,7 +260,7 @@ impl ActionEnum for RamenAction {
                         if is_xiahesu {
                             game.uma.flags.ill = false;
                             game.uma.flags.bad_trainer = false;
-                            info!(">> 夏合宿休息：自动治病");
+                            diag!(">> 夏合宿休息：自动治病");
                         }
                         self.fill_gauge_non_train(game, is_xiahesu)?;
                     }
@@ -292,7 +292,7 @@ impl ActionEnum for RamenAction {
                 match self.operation {
                     Operation::RegionSelect(regions) => {
                         game.ramen.selected_regions = regions;
-                        info!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
+                        diag!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
                     }
                     Operation::StageOnly => {}
                     Operation::Rest => {
@@ -302,7 +302,7 @@ impl ActionEnum for RamenAction {
                         if is_xiahesu {
                             game.uma.flags.ill = false;
                             game.uma.flags.bad_trainer = false;
-                            info!(">> 夏合宿休息：自动治病");
+                            diag!(">> 夏合宿休息：自动治病");
                         }
                         self.fill_gauge_non_train(game, is_xiahesu)?;
                     }
@@ -360,7 +360,7 @@ impl RamenAction {
             return Ok(());
         };
 
-        info!(">> 超级拉面分身分配 (选项 {})", sel + 1);
+        diag!(">> 超级拉面分身分配 (选项 {})", sel + 1);
 
         // 获取所有支援卡索引（含友人卡，index 0-5）
         let card_indices: Vec<i32> = (0..6i32)
@@ -394,7 +394,7 @@ impl RamenAction {
             }
             
             if !success {
-                warn!(">> 超级拉面分身失败: {} 无法分配到任何训练位置", 
+                diag!(">> 超级拉面分身失败: {} 无法分配到任何训练位置", 
                     game.persons[person_idx as usize].short_name());
             }
         }
@@ -441,7 +441,7 @@ impl RamenAction {
             }) {
                 let removed_id = game.base.distribution[train].remove(npc_pos);
                 game.base.distribution[train].push(person_idx);
-                warn!(">> 超级拉面分身挤掉NPC: {} -> {}训练 (挤掉{})", 
+                diag!(">> 超级拉面分身挤掉NPC: {} -> {}训练 (挤掉{})", 
                     game.persons[person_idx as usize].short_name(), 
                     global!(GAMECONSTANTS).train_names[train],
                     game.persons[removed_id as usize].short_name()
@@ -453,7 +453,7 @@ impl RamenAction {
         } else {
             // 未满5人，直接添加
             game.base.distribution[train].push(person_idx);
-            info!(">> 超级拉面分身: {} -> {}训练", 
+            diag!(">> 超级拉面分身: {} -> {}训练", 
                 game.persons[person_idx as usize].short_name(), 
                 global!(GAMECONSTANTS).train_names[train]);
         }
@@ -477,7 +477,7 @@ impl RamenAction {
             return Err(anyhow!("训练类型越界: {train}"));
         }
 
-        info!(
+        diag!(
             ">> {}训练 等级 {}",
             global!(GAMECONSTANTS).train_names[train],
             game.train_level(train)
@@ -518,7 +518,7 @@ impl RamenAction {
         // ========== 详细日志：训练参数逐项分解 ==========
         let train_name = global!(GAMECONSTANTS).train_names[train].clone();
         let shining_count = game.shining_count(train);
-        info!(
+        diag!(
             "\n===== 训练参数分解 {}训练 =====\n\
              distribution={:?} shining_count={} is_shining={}",
             train_name,
@@ -539,7 +539,7 @@ impl RamenAction {
                 let (raw_effect, _) = game.deck[pidx as usize].calc_training_effect(game, train as i32)?;
                 let raw_youqing = raw_effect.youqing;
                 let final_youqing = if shining_at { raw_youqing } else { 0.0 };
-                info!(
+                diag!(
                     "  [#{pidx}] {} 类型={} 羁绊={} shining_at={} raw_youqing={:.1} final_youqing={:.1} raw_xunlian={}",
                     person.short_name(),
                     person.train_type,
@@ -551,7 +551,7 @@ impl RamenAction {
                 );
             } else {
                 // NPC / 记者 / 友人 等
-                info!(
+                diag!(
                     "  [#{pidx}] {} 类型={:?} 羁绊={} shining_at={} (非支援卡，不贡献 youqing)",
                     person.short_name(),
                     person.person_type,
@@ -561,7 +561,7 @@ impl RamenAction {
             }
         }
 
-        info!(
+        diag!(
             "  → buffs 汇总: youqing={:.1} xunlian={} failure_rate_drop={:.1} ganjing={} deyilv={:.1}",
             buffs.youqing,
             buffs.xunlian,
@@ -569,7 +569,7 @@ impl RamenAction {
             buffs.ganjing,
             buffs.deyilv,
         );
-        info!(
+        diag!(
             "  → ramen_effect: xunlian={} youqing={} deyilv={} hint={} fail_rate_drop={} pt_bonus={} status_limit={} friendship={}",
             ramen_effect.xunlian,
             ramen_effect.youqing,
@@ -580,7 +580,7 @@ impl RamenAction {
             ramen_effect.status_limit,
             ramen_effect.friendship,
         );
-        info!(
+        diag!(
             "  → failure_rate: base={:.2}% final={:.2}%\n",
             base_failure_rate,
             failure_rate,
@@ -603,12 +603,12 @@ impl RamenAction {
     ) -> Result<()> {
         // 再判断一次，如果还失败就是大失败
         if rng.random_bool(failure_rate as f64 / 100.0) {
-            warn!("训练大失败!");
+            diag!("训练大失败!");
             game.apply_event(system_event("training_fail_low")?, 0, rng)?;
             game.uma.flags.ill = true;
             game.uma.flags.bad_trainer = true;
         } else {
-            warn!("训练失败!");
+            diag!("训练失败!");
             game.apply_event(system_event("training_fail")?, 0, rng)?;
         }
         Ok(())
@@ -811,7 +811,7 @@ impl RamenAction {
             which += 1;
         }
         if which < 5 {
-            info!(">> 友人出行 #{}", which + 1);
+            diag!(">> 友人出行 #{}", which + 1);
             let key = format!("outing{}", which + 1);
             let mut event = ramen_data.friend_events[&key].clone();
             event.person_index = Some(game.friend.person_index as i32);
@@ -821,7 +821,7 @@ impl RamenAction {
             // 友人出行后获得隐藏风味（新友人固定2个）
             let special = 2;
             game.ramen.special_feeling = (game.ramen.special_feeling + special).min(4);
-            info!(">> 隐藏风味 +{} (={})", special, game.ramen.special_feeling);
+            diag!(">> 隐藏风味 +{} (={})", special, game.ramen.special_feeling);
             Ok(())
         } else {
             Err(anyhow!("友人出行越界: {which}"))
