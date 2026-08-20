@@ -7,7 +7,8 @@ use rand_distr::{Distribution, weighted::WeightedIndex};
 
 use super::PersonType;
 use crate::{
-    explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, TrainingBasicTable, TriggerType}, global
+    explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, TrainingBasicTable, TriggerType}, global,
+    output::DecisionInfo,
 };
 // Game为核心特性，
 // ActionEnum 执行动作，修改Game状态
@@ -444,5 +445,14 @@ pub trait Trainer<G: Game> {
         &self, game: &G, _event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
     ) -> Result<usize> {
         self.select_choice(game, choices, rng)
+    }
+
+    /// 上一次决策的附加上下文（Phase 3 阶段 1 占位实现）
+    ///
+    /// 默认返回 `None`：Trainer trait 保持只输出 `action_index`，
+    /// 面向用户的 Trainer（MctsTrainer / HandwrittenTrainer）按需 override 此方法。
+    /// 设计依据：见 `.trae/documents/log_refactor_plan.md` §5。
+    fn last_decision(&self) -> Option<DecisionInfo> {
+        None
     }
 }

@@ -10,6 +10,7 @@ path = "src/main.rs"
 [[bin]]
 name = "ramen_manual"
 path = "src/bin/ramen_manual.rs"
+required-features = ["diag"]
 
 # [[bin]]
 # name = "generate_training_data"
@@ -18,6 +19,17 @@ path = "src/bin/ramen_manual.rs"
 # [[bin]]
 # name = "generate_mean_filtered_data"
 # path = "src/bin/generate_mean_filtered_data.rs"
+
+# diag feature 控制 output::diag! 宏的编译期可用性：
+# - default = ["diag"]        本 crate 默认开（含 ramen_manual 等需看规则日志的 binary）
+# - diag = []                  仅为一个 cfg 开关，无运行时依赖
+#
+# 关闭方式：依赖方写 `umasim = { path = "../umasim", default-features = false }`，编译
+# 时 `diag!` 宏的整个调用体被 `#[cfg(feature = "diag")]` 消除，零运行时开销。
+# 设计依据：.trae/documents/log_refactor_plan.md §3.2 / §6
+[features]
+default = ["diag"]
+diag = []
 
 [dependencies]
 anyhow.workspace = true

@@ -4,6 +4,14 @@
 
 ## 2026-08-20
 
+### 日志模块重构（Phase 3 / 阶段 1 骨架）
+
+新增 `umasim::output` 模块（`DecisionInfo` / `diag!` 宏 / `GameView` 骨架），`Trainer` trait 加默认 `last_decision()`；umasim 加 `diag` 编译期 feature（`ramen_manual required-features` 强制开启；`umaai` / `analyzer` `default-features = false`）。详见 `log_refactor_plan.md` §7.1。10 个新测试通过、旧测试无 regression。
+
+### 测试日志简化（Phase 3 阶段 0）
+
+新增 `init_test_logger(spec)`，测试场景下只输出 stderr 不写文件；将 100+ 处测试中的 `init_logger("test", ...)` 迁移到 `init_test_logger(...)`；删除测试中 3 处 `disable_log/enable_log` 调用（cargo test 已天然隔离）。详见 `log_refactor_plan.md` 阶段 0。`info!`/`warn!` 调用完全保留，业务 binary 的 `init_logger` 三版本不变。
+
 ### 测试日志简化（Phase 3 阶段 0）
 
 新增 `init_test_logger(spec)`，测试场景下只输出 stderr 不写文件；将 100+ 处测试中的 `init_logger("test", ...)` 迁移到 `init_test_logger(...)`；删除测试中 3 处 `disable_log/enable_log` 调用（cargo test 已天然隔离）。详见 `log_refactor_plan.md` 阶段 0。`info!`/`warn!` 调用完全保留，业务 binary 的 `init_logger` 三版本不变。

@@ -17,7 +17,10 @@ windows = { version = "0.62.2", features = ["Win32", "Win32_System", "Win32_Syst
 libc = "0.2.189"
 
 [dependencies]
-umasim.workspace = true
+# AI 助手 binary：不需要规则层诊断日志，关掉 `diag` feature 以避免无谓的开销与日志噪音。
+# 不用 workspace = true 是因为 cargo 不允许子 crate 覆盖 workspace 依赖的 default-features；
+# 直接 path 引入并显式声明 default-features = false 是 cargo 1.97 下的合规做法。
+umasim = { path = "../umasim", default-features = false }
 anyhow.workspace = true
 chrono.workspace = true
 clap.workspace = true
