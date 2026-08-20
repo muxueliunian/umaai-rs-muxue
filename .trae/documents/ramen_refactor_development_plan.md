@@ -552,7 +552,7 @@ Detailed    收集所有候选动作评估
 - [x] 1c - 实现动作预览和手写策略
 - [x] 1d - 跑通拉面杯最小闭环（回合 0-77 完整流程）
 - [x] 整理用户/开发者/运行时配置（Phase 2 全部子步骤完成，详见 `config_refactor_plan.md` 与 `project_context.md` Phase 2 章节）。
-- [ ] 建立结构化事件、用户视图、诊断日志和统计级别。
+- [x] 建立结构化事件、用户视图、诊断日志和统计级别（Phase 3 全部 6 个子阶段完成：阶段 0 测试日志简化、阶段 1 `output` 模块 + `diag` feature、阶段 2 142 处规则层日志迁 `diag!`、阶段 3 决策层日志梳理、阶段 4 `GameView` + `Game::view()`、阶段 5-6 删除 `disable_log` + cargo bloat 验证 + LOGGER 锁合并；详见 `log_refactor_plan.md` 与本仓库 `changelog.md` 2026-08-20 段）。
 - [ ] 明确并整理 `umasim`、`umaai`、`analyzer` 依赖边界。
 - [ ] 建立批量模拟和性能基准。
 - [ ] 按基准结果实施搜索、复制、日志和 RNG 优化。
