@@ -26,6 +26,7 @@ rank_scores / rank_names 从 US9 之后补齐至 LS24；five_status_final_score 
 
 - 友人解锁高羁绊概率 0.3 → 0.25
 - ramen_manual 改为密码学随机种子，启动不打印
+- 新增 `tests_overview.md`：按模块分类、一句话描述全部 121 个测试，并附"规则固化后缩减参考"
 
 ## 2026-08-19
 
