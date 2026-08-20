@@ -4,9 +4,11 @@
 
 ## 2026-08-20
 
-### 日志模块重构（Phase 3 / 阶段 1 骨架）
+### 日志模块重构（Phase 3 / 阶段 1 + 阶段 2）
 
-新增 `umasim::output` 模块（`DecisionInfo` / `diag!` 宏 / `GameView` 骨架），`Trainer` trait 加默认 `last_decision()`；umasim 加 `diag` 编译期 feature（`ramen_manual required-features` 强制开启；`umaai` / `analyzer` `default-features = false`）。详见 `log_refactor_plan.md` §7.1。10 个新测试通过、旧测试无 regression。
+**阶段 1 骨架**：`umasim::output` 模块（`DecisionInfo` / `diag!` 宏 / `GameView` 骨架）；`Trainer` trait 加默认 `last_decision()`；umasim 加 `diag` 编译期 feature（`ramen_manual required-features`；`umaai` / `analyzer` `default-features = false`）。详见 `log_refactor_plan.md` §7.1。10 个新测试通过、旧测试无 regression。
+
+**阶段 2 规则层迁移**（3 个 commit 完成）：`game/base/`、`game/ramen/`、`game/onsen/game.rs`、`sample_collector.rs` 等共 14 个文件中 142 处 `log::info!` / `log::warn!` 迁至 `crate::diag!`。决策层（`trainer/`）的日志按设计保持 `log::info!` 不变。134 个测试在迁移前后均全部通过；release 编译（含 `ramen_manual` `required-features = ["diag"]`）正常。详见 `log_refactor_plan.md` §7.2。
 
 ### 测试日志简化（Phase 3 阶段 0）
 
