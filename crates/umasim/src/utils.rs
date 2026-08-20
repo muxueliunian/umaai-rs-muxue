@@ -9,7 +9,7 @@ use std::{
 use anyhow::{Result, anyhow};
 use colored::Colorize;
 use comfy_table::Table;
-use flexi_logger::{DeferredNow, Duplicate, FileSpec, LogSpecification, style};
+use flexi_logger::{DeferredNow, Duplicate, FileSpec, style};
 use log::{Record, error, info};
 use serde::Serialize;
 
@@ -171,23 +171,6 @@ pub fn init_test_logger(spec: &str) -> Result<()> {
         LOGGER_INIT_DONE.store(true, Ordering::Release);
     }
     result
-}
-
-pub fn disable_log() {
-    // LOGGER 未初始化时直接返回（init_logger 之前/之后/被 reset 都可能触发）
-    if let Some(logger) = LOGGER.get() {
-        logger
-            .lock()
-            .expect("logger lock")
-            .push_temp_spec(LogSpecification::off());
-    }
-}
-
-pub fn enable_log() {
-    // 与 disable_log 配对：仅在 LOGGER 已初始化时恢复
-    if let Some(logger) = LOGGER.get() {
-        logger.lock().expect("logger lock").pop_temp_spec();
-    }
 }
 
 /// 把当前工作目录修改为exe所在目录

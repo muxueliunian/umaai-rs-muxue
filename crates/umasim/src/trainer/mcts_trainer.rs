@@ -23,7 +23,7 @@ use crate::{
         InheritInfo,
         Trainer,
         onsen::{action::OnsenAction, game::OnsenGame}
-    }, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, LOGGER}, global, neural::{Evaluator, HandwrittenEvaluator}, search::{FlatSearch, SearchConfig, SearchOutput}, utils::{disable_log, enable_log, format_luck}
+    }, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, LOGGER}, global, neural::{Evaluator, HandwrittenEvaluator}, search::{FlatSearch, SearchConfig, SearchOutput}, utils::format_luck
 };
 
 /// MCTS 训练员
@@ -282,15 +282,16 @@ impl Trainer<OnsenGame> for MctsTrainer {
             }
             return Ok(idx);
         }
-        disable_log();
-        // 使用 MCTS 搜索
+        // 使用 MCTS 搜索（Phase 3 / 阶段 5：不再用 disable_log/enable_log 包住，
+        // 因为规则层日志已通过 diag! 的 `diag` feature 编译期裁剪：
+        //   - umasi/analyzer（feature 关）：搜索期间不产生任何 diag
+        //   - ramen_manual（feature 开）：搜索期间输出诊断信息是开发工具的合理行为）
         let search_output = self.search.search(game, actions, rng)?;
         {
             // 保存搜索结果
             let mut s = self.search_output.lock().map_err(|_| anyhow!("lock failed"))?;
             *s = search_output.clone();
         }
-        enable_log();
 
         let best_action = search_output.best_action();
         let best_action_2 = search_output.best_action_pt();
