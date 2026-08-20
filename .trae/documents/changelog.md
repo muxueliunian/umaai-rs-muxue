@@ -10,6 +10,12 @@
 
 **阶段 2 规则层迁移**（3 个 commit 完成）：`game/base/`、`game/ramen/`、`game/onsen/game.rs`、`sample_collector.rs` 等共 14 个文件中 142 处 `log::info!` / `log::warn!` 迁至 `crate::diag!`。决策层（`trainer/`）的日志按设计保持 `log::info!` 不变。134 个测试在迁移前后均全部通过；release 编译（含 `ramen_manual` `required-features = ["diag"]`）正常。详见 `log_refactor_plan.md` §7.2。
 
+**阶段 4 GameView 字段完整化**：`output::view::GameView` 由 4 字段扩至 8 字段（新增 `max_turn`/`max_vital`/`skill_pt`/`total_hints`）；`Game` trait 加默认 `fn view(&self) -> GameView`，从 `turn()`/`max_turn()`/`uma()` 公共字段填充（`scenario` 字段留空，各剧本按需 override）。新增 `test_view_default` 验证字段链路。详见 `log_refactor_plan.md` §7.4。
+
+**阶段 5 disable_log 优化**：删除 `utils::disable_log` / `utils::enable_log` 公共函数（`mcts_trainer.rs` 是唯一调用方）；阶段 2 后规则层日志已通过 `diag!` 的 `diag` feature 编译期裁剪，`umaai`/`analyzer`（feature 关）搜索期间不再产生任何 diag，无需静音；`ramen_manual`（feature 开）作为开发工具搜索期间输出诊断信息合理。`LOGGER_INIT_DONE` / `INIT_LOCK` 并发初始化锁保留（继续保护并行 cargo test 下的 flexi_logger 全局状态）。
+
+**阶段 6 cargo bloat 验证**：`diag` feature 关闭 vs 开启时 `libumasim.rlib` 对比 — 字节大小减少 274,978 字节（~270 KB / 0.76%）；`"diagnostic"` 字符串命中从 19 次降至 6 次（13 处 call site 的 target 完全消除）；确认阶段 1 设计的"feature 关时零运行时开销"目标达成。
+
 ### 测试日志简化（Phase 3 阶段 0）
 
 新增 `init_test_logger(spec)`，测试场景下只输出 stderr 不写文件；将 100+ 处测试中的 `init_logger("test", ...)` 迁移到 `init_test_logger(...)`；删除测试中 3 处 `disable_log/enable_log` 调用（cargo test 已天然隔离）。详见 `log_refactor_plan.md` 阶段 0。`info!`/`warn!` 调用完全保留，业务 binary 的 `init_logger` 三版本不变。
