@@ -8,7 +8,7 @@ use super::PersonType;
 use crate::{
     diag,
     explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, TrainingBasicTable, TriggerType}, global,
-    output::DecisionInfo,
+    output::{DecisionInfo, GameView},
 };
 // Game为核心特性，
 // ActionEnum 执行动作，修改Game状态
@@ -430,6 +430,29 @@ pub trait Game: Clone {
         // 如果有不擅长练习，失败率可能达到100%
         f = (f * (100.0 - buffs.fail_rate_drop) / 100.0 + bias).min(100.0).max(0.0);
         f
+    }
+
+    /// provided: 游戏状态的结构化展示（Phase 3 / 阶段 4）
+    ///
+    /// 默认实现从 `Game` 公共接口（`turn()`/`max_turn()`/`uma()`）填充，
+    /// `scenario` 字段留空——具体剧本 override 此方法以填入剧本名
+    /// （如 `OnsenGame::view` 填 `"onsen"`）。
+    ///
+    /// 与 `explain()` 的关系：`explain()` 是开发者诊断快照（含 Array5
+    /// 等多义性结构），`view()` 是面向下游消费者的结构化字段。两者并存。
+    /// 设计依据：见 `.trae/documents/log_refactor_plan.md` §7.4。
+    fn view(&self) -> GameView {
+        let uma = self.uma();
+        GameView {
+            scenario: String::new(),
+            turn: (self.turn() + 1).max(0) as u32,
+            max_turn: self.max_turn().max(0) as u32,
+            vital: uma.vital,
+            max_vital: uma.max_vital,
+            motivation: uma.motivation,
+            skill_pt: uma.skill_pt,
+            total_hints: uma.total_hints,
+        }
     }
 }
 

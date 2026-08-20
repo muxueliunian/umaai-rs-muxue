@@ -609,4 +609,34 @@ mod tests {
         );
         Ok(())
     }
+
+    /// GameView 默认实现测试：BasicGame 应能 fill 各公共字段
+    #[test]
+    fn test_view_default() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+        let game = BasicGame::newgame(101901, &[302424, 302464, 302484, 302564, 302574, 302644], InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        })?;
+        let view = game.view();
+        // 默认 view()：scenario 字段留空（具体剧本 override fill）
+        assert_eq!(view.scenario, "");
+        // turn 从 0-based 转 1-based
+        assert_eq!(view.turn, 1);
+        assert_eq!(view.max_turn, game.max_turn() as u32);
+        // vital/motivation/pt/hint 从 game.uma() 公共字段取
+        assert_eq!(view.vital, game.uma().vital);
+        assert_eq!(view.max_vital, game.uma().max_vital);
+        assert_eq!(view.motivation, game.uma().motivation);
+        assert_eq!(view.skill_pt, game.uma().skill_pt);
+        assert_eq!(view.total_hints, game.uma().total_hints);
+
+        // GameView 必须能 serde 序列化
+        let json = serde_json::to_string(&view)?;
+        assert!(json.contains("\"turn\":1"));
+        Ok(())
+    }
 }

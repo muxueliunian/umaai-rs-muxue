@@ -16,5 +16,6 @@ pub mod diagnostic;
 pub mod view;
 
 pub use decision::DecisionInfo;
+pub use view::GameView;
 // 注意：`#[macro_export]` 标记的 `diag!` 宏已经在 crate 根全局可见（`umasim::diag!` 可直接调用），
 // 不能再用 `pub use diagnostic::diag;` 重新导出——宏不是普通 item，不支持 re-export。
