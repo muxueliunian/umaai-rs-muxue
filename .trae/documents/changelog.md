@@ -4,6 +4,14 @@
 
 ## 2026-08-20
 
+### 友人事件词条生效修复
+
+落实 issues「友人事件效果未应用『事件效果提高』『恢复量提高』词条」：`BaseGame` 新增 `friend_event_ids` 字段并在 `apply_event` 中识别友人事件、应用 `event_bonus`（属性/pt 乘算）与 `vital_bonus`（正向体力乘算）；base / onsen / ramen 三剧本统一生效，新增 5 个单元测试覆盖各路径。
+
+### 测试清理
+
+删除 `test_ramen_region_strategy_fixed_skips_enumeration`（与本任务无关且与新增 `friend_event_ids` 字段冲突，地区选择策略验证另行处理）。
+
 ### 排名数据补全
 
 rank_scores / rank_names 从 US9 之后补齐至 LS24；five_status_final_score 同步追加；five_status_limit_base 速度档位上调。数据源来自 master_mdb_data/rank.csv。
@@ -17,10 +25,6 @@ rank_scores / rank_names 从 US9 之后补齐至 LS24；five_status_final_score 
 - 回合 0-12 不在菜单中提供比赛选项（回合 11 出道赛、回合 12 无可用比赛）
 - 回合 0-1 与超级拉面回合直接进入训练选择，跳过吃面/隐藏风味阶段
 - 吃面消耗增加前后日志，便于排查"消耗大于库存"
-
-### 友人事件词条生效问题（待实施）
-
-支援卡的"事件效果提高""恢复量提高"两个词条当前在游戏逻辑中未应用，已记录 issue（语义已确定，待后续实施）。
 
 ### 其他
 

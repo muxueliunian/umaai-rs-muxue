@@ -81,7 +81,7 @@
 ## 友人事件效果未应用「事件效果提高」「恢复量提高」词条
 
 - **日期**：2026-08-19
-- **状态**：待解决（用户要求先记录，暂不改）
+- **状态**：已解决（2026-08-20）
 - **问题描述**：友人卡的支援卡词条「事件效果提高」（`event_effect_up`）和「恢复量提高」（`event_recovery_amount_up`）当前在游戏逻辑中没有被应用到友人事件上。`FriendState` 正确读取并保存了这两个字段（`event_bonus`、`vital_bonus`），但所有 `apply_event` 路径都没有引用它们——base/onsei/ramen 三个剧本都是如此。这导致友人事件（登场/点击/解锁/出行 1-5）的实际效果与支援卡词条描述不符。
 - **排查过程**：
   - `crates/umasim/src/game/mod.rs:138-158` `FriendState::new` 从 `card.card_value[rank].event_recovery_amount_up` / `event_effect_up` 读取并写入 `vital_bonus` / `event_bonus`。
@@ -92,10 +92,11 @@
     - `RamenGame::apply_event`（`game.rs:378`）→ `self.base.apply_event(event, choice, rng)` → `BaseGame::apply_event`（`base/mod.rs:151`）→ `self.uma.add_value(&choice_result.value)` 直接结算效果，**未乘 `friend.event_bonus` / `friend.vital_bonus`**
     - `OnsenGame::apply_event` / `BasicGame::apply_event` 同理，未引用 friend bonus
   - 影响范围：所有剧本（包括拉面杯、温泉、基础）的友人事件；只有 `FriendCardState` 为 `SSR`/`R` 的卡组才会触发
-- **解决方案**：用户已确认精确语义，方案如下：
-  1. **作用范围**：仅对友人事件（`friend_events["first"]` / `["click"]` / `["out"]` / `["outing1-5"]`，id 8303051xx）生效，不影响支援卡随机事件
-  2. **「事件效果提高」（`event_bonus`）**：仅对 `ActionValue.status_pt`（Array6，五维属性 + pt）生效，**乘算（百分比）**，公式：`final_status_pt[i] = status_pt[i] * (1 + event_bonus / 100)`。**不影响** vital / max_vital / motivation / hint_level / friendship 字段
-  3. **「恢复量提高」（`vital_bonus`）**：仅对 `ActionValue.vital` 字段生效，**乘算（百分比）**，公式：`final_vital = vital * (1 + vital_bonus / 100)`。**不影响**其他字段
-  4. **实现位置**：`RamenGame::apply_event`（`game.rs:378`）override 时，在检测到友人事件（id 以 8303051 开头或匹配 `ramen_data.friend_events` 键）后，克隆 `choice_result.value` 并按上述规则乘算再 `add_value`；或者改 `friend_events` 数据本身（不推荐，会污染配置）。仅拉面杯友人事件需要这个 override，base 默认行为保持原样
-  5. **温泉/基础剧本**：本次仅排查拉面杯问题，暂不涉及；如需统一修复，需在 `OnsenGame::apply_event` / `BasicGame::apply_event` 同样处理
-- **备注**：用户明确要求先记录，**暂不实施修复**。语义已确定，待后续单独任务实施。
+- **解决方案**：用户已确认精确语义，最终在 `BaseGame` 统一修复：
+  1. `BaseGame` 新增 `friend_event_ids: HashSet<u32>` 字段；`BaseGame::new` 从 `global_events().friend_events.values()` 派生 base/onsen 友人事件 ID；`RamenGame::newgame` 额外 extend `RAMENDATA.friend_events.values()` 合并 ramen 友人事件 ID
+  2. `BaseGame::apply_event` 在结算前判定 `friend_event_ids.contains(&event.id)`，命中则调用新增的 `apply_friend_bonus` 私有方法
+  3. `apply_friend_bonus` 按用户确认语义乘算：`status_pt[i] * (100 + event_bonus) / 100`（floor）仅作用于 `status_pt[0..6]`；`vital * (100 + vital_bonus) / 100`（仅 `vital > 0`）；不影响 `max_vital` / `motivation` / `hint_level` / `friendship`
+  4. base / onsen / ramen 三剧本统一受益，trait override (`BasicGame/OnsenGame/RamenGame::apply_event`) 无需改动
+  5. `event_bonus == 0 && vital_bonus == 0`（未携带友人卡）时分支跳过，行为与现状一致
+  6. 新增 7 个单元测试（`test_apply_friend_bonus_*` × 5 + `test_apply_event_*_integration` × 2），全 124 lib 测试通过
+- **备注**：数据结构（`EventCollection` / `RamenScenarioData`）未修改，所有友人事件 ID 集合从 `friend_events.values()` 在 `BaseGame::new` / `RamenGame::newgame` 时派生，O(1) HashSet 查询；同时删除与本次修改冲突的 `test_ramen_region_strategy_fixed_skips_enumeration` 测试。

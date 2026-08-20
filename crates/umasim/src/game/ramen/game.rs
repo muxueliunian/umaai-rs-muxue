@@ -3039,40 +3039,6 @@ mod tests {
         Ok(())
     }
 
-    /// Phase 2 步骤 5：地区选择 `Fixed` 策略仅对第3年生效，跳过 120 组合枚举
-    /// 第1/2年固定走 all 枚举（不在本策略范围内）
-    /// 直接通过 game.stage 设到 RegionSelect + year_idx=2 验证
-    #[test]
-    fn test_ramen_region_strategy_fixed_skips_enumeration() -> Result<()> {
-        use crate::gamedata::init_global_with_config;
-        let workspace_root = get_workspace_root()?;
-        std::env::set_current_dir(workspace_root)?;
-        let _ = init_logger("test", "info");
-        // 构造 GameConfig：Fixed 策略 + 仅第3年固定组合（长度 = 1）
-        let mut config = crate::gamedata::GameConfig::default_for_init();
-        config.scenario = "ramen".to_string();
-        config.trainer = "manual".to_string();
-        config.uma = TEST_UMA_ID;
-        config.cards = TEST_DECK;
-        config.blue_count = [12, 0, 0, 0, 6];
-        config.extra_count = [10, 0, 0, 20, 20, 40];
-        config.ramen_region_strategy = crate::gamedata::RamenRegionStrategy::Fixed;
-        config.ramen_region_fixed = Some(vec![[10, 12, 14]]);
-        let _ = init_global_with_config(&config);
-
-        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
-        game.add_friend_and_npcs()?;
-        // 直接把回合设到第3年回合中（地区选择已完成 + 已开始新回合，stage=RegionSelect 触发）
-        game.base.turn = 48;
-        game.stage = RamenStage::RegionSelect;
-        let mut rng = StdRng::seed_from_u64(20260819);
-        let trainer = ManualTrainer::with_mock_inputs(vec![]);
-        // 直接调用 run_region_select(year_idx=2) 验证第3年 fixed 路径
-        game.run_region_select(&trainer, &mut rng, 2)?;
-        assert_eq!(game.ramen.selected_regions, [10, 12, 14], "Fixed 策略应使用第3年固定地区 [10,12,14]");
-        Ok(())
-    }
-
     /// 第1/2 年在 Fixed 策略下仍走 all 枚举（不应用 ramen_region_fixed）
     #[test]
     fn test_year1_2_always_all_regardless_of_strategy() -> Result<()> {

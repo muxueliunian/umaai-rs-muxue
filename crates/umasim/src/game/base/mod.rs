@@ -1,7 +1,7 @@
 pub mod action;
 pub mod basic;
 pub mod person;
-use std::{default::Default, sync::Arc};
+use std::{collections::HashSet, default::Default, sync::Arc};
 
 pub use action::*;
 use anyhow::Result;
@@ -11,7 +11,7 @@ pub use person::*;
 use rand::{rngs::StdRng, seq::IndexedRandom};
 
 use crate::{
-    explain::Explain, game::*, gamedata::{ChoiceResult, EventChoice, EventData, TriggerType}, utils::*
+    explain::Explain, game::*, gamedata::{ActionValue, ChoiceResult, EventChoice, EventData, TriggerType}, utils::*
 };
 
 /// 一局游戏的基本状态，剧本通用，用于计算，不用于通信(例如通信只传递卡组id)
@@ -43,7 +43,10 @@ pub struct BaseGame {
     /// 本回合内还没触发的事件(Hint, 点击友人等)
     pub unresolved_events: Vec<EventData>,
     /// 每种训练卡数量，用于训练倾向和固有判断
-    pub card_type_count: Arc<[i32; 7]>
+    pub card_type_count: Arc<[i32; 7]>,
+    /// 友人事件 ID 集合（base/onsen 从 global_events.friend_events 派生；
+    /// ramen 在 `RamenGame::newgame` 中额外合并 `RAMENDATA.friend_events`）
+    pub friend_event_ids: HashSet<u32>
 }
 
 impl BaseGame {
@@ -112,7 +115,10 @@ impl BaseGame {
             events: HashMap::new(),
             absent_rate_drop: 0,
             unresolved_events: vec![],
-            card_type_count: Arc::new(card_type_count)
+            card_type_count: Arc::new(card_type_count),
+            // 从 global_events().friend_events.values() 派生友人事件 ID
+            // （base/onsen 用；ramen 在 RamenGame::newgame 中额外合并 RAMENDATA.friend_events）
+            friend_event_ids: global_events().friend_events.values().map(|e| e.id).collect()
         })
     }
 
@@ -151,9 +157,14 @@ impl BaseGame {
     pub fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Option<EventChoice> {
         self.events.entry(event.id).and_modify(|x| *x += 1).or_insert(1);
         if !event.choices.is_empty() {
-            if let Some(choice_result) = self.random_select_choice_result(&event.choices[choice], rng) {
+            if let Some(mut choice_result) = self.random_select_choice_result(&event.choices[choice], rng) {
                 if choice_result.result > 0 {
                     info!("事件结果: {}", ChoiceResult::try_from(choice_result.result).unwrap_or_default());
+                }
+                // 友人事件：应用 friend.event_bonus / vital_bonus 乘算
+                // （base/onsen/ramen 三剧本统一处理；详见 FriendState 字段语义）
+                if self.friend_event_ids.contains(&event.id) {
+                    Self::apply_friend_bonus(&mut choice_result.value, &self.friend);
                 }
                 self.uma.add_value(&choice_result.value);
                 Some(choice_result)
@@ -162,6 +173,29 @@ impl BaseGame {
             }
         } else {
             None
+        }
+    }
+
+    /// 对 ActionValue 应用友人卡词条 bonus 乘算
+    ///
+    /// - `event_bonus`（支援卡「事件效果提高」词条）：仅对 `status_pt[0..6]`（五维 + pt）乘算，
+    ///   公式 `status_pt[i] = status_pt[i] * (100 + event_bonus) / 100`（floor 除法）。
+    ///   不影响 vital / max_vital / motivation / hint_level / friendship。
+    /// - `vital_bonus`（支援卡「恢复量提高」词条）：仅对 `vital > 0` 乘算，
+    ///   公式 `vital = vital * (100 + vital_bonus) / 100`（floor 除法）。
+    ///   仅正向体力恢复生效，负向体力消耗不受影响。
+    fn apply_friend_bonus(value: &mut ActionValue, friend: &FriendState) {
+        if friend.event_bonus != 0 {
+            let multiplier = 100 + friend.event_bonus;
+            for i in 0..6 {
+                if value.status_pt[i] != 0 {
+                    value.status_pt[i] = value.status_pt[i] * multiplier / 100;
+                }
+            }
+        }
+        if friend.vital_bonus != 0 && value.vital > 0 {
+            let multiplier = 100 + friend.vital_bonus;
+            value.vital = value.vital * multiplier / 100;
         }
     }
 
@@ -274,6 +308,213 @@ mod tests {
         println!("{}", game.explain()?);
         let score = game.uma.calc_score();
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
+        Ok(())
+    }
+
+    // ========== 友人事件效果加成/恢复量加成测试 ==========
+
+    /// 验证 `event_bonus` 对 `status_pt` 的乘算（floor 除法）
+    #[test]
+    fn test_apply_friend_bonus_status_pt() -> Result<()> {
+        // 9 * 130 / 100 = 11
+        let mut value = ActionValue {
+            status_pt: [10, 0, 0, 9, 0, 20],
+            ..Default::default()
+        };
+        let mut friend = FriendState::default();
+        friend.event_bonus = 30;
+
+        BaseGame::apply_friend_bonus(&mut value, &friend);
+
+        println!("event_bonus=30 status_pt=[10,0,0,9,0,20] -> {:?}", value.status_pt);
+        // 10 * 130 / 100 = 13; 9 * 130 / 100 = 11; 20 * 130 / 100 = 26
+        assert_eq!(value.status_pt, [13, 0, 0, 11, 0, 26]);
+        Ok(())
+    }
+
+    /// 验证 `vital_bonus` 对正向 `vital` 的乘算
+    #[test]
+    fn test_apply_friend_bonus_vital() -> Result<()> {
+        let mut value = ActionValue {
+            vital: 25,
+            ..Default::default()
+        };
+        let mut friend = FriendState::default();
+        friend.vital_bonus = 50;
+
+        BaseGame::apply_friend_bonus(&mut value, &friend);
+
+        println!("vital_bonus=50 vital=25 -> vital={}", value.vital);
+        // 25 * 150 / 100 = 37
+        assert_eq!(value.vital, 37);
+        Ok(())
+    }
+
+    /// 验证 `event_bonus` 和 `vital_bonus` 都不影响 max_vital / motivation / hint_level / friendship
+    #[test]
+    fn test_apply_friend_bonus_other_fields_unchanged() -> Result<()> {
+        let mut value = ActionValue {
+            status_pt: [10, 5, 3, 0, 0, 20],
+            vital: 25,
+            max_vital: 4,
+            motivation: 1,
+            hint_level: 2,
+            friendship: 15
+        };
+        let mut friend = FriendState::default();
+        friend.event_bonus = 50;
+        friend.vital_bonus = 30;
+
+        BaseGame::apply_friend_bonus(&mut value, &friend);
+
+        println!("event_bonus=50 vital_bonus=30 -> {:?}", value);
+        // status_pt: 10*150/100=15, 5*150/100=7, 3*150/100=4, 20*150/100=30
+        assert_eq!(value.status_pt, [15, 7, 4, 0, 0, 30]);
+        // vital: 25 * 130 / 100 = 32
+        assert_eq!(value.vital, 32);
+        // max_vital / motivation / hint_level / friendship 不受加成影响
+        assert_eq!(value.max_vital, 4);
+        assert_eq!(value.motivation, 1);
+        assert_eq!(value.hint_level, 2);
+        assert_eq!(value.friendship, 15);
+        Ok(())
+    }
+
+    /// 验证 bonus 全为 0 时 value 原样不变（向后兼容）
+    #[test]
+    fn test_apply_friend_bonus_no_bonus() -> Result<()> {
+        let mut value = ActionValue {
+            status_pt: [10, 5, 3, 0, 0, 20],
+            vital: 25,
+            max_vital: 4,
+            motivation: 1,
+            hint_level: 2,
+            friendship: 15
+        };
+        let friend = FriendState::default(); // event_bonus = 0, vital_bonus = 0
+
+        BaseGame::apply_friend_bonus(&mut value, &friend);
+
+        println!("no bonus -> {:?}", value);
+        assert_eq!(value.status_pt, [10, 5, 3, 0, 0, 20]);
+        assert_eq!(value.vital, 25);
+        assert_eq!(value.max_vital, 4);
+        assert_eq!(value.motivation, 1);
+        assert_eq!(value.hint_level, 2);
+        assert_eq!(value.friendship, 15);
+        Ok(())
+    }
+
+    /// 验证 `vital_bonus` 仅对正向体力恢复生效，不影响负向体力消耗
+    #[test]
+    fn test_apply_friend_bonus_vital_negative_not_affected() -> Result<()> {
+        let mut value = ActionValue {
+            vital: -10,
+            ..Default::default()
+        };
+        let mut friend = FriendState::default();
+        friend.vital_bonus = 50;
+
+        BaseGame::apply_friend_bonus(&mut value, &friend);
+
+        println!("vital=-10 with vital_bonus=50 -> vital={}", value.vital);
+        // 负向体力消耗不被 vital_bonus 影响
+        assert_eq!(value.vital, -10);
+        Ok(())
+    }
+
+    /// 验证 `BaseGame::apply_event` 路径应用 friend bonus 的集成测试
+    #[test]
+    fn test_apply_event_friend_bonus_integration() -> Result<()> {
+        use rand::SeedableRng;
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        // 构造带友人卡的 BaseGame（302574 是 hotaku 友人）
+        let mut game = BaseGame::new(
+            101901,
+            &[302424, 302464, 302484, 302564, 302574, 302644],
+            InheritInfo {
+                blue_count: [15, 3, 0, 0, 0],
+                extra_count: [0, 30, 0, 0, 30, 30]
+            }
+        )?;
+        // 强制设置可预测的 friend bonus
+        game.friend.event_bonus = 30;
+        game.friend.vital_bonus = 20;
+
+        // 取 base 剧本的友人事件 first（id=809050001, status_pt=[0,0,9,9,9,0]）
+        let friend_event = global_events().friend_events["first"].clone();
+        println!("友人事件 first: id={}, choices={:?}", friend_event.id, friend_event.choices);
+        // 验证 ID 已被 BaseGame::new 自动加入
+        assert!(game.friend_event_ids.contains(&friend_event.id),
+            "friend_event.id={} 应该已加入 friend_event_ids", friend_event.id);
+
+        // 记录初始状态
+        let init_status = game.uma.five_status;
+        let init_skill_pt = game.uma.skill_pt;
+        let init_vital = game.uma.vital;
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        game.apply_event(&friend_event, 0, &mut rng);
+
+        println!("应用前 status={:?} skill_pt={} vital={}", init_status, init_skill_pt, init_vital);
+        println!("应用后 status={:?} skill_pt={} vital={}", game.uma.five_status, game.uma.skill_pt, game.uma.vital);
+
+        // first 事件 value: status_pt=[0,0,9,9,9,0], motivation=1, friendship=10, max_vital=4
+        // event_bonus=30 乘算: 9*130/100 = 11
+        // 期望: five_status[2]+=11, five_status[3]+=11, five_status[4]+=11
+        //       skill_pt += 0（status_pt[5]=0）
+        //       vital += 0（vital 未在 first 中）
+        assert_eq!(game.uma.five_status[0] - init_status[0], 0);
+        assert_eq!(game.uma.five_status[1] - init_status[1], 0);
+        assert_eq!(game.uma.five_status[2] - init_status[2], 11, "根性应该 +11 (9 * 130 / 100)");
+        assert_eq!(game.uma.five_status[3] - init_status[3], 11, "智力应该 +11 (9 * 130 / 100)");
+        assert_eq!(game.uma.five_status[4] - init_status[4], 11, "pt=0 不变（其实是五维第4个，pt 是 status_pt[5]）");
+        assert_eq!(game.uma.skill_pt - init_skill_pt, 0, "pt=0 不变");
+        Ok(())
+    }
+
+    /// 验证友人卡词条无加成时（即 friend.event_bonus=0, vital_bonus=0），
+    /// apply_event 行为与现状一致（向后兼容）
+    #[test]
+    fn test_apply_event_no_friend_bonus_backward_compatible() -> Result<()> {
+        use rand::SeedableRng;
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_logger("test", "info")?;
+        init_global()?;
+
+        // 不带友人卡的卡组：5 张普通支援卡 + 1 张 type<5 支援卡（没有友人）
+        // 实际 card_id=302424 不带友人（card_type<5）
+        // 改用一组全部非友人的卡组来保证 friend.event_bonus=0
+        // 这里直接用不带友人的卡组：[302424, 302464, 302484, 302564, 302644, 302694]
+        let mut game = BaseGame::new(
+            101901,
+            &[302424, 302464, 302484, 302564, 302644, 302694],
+            InheritInfo {
+                blue_count: [15, 3, 0, 0, 0],
+                extra_count: [0, 30, 0, 0, 30, 30]
+            }
+        )?;
+        // 验证 friend.event_bonus 和 vital_bonus 都是 0
+        assert_eq!(game.friend.event_bonus, 0);
+        assert_eq!(game.friend.vital_bonus, 0);
+
+        // 取 base 剧本的友人事件 first
+        let friend_event = global_events().friend_events["first"].clone();
+        let init_status = game.uma.five_status;
+        let mut rng = rand::rngs::StdRng::seed_from_u64(42);
+        game.apply_event(&friend_event, 0, &mut rng);
+
+        // 期望 status_pt 原样应用: status_pt=[0,0,9,9,9,0]
+        assert_eq!(game.uma.five_status[2] - init_status[2], 9);
+        assert_eq!(game.uma.five_status[3] - init_status[3], 9);
+        assert_eq!(game.uma.five_status[4] - init_status[4], 9);
         Ok(())
     }
 }

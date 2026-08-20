@@ -209,6 +209,11 @@ impl RamenGame {
             current_effect: RamenEffect::default(),
             deck_can_split: false
         };
+        // 合并拉面杯剧本的友人事件 ID（base 已包含 global_events.friend_events 的 ID）
+        // 让 apply_event 能正确识别 8303051xx 的友人事件并应用 friend.event_bonus / vital_bonus
+        ret.base.friend_event_ids.extend(
+            global!(RAMENDATA).friend_events.values().map(|e| e.id)
+        );
         // 五维属性上限：拉面杯剧本数据覆盖（Phase 2 步骤 1：从 constants.json 隔离到 scenario_ramen）
         // 若 scenario_ramen.json 未提供该字段，回退到全局默认值（防御）
         if let Some(limit) = global!(RAMENDATA).five_status_limit_base {
