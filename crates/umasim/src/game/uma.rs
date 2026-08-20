@@ -2,10 +2,10 @@ use std::default::Default;
 
 use anyhow::Result;
 use colored::Colorize;
-use log::{info, warn};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    diag,
     explain::Explain,
     gamedata::{ActionValue, EventChoice, FreeRaceData, GAMECONSTANTS, GAMEDATA, UmaData},
     global,
@@ -234,7 +234,7 @@ impl Uma {
     }
 
     pub fn add_value(&mut self, action: &ActionValue) -> &mut Self {
-        info!("{}", action.explain().bright_black());
+        diag!("{}", action.explain().bright_black());
         for i in 0..5 {
             self.five_status[i] = (self.five_status[i] + action.status_pt[i]).min(self.five_status_limit[i]);
         }
@@ -250,11 +250,11 @@ impl Uma {
     pub fn update_flags(&mut self, choice: &EventChoice) -> &mut Self {
         if let Some(flags) = &choice.add_flags {
             self.flags.add(&flags);
-            warn!("获得状态: {}", flags.explain());
+            diag!("获得状态: {}", flags.explain());
         }
         if let Some(flags) = &choice.remove_flags {
             self.flags.remove(&flags);
-            warn!("失去状态: {}", flags.explain());
+            diag!("失去状态: {}", flags.explain());
         }
 
         self

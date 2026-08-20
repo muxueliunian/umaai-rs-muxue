@@ -6,6 +6,7 @@ use rand_distr::{Distribution, weighted::WeightedIndex};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    diag,
     game::{base::*, *},
     gamedata::{ActionValue, GAMECONSTANTS}
 };
@@ -46,7 +47,7 @@ impl BaseAction {
     pub fn do_race(game: &mut BaseGame, _rng: &mut StdRng) -> Result<()> {
         let race_bonus = (100 + game.uma.race_bonus) as f32 / 100.0;
         if game.uma.is_race_turn(game.turn) {
-            info!(">> 生涯比赛 - 比赛加成: {}", game.uma.race_bonus);
+            diag!(">> 生涯比赛 - 比赛加成: {}", game.uma.race_bonus);
             let mut event = system_event("race_career")?.clone();
             // 事件面板乘算比赛加成
             event.map_status(|x| (x as f32 * race_bonus).round() as i32);
@@ -54,7 +55,7 @@ impl BaseAction {
             game.uma.set_race(game.turn);
         } else {
             let grade = global!(GAMECONSTANTS).race_grades[game.turn as usize];
-            info!(">> 自选比赛 G{grade} - 比赛加成: {}", game.uma.race_bonus);
+            diag!(">> 自选比赛 G{grade} - 比赛加成: {}", game.uma.race_bonus);
             let event_name = format!("race_g{grade}");
             let mut event = system_event(&event_name)?.clone();
             // 事件面板乘算比赛加成
@@ -78,17 +79,17 @@ impl BaseAction {
             let mut value = ActionValue::default();
             match weights.sample(rng) {
                 0 => {
-                    info!(">> 休息 - 寝不足");
+                    diag!(">> 休息 - 寝不足");
                     value.vital = 30;
                     game.uma.add_value(&value);
                 }
                 1 => {
-                    info!(">> 休息 - 正常");
+                    diag!(">> 休息 - 正常");
                     value.vital = 50;
                     game.uma.add_value(&value);
                 }
                 _ => {
-                    info!(">> 休息 - 大成功");
+                    diag!(">> 休息 - 大成功");
                     value.vital = 70;
                     game.uma.add_value(&value);
                 }
@@ -103,7 +104,7 @@ impl BaseAction {
             which += 1;
         }
         if which < 5 {
-            info!(">> 友人出行 #{}", which + 1);
+            diag!(">> 友人出行 #{}", which + 1);
             let mut event = global_events().friend_events[&(1 + which).to_string()].clone();
             event.person_index = Some(game.friend.person_index as i32);
             game.friend.out_used[which] = true;
@@ -127,7 +128,7 @@ impl BaseAction {
     }
 
     pub fn do_clinic(game: &mut BaseGame, _rng: &mut StdRng) -> Result<()> {
-        info!(">> 治病");
+        diag!(">> 治病");
         let value = ActionValue { vital: 20, ..Default::default() };
         game.uma.flags.ill = false;
         game.uma.flags.bad_trainer = false;

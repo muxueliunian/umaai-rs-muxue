@@ -1,12 +1,12 @@
 use std::fmt::{Debug, Display};
 
 use anyhow::{Result, anyhow};
-use log::{info, warn};
 use rand::{Rng, rngs::StdRng};
 use rand_distr::{Distribution, weighted::WeightedIndex};
 
 use super::PersonType;
 use crate::{
+    diag,
     explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, TrainingBasicTable, TriggerType}, global,
     output::DecisionInfo,
 };
@@ -105,10 +105,10 @@ pub trait Game: Clone {
     /// 以保证带 player_select=true 的事件无论选项数都交给 Trainer 决策，
     /// 而单选项的 RMJ/抽签等随机事件仍走 `apply_event` 内的 prob 加权逻辑。
     fn run_event<T: Trainer<Self>>(&mut self, event: &EventData, trainer: &T, rng: &mut StdRng) -> Result<()> {
-        info!("+ 事件: #{} {}", event.id, event.name);
+        diag!("+ 事件: #{} {}", event.id, event.name);
         if event.player_select && event.choices.len() > 1 {
             for (index, choice) in event.choices.iter().enumerate() {
-                info!("选项 {}: {}", index + 1, Explain::event_choice(choice));
+                diag!("选项 {}: {}", index + 1, Explain::event_choice(choice));
             }
 
             // 统一调用 select_event_choice（默认实现内部区分 chance/决策）
@@ -242,7 +242,7 @@ pub trait Game: Clone {
                 ok = true;
             }
             if !ok {
-                warn!("分配角色#{person_index}失败");
+                diag!("分配角色#{person_index}失败");
                 Ok(-1)
             } else {
                 self.distribution_mut()[train as usize].push(person_index);
@@ -392,7 +392,7 @@ pub trait Game: Clone {
                     * (1.0 + 0.05 * person_count as f32)
                     * (1.0 + 0.01 * status_bonus[i] as f32);
                 ret.status_pt[i] = real_value.floor() as i32;
-                //warn!("Train: {train}, i: {i}, real: {real_value}, ret: {}", ret.status_pt[i]);
+                //diag!("Train: {train}, i: {i}, real: {real_value}, ret: {}", ret.status_pt[i]);
             }
         }
         // 智力回体
@@ -403,7 +403,7 @@ pub trait Game: Clone {
         if ret.vital < 0 {
             ret.vital = (ret.vital as f32 * (1.0 - 0.01 * buffs.vital_cost_drop)) as i32;
         }
-        //warn!("Train: {train}, buffs: {}, basic_value: {basic_value:?}, status_bonus: {status_bonus:?}, ret: {ret:?}", buffs.explain());
+        //diag!("Train: {train}, buffs: {}, basic_value: {basic_value:?}, status_bonus: {status_bonus:?}, ret: {ret:?}", buffs.explain());
         Ok(ret)
     }
 

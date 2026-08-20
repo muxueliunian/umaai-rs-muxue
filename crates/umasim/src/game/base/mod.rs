@@ -6,11 +6,11 @@ use std::{collections::HashSet, default::Default, sync::Arc};
 pub use action::*;
 use anyhow::Result;
 use hashbrown::HashMap;
-use log::{info, warn};
 pub use person::*;
 use rand::{rngs::StdRng, seq::IndexedRandom};
 
 use crate::{
+    diag,
     explain::Explain, game::*, gamedata::{ActionValue, ChoiceResult, EventChoice, EventData, TriggerType}, utils::*
 };
 
@@ -66,7 +66,7 @@ impl BaseGame {
     /// 建立游戏对象
     pub fn new(uma_id: u32, deck_ids: &[u32; 6], inherit: InheritInfo) -> Result<Self> {
         let mut uma = Uma::new(uma_id)?;
-        info!("{}", uma.explain()?);
+        diag!("{}", uma.explain()?);
         let mut deck = vec![];
         let mut friend_id = None;
         let mut friend_index = 0;
@@ -78,9 +78,9 @@ impl BaseGame {
             let initial = card.initial_bonus();
             let race_bonus = card.effect.saihou;
             if !initial.is_default() {
-                info!("{} +初始属性 {initial:?} 赛后{race_bonus}", card.short_name());
+                diag!("{} +初始属性 {initial:?} 赛后{race_bonus}", card.short_name());
             } else {
-                info!("{} 赛后{race_bonus}", card.short_name());
+                diag!("{} 赛后{race_bonus}", card.short_name());
             }
             let (initial, pt) = split_status(initial)?;
             uma.five_status.add_eq(initial);
@@ -100,7 +100,7 @@ impl BaseGame {
         // 继承
         let newgame_inherit = inherit.inherit_newgame();
         let newgame_limit_inherit = inherit.inherit_limit_newgame();
-        info!("+继承: {newgame_inherit:?}");
+        diag!("+继承: {newgame_inherit:?}");
         uma.five_status.add_eq(&newgame_inherit);
         uma.five_status_limit.add_eq(&newgame_limit_inherit);
         Ok(Self {
@@ -159,7 +159,7 @@ impl BaseGame {
         if !event.choices.is_empty() {
             if let Some(mut choice_result) = self.random_select_choice_result(&event.choices[choice], rng) {
                 if choice_result.result > 0 {
-                    info!("事件结果: {}", ChoiceResult::try_from(choice_result.result).unwrap_or_default());
+                    diag!("事件结果: {}", ChoiceResult::try_from(choice_result.result).unwrap_or_default());
                 }
                 // 友人事件：应用 friend.event_bonus / vital_bonus 乘算
                 // （base/onsen/ramen 三剧本统一处理；详见 FriendState 字段语义）
@@ -242,12 +242,12 @@ impl BaseGame {
                 // 只在结束回合+1时检测
                 if self.turn as u32 == free_race.end_turn + 1 {
                     let count = self.uma.count_free_race(free_race);
-                    info!(
+                    diag!(
                         "回合 {} -> {} 已比赛 {} / {} 场",
                         free_race.start_turn, free_race.end_turn, count, free_race.count
                     );
                     if count < free_race.count {
-                        warn!("自选比赛未达标，寄了");
+                        diag!("自选比赛未达标，寄了");
                         return false;
                     }
                 }

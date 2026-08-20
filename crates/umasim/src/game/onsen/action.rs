@@ -2,11 +2,11 @@ use std::fmt::Display;
 
 use anyhow::Result;
 use colored::Colorize;
-use log::info;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    diag,
     game::{base::*, onsen::game::OnsenGame, *},
     gamedata::{EventData, GAMECONSTANTS, onsen::ONSENDATA},
     utils::system_event
@@ -108,7 +108,7 @@ impl ActionEnum for OnsenAction {
                         scenario_bonus *= 2.7;
                         pt_rate = 0.45;
                     }
-                    info!(
+                    diag!(
                         ">> 生涯比赛 - 比赛加成: {}, 剧本加成: {scenario_bonus}x",
                         game.uma.race_bonus
                     );
@@ -119,7 +119,7 @@ impl ActionEnum for OnsenAction {
                     game.unresolved_events.push(event);
                 } else {
                     let grade = global!(GAMECONSTANTS).race_grades[game.turn as usize];
-                    info!(">> 自选比赛 G{grade} - 比赛加成: {}", game.uma.race_bonus);
+                    diag!(">> 自选比赛 G{grade} - 比赛加成: {}", game.uma.race_bonus);
                     let event_name = format!("race_g{grade}");
                     let mut event = system_event(&event_name)?.clone();
                     // 事件面板乘算比赛加成

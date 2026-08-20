@@ -8,11 +8,11 @@ use std::{
 use anyhow::{Result, anyhow};
 use comfy_table::{ColumnConstraint, Table, Width};
 use enum_iterator::Sequence;
-use log::{info, warn};
 use rand::{Rng, rngs::StdRng, seq::IndexedRandom};
 use rand_distr::{Distribution, weighted::WeightedIndex};
 
 use crate::{
+    diag,
     game::{
         BaseAction::{self, *},
         BaseGame,
@@ -67,7 +67,7 @@ impl BasicAction {
         if train >= 5 {
             return Err(anyhow!("训练等级越界: {train}"));
         }
-        info!(
+        diag!(
             ">> {}训练 等级 {}",
             global!(GAMECONSTANTS).train_names[train],
             game.train_level(train)
@@ -78,12 +78,12 @@ impl BasicAction {
         if rng.random_bool(failure_rate as f64) {
             // 再判断一次，如果还失败就是大失败
             if rng.random_bool(failure_rate as f64) {
-                warn!("训练大失败!");
+                diag!("训练大失败!");
                 game.apply_event(system_event("training_fail_low")?, 0, rng)?;
                 game.uma.flags.ill = true;
                 game.uma.flags.bad_trainer = true;
             } else {
-                warn!("训练失败!");
+                diag!("训练失败!");
                 game.apply_event(system_event("training_fail")?, 0, rng)?;
             }
         } else {
@@ -191,7 +191,7 @@ impl DerefMut for BasicGame {
 
 impl BasicGame {
     pub fn add_person(&mut self, mut person: BasePerson) {
-        info!("新训练角色: {}", person.explain());
+        diag!("新训练角色: {}", person.explain());
         person.person_index = self.persons.len() as i32;
         self.persons.push(person);
     }
@@ -218,7 +218,7 @@ impl BasicGame {
                 self.deck[person_index].friendship = new_value;
             }
             if old_value < 100 {
-                info!(
+                diag!(
                     "{} 羁绊+{} (={})",
                     self.persons[person_index].short_name(),
                     value,
@@ -389,11 +389,11 @@ impl Game for BasicGame {
 
     fn run_stage<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
         //let events = self.list_events();
-        //info!("-- Turn {}-{:?} --", self.turn, self.stage);
+        //diag!("-- Turn {}-{:?} --", self.turn, self.stage);
         match self.stage {
             TurnStage::Begin => {
                 println!("-----------------------------------------");
-                info!("{}", self.explain()?);
+                diag!("{}", self.explain()?);
                 let mut events = self.generate_events(rng);
                 // 友人强制事件
                 if self.friend.out_state == FriendOutState::AfterUnlock {
@@ -423,13 +423,13 @@ impl Game for BasicGame {
                 } else {
                     self.distribute_all(rng)?;
                     self.distribute_hint(rng)?;
-                    info!("训练:\n{}", self.explain_distribution()?);
+                    diag!("训练:\n{}", self.explain_distribution()?);
                 }
             }
             TurnStage::Train => {
                 let actions = self.list_actions()?;
                 let selection = trainer.select_action(self, &actions, rng)?;
-                //info!("玩家选择: {:?}", actions[selection]);
+                //diag!("玩家选择: {:?}", actions[selection]);
                 self.apply_action(&actions[selection], rng)?;
             }
             TurnStage::AfterTrain => {
@@ -465,13 +465,13 @@ impl Game for BasicGame {
             5007 => {
                 // 大成功事件
                 if rng.random_bool(system_event_prob("qiezhe_normal")?) {
-                    warn!(">> 获得【切者】");
+                    diag!(">> 获得【切者】");
                     self.uma.flags.qiezhe = true;
                 }
             }
             809050004 => {
                 // 友人出门事件
-                info!(">> 友人出行已解锁");
+                diag!(">> 友人出行已解锁");
                 self.friend.out_state = FriendOutState::AfterUnlock;
             }
             _ => {}
@@ -599,7 +599,7 @@ mod tests {
         let trainer = RandomTrainer {};
         let mut rng = StdRng::from_os_rng();
         game.run_full_game(&trainer, &mut rng)?;
-        info!("育成结束！");
+        diag!("育成结束！");
         let score = game.uma.calc_score();
         println!(
             "评分: {} {}, PT: {}",

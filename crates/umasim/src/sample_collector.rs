@@ -143,7 +143,7 @@ impl SampleCollector {
     /// 训练样本列表，每个回合一个样本
     pub fn finalize(self) -> Vec<TrainingSample> {
         if !self.is_finished {
-            log::warn!("SampleCollector 未设置最终分数，使用默认值 0");
+            crate::diag!("SampleCollector 未设置最终分数，使用默认值 0");
         }
 
         let final_score = self.final_score as f32;

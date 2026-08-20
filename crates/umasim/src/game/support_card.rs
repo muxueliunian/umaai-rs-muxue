@@ -1,10 +1,11 @@
 use std::{collections::HashMap, default::Default, sync::Arc};
 
 use anyhow::{Result, anyhow};
-use log::{debug, warn};
+use log::debug;
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    diag,
     explain::Explain,
     game::Game,
     gamedata::{CardValue, GAMEDATA, SupportCardData},
@@ -155,7 +156,7 @@ impl CardTrainingEffect {
                 }
             }
             _ => {
-                warn!("未知效果词条: {effect_id} = {value}");
+                diag!("未知效果词条: {effect_id} = {value}");
             }
         }
         self
@@ -316,7 +317,7 @@ impl SupportCard {
                     }
                 }
                 _ => {
-                    warn!(
+                    diag!(
                         "未实现固有逻辑: #{} - {}",
                         self.data.unique_effect_type,
                         self.short_name()
