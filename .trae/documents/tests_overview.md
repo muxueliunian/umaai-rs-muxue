@@ -2,7 +2,7 @@
 
 本文件按模块分类、用一句话描述每个测试的功能，便于快速定位和评估覆盖率。
 
-总计：**153 个测试**（含 1 个 async），分布在 `crates/umasim/src/` 与 `crates/umaai/src/` 各文件中。
+总计：**155 个测试**（含 1 个 async），分布在 `crates/umasim/src/` 与 `crates/umaai/src/` 各文件中。
 
 ## 目录
 
@@ -19,7 +19,7 @@
 - [基础游戏](#基础游戏) — 10
 - [决策日志](#决策日志outputdecision_logrs) — 4
 - [其他](#其他) — 4
-- [基准测试](#基准测试binbench_basers)（bench_base 运行说明）
+- [基准测试](#基准测试)（bench_base / bench_compositions 运行说明）
 
 ---
 
@@ -293,6 +293,17 @@ cargo run --release --bin bench_base -- --runs 100 --seed 7 --log --out logs
 - 性能基线（2026-08-21 实测）：RandomTrainer 单局 ~1.2ms，吞吐 ~815 局/s——手写策略须保持 O(候选数) 简单才有 rollout 接入意义
 
 ---
+
+### `bin/bench_compositions.rs`
+
+固定种子遍历五种普通支援卡各 0..=3 张、合计 5 张再加固定友人的全部 101 种构成，输出评分、五维、训练技能 PT、RMJ 和友人出行聚合 CSV。
+
+```bash
+cargo run --release --bin bench_compositions -- --runs 100 --seed 42 --trainer handwritten --out logs/bench_compositions.csv
+```
+
+- `test_enumerate_all_101_compositions` — 严格验证合法构成总数为 101，且每种合计 5 张、单类型不超过 3 张
+- `test_build_all_composition_decks` — 验证全部构成都生成 5 张普通卡 + 1 张固定友人
 
 ## 未来缩减参考（规则固化后讨论）
 
