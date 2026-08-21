@@ -4,6 +4,7 @@
 
 ## 2026-08-21
 
+- **拉面杯全卡型构成基准**：新增 `bench_compositions`，枚举五种普通支援卡各 0..=3 张、合计 5 张再加固定友人的全部 101 种构成；支持固定种子、Random/Handwritten 训练员、CSV 聚合输出与异常局失败；新增构成数量和六卡结构测试
 - **手写基础策略（HandwrittenTrainer）规划文档**：新增 `.trae/documents/handwritten_policy/` 目录（思路总纲 + 好/坏手法主线特征清单）；确定范围（只做 MCTS rollout 基策、HandwrittenTrainer 仅测试壳）、策略形态（参数化利于调参）、确定性要求、复用现有公式算法、卡组适配方案；明确输出分层（决策日志 / DecisionInfo / GameView 各司其职）与地基方案（RandomTrainer 补鲁棒性与覆盖率、简单基础策略做质量基线与调参载体）；收录玩家经验输入：好/坏手法主线特征（free_race 达标为硬守门、第三年隐藏风味需清空等）与决策频率×影响维度（高频小影响 vs 低频大影响）
 - **手写策略第一步：地基设施**：新增 `bench_base` 基准 bin + `bench_config.toml`（固定种子跑批，结果/决策日志 CSV 落盘，汇总含分数分布、按阶段决策耗时、吞吐）；新增决策日志模块 `output/decision_log.rs` 与 `LoggingTrainer`（记录每次决策的耗时与动作）；修复规则层可复现性（`RamenGame.internal_rng` 替换 `Game::next()` 内 3 处 `from_os_rng`，固定种子整局可复现）；基线：Random 20 局 score mean=30432、整局 ~1.2ms；新增 decision_log 与 logging_trainer 单元测试
 - **手写策略第二步：策略核心 + RamenHandwrittenTrainer**：
