@@ -122,11 +122,7 @@ impl Summary {
         format!(
             "{},{},{},{},{:.3},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4}",
             self.composition.name(),
-            self.deck
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join("/"),
+            self.deck.iter().map(u32::to_string).collect::<Vec<_>>().join("/"),
             self.completed,
             self.failed,
             self.score_mean,
@@ -178,9 +174,7 @@ fn parse_args(args: &[String]) -> Result<Config> {
 /// 读取一个命令行参数值并推进索引。
 fn parse_value<T: std::str::FromStr>(args: &[String], idx: &mut usize, key: &str) -> Result<T> {
     *idx += 1;
-    let value = args
-        .get(*idx)
-        .ok_or_else(|| anyhow::anyhow!("参数 {key} 缺少值"))?;
+    let value = args.get(*idx).ok_or_else(|| anyhow::anyhow!("参数 {key} 缺少值"))?;
     value
         .parse()
         .map_err(|_| anyhow::anyhow!("参数 {key} 的值无效: {value}"))
@@ -223,11 +217,7 @@ fn select_representatives() -> Result<[Vec<CardRepresentative>; 5]> {
     }
     for (card_type, pool) in pools.iter_mut().enumerate() {
         pool.sort_by_key(|card| std::cmp::Reverse(card.idrank));
-        ensure!(
-            pool.len() >= 3,
-            "{} 类型满破 SSR 不足三张",
-            TYPE_NAMES[card_type]
-        );
+        ensure!(pool.len() >= 3, "{} 类型满破 SSR 不足三张", TYPE_NAMES[card_type]);
         pool.truncate(3);
     }
     Ok(pools)
@@ -235,9 +225,7 @@ fn select_representatives() -> Result<[Vec<CardRepresentative>; 5]> {
 
 /// 根据构成与固定友人生成六张卡组。
 fn build_deck(
-    composition: Composition,
-    representatives: &[Vec<CardRepresentative>; 5],
-    friend: u32,
+    composition: Composition, representatives: &[Vec<CardRepresentative>; 5], friend: u32,
 ) -> Result<[u32; 6]> {
     let mut deck = Vec::with_capacity(6);
     for (card_type, count) in composition.counts.iter().copied().enumerate() {
@@ -246,12 +234,7 @@ fn build_deck(
             "{} 类型代表卡不足 {count} 张",
             TYPE_NAMES[card_type]
         );
-        deck.extend(
-            representatives[card_type]
-                .iter()
-                .take(count)
-                .map(|card| card.idrank),
-        );
+        deck.extend(representatives[card_type].iter().take(count).map(|card| card.idrank));
     }
     deck.push(friend);
     deck.try_into()
@@ -260,10 +243,7 @@ fn build_deck(
 
 /// 使用指定训练员执行一种构成。
 fn run_composition<T: Trainer<RamenGame>>(
-    cfg: &Config,
-    composition: Composition,
-    deck: [u32; 6],
-    trainer: &T,
+    cfg: &Config, composition: Composition, deck: [u32; 6], trainer: &T,
 ) -> Summary {
     let mut scores = Vec::with_capacity(cfg.runs);
     let mut status_sum = [0_i64; 5];
@@ -276,13 +256,11 @@ fn run_composition<T: Trainer<RamenGame>>(
         let seed = cfg.seed + run_idx as u64;
         let mut decision_rng = StdRng::seed_from_u64(seed);
         let rule_rng = StdRng::seed_from_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
-        let game_result = RamenGame::newgame(DEFAULT_UMA, &deck, DEFAULT_INHERIT).and_then(
-            |mut game| {
-                game.set_internal_rng(rule_rng);
-                game.run_full_game(trainer, &mut decision_rng)?;
-                Ok(game)
-            },
-        );
+        let game_result = RamenGame::newgame(DEFAULT_UMA, &deck, DEFAULT_INHERIT).and_then(|mut game| {
+            game.set_internal_rng(rule_rng);
+            game.run_full_game(trainer, &mut decision_rng)?;
+            Ok(game)
+        });
         match game_result {
             Ok(game) => {
                 scores.push(game.uma.calc_score());
@@ -295,11 +273,7 @@ fn run_composition<T: Trainer<RamenGame>>(
             }
             Err(error) => {
                 failed += 1;
-                eprintln!(
-                    "构成 {} seed={} 模拟失败: {error:#}",
-                    composition.name(),
-                    seed
-                );
+                eprintln!("构成 {} seed={} 模拟失败: {error:#}", composition.name(), seed);
             }
         }
     }
@@ -340,22 +314,14 @@ fn print_representatives(representatives: &[Vec<CardRepresentative>; 5]) {
 
 /// 执行全部构成并返回汇总。
 fn run_all(
-    cfg: &Config,
-    compositions: &[Composition],
-    representatives: &[Vec<CardRepresentative>; 5],
+    cfg: &Config, compositions: &[Composition], representatives: &[Vec<CardRepresentative>; 5],
 ) -> Result<Vec<Summary>> {
     let mut summaries = Vec::with_capacity(compositions.len());
     let random = RandomTrainer;
     let handwritten = RamenHandwrittenTrainer::new();
     for (idx, composition) in compositions.iter().copied().enumerate() {
         let deck = build_deck(composition, representatives, cfg.friend)?;
-        eprintln!(
-            "[{}/{}] {} {:?}",
-            idx + 1,
-            compositions.len(),
-            composition.name(),
-            deck
-        );
+        eprintln!("[{}/{}] {} {:?}", idx + 1, compositions.len(), composition.name(), deck);
         let summary = match cfg.trainer.as_str() {
             "random" => run_composition(cfg, composition, deck, &random),
             "handwritten" => run_composition(cfg, composition, deck, &handwritten),
@@ -370,8 +336,7 @@ fn run_all(
 fn save_csv(path: &str, summaries: &[Summary]) -> Result<()> {
     let output_path = std::path::Path::new(path);
     if let Some(parent) = output_path.parent() {
-        std::fs::create_dir_all(parent)
-            .with_context(|| format!("创建输出目录失败: {}", parent.display()))?;
+        std::fs::create_dir_all(parent).with_context(|| format!("创建输出目录失败: {}", parent.display()))?;
     }
     let mut csv = String::from(
         "composition,deck,completed,failed,score_mean,score_median,score_p10,speed_mean,stamina_mean,power_mean,guts_mean,wisdom_mean,skill_pt_mean,rmj_all_rate,friend_all_rate\n",
@@ -380,8 +345,7 @@ fn save_csv(path: &str, summaries: &[Summary]) -> Result<()> {
         csv.push_str(&summary.csv_row());
         csv.push('\n');
     }
-    std::fs::write(output_path, csv)
-        .with_context(|| format!("写入结果失败: {}", output_path.display()))
+    std::fs::write(output_path, csv).with_context(|| format!("写入结果失败: {}", output_path.display()))
 }
 
 /// 程序入口。
@@ -435,8 +399,7 @@ mod tests {
         ensure!(compositions.len() == 101, "构成数量不是 101");
         ensure!(
             compositions.iter().all(|composition| {
-                composition.counts.iter().sum::<usize>() == 5
-                    && composition.counts.iter().all(|count| *count <= 3)
+                composition.counts.iter().sum::<usize>() == 5 && composition.counts.iter().all(|count| *count <= 3)
             }),
             "存在不满足合计五张或单类型最多三张的构成"
         );
@@ -457,10 +420,7 @@ mod tests {
         for composition in enumerate_compositions() {
             let deck = build_deck(composition, &representatives, DEFAULT_FRIEND)?;
             ensure!(deck[5] == DEFAULT_FRIEND, "最后一张不是固定友人");
-            ensure!(
-                deck[..5].iter().all(|id| *id != DEFAULT_FRIEND),
-                "普通卡槽混入固定友人"
-            );
+            ensure!(deck[..5].iter().all(|id| *id != DEFAULT_FRIEND), "普通卡槽混入固定友人");
         }
         println!("全部 101 种卡组结构验证通过");
         Ok(())
