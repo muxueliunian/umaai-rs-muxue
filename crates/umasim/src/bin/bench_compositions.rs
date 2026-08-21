@@ -337,7 +337,7 @@ fn print_representatives(set: &bench::RepresentativeSet, opts: &CardPickOpts) {
                 .map(|card| format!("{} {}", card.idrank, card.name))
                 .collect::<Vec<_>>()
                 .join(" / ");
-            println!("    跳过弱卡: {detail}");
+            println!("    跳过: {detail}");
         }
     }
 }

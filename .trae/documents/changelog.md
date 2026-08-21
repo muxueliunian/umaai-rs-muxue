@@ -4,7 +4,8 @@
 
 ## 2026-08-21
 
-- **bench 重构**：新增 `umasim::bench` 公共设施（seed 双 RNG 分裂、`run_seeded` 单局运行、统计、CSV 落盘、代表性选卡），`bench_base` / `bench_compositions` 复用瘦身净减约 200 行；新增 `csv` / `lexopt` 依赖（无条件编译，保持 `--no-default-features` 可编译）；bench_compositions 选卡改「最新 5 张 + 面板和值≥70 + 倒序取 3」，阈值可配、`--cards-file` 兜底；测试 +4（共 160）
+- **bench 重构**：新增 `umasim::bench` 公共设施（seed 双 RNG 分裂、`run_seeded` 单局运行、统计、CSV 落盘、代表性选卡），`bench_base` / `bench_compositions` 复用瘦身净减约 200 行；新增 `csv` / `lexopt` 依赖（无条件编译，保持 `--no-default-features` 可编译）；bench_compositions 选卡改「最新 5 张 + 面板和值≥70 + 倒序取 3」，阈值可配、`--cards-file` 兜底；屏幕输出中文（复用 `train_names`）、CSV 英文，代表卡列表移至跑批后并打印跳过卡；测试 +4（共 160）
+- **rustfmt 规则固化（用户）+ issues 更新**：AGENTS.md 新增规则（项目使用 Nightly 格式，stable 下禁止 cargo fmt）；issues 新增 rustfmt 问题（已解决）并更新第三年地区选择状态为已解决
 - **拉面杯全卡型构成基准**：新增 `bench_compositions`，枚举五种普通支援卡各 0..=3 张、合计 5 张再加固定友人的全部 101 种构成；支持固定种子、Random/Handwritten 训练员、CSV 聚合输出与异常局失败；新增构成数量和六卡结构测试
 - **手写基础策略（HandwrittenTrainer）规划文档**：新增 `.trae/documents/handwritten_policy/` 目录（思路总纲 + 好/坏手法主线特征清单）；确定范围（只做 MCTS rollout 基策、HandwrittenTrainer 仅测试壳）、策略形态（参数化利于调参）、确定性要求、复用现有公式算法、卡组适配方案；明确输出分层（决策日志 / DecisionInfo / GameView 各司其职）与地基方案（RandomTrainer 补鲁棒性与覆盖率、简单基础策略做质量基线与调参载体）；收录玩家经验输入：好/坏手法主线特征（free_race 达标为硬守门、第三年隐藏风味需清空等）与决策频率×影响维度（高频小影响 vs 低频大影响）
 - **手写策略第一步：地基设施**：新增 `bench_base` 基准 bin + `bench_config.toml`（固定种子跑批，结果/决策日志 CSV 落盘，汇总含分数分布、按阶段决策耗时、吞吐）；新增决策日志模块 `output/decision_log.rs` 与 `LoggingTrainer`（记录每次决策的耗时与动作）；修复规则层可复现性（`RamenGame.internal_rng` 替换 `Game::next()` 内 3 处 `from_os_rng`，固定种子整局可复现）；基线：Random 20 局 score mean=30432、整局 ~1.2ms；新增 decision_log 与 logging_trainer 单元测试

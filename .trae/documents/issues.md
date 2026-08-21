@@ -39,15 +39,12 @@
 ## 第三年地区选择组合过多
 
 - **日期**：2026-08-17
-- **状态**：待解决
+- **状态**：已解决（2026-08-20）
 - **问题描述**：第3年可选地区为10-19共10个，C(10,3)=120种组合，动作空间过大，影响搜索效率
 - **排查过程**：
   - 第1/2年各5个地区，C(5,3)=10种组合，可接受
   - 第3年120种组合导致 Trainer 需要评估120个动作，计算开销显著增加
-- **解决方案**：待讨论，可能的方向：
-  1. 基于当前卡组和诀窍库存，预筛选出合理的候选组合（如基于配方消耗匹配度）
-  2. 分两步决策：先选主方向（偏速/偏耐/偏力等），再在子集中选具体组合
-  3. 使用评估函数对120个组合快速打分排序，只让Trainer从top-K中选择
+- **解决方案**：第3年地区选择默认 Fixed，走固定组合 `[[11,14,15]]`，跳过 120 组合枚举（2026-08-20 实现，见 changelog）；后续如需动态策略，可再按"先定主方向、再子集内选组合"的预筛选方案扩展
 - **备注**：第3年地区还包含pt_bonus效果，选择策略需要同时考虑youqing/pt_bonus和配方匹配
 
 ---
@@ -100,3 +97,19 @@
   5. `event_bonus == 0 && vital_bonus == 0`（未携带友人卡）时分支跳过，行为与现状一致
   6. 新增 7 个单元测试（`test_apply_friend_bonus_*` × 5 + `test_apply_event_*_integration` × 2），全 124 lib 测试通过
 - **备注**：数据结构（`EventCollection` / `RamenScenarioData`）未修改，所有友人事件 ID 集合从 `friend_events.values()` 在 `BaseGame::new` / `RamenGame::newgame` 时派生，O(1) HashSet 查询；同时删除与本次修改冲突的 `test_ramen_region_strategy_fixed_skips_enumeration` 测试。
+
+---
+
+## stable 工具链下 cargo fmt 破坏 Nightly 格式
+
+- **日期**：2026-08-21
+- **状态**：已解决（2026-08-21）
+- **问题描述**：`rustfmt.toml` 使用 8 个 Nightly-only 选项（`imports_granularity` / `group_imports` / `trailing_comma` / `wrap_comments` 等），在 stable 工具链执行 `cargo fmt` 会静默忽略这些选项，把整个仓库重排成 stable 风格——与 git 历史 `ffddd1a`（应用仓库 rustfmt 格式）的 Nightly 格式不一致，产生大量无关 diff
+- **排查过程**：
+  - `rustfmt.toml` 含 `imports_granularity = "Crate"`、`group_imports = "StdExternalCrate"`、`trailing_comma = "Never"` 等 Nightly 特性，stable rustfmt 不支持且无报错（仅 warning）
+  - 环境无 `rust-toolchain` 文件、无 Nightly 工具链（`rustup toolchain list` 仅 stable），`cargo fmt` 实际以 stable 行为执行
+  - 实际触发：bench 重构时执行 `cargo fmt` 误将 55 个文件、约 1900 行重排为 stable 风格，已全部还原
+- **解决方案**：
+  1. AGENTS.md 固化规则：项目使用 **Nightly** 格式规则，stable 工具链下**禁止执行 cargo fmt**
+  2. 格式化走 Nightly：`rustup toolchain install nightly --component rustfmt` 后使用 `cargo +nightly fmt`；编译仍用 stable，互不影响
+- **备注**：Nightly 为滚动版本，rustfmt 输出偶有细微变化；如需完全固定可锁定指定日期（如 `nightly-YYYY-MM-DD`）。本次 bench 重构的 3 个新/改文件尚未跑 Nightly fmt，待 Nightly 就绪后统一格式化
