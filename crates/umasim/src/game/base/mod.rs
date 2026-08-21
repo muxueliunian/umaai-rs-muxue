@@ -11,7 +11,10 @@ use rand::{rngs::StdRng, seq::IndexedRandom};
 
 use crate::{
     diag,
-    explain::Explain, game::*, gamedata::{ActionValue, ChoiceResult, EventChoice, EventData, TriggerType}, utils::*
+    explain::Explain,
+    game::*,
+    gamedata::{ActionValue, ChoiceResult, EventChoice, EventData, TriggerType},
+    utils::*
 };
 
 /// 一局游戏的基本状态，剧本通用，用于计算，不用于通信(例如通信只传递卡组id)
@@ -169,7 +172,8 @@ impl BaseGame {
         } else if choices.len() == 1 {
             Some(choices[0].clone())
         } else {
-            choices.choose_weighted(rng, |c| { c.prob })
+            choices
+                .choose_weighted(rng, |c| c.prob)
                 .inspect_err(|e| log::error!("sample error: {e:?}"))
                 .ok()
                 .cloned()
@@ -181,7 +185,10 @@ impl BaseGame {
         if !event.choices.is_empty() {
             if let Some(mut choice_result) = self.random_select_choice_result(&event.choices[choice], rng) {
                 if choice_result.result > 0 {
-                    diag!("事件结果: {}", ChoiceResult::try_from(choice_result.result).unwrap_or_default());
+                    diag!(
+                        "事件结果: {}",
+                        ChoiceResult::try_from(choice_result.result).unwrap_or_default()
+                    );
                 }
                 // 友人事件：应用 friend.event_bonus / vital_bonus 乘算
                 // （base/onsen/ramen 三剧本统一处理；详见 FriendState 字段语义）
@@ -266,7 +273,10 @@ impl BaseGame {
                     let count = self.uma.count_free_race(free_race);
                     diag!(
                         "回合 {} -> {} 已比赛 {} / {} 场",
-                        free_race.start_turn, free_race.end_turn, count, free_race.count
+                        free_race.start_turn,
+                        free_race.end_turn,
+                        count,
+                        free_race.count
                     );
                     if count < free_race.count {
                         diag!("自选比赛未达标，寄了");
@@ -300,7 +310,10 @@ mod tests {
     use anyhow::Result;
 
     use super::*;
-    use crate::{gamedata::*, utils::{get_workspace_root, init_test_logger}};
+    use crate::{
+        gamedata::*,
+        utils::{get_workspace_root, init_test_logger}
+    };
 
     #[test]
     fn test_explain() -> Result<()> {
@@ -355,7 +368,7 @@ mod tests {
             (74, false),
             (75, false),
             (76, false),
-            (77, false),
+            (77, false)
         ] {
             game.turn = turn;
             let got = game.can_self_race();
@@ -524,24 +537,26 @@ mod tests {
         init_global()?;
 
         // 构造带友人卡的 BaseGame（302574 是 hotaku 友人）
-        let mut game = BaseGame::new(
-            101901,
-            &[302424, 302464, 302484, 302564, 302574, 302644],
-            InheritInfo {
-                blue_count: [15, 3, 0, 0, 0],
-                extra_count: [0, 30, 0, 0, 30, 30]
-            }
-        )?;
+        let mut game = BaseGame::new(101901, &[302424, 302464, 302484, 302564, 302574, 302644], InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        })?;
         // 强制设置可预测的 friend bonus
         game.friend.event_bonus = 30;
         game.friend.vital_bonus = 20;
 
         // 取 base 剧本的友人事件 first（id=809050001, status_pt=[0,0,9,9,9,0]）
         let friend_event = global_events().friend_events["first"].clone();
-        println!("友人事件 first: id={}, choices={:?}", friend_event.id, friend_event.choices);
+        println!(
+            "友人事件 first: id={}, choices={:?}",
+            friend_event.id, friend_event.choices
+        );
         // 验证 ID 已被 BaseGame::new 自动加入
-        assert!(game.friend_event_ids.contains(&friend_event.id),
-            "friend_event.id={} 应该已加入 friend_event_ids", friend_event.id);
+        assert!(
+            game.friend_event_ids.contains(&friend_event.id),
+            "friend_event.id={} 应该已加入 friend_event_ids",
+            friend_event.id
+        );
 
         // 记录初始状态
         let init_status = game.uma.five_status;
@@ -551,8 +566,14 @@ mod tests {
         let mut rng = rand::rngs::StdRng::seed_from_u64(42);
         game.apply_event(&friend_event, 0, &mut rng);
 
-        println!("应用前 status={:?} skill_pt={} vital={}", init_status, init_skill_pt, init_vital);
-        println!("应用后 status={:?} skill_pt={} vital={}", game.uma.five_status, game.uma.skill_pt, game.uma.vital);
+        println!(
+            "应用前 status={:?} skill_pt={} vital={}",
+            init_status, init_skill_pt, init_vital
+        );
+        println!(
+            "应用后 status={:?} skill_pt={} vital={}",
+            game.uma.five_status, game.uma.skill_pt, game.uma.vital
+        );
 
         // first 事件 value: status_pt=[0,0,9,9,9,0], motivation=1, friendship=10, max_vital=4
         // event_bonus=30 乘算: 9*130/100 = 11
@@ -561,9 +582,21 @@ mod tests {
         //       vital += 0（vital 未在 first 中）
         assert_eq!(game.uma.five_status[0] - init_status[0], 0);
         assert_eq!(game.uma.five_status[1] - init_status[1], 0);
-        assert_eq!(game.uma.five_status[2] - init_status[2], 11, "根性应该 +11 (9 * 130 / 100)");
-        assert_eq!(game.uma.five_status[3] - init_status[3], 11, "智力应该 +11 (9 * 130 / 100)");
-        assert_eq!(game.uma.five_status[4] - init_status[4], 11, "pt=0 不变（其实是五维第4个，pt 是 status_pt[5]）");
+        assert_eq!(
+            game.uma.five_status[2] - init_status[2],
+            11,
+            "根性应该 +11 (9 * 130 / 100)"
+        );
+        assert_eq!(
+            game.uma.five_status[3] - init_status[3],
+            11,
+            "智力应该 +11 (9 * 130 / 100)"
+        );
+        assert_eq!(
+            game.uma.five_status[4] - init_status[4],
+            11,
+            "pt=0 不变（其实是五维第4个，pt 是 status_pt[5]）"
+        );
         assert_eq!(game.uma.skill_pt - init_skill_pt, 0, "pt=0 不变");
         Ok(())
     }
@@ -583,14 +616,10 @@ mod tests {
         // 实际 card_id=302424 不带友人（card_type<5）
         // 改用一组全部非友人的卡组来保证 friend.event_bonus=0
         // 这里直接用不带友人的卡组：[302424, 302464, 302484, 302564, 302644, 302694]
-        let mut game = BaseGame::new(
-            101901,
-            &[302424, 302464, 302484, 302564, 302644, 302694],
-            InheritInfo {
-                blue_count: [15, 3, 0, 0, 0],
-                extra_count: [0, 30, 0, 0, 30, 30]
-            }
-        )?;
+        let mut game = BaseGame::new(101901, &[302424, 302464, 302484, 302564, 302644, 302694], InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        })?;
         // 验证 friend.event_bonus 和 vital_bonus 都是 0
         assert_eq!(game.friend.event_bonus, 0);
         assert_eq!(game.friend.vital_bonus, 0);

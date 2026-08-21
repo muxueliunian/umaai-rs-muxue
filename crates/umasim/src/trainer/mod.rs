@@ -1,6 +1,4 @@
-use std::cell::RefCell;
-use std::collections::VecDeque;
-use std::rc::Rc;
+use std::{cell::RefCell, collections::VecDeque, rc::Rc};
 
 use anyhow::Result;
 #[cfg(feature = "cli")]
@@ -9,7 +7,8 @@ use log::info;
 use rand::{Rng, prelude::StdRng, seq::SliceRandom};
 
 use crate::{
-    game::{ActionEnum, BaseAction, Game, Trainer}, gamedata::EventChoice
+    game::{ActionEnum, BaseAction, Game, Trainer},
+    gamedata::EventChoice
 };
 
 // 导出手写逻辑训练员、数据收集训练员、神经网络训练员和 MCTS 训练员
@@ -65,9 +64,7 @@ impl<G: Game> Trainer<G> for RandomTrainer {
         if ret.is_none() {
             for i in &random_index {
                 if let Some(ra) = any_ramen_action(&actions[*i]) {
-                    if ra.ramen.is_some()
-                        || ra.special_targets.is_some_and(|t| t.iter().any(|&x| x > 0))
-                    {
+                    if ra.ramen.is_some() || ra.special_targets.is_some_and(|t| t.iter().any(|&x| x > 0)) {
                         ret = Some(*i);
                         break;
                     }
@@ -110,7 +107,7 @@ pub struct ManualTrainer {
     /// mock 队列耗尽时的回退模式
     /// - `Interactive`（默认）：回退到 inquire（真实玩家模式）
     /// - `PickFirst`：选第一个候选（自动化测试模式，避免阻塞）
-    pub fallback: FallbackMode,
+    pub fallback: FallbackMode
 }
 
 /// mock 输入队列耗尽时的回退策略
@@ -119,7 +116,7 @@ pub enum FallbackMode {
     /// 回退到 inquire（真实玩家）
     Interactive,
     /// 自动选第一个候选（自动化测试）
-    PickFirst,
+    PickFirst
 }
 
 impl Default for ManualTrainer {
@@ -133,7 +130,7 @@ impl ManualTrainer {
     pub fn new() -> Self {
         Self {
             mock_inputs: Rc::new(RefCell::new(VecDeque::new())),
-            fallback: FallbackMode::Interactive,
+            fallback: FallbackMode::Interactive
         }
     }
 
@@ -147,7 +144,7 @@ impl ManualTrainer {
     pub fn with_mock_inputs(inputs: Vec<String>) -> Self {
         Self {
             mock_inputs: Rc::new(RefCell::new(inputs.into_iter().collect())),
-            fallback: FallbackMode::PickFirst,
+            fallback: FallbackMode::PickFirst
         }
     }
 
@@ -178,7 +175,7 @@ impl<G: Game> Trainer<G> for ManualTrainer {
             FallbackMode::PickFirst => self.fallback_pick_first(actions.len(), "动作"),
             #[cfg(feature = "cli")]
             FallbackMode::Interactive => {
-              //  println!("{actions:#?}");
+                //  println!("{actions:#?}");
                 let selected = Select::new("请选择:", actions.to_vec())
                     .with_page_size(actions.len())
                     .prompt()?;
@@ -188,12 +185,10 @@ impl<G: Game> Trainer<G> for ManualTrainer {
                     .ok_or_else(|| anyhow::anyhow!("未找到该动作: {selected}"))
             }
             #[cfg(not(feature = "cli"))]
-            FallbackMode::Interactive => {
-                Err(anyhow::anyhow!(
-                    "ManualTrainer::Interactive 需要 cli feature（inquire 终端交互）；\
+            FallbackMode::Interactive => Err(anyhow::anyhow!(
+                "ManualTrainer::Interactive 需要 cli feature（inquire 终端交互）；\
                      当前编译未启用 cli，请改用 ManualTrainer::with_mock_inputs(..)"
-                ))
-            }
+            ))
         }
     }
 
@@ -220,12 +215,10 @@ impl<G: Game> Trainer<G> for ManualTrainer {
                     .ok_or_else(|| anyhow::anyhow!("未找到该选项: {selected}"))
             }
             #[cfg(not(feature = "cli"))]
-            FallbackMode::Interactive => {
-                Err(anyhow::anyhow!(
-                    "ManualTrainer::Interactive 需要 cli feature（inquire 终端交互）；\
+            FallbackMode::Interactive => Err(anyhow::anyhow!(
+                "ManualTrainer::Interactive 需要 cli feature（inquire 终端交互）；\
                      当前编译未启用 cli，请改用 ManualTrainer::with_mock_inputs(..)"
-                ))
-            }
+            ))
         }
     }
 }

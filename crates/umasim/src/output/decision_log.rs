@@ -10,8 +10,7 @@
 //! 本模块是**开发格式**：CSV 落盘到 `logs/`，字段可随时增删；
 //! `score_breakdown` 为预留列（手写策略接入后填充各评分维度分解）。
 
-use std::fmt::Write as _;
-use std::path::Path;
+use std::{fmt::Write as _, path::Path};
 
 use anyhow::Result;
 use fs_err as fs;
@@ -34,18 +33,17 @@ pub struct DecisionLogRow {
     /// 决策耗时（微秒）
     pub elapsed_us: u64,
     /// 各候选评分分解（手写策略填充；随机基线为空）
-    pub score_breakdown: Option<String>,
+    pub score_breakdown: Option<String>
 }
 
 /// CSV 列名（与 [`DecisionLogRow`] 字段一一对应）
-const CSV_HEADER: &str =
-    "seed,turn,stage,candidates,action_index,action_desc,elapsed_us,score_breakdown";
+const CSV_HEADER: &str = "seed,turn,stage,candidates,action_index,action_desc,elapsed_us,score_breakdown";
 
 /// 决策日志集合（每次决策追加一行）
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct DecisionLog {
     /// 全部决策记录
-    pub rows: Vec<DecisionLogRow>,
+    pub rows: Vec<DecisionLogRow>
 }
 
 impl DecisionLog {
@@ -91,11 +89,7 @@ impl DecisionLogRow {
             csv_escape(&self.action_desc),
             self.elapsed_us.to_string(),
         ];
-        let breakdown = self
-            .score_breakdown
-            .as_deref()
-            .map(csv_escape)
-            .unwrap_or_default();
+        let breakdown = self.score_breakdown.as_deref().map(csv_escape).unwrap_or_default();
         cols.push(breakdown);
         cols.join(",")
     }
@@ -144,7 +138,7 @@ mod tests {
             action_index: 2,
             action_desc: "吃面/新潟, 速度".into(),
             elapsed_us: 123,
-            score_breakdown: None,
+            score_breakdown: None
         };
         let line = row.to_csv_row();
         println!("单行 CSV: {line}");
@@ -181,7 +175,7 @@ mod tests {
             action_index: 0,
             action_desc: "速度训练".into(),
             elapsed_us: 5,
-            score_breakdown: Some("speed=100".into()),
+            score_breakdown: Some("speed=100".into())
         });
         log.save_to(&path)?;
 

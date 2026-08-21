@@ -9,17 +9,17 @@
 //! - [`select_representatives`] + [`CardPickOpts`]：代表性支援卡选择（bench 专用粗略估计）
 //! - [`parse_value`]：lexopt 键值参数读取 helper
 
-use std::path::Path;
-use std::time::Instant;
+use std::{path::Path, time::Instant};
 
 use anyhow::{Context, Result, ensure};
 use rand::{SeedableRng, rngs::StdRng};
 
-use crate::game::ramen::RamenGame;
-use crate::game::{Game, InheritInfo, Trainer};
-use crate::gamedata::{GAMECONSTANTS, GAMEDATA, SupportCardData};
-use crate::global;
-use crate::trainer::LoggingTrainer;
+use crate::{
+    game::{Game, InheritInfo, Trainer, ramen::RamenGame},
+    gamedata::{GAMECONSTANTS, GAMEDATA, SupportCardData},
+    global,
+    trainer::LoggingTrainer
+};
 
 /// 五种普通支援卡类型英文名称（CSV 等机器可读输出用），索引与 `card_type` 一一对应。
 pub const TYPE_NAMES: [&str; 5] = ["speed", "stamina", "power", "guts", "wisdom"];
@@ -36,8 +36,9 @@ pub fn type_name_zh(card_type: usize) -> String {
 
 /// 从单一 seed 分裂决策 RNG 与规则层 RNG，保证固定种子整局可复现。
 ///
-/// 第二个种子用黄金比例常数异或派生，使两条 RNG 序列互不相关；具体常数无关紧要，
-/// 关键是固定不变——规则层可复现性依赖此派生在代码演进中保持稳定。
+/// 第二个种子用 SplitMix64 的标准 gamma 增量常数（黄金比例 `0x9E37_79B9_7F4A_7C15`，
+/// 有据可依的标准常数，非任意指纹）异或派生，使两条 RNG 序列互不相关；具体常数
+/// 无关紧要，关键是固定不变——规则层可复现性依赖此派生在代码演进中保持稳定。
 pub fn seeded_rngs(seed: u64) -> (StdRng, StdRng) {
     let rule_seed = seed ^ 0x9E37_79B9_7F4A_7C15;
     (StdRng::seed_from_u64(seed), StdRng::seed_from_u64(rule_seed))
@@ -65,12 +66,12 @@ pub struct GameOutcome {
     /// 五次友人出行是否全部完成。
     pub friend_all: bool,
     /// 整局耗时（毫秒）。
-    pub elapsed_ms: f64,
+    pub elapsed_ms: f64
 }
 
 /// 跑一局固定种子的完整拉面杯（统一 `LoggingTrainer` 包装，注入规则层 RNG）。
 pub fn run_seeded<T: Trainer<RamenGame>>(
-    uma: u32, deck: &[u32; 6], inherit: &InheritInfo, seed: u64, trainer: &LoggingTrainer<T>,
+    uma: u32, deck: &[u32; 6], inherit: &InheritInfo, seed: u64, trainer: &LoggingTrainer<T>
 ) -> Result<GameOutcome> {
     let (mut decision_rng, rule_rng) = seeded_rngs(seed);
     let mut game = RamenGame::newgame(uma, deck, inherit.clone())?;
@@ -89,7 +90,7 @@ pub fn run_seeded<T: Trainer<RamenGame>>(
         rmj_ok: game.ramen.rmj_results.iter().filter(|&&ok| ok).count(),
         eat_count: game.ramen.eat_count,
         friend_all: game.friend.out_used.iter().all(|used| *used),
-        elapsed_ms,
+        elapsed_ms
     })
 }
 
@@ -105,7 +106,7 @@ pub struct Stats {
     /// 中位数。
     pub median: f64,
     /// 标准差（总体）。
-    pub std: f64,
+    pub std: f64
 }
 
 /// 基本统计（min/max/mean/median/std），空序列返回全 0。
@@ -116,7 +117,7 @@ pub fn summarize(values: &[f64]) -> Stats {
             max: 0.0,
             mean: 0.0,
             median: 0.0,
-            std: 0.0,
+            std: 0.0
         };
     }
     let n = values.len() as f64;
@@ -173,7 +174,7 @@ pub struct CardRep {
     /// 满破 idrank（card_id * 10 + 4）。
     pub idrank: u32,
     /// 卡名。
-    pub name: String,
+    pub name: String
 }
 
 /// 代表性支援卡选择参数。
@@ -184,7 +185,7 @@ pub struct CardPickOpts {
     /// 弱卡阈值：满破面板「友情+干劲+训练」低于此值视为弱卡。
     pub min_panel: f32,
     /// 每种类型选取张数。
-    pub pick: usize,
+    pub pick: usize
 }
 
 impl Default for CardPickOpts {
@@ -193,7 +194,7 @@ impl Default for CardPickOpts {
         Self {
             pool_size: 5,
             min_panel: 70.0,
-            pick: 3,
+            pick: 3
         }
     }
 }
@@ -204,7 +205,7 @@ pub struct RepresentativeSet {
     /// 各类型选出的代表卡（按 card_id 倒序）。
     pub picked: [Vec<CardRep>; 5],
     /// 候选池中友情+干劲+训练低于阈值的弱卡。
-    pub skipped: [Vec<CardRep>; 5],
+    pub skipped: [Vec<CardRep>; 5]
 }
 
 /// 选取各类型的代表性支援卡。
@@ -235,12 +236,12 @@ pub fn select_representatives(opts: &CardPickOpts) -> Result<RepresentativeSet> 
             if panel_score(card) >= opts.min_panel && picked[card_type].len() < opts.pick {
                 picked[card_type].push(CardRep {
                     idrank: card.card_id * 10 + 4,
-                    name: card.card_name.clone(),
+                    name: card.card_name.clone()
                 });
             } else if panel_score(card) < opts.min_panel {
                 skipped[card_type].push(CardRep {
                     idrank: card.card_id * 10 + 4,
-                    name: card.card_name.clone(),
+                    name: card.card_name.clone()
                 });
             }
         }
@@ -314,8 +315,10 @@ mod tests {
     /// 集成验证：真实 cardDB 上默认参数能选出每类型 3 张、idrank 严格倒序的代表卡。
     #[test]
     fn test_select_representatives_live_data() -> Result<()> {
-        use crate::gamedata::{GameConfig, init_global_with_config};
-        use crate::utils::get_workspace_root;
+        use crate::{
+            gamedata::{GameConfig, init_global_with_config},
+            utils::get_workspace_root
+        };
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(&workspace_root)?;
         init_global_with_config(&GameConfig::default_for_init())?;

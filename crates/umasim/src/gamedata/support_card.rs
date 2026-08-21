@@ -1,4 +1,5 @@
-use serde::{Serialize, Deserialize};
+use serde::{Deserialize, Serialize};
+
 use crate::utils::Array6;
 
 /// 支援卡数据 CardDB.json

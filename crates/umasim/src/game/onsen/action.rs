@@ -63,7 +63,7 @@ impl Display for OnsenAction {
                 let name = &global!(ONSENDATA).dig_tool_name[*x as usize];
                 write!(f, "升级 {}", name.bright_yellow())
             }
-            OnsenAction::Choice((_event, choice)) => write!(f, "选项{}", *choice+1)
+            OnsenAction::Choice((_event, choice)) => write!(f, "选项{}", *choice + 1)
         }
     }
 }
@@ -115,7 +115,8 @@ impl ActionEnum for OnsenAction {
                     let mut event = system_event("race_career")?.clone();
                     // 事件面板乘算比赛加成
                     event.map_status(|x| (x as f32 * race_bonus * scenario_bonus).round() as i32);
-                    event.choices[0][0].value.status_pt[5] = (event.choices[0][0].value.status_pt[5] as f32 * pt_rate).round() as i32;
+                    event.choices[0][0].value.status_pt[5] =
+                        (event.choices[0][0].value.status_pt[5] as f32 * pt_rate).round() as i32;
                     game.unresolved_events.push(event);
                 } else {
                     let grade = global!(GAMECONSTANTS).race_grades[game.turn as usize];
@@ -180,9 +181,7 @@ impl ActionEnum for OnsenAction {
             // ========== 升级工具动作 ==========
             OnsenAction::Upgrade(tool) => game.do_upgrade_equipment(*tool as usize),
             // ========== 选择事件选项(test) ==========
-            OnsenAction::Choice((event, choice)) => {
-                game.apply_event(event, *choice, rng)
-            }
+            OnsenAction::Choice((event, choice)) => game.apply_event(event, *choice, rng)
         }
     }
 

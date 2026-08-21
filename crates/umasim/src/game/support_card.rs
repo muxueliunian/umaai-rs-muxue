@@ -333,8 +333,10 @@ impl SupportCard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gamedata::init_global;
-    use crate::utils::{get_workspace_root, init_test_logger};
+    use crate::{
+        gamedata::init_global,
+        utils::{get_workspace_root, init_test_logger}
+    };
 
     #[test]
     fn test_support() -> Result<()> {

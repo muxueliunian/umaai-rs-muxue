@@ -7,8 +7,11 @@ use rand_distr::{Distribution, weighted::WeightedIndex};
 use super::PersonType;
 use crate::{
     diag,
-    explain::Explain, game::{BaseAction, CardTrainingEffect, SupportCard, Uma}, gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, TrainingBasicTable, TriggerType}, global,
-    output::{DecisionInfo, GameView},
+    explain::Explain,
+    game::{BaseAction, CardTrainingEffect, SupportCard, Uma},
+    gamedata::{ActionValue, EventChoice, EventData, GAMECONSTANTS, TrainingBasicTable, TriggerType},
+    global,
+    output::{DecisionInfo, GameView}
 };
 // Game为核心特性，
 // ActionEnum 执行动作，修改Game状态
@@ -131,16 +134,14 @@ pub trait Game: Clone {
     fn list_turn_events(&self, events: &[EventData]) -> Vec<EventData> {
         events
             .iter()
-            .filter_map(|e| {
-                match &e.trigger {
-                    TriggerType::Random { .. } => Some(e.clone()),
-                    TriggerType::Code => None,
-                    TriggerType::Fixed { turns } => {
-                        if turns.contains(&self.turn()) {
-                            Some(e.clone())
-                        } else {
-                            None
-                        }
+            .filter_map(|e| match &e.trigger {
+                TriggerType::Random { .. } => Some(e.clone()),
+                TriggerType::Code => None,
+                TriggerType::Fixed { turns } => {
+                    if turns.contains(&self.turn()) {
+                        Some(e.clone())
+                    } else {
+                        None
                     }
                 }
             })
@@ -307,11 +308,14 @@ pub trait Game: Clone {
     /// provided: 指定训练的彩圈个数
     fn shining_count(&self, train: usize) -> usize {
         // 防御：distribution 未初始化时返回 0
-        self.distribution().get(train)
-            .map(|d| d.iter()
-                .filter(|index| **index >= 0) // 过滤掉分身（负数）和空位（-1）
-                .filter(|index| self.is_shining_at(**index as usize, train))
-                .count())
+        self.distribution()
+            .get(train)
+            .map(|d| {
+                d.iter()
+                    .filter(|index| **index >= 0) // 过滤掉分身（负数）和空位（-1）
+                    .filter(|index| self.is_shining_at(**index as usize, train))
+                    .count()
+            })
             .unwrap_or(0)
     }
     // 训练相关
@@ -365,7 +369,9 @@ pub trait Game: Clone {
         }
         // 人数, 包括NPC和分身, 排除掉理事长和记者
         // 防御：distribution 未初始化时返回 0 人数
-        let person_count = self.distribution().get(train)
+        let person_count = self
+            .distribution()
+            .get(train)
             .map(|d| d.iter().filter(|p| **p != 6 && **p != 7).count())
             .unwrap_or(0);
         // 基础值
@@ -451,7 +457,7 @@ pub trait Game: Clone {
             max_vital: uma.max_vital,
             motivation: uma.motivation,
             skill_pt: uma.skill_pt,
-            total_hints: uma.total_hints,
+            total_hints: uma.total_hints
         }
     }
 }

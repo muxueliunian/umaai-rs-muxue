@@ -26,7 +26,7 @@ use crate::{
         Uma,
         traits::*
     },
-    gamedata::{*, onsen::ONSENDATA},
+    gamedata::{onsen::ONSENDATA, *},
     global,
     utils::{AttributeArray, global_events, system_event, system_event_prob}
 };
@@ -136,8 +136,7 @@ impl BasicAction {
             if !game.is_xiahesu() && rng.random_bool(extra_train_prob as f64) {
                 let mut event = EventData::extra_training_event(train);
                 // 动态设置理事长索引
-                if let Some(yayoi_index) = game.persons.iter()
-                    .position(|p| p.person_type == PersonType::Yayoi) {
+                if let Some(yayoi_index) = game.persons.iter().position(|p| p.person_type == PersonType::Yayoi) {
                     event.person_index = Some(yayoi_index as i32);
                 }
                 game.unresolved_events.push(event);
@@ -304,16 +303,14 @@ impl Game for BasicGame {
         let story_events = global_events()
             .story_events
             .iter()
-            .filter_map(|e| {
-                match &e.trigger {
-                    TriggerType::Random { .. } => Some(e.clone()),
-                    TriggerType::Code => None,
-                    TriggerType::Fixed { turns } => {
-                        if turns.contains(&self.turn) {
-                            Some(e.clone())
-                        } else {
-                            None
-                        }
+            .filter_map(|e| match &e.trigger {
+                TriggerType::Random { .. } => Some(e.clone()),
+                TriggerType::Code => None,
+                TriggerType::Fixed { turns } => {
+                    if turns.contains(&self.turn) {
+                        Some(e.clone())
+                    } else {
+                        None
                     }
                 }
             })
@@ -447,9 +444,11 @@ impl Game for BasicGame {
     /// 使事件生效（无选项）。修改羁绊和特殊事件的部分需要在当前类型里完成
     fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()> {
         if let Some(result) = self.base.apply_event(event, choice, rng) {
-            if let Some(person_index) = &event.person_index && result.value.friendship != 0 {
+            if let Some(person_index) = &event.person_index
+                && result.value.friendship != 0
+            {
                 self.add_friendship(*person_index as usize, result.value.friendship);
-            } 
+            }
         }
         // 判断特殊事件
         match event.id {
@@ -604,7 +603,11 @@ mod tests {
     use rand::SeedableRng;
 
     use super::*;
-    use crate::{global, trainer::RandomTrainer, utils::{get_workspace_root, init_test_logger}};
+    use crate::{
+        global,
+        trainer::RandomTrainer,
+        utils::{get_workspace_root, init_test_logger}
+    };
 
     #[test]
     fn test_newgame() -> Result<()> {

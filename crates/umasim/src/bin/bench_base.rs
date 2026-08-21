@@ -27,12 +27,14 @@ use std::time::Instant;
 use anyhow::{Context, Result};
 use lexopt::Arg;
 use serde::Deserialize;
-use umasim::bench;
-use umasim::game::InheritInfo;
-use umasim::gamedata::init_global_with_config;
-use umasim::output::decision_log::DecisionLogRow;
-use umasim::trainer::{LoggingTrainer, RamenHandwrittenTrainer, RandomTrainer};
-use umasim::utils::{get_workspace_root, load_game_config};
+use umasim::{
+    bench,
+    game::InheritInfo,
+    gamedata::init_global_with_config,
+    output::decision_log::DecisionLogRow,
+    trainer::{LoggingTrainer, RamenHandwrittenTrainer, RandomTrainer},
+    utils::{get_workspace_root, load_game_config}
+};
 
 /// bench_config.toml 的配置项（CLI 参数可覆盖同名项）
 #[derive(Debug, Clone, Deserialize)]
@@ -54,7 +56,7 @@ struct BenchConfig {
     /// 是否落盘决策日志
     decision_log: bool,
     /// 训练员: "random"（基线）| "handwritten"（手写策略）
-    trainer: String,
+    trainer: String
 }
 
 /// 内置默认值（与 bench_config.toml 保持一致；文件缺失时使用）
@@ -69,7 +71,7 @@ impl Default for BenchConfig {
             seed: 42,
             out_dir: "logs".to_string(),
             decision_log: false,
-            trainer: "random".to_string(),
+            trainer: "random".to_string()
         }
     }
 }
@@ -88,7 +90,7 @@ const RESULTS_HEADER: [&str; 13] = [
     "scenario_pt",
     "rmj_ok",
     "eat_count",
-    "elapsed_ms",
+    "elapsed_ms"
 ];
 
 /// 解析 CLI 参数（`--key value` 或 `--key=value`），覆盖 bench 配置
@@ -181,7 +183,7 @@ fn main() -> Result<()> {
 
     let inherit = InheritInfo {
         blue_count: cfg.blue_count,
-        extra_count: cfg.extra_count,
+        extra_count: cfg.extra_count
     };
 
     println!(
@@ -205,7 +207,7 @@ fn main() -> Result<()> {
                 let outcome = bench::run_seeded(cfg.uma, &cfg.cards, &inherit, seed, &trainer)?;
                 (outcome, trainer.take_records())
             }
-            other => anyhow::bail!("未知 trainer: {other}（可选 random / handwritten）"),
+            other => anyhow::bail!("未知 trainer: {other}（可选 random / handwritten）")
         };
         println!(
             "  [#{:02}] seed={} score={} ({}) PT={} RMJ={}/3 耗时={:.3}ms",

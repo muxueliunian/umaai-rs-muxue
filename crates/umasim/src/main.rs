@@ -72,7 +72,7 @@ fn run_basic_once<T: Trainer<BasicGame>>(
 /// # 探索性策略
 /// 使用 40% 探索率在温泉选择时引入随机性，让神经网络能够
 /// 从不同的挖掘顺序中学习，而不是只记住固定的顺序。
-/* 
+/*
 #[allow(dead_code)]
 fn run_collector_mode(config: &GameConfig, num_games: usize, rng: &mut StdRng) -> Result<()> {
     // 创建带探索率的训练员

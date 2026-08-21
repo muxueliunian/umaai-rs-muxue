@@ -9,29 +9,33 @@
 use anyhow::{Result, anyhow};
 #[cfg(feature = "cli")]
 use comfy_table::{ColumnConstraint, Table, Width};
-use rand::prelude::IndexedRandom;
-use rand::{Rng, SeedableRng, rngs::StdRng};
+use rand::{Rng, SeedableRng, prelude::IndexedRandom, rngs::StdRng};
 use rand_distr::{Distribution, weighted::WeightedIndex};
 
-use super::{RamenGame, RamenStage, RamenAction, Operation, FeelingType};
-use super::rules::{self, get_turn_special_feeling};
-use super::events::assign_train_feeling_type;
-use super::effects::calc_ramen_training_effect;
-use super::policy::fixed_super_ramen_selection;
+use super::{
+    FeelingType,
+    Operation,
+    RamenAction,
+    RamenGame,
+    RamenStage,
+    effects::calc_ramen_training_effect,
+    events::assign_train_feeling_type,
+    policy::fixed_super_ramen_selection,
+    rules::{self, get_turn_special_feeling}
+};
 use crate::{
     diag,
     game::{
-        BasePerson, FriendOutState, PersonType,
+        BasePerson,
+        FriendOutState,
+        PersonType,
         traits::{Game, Person, Trainer},
-        uma::Uma,
+        uma::Uma
     },
+    gamedata::{ActionValue, EventData, GAMECONFIG, GAMECONSTANTS, RamenRegionStrategy, TriggerType, ramen::RAMENDATA},
+    global,
+    utils::{AttributeArray, global_events, system_event, system_event_prob}
 };
-use crate::gamedata::{
-    ActionValue, EventData, GAMECONFIG, GAMECONSTANTS,
-    RamenRegionStrategy, TriggerType, ramen::RAMENDATA,
-};
-use crate::global;
-use crate::utils::{global_events, system_event, system_event_prob, AttributeArray};
 
 impl Game for RamenGame {
     type Person = BasePerson;
@@ -138,7 +142,12 @@ impl Game for RamenGame {
                 if result.is_success() {
                     self.ramen.train_level_bonus += 1;
                 }
-                diag!("RMJ 结算: {:?} (PT={}) 训练等级加成={}", result, self.ramen.scenario_pt, self.ramen.train_level_bonus);
+                diag!(
+                    "RMJ 结算: {:?} (PT={}) 训练等级加成={}",
+                    result,
+                    self.ramen.scenario_pt,
+                    self.ramen.train_level_bonus
+                );
                 self.ramen.eat_count = 0;
                 // RMJ 事件立即 apply（在 turn=N 末触发，而非 turn=N+1 末）
                 // 原因：push 到 unresolved_events 后会被 AfterTrain 阶段消费，
@@ -147,12 +156,7 @@ impl Game for RamenGame {
                 // RMJ 事件没有 player_select=true，可以直接 apply 而不需 Trainer。
                 // 事件 ID：401404(年1) / 401405(年2) / 401406(年3)，按 rmj_results[year_idx] 决定 result=2/1
                 if let Some(event) = find_rmj_event(year_idx) {
-                    diag!(
-                        "+ 事件: #{} {} (回合 {} 末)",
-                        event.id,
-                        event.name,
-                        self.base.turn + 1
-                    );
+                    diag!("+ 事件: #{} {} (回合 {} 末)", event.id, event.name, self.base.turn + 1);
                     // 使用规则层 RNG（保证固定种子可复现）
                     let mut apply_rng = self.take_internal_rng();
                     let err = self.apply_event(&event, 0, &mut apply_rng).is_err();
@@ -165,10 +169,7 @@ impl Game for RamenGame {
                 // 此时 rmj_results 已写入，下一年的 ramen_success_effect / ramen_fail_effect 已可读取
                 let pt_before_reset = self.ramen.scenario_pt;
                 self.ramen.scenario_pt = 0;
-                diag!(
-                    "scenario_pt 已归零（结算前 PT={}，下年重新累计）",
-                    pt_before_reset
-                );
+                diag!("scenario_pt 已归零（结算前 PT={}，下年重新累计）", pt_before_reset);
             }
 
             // 年度地区选择：回合23（第1年结束后）、回合47（第2年结束后）
@@ -217,7 +218,7 @@ impl Game for RamenGame {
                     2 => 0,
                     23 => 1,
                     47 => 2,
-                    _ => unreachable!("unexpected turn for RegionSelect: {}", self.base.turn),
+                    _ => unreachable!("unexpected turn for RegionSelect: {}", self.base.turn)
                 };
                 self.run_region_select(trainer, rng, year_idx)?;
             }
@@ -247,7 +248,7 @@ impl Game for RamenGame {
                 if self.base.turn >= 2 && !self.is_super_ramen_turn() {
                     Ok(super::action::list_ramen_select_actions(
                         &self.ramen,
-                        &self.ramen.selected_regions,
+                        &self.ramen.selected_regions
                     ))
                 } else {
                     Ok(vec![RamenAction::ramen_select(None)])
@@ -264,7 +265,7 @@ impl Game for RamenGame {
                 can_friend_outing,
                 is_ill,
                 self.is_xiahesu(),
-                can_race,
+                can_race
             )),
             // 其他阶段的 list_actions 保留旧行为（虽然外部不会在此阶段调）
             _ => {
@@ -278,7 +279,7 @@ impl Game for RamenGame {
                     can_friend_outing,
                     is_ill,
                     self.is_xiahesu(),
-                    can_race,
+                    can_race
                 ))
             }
         }
@@ -347,40 +348,31 @@ impl Game for RamenGame {
                 }
             }
             // 一般随机事件
-            let weights =
-                WeightedIndex::new(global!(GAMECONSTANTS).get_event_distribution())
-                    .expect("event weights");
+            let weights = WeightedIndex::new(global!(GAMECONSTANTS).get_event_distribution()).expect("event weights");
             match weights.sample(rng) {
                 0 => {
                     // 只从 Card 类型的人物中随机选择
-                    let card_indices: Vec<i32> = self.persons.iter()
+                    let card_indices: Vec<i32> = self
+                        .persons
+                        .iter()
                         .enumerate()
                         .filter(|(_, p)| p.person_type == PersonType::Card)
                         .map(|(i, _)| i as i32)
                         .collect();
                     if let Some(&person_index) = card_indices.choose(rng) {
-                        if let Some(event) = self.base.generate_card_event(
-                            person_index,
-                            rng,
-                        ) {
+                        if let Some(event) = self.base.generate_card_event(person_index, rng) {
                             events.push(event);
                         }
                     }
                 }
                 1 => {
-                    if let Some(event) =
-                        self.base.random_select_event(&global_events().uma_events, rng)
-                    {
+                    if let Some(event) = self.base.random_select_event(&global_events().uma_events, rng) {
                         events.push(event);
                     }
                 }
                 2 => {
                     if self.base.turn >= 12 {
-                        events.push(
-                            system_event("drop_motivation")
-                                .expect("掉心情事件")
-                                .clone(),
-                        );
+                        events.push(system_event("drop_motivation").expect("掉心情事件").clone());
                     }
                 }
                 _ => {}
@@ -393,12 +385,10 @@ impl Game for RamenGame {
         // RMJ 事件特殊处理：根据 rmj_results[year_idx] 选择 result=2 或 result=1 的分支
         if let Some(year_idx) = rmj_event_year(event.id) {
             if let Some(choice_group) = event.choices.first() {
-                if let Some(target) = select_rmj_choice_by_result(choice_group, self.ramen.rmj_results.get(year_idx).copied()) {
-                    diag!(
-                        "RMJ 事件 #{} 应用 result={} 分支",
-                        event.id,
-                        target.result
-                    );
+                if let Some(target) =
+                    select_rmj_choice_by_result(choice_group, self.ramen.rmj_results.get(year_idx).copied())
+                {
+                    diag!("RMJ 事件 #{} 应用 result={} 分支", event.id, target.result);
                     self.base.uma.add_value(&target.value);
                 } else {
                     diag!(
@@ -415,7 +405,9 @@ impl Game for RamenGame {
         }
 
         if let Some(result) = self.base.apply_event(event, choice, rng) {
-            if let Some(person_index) = &event.person_index && result.value.friendship != 0 {
+            if let Some(person_index) = &event.person_index
+                && result.value.friendship != 0
+            {
                 self.add_friendship(*person_index as usize, result.value.friendship);
             }
         }
@@ -447,14 +439,30 @@ impl Game for RamenGame {
 
     // ========== Getters ==========
 
-    fn persons(&self) -> &[Self::Person] { &self.persons }
-    fn persons_mut(&mut self) -> &mut [Self::Person] { &mut self.persons }
-    fn absent_rate_drop(&self) -> i32 { self.base.absent_rate_drop }
-    fn distribution(&self) -> &Vec<Vec<i32>> { &self.base.distribution }
-    fn distribution_mut(&mut self) -> &mut Vec<Vec<i32>> { &mut self.base.distribution }
-    fn uma(&self) -> &Uma { &self.uma }
-    fn uma_mut(&mut self) -> &mut Uma { &mut self.uma }
-    fn deck(&self) -> &Vec<crate::game::SupportCard> { &self.deck }
+    fn persons(&self) -> &[Self::Person] {
+        &self.persons
+    }
+    fn persons_mut(&mut self) -> &mut [Self::Person] {
+        &mut self.persons
+    }
+    fn absent_rate_drop(&self) -> i32 {
+        self.base.absent_rate_drop
+    }
+    fn distribution(&self) -> &Vec<Vec<i32>> {
+        &self.base.distribution
+    }
+    fn distribution_mut(&mut self) -> &mut Vec<Vec<i32>> {
+        &mut self.base.distribution
+    }
+    fn uma(&self) -> &Uma {
+        &self.uma
+    }
+    fn uma_mut(&mut self) -> &mut Uma {
+        &mut self.uma
+    }
+    fn deck(&self) -> &Vec<crate::game::SupportCard> {
+        &self.deck
+    }
 
     fn deyilv(&mut self, person_index: i32) -> Result<f32> {
         if person_index < 6 {
@@ -471,7 +479,9 @@ impl Game for RamenGame {
         }
     }
 
-    fn has_group_buff(&self) -> bool { self.friend.group_buff_turn > 0 }
+    fn has_group_buff(&self) -> bool {
+        self.friend.group_buff_turn > 0
+    }
 
     /// 重写闪耀判定
     ///
@@ -484,9 +494,7 @@ impl Game for RamenGame {
         let person = &self.persons[person_index];
         match person.person_type {
             // 支援卡（含分身）：只能在本体的得意训练位置闪耀
-            PersonType::Card => {
-                person.train_type == train as i32 && person.friendship >= 80
-            },
+            PersonType::Card => person.train_type == train as i32 && person.friendship >= 80,
             // 友人卡：有 group buff 时闪耀
             PersonType::ScenarioCard => self.has_group_buff(),
             // NPC、理事长、记者不能闪耀
@@ -511,17 +519,21 @@ impl Game for RamenGame {
         let base_headers = vec!["速", "耐", "力", "根", "智"];
         // 剧本机制已开启 且 非URA回合 时显示诀窍角标
         let show_ramen = self.base.turn >= 2 && !self.is_super_ramen_turn();
-        let headers: Vec<String> = base_headers.iter().enumerate().map(|(i, &h)| {
-            if show_ramen {
-                if let Some(types) = self.ramen.train_feeling_type {
-                    format!("{}{:?}", h, types[i])
+        let headers: Vec<String> = base_headers
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| {
+                if show_ramen {
+                    if let Some(types) = self.ramen.train_feeling_type {
+                        format!("{}{:?}", h, types[i])
+                    } else {
+                        h.to_string()
+                    }
                 } else {
                     h.to_string()
                 }
-            } else {
-                h.to_string()
-            }
-        }).collect();
+            })
+            .collect();
         // 防御：distribution 未初始化（dist.len() < 5）时填充空 vec，
         // 避免 ground_ramen_effects 在 distribute 之前触发时 panic
         let dist: Vec<Vec<i32>> = if self.base.distribution.len() < 5 {
@@ -600,8 +612,8 @@ impl Game for RamenGame {
         // - pt_bonus 仅对 status_pt[5]（PT）单独生效
         for i in 0..5 {
             if base_value.status_pt[i] > 0 {
-                let upper_raw = (base_value.status_pt[i] as f64 * xunlian_mult * youqing_mult) as i32
-                    - base_value.status_pt[i];
+                let upper_raw =
+                    (base_value.status_pt[i] as f64 * xunlian_mult * youqing_mult) as i32 - base_value.status_pt[i];
                 let upper = upper_raw.min(status_limit).max(0);
                 base_value.status_pt[i] += upper;
             }
@@ -618,7 +630,7 @@ impl Game for RamenGame {
         match self.persons[person_index].person_type {
             PersonType::ScenarioCard => self.base.turn >= 2,
             PersonType::Reporter => self.base.turn >= 12,
-            _ => true,
+            _ => true
         }
     }
 
@@ -698,8 +710,7 @@ impl RamenGame {
         // 1. 消耗诀窍 + PT 增量 + current_ramen + 分身（仅当 pending_ramen.is_some()）
         if let Some(ramen_idx) = self.ramen.pending_ramen {
             let targets = self.ramen.pending_special_targets;
-            let used_special =
-                super::rules::consume_for_ramen(&mut self.ramen, ramen_idx, &targets)?;
+            let used_special = super::rules::consume_for_ramen(&mut self.ramen, ramen_idx, &targets)?;
             self.ramen.current_ramen = Some(ramen_idx);
 
             let year_idx = (self.current_year() - 1) as usize;
@@ -770,10 +781,7 @@ impl RamenGame {
         if let Some(basic) = ramen_data.ramen_basic_effect.get(year_idx) {
             if basic.friendship > 0 {
                 for i in 0..self.persons.len() {
-                    if matches!(
-                        self.persons[i].person_type,
-                        PersonType::Card | PersonType::ScenarioCard
-                    ) {
+                    if matches!(self.persons[i].person_type, PersonType::Card | PersonType::ScenarioCard) {
                         self.add_friendship(i, basic.friendship);
                     }
                 }
@@ -791,11 +799,7 @@ impl RamenGame {
     /// - 满员规则：每个训练位置最多 5 人；已满则优先挤掉 NPC
     /// - 同一训练不能存在相同卡的 `Person` 和分身
     /// - 分身不计算得意率，不包含友人卡
-    fn distribute_region_clones(
-        &mut self,
-        region_id: usize,
-        rng: &mut StdRng,
-    ) -> Result<()> {
+    fn distribute_region_clones(&mut self, region_id: usize, rng: &mut StdRng) -> Result<()> {
         let ramen_data = global!(RAMENDATA);
         let region = &ramen_data.ramen_region_effect[region_id];
 
@@ -866,9 +870,10 @@ impl RamenGame {
 
             if dist.len() >= 5 {
                 // 已满5人，尝试挤掉NPC
-                if let Some(npc_pos) = dist.iter().position(|&id| {
-                    id >= 0 && self.persons[id as usize].person_type == PersonType::Npc
-                }) {
+                if let Some(npc_pos) = dist
+                    .iter()
+                    .position(|&id| id >= 0 && self.persons[id as usize].person_type == PersonType::Npc)
+                {
                     let removed_id = self.base.distribution[train].remove(npc_pos);
                     self.base.distribution[train].push(person_idx);
                     crate::diag!(
@@ -981,11 +986,7 @@ impl RamenGame {
     /// 4. **不直接设 stage**，交给 `Game::next()` 推进（避免后续 next 混乱）
     ///
     /// 必须在 `stage == RamenStage::RamenSelect` 时调用；其他阶段调用返回错误。
-    pub fn apply_combined_ramen_decision(
-        &mut self,
-        ramen: Option<usize>,
-        targets: [i32; 3],
-    ) -> Result<()> {
+    pub fn apply_combined_ramen_decision(&mut self, ramen: Option<usize>, targets: [i32; 3]) -> Result<()> {
         if self.stage != RamenStage::RamenSelect {
             anyhow::bail!(
                 "apply_combined_ramen_decision: 仅在 RamenSelect 阶段可调用，当前 stage={:?}",
@@ -1113,12 +1114,15 @@ impl RamenGame {
                 self.uma.race_bonus += finals_base.saihou;
                 diag!(
                     "超级拉面自动恢复: 体力+{}, 干劲+{}, 赛后+{}（一次性）",
-                    finals_base.vital, finals_base.motivation, finals_base.saihou
+                    finals_base.vital,
+                    finals_base.motivation,
+                    finals_base.saihou
                 );
             } else {
                 diag!(
                     "超级拉面自动恢复: 体力+{}, 干劲+{}",
-                    finals_base.vital, finals_base.motivation
+                    finals_base.vital,
+                    finals_base.motivation
                 );
             }
         }
@@ -1132,9 +1136,7 @@ impl RamenGame {
             self.reset_distribution();
         } else {
             let raw_types = assign_train_feeling_type(rng);
-            let feelings: [FeelingType; 5] = raw_types.map(|v| {
-                FeelingType::try_from(v).unwrap_or(FeelingType::A)
-            });
+            let feelings: [FeelingType; 5] = raw_types.map(|v| FeelingType::try_from(v).unwrap_or(FeelingType::A));
             self.ramen.train_feeling_type = Some(feelings);
             self.distribute_all(rng)?;
             self.distribute_hint(rng)?;
@@ -1213,10 +1215,7 @@ impl RamenGame {
         // Phase 2 步骤 5：策略路由（仅第3年 year_idx=2 生效；第1/2年固定走 all 枚举）
         // - Fixed：跳过 120 组合枚举，直接用 ramen_region_fixed[0]
         // - All：枚举所有组合交给 Trainer（默认）
-        if year_idx == 2 && matches!(
-            global!(GAMECONFIG).ramen_region_strategy,
-            RamenRegionStrategy::Fixed
-        ) {
+        if year_idx == 2 && matches!(global!(GAMECONFIG).ramen_region_strategy, RamenRegionStrategy::Fixed) {
             let fixed = global!(GAMECONFIG).ramen_region_fixed.as_ref().ok_or_else(|| {
                 anyhow::anyhow!("ramen_region_strategy=fixed 但未设置 ramen_region_fixed（仅第3年需要，长度 = 1）")
             })?;
@@ -1224,9 +1223,10 @@ impl RamenGame {
                 anyhow::bail!("ramen_region_fixed 长度必须 = 1（仅第3年）");
             }
             let combo = fixed[0];
-            let names: Vec<&str> = combo.iter().filter_map(|&idx| {
-                ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str())
-            }).collect();
+            let names: Vec<&str> = combo
+                .iter()
+                .filter_map(|&idx| ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str()))
+                .collect();
             diag!("==== 第3年 地区选择（Fixed 策略）: {} ====", names.join(", "));
             let action = RamenAction::no_ramen(Operation::RegionSelect(combo));
             self.apply_action(&action, rng)?;
@@ -1236,12 +1236,16 @@ impl RamenGame {
         let combos = super::rules::get_region_combinations(year_idx)?;
         diag!("==== 第{}年 地区选择 ({}种组合) ====", year, combos.len());
         for (i, combo) in combos.iter().enumerate() {
-            let names: Vec<&str> = combo.iter().filter_map(|&idx| {
-                ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str())
-            }).collect();
+            let names: Vec<&str> = combo
+                .iter()
+                .filter_map(|&idx| ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str()))
+                .collect();
             diag!("  {}: {}", i + 1, names.join(", "));
         }
-        let actions: Vec<RamenAction> = combos.iter().map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c))).collect();
+        let actions: Vec<RamenAction> = combos
+            .iter()
+            .map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c)))
+            .collect();
         let selection = trainer.select_action(self, &actions, rng)?;
         self.apply_action(&actions[selection], rng)
     }
@@ -1264,9 +1268,9 @@ impl RamenGame {
         // 查找友人卡
         let friend_card = self.deck.iter().find(|c| c.card_type >= 5);
         let init_val = match friend_card {
-            Some(card) if card.card_id == 30305 => 2,       // 新友人
+            Some(card) if card.card_id == 30305 => 2,                     // 新友人
             Some(card) if matches!(card.data.chara_id, 9001 | 9008) => 1, // 旧友人
-            _ => 0,                                           // 无友人卡
+            _ => 0                                                        // 无友人卡
         };
 
         self.ramen.feeling_stock = [init_val; 3];
@@ -1281,7 +1285,9 @@ impl RamenGame {
         }
         diag!(
             ">> 诀窍初始化: 每种={} 隐藏+{} (={})",
-            init_val, special_gain, self.ramen.special_feeling
+            init_val,
+            special_gain,
+            self.ramen.special_feeling
         );
     }
 
@@ -1381,12 +1387,26 @@ impl RamenGame {
                 let train = region.at_trains.first().copied().unwrap_or(0) as usize;
                 let eff = super::effects::calc_ramen_training_effect(self, train, false);
                 let mut parts = vec![];
-                if eff.xunlian != 0 { parts.push(format!("训+{}", eff.xunlian)); }
-                if eff.fail_rate_drop as i32 != 0 { parts.push(format!("失败率-{}", eff.fail_rate_drop as i32)); }
-                if eff.friendship != 0 { parts.push(format!("羁绊+{}", eff.friendship)); }
-                if eff.status_limit != 0 { parts.push(format!("上限+{}", eff.status_limit)); }
-                if eff.pt_bonus != 0 { parts.push(format!("PT+{}", eff.pt_bonus)); }
-                if parts.is_empty() { region.name.clone() } else { format!("{}({})", region.name, parts.join(",")) }
+                if eff.xunlian != 0 {
+                    parts.push(format!("训+{}", eff.xunlian));
+                }
+                if eff.fail_rate_drop as i32 != 0 {
+                    parts.push(format!("失败率-{}", eff.fail_rate_drop as i32));
+                }
+                if eff.friendship != 0 {
+                    parts.push(format!("羁绊+{}", eff.friendship));
+                }
+                if eff.status_limit != 0 {
+                    parts.push(format!("上限+{}", eff.status_limit));
+                }
+                if eff.pt_bonus != 0 {
+                    parts.push(format!("PT+{}", eff.pt_bonus));
+                }
+                if parts.is_empty() {
+                    region.name.clone()
+                } else {
+                    format!("{}({})", region.name, parts.join(","))
+                }
             } else {
                 "无".to_string()
             }
@@ -1398,16 +1418,34 @@ impl RamenGame {
         if is_ura {
             let eff = super::effects::calc_ramen_training_effect(self, 0, false);
             let mut parts = vec![];
-            if eff.xunlian != 0 { parts.push(format!("训+{}", eff.xunlian)); }
-            if eff.youqing != 0 { parts.push(format!("友情+{}", eff.youqing)); }
-            if eff.deyilv != 0 { parts.push(format!("得意+{}", eff.deyilv)); }
-            if eff.fail_rate_drop as i32 != 0 { parts.push(format!("失败率-{}", eff.fail_rate_drop as i32)); }
-            if eff.friendship != 0 { parts.push(format!("羁绊+{}", eff.friendship)); }
-            if eff.status_limit != 0 { parts.push(format!("上限+{}", eff.status_limit)); }
-            if eff.pt_bonus != 0 { parts.push(format!("PT+{}", eff.pt_bonus)); }
-            if eff.hint != 0 { parts.push(format!("hint+{}", eff.hint)); }
-            if eff.clone_count != 0 { parts.push(format!("分身+{}", eff.clone_count)); }
-            
+            if eff.xunlian != 0 {
+                parts.push(format!("训+{}", eff.xunlian));
+            }
+            if eff.youqing != 0 {
+                parts.push(format!("友情+{}", eff.youqing));
+            }
+            if eff.deyilv != 0 {
+                parts.push(format!("得意+{}", eff.deyilv));
+            }
+            if eff.fail_rate_drop as i32 != 0 {
+                parts.push(format!("失败率-{}", eff.fail_rate_drop as i32));
+            }
+            if eff.friendship != 0 {
+                parts.push(format!("羁绊+{}", eff.friendship));
+            }
+            if eff.status_limit != 0 {
+                parts.push(format!("上限+{}", eff.status_limit));
+            }
+            if eff.pt_bonus != 0 {
+                parts.push(format!("PT+{}", eff.pt_bonus));
+            }
+            if eff.hint != 0 {
+                parts.push(format!("hint+{}", eff.hint));
+            }
+            if eff.clone_count != 0 {
+                parts.push(format!("分身+{}", eff.clone_count));
+            }
+
             let mut result = format!("超级拉面回合");
             if !parts.is_empty() {
                 result.push_str(&format!(" [{}]", parts.join(",")));
@@ -1417,9 +1455,12 @@ impl RamenGame {
 
         // 普通回合：完整显示
         // 当前选择地区
-        let regions_str: Vec<String> = self.ramen.selected_regions.iter().filter_map(|&idx| {
-            ramen_data.ramen_region_effect.get(idx).map(|r| r.name.clone())
-        }).collect();
+        let regions_str: Vec<String> = self
+            .ramen
+            .selected_regions
+            .iter()
+            .filter_map(|&idx| ramen_data.ramen_region_effect.get(idx).map(|r| r.name.clone()))
+            .collect();
 
         // 诀窍库存和槽
         let stock = &self.ramen.feeling_stock;
@@ -1429,9 +1470,15 @@ impl RamenGame {
         let pt_tier = super::effects::find_pt_effect_tier(self.ramen.scenario_pt);
         let pt_effect = &ramen_data.ramen_pt_effect[pt_tier];
         let mut pt_parts = vec![];
-        if pt_effect.xunlian != 0 { pt_parts.push(format!("训+{}", pt_effect.xunlian)); }
-        if pt_effect.deyilv != 0 { pt_parts.push(format!("得意+{}", pt_effect.deyilv)); }
-        if pt_effect.hint != 0 { pt_parts.push(format!("hint+{}", pt_effect.hint)); }
+        if pt_effect.xunlian != 0 {
+            pt_parts.push(format!("训+{}", pt_effect.xunlian));
+        }
+        if pt_effect.deyilv != 0 {
+            pt_parts.push(format!("得意+{}", pt_effect.deyilv));
+        }
+        if pt_effect.hint != 0 {
+            pt_parts.push(format!("hint+{}", pt_effect.hint));
+        }
 
         // 基础诀窍槽加成
         let base_dist = super::rules::calc_gauge_base_distribution(&self.ramen.selected_regions);
@@ -1440,13 +1487,20 @@ impl RamenGame {
             "拉面: {} | 地区: {} | 诀窍 A{}/{} B{}/{} C{}/{} | 槽基础 {:?} | 隐藏诀窍 {} | PT{} [{}]",
             ramen_str,
             regions_str.join(","),
-            stock[0], slot[0],
-            stock[1], slot[1],
-            stock[2], slot[2],
+            stock[0],
+            slot[0],
+            stock[1],
+            slot[1],
+            stock[2],
+            slot[2],
             base_dist,
             self.ramen.special_feeling,
             self.ramen.scenario_pt,
-            if pt_parts.is_empty() { "无加成".to_string() } else { pt_parts.join(",") }
+            if pt_parts.is_empty() {
+                "无加成".to_string()
+            } else {
+                pt_parts.join(",")
+            }
         )
     }
 
@@ -1476,9 +1530,7 @@ impl RamenGame {
         }
         // 48 回合结束：新年抽签 4011
         if self.base.turn == 48 {
-            self.base
-                .unresolved_events
-                .push(system_event("ticket")?.clone());
+            self.base.unresolved_events.push(system_event("ticket")?.clone());
         }
         // 77 回合结束：育成结束事件 5011（ending）和 401407
         if self.base.turn == 77 {
@@ -1518,7 +1570,8 @@ impl RamenGame {
                 // 普通回合：显示训练数值（包含拉面效果）+ 失败率 + 诀窍槽明细
                 let ramen_effect = calc_ramen_training_effect(self, train, is_shining);
                 let effective_fail = (fail_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0)
-                    .min(100.0).max(0.0);
+                    .min(100.0)
+                    .max(0.0);
 
                 let value = ActionValue {
                     status_pt: base_value.status_pt,
@@ -1527,26 +1580,58 @@ impl RamenGame {
                     ..Default::default()
                 };
 
-                let support_count = dist[train].iter()
-                    .filter(|&&p| p >= 0 && (p as usize) < self.persons.len()
-                        && self.persons[p as usize].person_type == crate::game::PersonType::Card)
+                let support_count = dist[train]
+                    .iter()
+                    .filter(|&&p| {
+                        p >= 0
+                            && (p as usize) < self.persons.len()
+                            && self.persons[p as usize].person_type == crate::game::PersonType::Card
+                    })
                     .count();
-                let npc_count = dist[train].iter()
-                    .filter(|&&p| p >= 0 && (p as usize) < self.persons.len()
-                        && self.persons[p as usize].person_type == crate::game::PersonType::Npc)
+                let npc_count = dist[train]
+                    .iter()
+                    .filter(|&&p| {
+                        p >= 0
+                            && (p as usize) < self.persons.len()
+                            && self.persons[p as usize].person_type == crate::game::PersonType::Npc
+                    })
                     .count();
                 let train_feeling_bonus = super::rules::calc_train_feeling_bonus(support_count, npc_count);
                 let base_dist = super::rules::calc_gauge_base_distribution(&self.ramen.selected_regions);
                 let feeling_type = self.ramen.train_feeling_type.map(|types| types[train]);
 
-                let gauge_a = base_dist[0] + if feeling_type == Some(super::FeelingType::A) { train_feeling_bonus } else { 0 } + if is_shining { 2 } else { 0 };
-                let gauge_b = base_dist[1] + if feeling_type == Some(super::FeelingType::B) { train_feeling_bonus } else { 0 } + if is_shining { 2 } else { 0 };
-                let gauge_c = base_dist[2] + if feeling_type == Some(super::FeelingType::C) { train_feeling_bonus } else { 0 } + if is_shining { 2 } else { 0 };
+                let gauge_a = base_dist[0]
+                    + if feeling_type == Some(super::FeelingType::A) {
+                        train_feeling_bonus
+                    } else {
+                        0
+                    }
+                    + if is_shining { 2 } else { 0 };
+                let gauge_b = base_dist[1]
+                    + if feeling_type == Some(super::FeelingType::B) {
+                        train_feeling_bonus
+                    } else {
+                        0
+                    }
+                    + if is_shining { 2 } else { 0 };
+                let gauge_c = base_dist[2]
+                    + if feeling_type == Some(super::FeelingType::C) {
+                        train_feeling_bonus
+                    } else {
+                        0
+                    }
+                    + if is_shining { 2 } else { 0 };
 
                 let gauge_detail = format!("诀窍槽 A+{} B+{} C+{}", gauge_a, gauge_b, gauge_c);
 
                 if effective_fail > 0.0 {
-                    lines.push(format!("{} {} 失败率: {}% {}", header, value.explain(), effective_fail, gauge_detail));
+                    lines.push(format!(
+                        "{} {} 失败率: {}% {}",
+                        header,
+                        value.explain(),
+                        effective_fail,
+                        gauge_detail
+                    ));
                 } else {
                     lines.push(format!("{} {} {}", header, value.explain(), gauge_detail));
                 }
@@ -1566,13 +1651,9 @@ fn find_rmj_event(year_idx: usize) -> Option<crate::gamedata::EventData> {
         0 => 401404,
         1 => 401405,
         2 => 401406,
-        _ => return None,
+        _ => return None
     };
-    ramen_data
-        .scenario_events
-        .iter()
-        .find(|e| e.id == target_id)
-        .cloned()
+    ramen_data.scenario_events.iter().find(|e| e.id == target_id).cloned()
 }
 
 /// 按 ID 在 scenario_events 中查找事件
@@ -1580,11 +1661,7 @@ fn find_rmj_event(year_idx: usize) -> Option<crate::gamedata::EventData> {
 /// 用于 push 未在 `add_mandatory_events` 处理的事件（如育成结束事件 401407）。
 fn find_scenario_event(target_id: u32) -> Option<crate::gamedata::EventData> {
     let ramen_data = global!(RAMENDATA);
-    ramen_data
-        .scenario_events
-        .iter()
-        .find(|e| e.id == target_id)
-        .cloned()
+    ramen_data.scenario_events.iter().find(|e| e.id == target_id).cloned()
 }
 
 /// 判断事件 ID 是否为 RMJ 结算事件，若是则返回对应的年份索引（0/1/2）
@@ -1595,7 +1672,7 @@ fn rmj_event_year(event_id: u32) -> Option<usize> {
         401404 => Some(0),
         401405 => Some(1),
         401406 => Some(2),
-        _ => None,
+        _ => None
     }
 }
 
@@ -1610,16 +1687,15 @@ fn rmj_event_year(event_id: u32) -> Option<usize> {
 /// - 优先按 `result` 字段匹配（成功→2，失败→1）
 /// - 若无 `result` 字段匹配，则回退到第 0 个分支（防御性）
 fn select_rmj_choice_by_result(
-    choices: &[crate::gamedata::EventChoice],
-    is_success: Option<bool>,
+    choices: &[crate::gamedata::EventChoice], is_success: Option<bool>
 ) -> Option<&crate::gamedata::EventChoice> {
     if choices.is_empty() {
         return None;
     }
     let target_result = match is_success {
-        Some(true) => 2,   // 成功 → result=2
-        Some(false) => 1,  // 失败 → result=1
-        None => return Some(&choices[0]), // 无结算结果时回退到第一个分支
+        Some(true) => 2,                 // 成功 → result=2
+        Some(false) => 1,                // 失败 → result=1
+        None => return Some(&choices[0]) // 无结算结果时回退到第一个分支
     };
     choices.iter().find(|c| c.result == target_result).or(Some(&choices[0]))
 }
@@ -1628,22 +1704,22 @@ fn select_rmj_choice_by_result(
 
 #[cfg(test)]
 mod tests {
+    use rand::SeedableRng;
+
     use super::*;
     use crate::{
-        gamedata::{init_global, ActionValue, EventChoice},
+        game::{PersonType, ramen::events::assign_train_feeling_type},
+        gamedata::{ActionValue, EventChoice, init_global},
         trainer::{ManualTrainer, RandomTrainer},
-        utils::{get_workspace_root, init_test_logger},
+        utils::{get_workspace_root, init_test_logger}
     };
-    use rand::SeedableRng;
-    use crate::game::ramen::events::assign_train_feeling_type;
-    use crate::game::PersonType;
 
     // 测试用公共参数
     // [速]杏目, [智]青春永驻, [耐]名将怒涛, [速]洛林军歌, [速]里见光钻, [友]骏川手纲
     const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
     const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
         blue_count: [15, 3, 0, 0, 0],
-        extra_count: [0, 30, 0, 0, 30, 30],
+        extra_count: [0, 30, 0, 0, 30, 30]
     };
     const TEST_UMA_ID: u32 = 102601;
 
@@ -1658,14 +1734,32 @@ mod tests {
         println!("开局人头数: {}", game.persons.len());
         println!("{}", game.explain()?);
 
-        let card_count = game.persons.iter().filter(|p| p.person_type == PersonType::Card).count();
-        let yayoi_count = game.persons.iter().filter(|p| p.person_type == PersonType::Yayoi).count();
+        let card_count = game
+            .persons
+            .iter()
+            .filter(|p| p.person_type == PersonType::Card)
+            .count();
+        let yayoi_count = game
+            .persons
+            .iter()
+            .filter(|p| p.person_type == PersonType::Yayoi)
+            .count();
         let npc_count = game.persons.iter().filter(|p| p.person_type == PersonType::Npc).count();
-        let reporter_count = game.persons.iter().filter(|p| p.person_type == PersonType::Reporter).count();
-        let scenario_count = game.persons.iter().filter(|p| p.person_type == PersonType::ScenarioCard).count();
+        let reporter_count = game
+            .persons
+            .iter()
+            .filter(|p| p.person_type == PersonType::Reporter)
+            .count();
+        let scenario_count = game
+            .persons
+            .iter()
+            .filter(|p| p.person_type == PersonType::ScenarioCard)
+            .count();
 
-        println!("支援卡: {}, 理事长: {}, NPC: {}, 记者: {}, 友人卡: {}",
-                card_count, yayoi_count, npc_count, reporter_count, scenario_count);
+        println!(
+            "支援卡: {}, 理事长: {}, NPC: {}, 记者: {}, 友人卡: {}",
+            card_count, yayoi_count, npc_count, reporter_count, scenario_count
+        );
 
         assert_eq!(yayoi_count, 1, "开局应该有1个理事长");
         assert_eq!(npc_count, 0, "开局不应该有NPC");
@@ -1741,7 +1835,10 @@ mod tests {
         println!("RMJ结果: {:?}", game.ramen.rmj_results);
         println!("地区选择: {:?}", game.ramen.selected_regions);
         println!("超级拉面选择: {:?}", game.ramen.super_ramen);
-        println!("诀窍库存: A={} B={} C={}", game.ramen.feeling_stock[0], game.ramen.feeling_stock[1], game.ramen.feeling_stock[2]);
+        println!(
+            "诀窍库存: A={} B={} C={}",
+            game.ramen.feeling_stock[0], game.ramen.feeling_stock[1], game.ramen.feeling_stock[2]
+        );
         println!("隐藏风味: {}", game.ramen.special_feeling);
         let score = game.uma.calc_score();
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
@@ -1756,7 +1853,7 @@ mod tests {
     fn test_ramen_silent_loop() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = init_test_logger("error");  // 只输出错误
+        let _ = init_test_logger("error"); // 只输出错误
         let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
@@ -1778,7 +1875,10 @@ mod tests {
         println!("RMJ结果: {:?}", game.ramen.rmj_results);
         println!("地区选择: {:?}", game.ramen.selected_regions);
         println!("超级拉面选择: {:?}", game.ramen.super_ramen);
-        println!("诀窍库存: A={} B={} C={}", game.ramen.feeling_stock[0], game.ramen.feeling_stock[1], game.ramen.feeling_stock[2]);
+        println!(
+            "诀窍库存: A={} B={} C={}",
+            game.ramen.feeling_stock[0], game.ramen.feeling_stock[1], game.ramen.feeling_stock[2]
+        );
         println!("隐藏风味: {}", game.ramen.special_feeling);
         let score = game.uma.calc_score();
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
@@ -1833,7 +1933,7 @@ mod tests {
             FeelingType::B,
             FeelingType::C,
             FeelingType::A,
-            FeelingType::B,
+            FeelingType::B
         ]);
 
         use crate::game::traits::{ActionEnum, Game};
@@ -1847,29 +1947,16 @@ mod tests {
         let actions = game.list_actions()?;
         let train_idx = actions
             .iter()
-            .position(|a| {
-                matches!(
-                    a.as_base_action(),
-                    Some(crate::game::BaseAction::Train(0))
-                )
-            })
+            .position(|a| matches!(a.as_base_action(), Some(crate::game::BaseAction::Train(0))))
             .expect("应能找到速训练动作");
-        println!(
-            "\n===== 场景 A：不吃面、速训练 =====\n{}",
-            game.explain_distribution()?
-        );
+        println!("\n===== 场景 A：不吃面、速训练 =====\n{}", game.explain_distribution()?);
         game.apply_action(&actions[train_idx], &mut rng)?;
 
         // ============ 场景 B：吃面 Some(5) 中京、速训练 ============
         game.ramen.current_ramen = Some(5); // 中京 at_trains=[0,1,2,3,4], youqing=10
         let train_idx2 = actions
             .iter()
-            .position(|a| {
-                matches!(
-                    a.as_base_action(),
-                    Some(crate::game::BaseAction::Train(0))
-                )
-            })
+            .position(|a| matches!(a.as_base_action(), Some(crate::game::BaseAction::Train(0))))
             .expect("应能找到速训练动作");
         println!(
             "\n===== 场景 B：吃面 Some(5) 中京、速训练 =====\n{}",
@@ -2036,9 +2123,7 @@ mod tests {
 
         // ========== 随机分配 1 次（两个场景共用同一份分配） ==========
         let raw_types = assign_train_feeling_type(&mut rng);
-        let feelings: [FeelingType; 5] = raw_types.map(|v| {
-            FeelingType::try_from(v).unwrap_or(FeelingType::A)
-        });
+        let feelings: [FeelingType; 5] = raw_types.map(|v| FeelingType::try_from(v).unwrap_or(FeelingType::A));
         game.ramen.train_feeling_type = Some(feelings);
         game.distribute_all(&mut rng)?;
         game.distribute_hint(&mut rng)?;
@@ -2189,9 +2274,7 @@ mod tests {
 
         // ===== 阶段2：SpecialSelect =====
         let actions = game.list_actions()?;
-        println!(
-            "SpecialSelect 阶段: {actions:#?}"
-        );
+        println!("SpecialSelect 阶段: {actions:#?}");
         assert!(actions.len() >= 1, "至少有 1 个 targets 候选");
         for a in &actions {
             assert!(
@@ -2199,7 +2282,10 @@ mod tests {
                 "SpecialSelect 阶段动作 operation 必须是 StageOnly"
             );
             assert_eq!(a.ramen, Some(ramen_idx));
-            assert!(a.special_targets.is_some(), "SpecialSelect 阶段动作应携带 special_targets");
+            assert!(
+                a.special_targets.is_some(),
+                "SpecialSelect 阶段动作应携带 special_targets"
+            );
         }
 
         // 选第一个 targets（按 sum 升序通常第一个是最小必要）
@@ -2221,7 +2307,10 @@ mod tests {
         assert!(actions.len() >= 8);
         for a in &actions {
             assert_eq!(a.ramen, None, "Train 阶段动作 ramen 应为空（已 ground）");
-            assert_eq!(a.special_targets, None, "Train 阶段动作 special_targets 应为空（已 ground）");
+            assert_eq!(
+                a.special_targets, None,
+                "Train 阶段动作 special_targets 应为空（已 ground）"
+            );
             assert!(
                 !matches!(a.operation, Operation::StageOnly),
                 "Train 阶段动作 operation 不应是 StageOnly"
@@ -2384,10 +2473,7 @@ mod tests {
 
         // 走三阶段路径：选面 0 后 apply，写 pending_ramen
         let actions = game.list_actions()?;
-        let pick = actions
-            .iter()
-            .position(|a| a.ramen == Some(0))
-            .expect("应有面 0 候选");
+        let pick = actions.iter().position(|a| a.ramen == Some(0)).expect("应有面 0 候选");
         game.apply_action(&actions[pick], &mut StdRng::from_os_rng())?;
 
         // combined_decision 应保持 false（apply_action 走中间步骤，不设标记）
@@ -2412,12 +2498,20 @@ mod tests {
         let choices = vec![
             EventChoice {
                 result: 2, // 成功
-                value: ActionValue { status_pt: [10, 10, 10, 10, 10, 100], vital: 33, ..Default::default() },
+                value: ActionValue {
+                    status_pt: [10, 10, 10, 10, 10, 100],
+                    vital: 33,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
             EventChoice {
                 result: 1, // 失败
-                value: ActionValue { status_pt: [5, 5, 5, 5, 5, 50], vital: 30, ..Default::default() },
+                value: ActionValue {
+                    status_pt: [5, 5, 5, 5, 5, 50],
+                    vital: 30,
+                    ..Default::default()
+                },
                 ..Default::default()
             },
         ];
@@ -2493,11 +2587,7 @@ mod tests {
 
         // 成功分支应该：速+10, 耐+10, 力+10, 根+10, 智+10, pt+100, vital+33
         for i in 0..5 {
-            assert_eq!(
-                status_after[i] - status_before[i],
-                10,
-                "属性 {i} 增量应为 10"
-            );
+            assert_eq!(status_after[i] - status_before[i], 10, "属性 {i} 增量应为 10");
         }
         assert_eq!(pt_after - pt_before, 100);
         assert_eq!(vital_after - vital_before, 33);
@@ -2542,11 +2632,7 @@ mod tests {
 
         // 失败分支应该：速+5, 耐+5, 力+5, 根+5, 智+5, pt+50, vital+30
         for i in 0..5 {
-            assert_eq!(
-                status_after[i] - status_before[i],
-                5,
-                "属性 {i} 增量应为 5"
-            );
+            assert_eq!(status_after[i] - status_before[i], 5, "属性 {i} 增量应为 5");
         }
         assert_eq!(pt_after - pt_before, 50);
         assert_eq!(vital_after - vital_before, 30);
@@ -2646,7 +2732,11 @@ mod tests {
         // turn=0 应触发马娘登场
         game.base.turn = 0;
         let events = game.generate_events(&mut rng);
-        println!("turn=0 事件数: {}, IDs: {:?}", events.len(), events.iter().map(|e| e.id).collect::<Vec<_>>());
+        println!(
+            "turn=0 事件数: {}, IDs: {:?}",
+            events.len(),
+            events.iter().map(|e| e.id).collect::<Vec<_>>()
+        );
         assert!(!events.is_empty(), "turn=0 应有事件");
         assert_eq!(events[0].id, 400000400, "turn=0 第一个事件应是马娘登场");
 
@@ -2665,7 +2755,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         game.base.turn = 24;
         let events = game.generate_events(&mut rng);
-        println!("turn=24 事件数: {}, IDs: {:?}", events.len(), events.iter().map(|e| e.id).collect::<Vec<_>>());
+        println!(
+            "turn=24 事件数: {}, IDs: {:?}",
+            events.len(),
+            events.iter().map(|e| e.id).collect::<Vec<_>>()
+        );
         assert!(!events.is_empty(), "turn=24 应有事件");
         assert_eq!(events[0].id, 4009, "turn=24 第一个事件应是经典年新年");
 
@@ -2684,7 +2778,11 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(42);
         game.base.turn = 48;
         let events = game.generate_events(&mut rng);
-        println!("turn=48 事件数: {}, IDs: {:?}", events.len(), events.iter().map(|e| e.id).collect::<Vec<_>>());
+        println!(
+            "turn=48 事件数: {}, IDs: {:?}",
+            events.len(),
+            events.iter().map(|e| e.id).collect::<Vec<_>>()
+        );
         assert!(!events.is_empty(), "turn=48 应有事件");
         assert_eq!(events[0].id, 4010, "turn=48 第一个事件应是古马年新年");
 
@@ -2704,7 +2802,11 @@ mod tests {
         let mut events = vec![];
         game.add_mandatory_events(&mut events)?;
         // turn=48 没有友人解锁就没有友人事件
-        println!("turn=48 同步事件数: {}, unresolved 数: {}", events.len(), game.base.unresolved_events.len());
+        println!(
+            "turn=48 同步事件数: {}, unresolved 数: {}",
+            events.len(),
+            game.base.unresolved_events.len()
+        );
         // 4011 (ticket) 应在 unresolved_events 中
         assert!(game.base.unresolved_events.iter().any(|e| e.id == 4011));
         println!("turn=48 ticket(4011) 已在 unresolved_events 中");
@@ -2724,7 +2826,11 @@ mod tests {
         game.base.turn = 77;
         let mut events = vec![];
         game.add_mandatory_events(&mut events)?;
-        println!("turn=77 同步事件数: {}, unresolved 数: {}", events.len(), game.base.unresolved_events.len());
+        println!(
+            "turn=77 同步事件数: {}, unresolved 数: {}",
+            events.len(),
+            game.base.unresolved_events.len()
+        );
 
         // ending(5011) 和 401407 应在 unresolved_events 中
         let unresolved_ids: Vec<u32> = game.base.unresolved_events.iter().map(|e| e.id).collect();
@@ -2736,7 +2842,7 @@ mod tests {
     }
 
     /// 验证超级拉面回合（turn=72-77）的 vital/motivation 每回合自动恢复
-/// + saihou（赛后加成）仅 turn=72 一次性 +100（之后回合不重复累加）
+    /// + saihou（赛后加成）仅 turn=72 一次性 +100（之后回合不重复累加）
     #[test]
     fn test_super_ramen_base_effect_vital_motivation() -> Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -2850,8 +2956,7 @@ mod tests {
     ///
     /// 关键设置：deck_can_split=true（支援卡种类>=4），年份=3（hint_special=true）。
     fn make_hint_special_test_game() -> RamenGame {
-        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)
-            .expect("newgame 失败");
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT).expect("newgame 失败");
         // 设置为第三年且确保支援卡种类>=4
         game.base.turn = 60; // year 3
         game.deck_can_split = true;
@@ -2867,12 +2972,14 @@ mod tests {
         let _ = init_global();
 
         let game = make_hint_special_test_game();
-        assert!(!game.calc_hint_special_active(),
-            "不吃面时 hint_special 必须为 false");
+        assert!(!game.calc_hint_special_active(), "不吃面时 hint_special 必须为 false");
         // 任何 train 都应返回 false
         for train in 0..5 {
-            assert!(!game.is_hint_special_active_for_train(train),
-                "不吃面时 train={} 的 hint_special 必须为 false", train);
+            assert!(
+                !game.is_hint_special_active_for_train(train),
+                "不吃面时 train={} 的 hint_special 必须为 false",
+                train
+            );
         }
         println!("不吃面时 hint_special 不生效 ✓");
         Ok(())
@@ -2890,13 +2997,17 @@ mod tests {
         // year 1
         game.base.turn = 5;
         game.ramen.current_ramen = Some(5);
-        assert!(!game.calc_hint_special_active(),
-            "year1 吃面时 hint_special 必须为 false（basic.year0.hint_special=false）");
+        assert!(
+            !game.calc_hint_special_active(),
+            "year1 吃面时 hint_special 必须为 false（basic.year0.hint_special=false）"
+        );
 
         // year 2
         game.base.turn = 30;
-        assert!(!game.calc_hint_special_active(),
-            "year2 吃面时 hint_special 必须为 false（basic.year1.hint_special=false）");
+        assert!(
+            !game.calc_hint_special_active(),
+            "year2 吃面时 hint_special 必须为 false（basic.year1.hint_special=false）"
+        );
 
         println!("year1/year2 吃面时 hint_special 不生效 ✓");
         Ok(())
@@ -2913,8 +3024,10 @@ mod tests {
         let mut game = make_hint_special_test_game();
         game.base.turn = 60;
         game.ramen.current_ramen = Some(5);
-        assert!(game.calc_hint_special_active(),
-            "year3 + 吃面 + 支援卡种类>=4 时 hint_special 应生效");
+        assert!(
+            game.calc_hint_special_active(),
+            "year3 + 吃面 + 支援卡种类>=4 时 hint_special 应生效"
+        );
 
         // 检查 at_trains 是否正确（region 5 的 at_trains）
         let at_trains = game.calc_hint_special_at_trains();
@@ -2924,8 +3037,11 @@ mod tests {
 
         // 所有 train 都应激活 hint_special
         for train in 0..5 {
-            assert!(game.is_hint_special_active_for_train(train),
-                "全位置面时 train={} 应激活 hint_special", train);
+            assert!(
+                game.is_hint_special_active_for_train(train),
+                "全位置面时 train={} 应激活 hint_special",
+                train
+            );
         }
         println!("year3 + 全位置面 + 支援卡种类>=4 时 hint_special 对所有 train 生效 ✓");
         Ok(())
@@ -2943,14 +3059,18 @@ mod tests {
         game.base.turn = 60;
         // region 0 的 at_trains=[0]，只对速训练生效
         game.ramen.current_ramen = Some(0);
-        assert!(game.calc_hint_special_active(),
-            "hint_special 应生效");
+        assert!(game.calc_hint_special_active(), "hint_special 应生效");
 
-        assert!(game.is_hint_special_active_for_train(0),
-            "train=0 在 at_trains=[0] 中应激活");
+        assert!(
+            game.is_hint_special_active_for_train(0),
+            "train=0 在 at_trains=[0] 中应激活"
+        );
         for train in 1..5 {
-            assert!(!game.is_hint_special_active_for_train(train),
-                "train={} 不在 at_trains=[0] 中应不激活", train);
+            assert!(
+                !game.is_hint_special_active_for_train(train),
+                "train={} 不在 at_trains=[0] 中应不激活",
+                train
+            );
         }
 
         let at_trains = game.calc_hint_special_at_trains();
@@ -2973,8 +3093,10 @@ mod tests {
         // 模拟支援卡种类 < 4（只有3种）
         game.card_type_count = std::sync::Arc::new([1, 1, 1, 0, 0, 0, 0]);
         game.deck_can_split = false;
-        assert!(!game.calc_hint_special_active(),
-            "支援卡种类<4 时 hint_special 必须为 false");
+        assert!(
+            !game.calc_hint_special_active(),
+            "支援卡种类<4 时 hint_special 必须为 false"
+        );
         println!("支援卡种类<4 时 hint_special 不生效 ✓");
         Ok(())
     }
@@ -3018,10 +3140,10 @@ mod tests {
         println!("RMJ结果: {:?}", game.ramen.rmj_results);
         println!("地区选择: {:?}", game.ramen.selected_regions);
         println!("超级拉面选择: {:?}", game.ramen.super_ramen);
-        println!("诀窍库存: A={} B={} C={}",
-            game.ramen.feeling_stock[0],
-            game.ramen.feeling_stock[1],
-            game.ramen.feeling_stock[2]);
+        println!(
+            "诀窍库存: A={} B={} C={}",
+            game.ramen.feeling_stock[0], game.ramen.feeling_stock[1], game.ramen.feeling_stock[2]
+        );
         println!("隐藏风味: {}", game.ramen.special_feeling);
         let score = game.uma.calc_score();
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
@@ -3074,8 +3196,11 @@ mod tests {
         }
 
         println!("第3年跑完 {} 轮无 panic", turn_count);
-        println!("最终回合: {}, is_hint_special_active={}",
-            game.turn(), game.calc_hint_special_active());
+        println!(
+            "最终回合: {}, is_hint_special_active={}",
+            game.turn(),
+            game.calc_hint_special_active()
+        );
         println!("ManualTrainer + hint_special 路径未崩溃 ✓");
         Ok(())
     }
@@ -3107,7 +3232,11 @@ mod tests {
         let trainer = ManualTrainer::with_mock_inputs(vec![]);
         // 第1年（year_idx=0）：Fixed 策略应不生效，走 all 枚举（默认选 [0,1,2]）
         game.run_region_select(&trainer, &mut rng, 0)?;
-        assert_eq!(game.ramen.selected_regions, [0, 1, 2], "第1年 Fixed 策略应仍走 all 枚举（fixed 仅第3年生效）");
+        assert_eq!(
+            game.ramen.selected_regions,
+            [0, 1, 2],
+            "第1年 Fixed 策略应仍走 all 枚举（fixed 仅第3年生效）"
+        );
         Ok(())
     }
 

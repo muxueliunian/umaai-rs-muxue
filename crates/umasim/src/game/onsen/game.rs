@@ -595,8 +595,7 @@ impl OnsenGame {
         if !self.is_xiahesu() && rng.random_bool(extra_train_prob as f64) {
             let mut event = EventData::extra_training_event(train);
             // 动态设置理事长索引
-            if let Some(yayoi_index) = self.persons.iter()
-                .position(|p| p.person_type == PersonType::Yayoi) {
+            if let Some(yayoi_index) = self.persons.iter().position(|p| p.person_type == PersonType::Yayoi) {
                 event.person_index = Some(yayoi_index as i32);
             }
             self.unresolved_events.push(event);
@@ -795,7 +794,8 @@ impl OnsenGame {
         self.bathing.buff_remain_turn = 2;
         diag!(
             "  温泉券剩余: {}, Buff持续: {}回合",
-            self.bathing.ticket_num, self.bathing.buff_remain_turn
+            self.bathing.ticket_num,
+            self.bathing.buff_remain_turn
         );
 
         // 6. 秘汤汤驹效果：追加支援卡（split效果）
@@ -891,7 +891,9 @@ impl OnsenGame {
         self.dig_level[dig_type] += 1;
         diag!(
             ">> 装备升级: {} Lv.{} -> Lv.{}",
-            dig_type_names[dig_type], old_level, self.dig_level[dig_type]
+            dig_type_names[dig_type],
+            old_level,
+            self.dig_level[dig_type]
         );
 
         Ok(())
@@ -1483,15 +1485,16 @@ impl Game for OnsenGame {
     fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()> {
         if let Some(result) = self.base.apply_event(event, choice, rng) {
             // 判定超回复
-            if result.value.vital < 0
-            {
+            if result.value.vital < 0 {
                 self.update_super_on_vital_cost(-result.value.vital, rng);
             }
-            if let Some(person_index) = &event.person_index && result.value.friendship != 0 {
+            if let Some(person_index) = &event.person_index
+                && result.value.friendship != 0
+            {
                 self.add_friendship(*person_index as usize, result.value.friendship);
             }
         }
-        
+
         // 判断特殊事件
         match event.id {
             4012 | 4013 => {
@@ -1636,12 +1639,7 @@ impl Game for OnsenGame {
                 let fail_rate = self.calc_training_failure_rate(&buffs, train);
                 let value = self.calc_training_value(&buffs, train)?;
                 if fail_rate > 0.0 {
-                    lines.push(format!(
-                        "{} {} 失败率: {}%",
-                        headers[train],
-                        value.explain(),
-                        fail_rate
-                    ));
+                    lines.push(format!("{} {} 失败率: {}%", headers[train], value.explain(), fail_rate));
                 } else {
                     lines.push(format!("{} {}", headers[train], value.explain()));
                 }

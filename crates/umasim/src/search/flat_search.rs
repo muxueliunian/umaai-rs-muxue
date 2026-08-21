@@ -14,18 +14,16 @@ use super::{
     config::{SearchConfig, TOTAL_TURN},
     result::{ActionResult, SearchOutput}
 };
+#[cfg(feature = "onnx")]
+use crate::neural::{ThreadLocalNeuralNetLeafEvaluator, ThreadLocalNeuralNetLeafStatsSnapshot};
 use crate::{
     game::{
         Game,
         onsen::{action::OnsenAction, game::OnsenGame}
-    }, gamedata::EventChoice, neural::{
-        Evaluator,
-        HandwrittenEvaluator,
-        ValueOutput
-    }
+    },
+    gamedata::EventChoice,
+    neural::{Evaluator, HandwrittenEvaluator, ValueOutput}
 };
-#[cfg(feature = "onnx")]
-use crate::neural::{ThreadLocalNeuralNetLeafEvaluator, ThreadLocalNeuralNetLeafStatsSnapshot};
 
 #[derive(Clone)]
 enum LeafEvaluator {
@@ -716,9 +714,7 @@ impl<'a> crate::game::Trainer<OnsenGame> for SimulationTrainer<'a> {
         Ok(idx)
     }
 
-    fn select_choice(
-        &self, game: &OnsenGame, choices: &[Vec<EventChoice>], _rng: &mut StdRng
-    ) -> Result<usize> {
+    fn select_choice(&self, game: &OnsenGame, choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
         // 使用 HandwrittenEvaluator 的 evaluate_choice 逻辑
         let mut best_idx = 0;
         let mut best_value = f64::NEG_INFINITY;

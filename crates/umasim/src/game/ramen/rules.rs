@@ -67,9 +67,7 @@ pub fn calc_gauge_base_distribution(selected_regions: &[usize; 3]) -> [i32; 3] {
             match best {
                 None => best = Some(i),
                 Some(b) => {
-                    if result[i] < result[b]
-                        || (result[i] == result[b] && recipe_sum[i] > recipe_sum[b])
-                    {
+                    if result[i] < result[b] || (result[i] == result[b] && recipe_sum[i] > recipe_sum[b]) {
                         best = Some(i);
                     }
                 }
@@ -164,7 +162,7 @@ fn calc_net_recipe(recipe: &[i32; 3], special_targets: &[i32; 3]) -> [i32; 3] {
     [
         recipe[0] - special_targets[0],
         recipe[1] - special_targets[1],
-        recipe[2] - special_targets[2],
+        recipe[2] - special_targets[2]
     ]
 }
 
@@ -210,28 +208,17 @@ pub fn can_make_ramen(state: &RamenState, recipe: &[i32; 3], special_targets: &[
 /// - special_targets 不合法（负值、超过配方消耗、总和 > 2）
 /// - 隐藏风味不足
 /// - 诀窍库存不足
-pub fn consume_for_ramen(
-    state: &mut RamenState,
-    recipe_idx: usize,
-    special_targets: &[i32; 3],
-) -> Result<i32> {
+pub fn consume_for_ramen(state: &mut RamenState, recipe_idx: usize, special_targets: &[i32; 3]) -> Result<i32> {
     let recipe = get_recipe(recipe_idx)?;
     validate_special_targets(recipe, special_targets)?;
     let total_special: i32 = special_targets.iter().sum();
     if total_special > state.special_feeling {
-        anyhow::bail!(
-            "隐藏风味不足: 需要 {total_special}，实际 {}",
-            state.special_feeling
-        );
+        anyhow::bail!("隐藏风味不足: 需要 {total_special}，实际 {}", state.special_feeling);
     }
     let net = calc_net_recipe(recipe, special_targets);
     for i in 0..3 {
         if state.feeling_stock[i] < net[i] {
-            anyhow::bail!(
-                "诀窍不足: 类型{i} 需要 {}，实际 {}",
-                net[i],
-                state.feeling_stock[i]
-            );
+            anyhow::bail!("诀窍不足: 类型{i} 需要 {}，实际 {}", net[i], state.feeling_stock[i]);
         }
     }
     // 消耗前快照：便于排查"消耗大于库存"
@@ -287,15 +274,12 @@ pub fn consume_for_ramen(
 /// 6. 过滤 `can_make_ramen`，按 `sum(t)` 升序返回
 ///
 /// 这样生成的候选数与玩家实际可选空间一致（库存紧张 1~6 种，全富余 9~10 种）。
-pub fn list_special_targets_for(
-    state: &RamenState,
-    ramen_idx: usize,
-) -> Result<Vec<[i32; 3]>> {
+pub fn list_special_targets_for(state: &RamenState, ramen_idx: usize) -> Result<Vec<[i32; 3]>> {
     let recipe = get_recipe(ramen_idx)?;
     let min_needed: [i32; 3] = [
         (recipe[0] - state.feeling_stock[0]).max(0),
         (recipe[1] - state.feeling_stock[1]).max(0),
-        (recipe[2] - state.feeling_stock[2]).max(0),
+        (recipe[2] - state.feeling_stock[2]).max(0)
     ];
     let need_sum: i32 = min_needed.iter().sum();
     let budget = 2.min(state.special_feeling) - need_sum;
@@ -362,7 +346,7 @@ pub enum RmjResult {
     /// 成功
     Success,
     /// 大成功（第三年 pt >= 5000）
-    GreatSuccess,
+    GreatSuccess
 }
 
 impl RmjResult {
@@ -384,11 +368,7 @@ impl RmjResult {
 /// 结果存入 `state.rmj_results`。
 pub fn check_rmj(state: &mut RamenState, year_idx: usize) -> RmjResult {
     let ramen_data = global!(RAMENDATA);
-    let threshold = ramen_data
-        .ramen_success_pt
-        .get(year_idx)
-        .copied()
-        .unwrap_or(i32::MAX);
+    let threshold = ramen_data.ramen_success_pt.get(year_idx).copied().unwrap_or(i32::MAX);
     let result = if state.scenario_pt < threshold {
         RmjResult::Fail
     } else if year_idx == 2 && state.scenario_pt >= 5000 {
@@ -456,7 +436,7 @@ pub fn get_turn_special_feeling(turn: i32) -> i32 {
     match turn {
         2 | 24 | 36 | 48 | 60 => 2,
         37 | 38 | 39 | 61 | 62 | 63 => 1,
-        _ => 0,
+        _ => 0
     }
 }
 
@@ -547,12 +527,8 @@ fn fill_gauge_xiahesu_max(state: &mut RamenState) {
 /// 夏合宿特殊规则：无论基础值/训练加成/友情加成如何分配，三种槽一律直接填满
 /// 到上限（参见 `fill_gauge_xiahesu_max`）。
 pub fn fill_gauge_after_train(
-    state: &mut RamenState,
-    base_dist: &[i32; 3],
-    train_type: FeelingType,
-    train_bonus: i32,
-    is_shining: bool,
-    is_xiahesu: bool,
+    state: &mut RamenState, base_dist: &[i32; 3], train_type: FeelingType, train_bonus: i32, is_shining: bool,
+    is_xiahesu: bool
 ) {
     if is_xiahesu {
         fill_gauge_xiahesu_max(state);
@@ -580,11 +556,7 @@ pub fn fill_gauge_after_train(
 /// 夏合宿特殊规则：三种槽一律直接填满到上限（参见 `fill_gauge_xiahesu_max`）。
 ///
 /// 注：治病的调用方不应使用本函数（按用户确认，治病不获得诀窍槽）。
-pub fn fill_gauge_after_non_train(
-    state: &mut RamenState,
-    base_dist: &[i32; 3],
-    is_xiahesu: bool,
-) {
+pub fn fill_gauge_after_non_train(state: &mut RamenState, base_dist: &[i32; 3], is_xiahesu: bool) {
     if is_xiahesu {
         fill_gauge_xiahesu_max(state);
         return;
@@ -599,7 +571,10 @@ pub fn fill_gauge_after_non_train(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{gamedata::init_global, utils::{get_workspace_root, init_test_logger}};
+    use crate::{
+        gamedata::init_global,
+        utils::{get_workspace_root, init_test_logger}
+    };
 
     #[test]
     fn test_gauge_base_distribution() -> anyhow::Result<()> {
@@ -620,7 +595,7 @@ mod tests {
             ([0, 1, 6], "札幌函館中京"),
             ([0, 4, 6], "札幌東京中京"),
             ([0, 5, 6], "札幌中山中京"),
-            ([5, 6, 7], "中山中京京都"),
+            ([5, 6, 7], "中山中京京都")
         ];
         for &(regions, name) in cases {
             let dist = calc_gauge_base_distribution(&regions);
@@ -630,12 +605,11 @@ mod tests {
             let mut actual_sum = [0i32; 3];
             for &r in &regions {
                 let f = &ramen_data.region_feeling[r];
-                for j in 0..3 { actual_sum[j] += f[j]; }
+                for j in 0..3 {
+                    actual_sum[j] += f[j];
+                }
             }
-            println!(
-                "{name}: 配方 {:?} 分配 {:?} 降序 {:?}",
-                actual_sum, dist, sorted
-            );
+            println!("{name}: 配方 {:?} 分配 {:?} 降序 {:?}", actual_sum, dist, sorted);
         }
         Ok(())
     }
@@ -648,14 +622,20 @@ mod tests {
         add_feeling(&mut state, FeelingType::B, 3);
         add_feeling(&mut state, FeelingType::C, 2);
         println!("初始状态:");
-        println!("  库存 A={} B={} C={}", state.feeling_stock[0], state.feeling_stock[1], state.feeling_stock[2]);
+        println!(
+            "  库存 A={} B={} C={}",
+            state.feeling_stock[0], state.feeling_stock[1], state.feeling_stock[2]
+        );
         println!("  总数 {}", state.feeling_stock.iter().sum::<i32>());
         println!("  队列 {:?}", state.feeling_queue);
 
         // 再加 1 个 B，总数将超上限 10，应丢弃队列最前面的 A
         println!("\n加 1 个 B (总数将超过上限 {}):", FEELING_LIMIT);
         add_feeling(&mut state, FeelingType::B, 1);
-        println!("  库存 A={} B={} C={}", state.feeling_stock[0], state.feeling_stock[1], state.feeling_stock[2]);
+        println!(
+            "  库存 A={} B={} C={}",
+            state.feeling_stock[0], state.feeling_stock[1], state.feeling_stock[2]
+        );
         println!("  总数 {}", state.feeling_stock.iter().sum::<i32>());
         println!("  队列 {:?}", state.feeling_queue);
         println!("  => 队列最前面是 A，丢弃 1 个 A → A=4 B=4 C=2");
@@ -681,11 +661,17 @@ mod tests {
         // 公式: 1 + 支援卡数量 + floor(NPC数量 / 2)
         let (sc, npc) = (2, 3);
         let bonus = calc_train_feeling_bonus(sc, npc);
-        println!("支援卡={sc} NPC={npc}: 1 + {sc} + {npc}/2 = 1 + {sc} + {} = {bonus}", npc / 2);
+        println!(
+            "支援卡={sc} NPC={npc}: 1 + {sc} + {npc}/2 = 1 + {sc} + {} = {bonus}",
+            npc / 2
+        );
 
         let (sc, npc) = (4, 5);
         let bonus = calc_train_feeling_bonus(sc, npc);
-        println!("支援卡={sc} NPC={npc}: 1 + {sc} + {npc}/2 = 1 + {sc} + {} = {bonus}", npc / 2);
+        println!(
+            "支援卡={sc} NPC={npc}: 1 + {sc} + {npc}/2 = 1 + {sc} + {} = {bonus}",
+            npc / 2
+        );
     }
 
     // ========== 做面/吃面测试 ==========
@@ -705,7 +691,10 @@ mod tests {
         state.feeling_stock = [5, 5, 5];
         // 无隐藏风味，足够
         println!("库存={:?}, special={}", state.feeling_stock, state.special_feeling);
-        println!("不使用隐藏风味: can_make={}", can_make_ramen(&state, recipe, &[0, 0, 0]));
+        println!(
+            "不使用隐藏风味: can_make={}",
+            can_make_ramen(&state, recipe, &[0, 0, 0])
+        );
 
         // 库存不足的情况
         state.feeling_stock = [1, 5, 5];
@@ -714,10 +703,16 @@ mod tests {
 
         // 用隐藏风味弥补 A
         state.special_feeling = 1;
-        println!("special=1, 替换A: can_make={}", can_make_ramen(&state, recipe, &[1, 0, 0]));
+        println!(
+            "special=1, 替换A: can_make={}",
+            can_make_ramen(&state, recipe, &[1, 0, 0])
+        );
         // 隐藏风味不够用
         state.special_feeling = 0;
-        println!("special=0, 替换A: can_make={}", can_make_ramen(&state, recipe, &[1, 0, 0]));
+        println!(
+            "special=0, 替换A: can_make={}",
+            can_make_ramen(&state, recipe, &[1, 0, 0])
+        );
 
         // get_recipe 测试（年3地区通过取模映射到年1配方）
         assert!(get_recipe(0).is_ok());
@@ -737,27 +732,58 @@ mod tests {
         let mut state = RamenState::default();
         state.feeling_stock = [5, 5, 5];
         state.feeling_queue = vec![
-            FeelingType::A, FeelingType::A, FeelingType::A, FeelingType::A, FeelingType::A,
-            FeelingType::B, FeelingType::B, FeelingType::B, FeelingType::B, FeelingType::B,
-            FeelingType::C, FeelingType::C, FeelingType::C, FeelingType::C, FeelingType::C,
+            FeelingType::A,
+            FeelingType::A,
+            FeelingType::A,
+            FeelingType::A,
+            FeelingType::A,
+            FeelingType::B,
+            FeelingType::B,
+            FeelingType::B,
+            FeelingType::B,
+            FeelingType::B,
+            FeelingType::C,
+            FeelingType::C,
+            FeelingType::C,
+            FeelingType::C,
+            FeelingType::C,
         ];
-        println!("初始: stock={:?}, queue_len={}", state.feeling_stock, state.feeling_queue.len());
+        println!(
+            "初始: stock={:?}, queue_len={}",
+            state.feeling_stock,
+            state.feeling_queue.len()
+        );
 
         // 札幌 [2,2,1], 不使用隐藏风味
         let used = consume_for_ramen(&mut state, 0, &[0, 0, 0])?;
-        println!("消耗后: stock={:?}, queue_len={}, used_special={}", state.feeling_stock, state.feeling_queue.len(), used);
+        println!(
+            "消耗后: stock={:?}, queue_len={}, used_special={}",
+            state.feeling_stock,
+            state.feeling_queue.len(),
+            used
+        );
 
         // 使用隐藏风味：替换 1A + 1B
         state.special_feeling = 2;
         let used = consume_for_ramen(&mut state, 0, &[1, 1, 0])?;
-        println!("再做一次(替换1A+1B): stock={:?}, special={}, used_special={}", state.feeling_stock, state.special_feeling, used);
+        println!(
+            "再做一次(替换1A+1B): stock={:?}, special={}, used_special={}",
+            state.feeling_stock, state.special_feeling, used
+        );
 
         // 验证手动选择替换：配方 [1,1,3] (东京=4)，替换 2C
         state.feeling_stock = [5, 5, 5];
         state.special_feeling = 2;
-        state.feeling_queue = vec![FeelingType::A; 5].into_iter().chain(vec![FeelingType::B; 5]).chain(vec![FeelingType::C; 5]).collect();
+        state.feeling_queue = vec![FeelingType::A; 5]
+            .into_iter()
+            .chain(vec![FeelingType::B; 5])
+            .chain(vec![FeelingType::C; 5])
+            .collect();
         let used = consume_for_ramen(&mut state, 4, &[0, 0, 2])?;
-        println!("东京[1,1,3], 替换2C: stock={:?}, special={}, used_special={}", state.feeling_stock, state.special_feeling, used);
+        println!(
+            "东京[1,1,3], 替换2C: stock={:?}, special={}, used_special={}",
+            state.feeling_stock, state.special_feeling, used
+        );
         // 预期: A=5-1=4, B=5-1=4, C=5-1=4, special=2-2=0
 
         Ok(())
@@ -1184,10 +1210,7 @@ mod tests {
         state.feeling_slot = [0, 3, 6];
         // 初始库存 [0, 0, 0]
         state.feeling_stock = [0, 0, 0];
-        println!(
-            "初始: 槽 {:?} 库存 {:?}",
-            state.feeling_slot, state.feeling_stock
-        );
+        println!("初始: 槽 {:?} 库存 {:?}", state.feeling_slot, state.feeling_stock);
 
         // 夏合宿触发 fill_gauge_after_train
         fill_gauge_after_train(
@@ -1196,7 +1219,7 @@ mod tests {
             FeelingType::A,
             4,
             false,
-            true, // is_xiahesu
+            true // is_xiahesu
         );
 
         println!(
@@ -1223,7 +1246,7 @@ mod tests {
             FeelingType::C,
             3,
             false,
-            false, // is_xiahesu = false
+            false // is_xiahesu = false
         );
 
         // A=5, B=4, C=1+3=4，都没有到上限
@@ -1239,7 +1262,7 @@ mod tests {
             FeelingType::A,
             0,
             true, // 友情训练
-            false,
+            false
         );
         assert_eq!(state2.feeling_slot, [7, 6, 6]);
     }

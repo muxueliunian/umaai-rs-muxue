@@ -14,7 +14,9 @@ use log::info;
 use rand::prelude::StdRng;
 
 use crate::{
-    game::{Trainer, onsen::game::OnsenGame}, gamedata::EventChoice, neural::{Evaluator, HandwrittenEvaluator}
+    game::{Trainer, onsen::game::OnsenGame},
+    gamedata::EventChoice,
+    neural::{Evaluator, HandwrittenEvaluator}
 };
 
 /// 手写策略训练员
@@ -159,7 +161,7 @@ impl Trainer<OnsenGame> for HandwrittenTrainer {
             info!(
                 "[回合 {}] 手写策略选择选项: {}",
                 game.turn,
-                (best_idx+1).to_string().green()
+                (best_idx + 1).to_string().green()
             );
         }
 

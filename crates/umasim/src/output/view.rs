@@ -43,7 +43,7 @@ pub struct GameView {
     pub skill_pt: i32,
 
     /// 已累计 Hint 数
-    pub total_hints: i32,
+    pub total_hints: i32
 }
 
 impl GameView {
@@ -90,7 +90,7 @@ mod tests {
             max_vital: 120,
             motivation: 4,
             skill_pt: 3500,
-            total_hints: 18,
+            total_hints: 18
         };
         let json = serde_json::to_string(&view).expect("serialize");
         let back: GameView = serde_json::from_str(&json).expect("deserialize");
@@ -108,7 +108,7 @@ mod tests {
             max_vital: 100,
             motivation: 3,
             skill_pt: 1200,
-            total_hints: 7,
+            total_hints: 7
         };
         let v = serde_json::to_value(&view).expect("to_value");
         assert_eq!(v["scenario"], "ramen");

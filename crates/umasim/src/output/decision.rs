@@ -55,7 +55,7 @@ pub struct DecisionInfo {
     /// 设计上保留最大灵活性：剧本特有信息（如拉面杯的"地区拉面"、温泉剧本的"温泉顺序"）
     /// 以 `serde_json::Value` 形式挂载，避免 [`DecisionInfo`] 被剧本 enum 渗透。
     /// 调用方需要时 `serde_json::to_value(&self).unwrap()` 整体序列化。
-    pub scenario_extra: Option<serde_json::Value>,
+    pub scenario_extra: Option<serde_json::Value>
 }
 
 impl DecisionInfo {
@@ -151,7 +151,7 @@ mod tests {
             search_depth: None,
             visit_count: None,
             score_breakdown: None,
-            scenario_extra: None,
+            scenario_extra: None
         };
         let v = serde_json::to_value(&info).expect("to_value");
         assert_eq!(v["action_index"], 1);

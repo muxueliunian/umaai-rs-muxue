@@ -23,9 +23,13 @@ use crate::{
         InheritInfo,
         Trainer,
         onsen::{action::OnsenAction, game::OnsenGame}
-    }, gamedata::{EventChoice, EventData, GAMECONSTANTS}, global, neural::{Evaluator, HandwrittenEvaluator}, search::{FlatSearch, SearchConfig, SearchOutput}
+    },
+    gamedata::{EventChoice, EventData, GAMECONSTANTS},
+    global,
+    neural::{Evaluator, HandwrittenEvaluator},
+    search::{FlatSearch, SearchConfig, SearchOutput},
+    utils::format_luck
 };
-use crate::utils::format_luck;
 
 /// MCTS 训练员
 ///
@@ -347,9 +351,11 @@ impl Trainer<OnsenGame> for MctsTrainer {
 
     /// 重构的选择事件逻辑
     fn select_event_choice(
-            &self, game: &OnsenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
-        ) -> Result<usize> {
-        let choice_actions: Vec<_> = choices.iter().enumerate()
+        &self, game: &OnsenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
+    ) -> Result<usize> {
+        let choice_actions: Vec<_> = choices
+            .iter()
+            .enumerate()
             .map(|(i, _)| OnsenAction::Choice((Box::new(event.clone()), i)))
             .collect();
         self.select_action(game, &choice_actions, rng)

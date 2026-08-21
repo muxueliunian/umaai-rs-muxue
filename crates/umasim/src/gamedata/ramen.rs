@@ -1,12 +1,11 @@
 //! 拉面杯剧本数据
 
-use std::sync::OnceLock;
+use std::{collections::HashMap, sync::OnceLock};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::gamedata::{TrainingBasicTable, EventData, load_json};
-use std::collections::HashMap;
+use crate::gamedata::{EventData, TrainingBasicTable, load_json};
 
 /// 拉面基础效果
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -24,7 +23,7 @@ pub struct RamenBasicEffect {
     /// 属性和PT上限增加
     pub status_limit: i32,
     /// 仅第三年生效的特殊hint效果
-    pub hint_special: bool,
+    pub hint_special: bool
 }
 
 /// 地区拉面效果
@@ -63,7 +62,7 @@ pub struct FinalsBaseEffect {
     /// 友情加成
     pub youqing: i32,
     /// hint等级
-    pub hint_level: i32,
+    pub hint_level: i32
 }
 
 /// 超级拉面额外效果（大成功时）
@@ -74,7 +73,7 @@ pub struct FinalsExtraEffect {
     /// PT上限增加
     pub pt_limit: i32,
     /// 分身数量
-    pub clone_count: i32,
+    pub clone_count: i32
 }
 
 /// 超级拉面效果
@@ -85,7 +84,7 @@ pub struct FinalsEffect {
     /// 额外效果（大成功时）
     pub extra: FinalsExtraEffect,
     /// 训练限制选项（三个选项对应的训练位置）
-    pub training_limit_options: Vec<Vec<i32>>,
+    pub training_limit_options: Vec<Vec<i32>>
 }
 
 /// RMJ成功/失败效果
@@ -96,7 +95,7 @@ pub struct RmjEffect {
     /// 得意率加成
     pub deyilv: i32,
     /// hint出现率加成
-    pub hint: i32,
+    pub hint: i32
 }
 
 /// 剧本PT常驻加成
@@ -109,7 +108,7 @@ pub struct PtEffect {
     /// 得意率加成
     pub deyilv: i32,
     /// hint出现率加成
-    pub hint: i32,
+    pub hint: i32
 }
 
 /// 拉面杯剧本数据
@@ -168,7 +167,7 @@ pub struct RamenScenarioData {
     /// 五维属性上限（拉面杯剧本覆盖，Phase 2 步骤 1 从 constants.json 隔离）
     /// basic/onsen 仍使用 `GAMECONSTANTS.five_status_limit_base`；拉面杯使用此字段
     #[serde(default)]
-    pub five_status_limit_base: Option<[i32; 5]>,
+    pub five_status_limit_base: Option<[i32; 5]>
 }
 
 impl RamenScenarioData {
@@ -176,7 +175,6 @@ impl RamenScenarioData {
     pub fn load() -> Result<Self> {
         load_json("gamedata/scenario_ramen.json")
     }
-
 }
 
 /// 全局拉面杯剧本数据

@@ -16,11 +16,10 @@ pub mod rules;
 pub mod state;
 
 pub use action::*;
-pub use state::*;
-
 use enum_iterator::Sequence;
 use int_enum::IntEnum;
 use serde::{Deserialize, Serialize};
+pub use state::*;
 
 /// 拉面杯回合阶段
 ///
@@ -132,5 +131,5 @@ pub enum Operation {
     /// 用于 `RamenSelect`/`SpecialSelect` 阶段的 `RamenAction`，这些阶段的决策
     /// 仅体现在 `ramen` 或 `special_targets` 字段上，不需要真正的基础操作。
     /// `apply` 看到此变体时直接切阶段、不执行任何操作。
-    StageOnly,
+    StageOnly
 }

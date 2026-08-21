@@ -201,7 +201,8 @@ impl EventChoice {
 impl EventData {
     /// 解释事件内容，输出事件名称和每个选项组的效果
     pub fn explain(&self) -> String {
-        let first = format!("[{}] {} {}",
+        let first = format!(
+            "[{}] {} {}",
             self.id,
             self.name,
             if self.player_select { "[选择]-->  " } else { "" }
@@ -307,8 +308,10 @@ pub struct EventCollection {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::gamedata::{GameConstants, GAMECONSTANTS, load_json};
-    use crate::utils::get_workspace_root;
+    use crate::{
+        gamedata::{GAMECONSTANTS, GameConstants, load_json},
+        utils::get_workspace_root
+    };
 
     /// 从workspace根目录的gamedata/events.json载入EventCollection，并分别explain各类事件
     ///
@@ -325,19 +328,29 @@ mod tests {
         let events: EventCollection = load_json("gamedata/events.json")?;
 
         println!("=== story_events ({} 条) ===", events.story_events.len());
-        for e in &events.story_events { println!("{}", e.explain()); }
+        for e in &events.story_events {
+            println!("{}", e.explain());
+        }
 
         println!("=== uma_events ({} 条) ===", events.uma_events.len());
-        for e in &events.uma_events { println!("{}", e.explain()); }
+        for e in &events.uma_events {
+            println!("{}", e.explain());
+        }
 
         println!("=== card_events ({} 条) ===", events.card_events.len());
-        for e in &events.card_events { println!("{}", e.explain()); }
+        for e in &events.card_events {
+            println!("{}", e.explain());
+        }
 
         println!("=== friend_events ({} 条) ===", events.friend_events.len());
-        for e in events.friend_events.values() { println!("{}", e.explain()); }
+        for e in events.friend_events.values() {
+            println!("{}", e.explain());
+        }
 
         println!("=== system_events ({} 条) ===", events.system_events.len());
-        for e in events.system_events.values() { println!("{}", e.explain()); }
+        for e in events.system_events.values() {
+            println!("{}", e.explain());
+        }
 
         Ok(())
     }
@@ -359,12 +372,15 @@ mod tests {
         let ramen_data = RamenScenarioData::load()?;
 
         println!("=== scenario_events ({} 条) ===", ramen_data.scenario_events.len());
-        for e in &ramen_data.scenario_events { println!("{}", e.explain()); }
+        for e in &ramen_data.scenario_events {
+            println!("{}", e.explain());
+        }
 
         println!("\n=== friend_events ({} 条) ===", ramen_data.friend_events.len());
-        for e in ramen_data.friend_events.values() { println!("{}", e.explain()); }
+        for e in ramen_data.friend_events.values() {
+            println!("{}", e.explain());
+        }
 
         Ok(())
     }
 }
-

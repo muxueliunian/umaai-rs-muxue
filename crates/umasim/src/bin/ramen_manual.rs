@@ -18,16 +18,12 @@ use std::time::Instant;
 use anyhow::{Result, anyhow};
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
-
 use umasim::{
-    game::{
-        Game, InheritInfo,
-        ramen::RamenGame,
-    },
+    game::{Game, InheritInfo, ramen::RamenGame},
     gamedata::{GAMECONSTANTS, init_global_with_config},
     global,
     trainer::ManualTrainer,
-    utils::{init_logger_stdout, load_game_config},
+    utils::{init_logger_stdout, load_game_config}
 };
 
 fn main() -> Result<()> {
@@ -64,7 +60,7 @@ fn main() -> Result<()> {
     let deck = game_config.cards;
     let inherit = InheritInfo {
         blue_count: game_config.blue_count,
-        extra_count: game_config.extra_count,
+        extra_count: game_config.extra_count
     };
 
     println!("╔══════════════════════════════════════════════╗");
@@ -105,9 +101,7 @@ fn main() -> Result<()> {
     println!("超级拉面选择: {:?}", game.ramen.super_ramen);
     println!(
         "诀窍库存: A={} B={} C={}",
-        game.ramen.feeling_stock[0],
-        game.ramen.feeling_stock[1],
-        game.ramen.feeling_stock[2]
+        game.ramen.feeling_stock[0], game.ramen.feeling_stock[1], game.ramen.feeling_stock[2]
     );
     println!("隐藏风味: {}", game.ramen.special_feeling);
 

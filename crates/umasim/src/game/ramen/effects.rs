@@ -4,8 +4,7 @@
 //! 将所有剧本加成来源合并为统一的训练效果，再应用于训练数值计算。
 
 use super::RamenGame;
-use crate::gamedata::ramen::RAMENDATA;
-use crate::global;
+use crate::{gamedata::ramen::RAMENDATA, global};
 
 /// 拉面杯训练效果（合并所有来源的加成）
 ///
@@ -174,11 +173,7 @@ fn calc_normal_effect(game: &RamenGame, train: usize, year_idx: usize) -> RamenT
             if region.at_trains.contains(&(train as i32)) {
                 // 地区词条加成随当年剧本PT增加
                 let bonus_tier = calc_region_bonus_tier(game.ramen.scenario_pt);
-                let region_bonus = ramen_data
-                    .region_bonus
-                    .get(bonus_tier)
-                    .copied()
-                    .unwrap_or(0);
+                let region_bonus = ramen_data.region_bonus.get(bonus_tier).copied().unwrap_or(0);
                 effect.xunlian += region.xunlian;
                 effect.youqing += region.youqing + region_bonus;
                 effect.pt_bonus += region.pt_bonus + region_bonus;
@@ -201,11 +196,7 @@ fn calc_normal_effect(game: &RamenGame, train: usize, year_idx: usize) -> RamenT
 /// - `game`: 拉面杯游戏状态
 /// - `train`: 训练位置（0=速, 1=耐, 2=力, 3=根, 4=智）
 /// - `is_shining`: 是否友情训练（非友情训练时 youqing 视为 0）
-pub fn calc_ramen_training_effect(
-    game: &RamenGame,
-    train: usize,
-    is_shining: bool
-) -> RamenTrainingEffect {
+pub fn calc_ramen_training_effect(game: &RamenGame, train: usize, is_shining: bool) -> RamenTrainingEffect {
     let super_ramen = game.is_super_ramen_turn();
     let year_idx = (game.current_year() - 1) as usize;
 
@@ -287,11 +278,7 @@ pub fn calc_scenario_deyilv(game: &RamenGame) -> i32 {
 ///
 /// # 返回
 /// `(属性增加值, PT增加值)` - 包含下层数值和受上限约束的上层数值的最终训练数值
-pub fn apply_ramen_training_value(
-    lower_value: i32,
-    effect: &RamenTrainingEffect,
-    _train: usize
-) -> (i32, i32) {
+pub fn apply_ramen_training_value(lower_value: i32, effect: &RamenTrainingEffect, _train: usize) -> (i32, i32) {
     let lower = lower_value.min(100);
 
     // 计算上层数值
@@ -302,8 +289,7 @@ pub fn apply_ramen_training_value(
     // 属性训练上层数值
     let status_upper_raw = (lower as f64 * xunlian_mult * youqing_mult) as i32 - lower;
     // PT训练上层数值
-    let pt_upper_raw =
-        (lower as f64 * xunlian_mult * youqing_mult * pt_bonus_mult) as i32 - lower;
+    let pt_upper_raw = (lower as f64 * xunlian_mult * youqing_mult * pt_bonus_mult) as i32 - lower;
 
     // 上层数值上限约束
     let status_limit = 100 + effect.status_limit;
@@ -318,11 +304,21 @@ pub fn apply_ramen_training_value(
          xunlian={} youqing={} pt_bonus={} status_limit={} pt_limit={}\n    \
          属性: status_upper_raw={} -> status_limit={} -> status_upper={} (最终={})\n    \
          PT:   pt_upper_raw={} -> pt_limit={} -> pt_upper={} (最终={})",
-        lower, lower_value,
-        effect.xunlian, effect.youqing, effect.pt_bonus,
-        effect.status_limit, effect.pt_limit,
-        status_upper_raw, status_limit, status_upper, lower + status_upper,
-        pt_upper_raw, pt_limit, pt_upper, lower + pt_upper,
+        lower,
+        lower_value,
+        effect.xunlian,
+        effect.youqing,
+        effect.pt_bonus,
+        effect.status_limit,
+        effect.pt_limit,
+        status_upper_raw,
+        status_limit,
+        status_upper,
+        lower + status_upper,
+        pt_upper_raw,
+        pt_limit,
+        pt_upper,
+        lower + pt_upper,
     );
 
     (lower + status_upper, lower + pt_upper)
@@ -331,9 +327,11 @@ pub fn apply_ramen_training_value(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::ramen::RamenState;
-    use crate::gamedata::init_global;
-    use crate::utils::{get_workspace_root, init_test_logger};
+    use crate::{
+        game::ramen::RamenState,
+        gamedata::init_global,
+        utils::{get_workspace_root, init_test_logger}
+    };
 
     /// 创建一个用于测试的 RamenGame 实例
     fn make_test_game() -> RamenGame {
@@ -360,8 +358,14 @@ mod tests {
 
         let effect = calc_ramen_training_effect(&game, 0, false);
         println!("PT=1000, 不吃面, 非友情:");
-        println!("  xunlian={} youqing={} pt_bonus={}", effect.xunlian, effect.youqing, effect.pt_bonus);
-        println!("  deyilv={} hint={} fail_rate_drop={}", effect.deyilv, effect.hint, effect.fail_rate_drop);
+        println!(
+            "  xunlian={} youqing={} pt_bonus={}",
+            effect.xunlian, effect.youqing, effect.pt_bonus
+        );
+        println!(
+            "  deyilv={} hint={} fail_rate_drop={}",
+            effect.deyilv, effect.hint, effect.fail_rate_drop
+        );
         // pt_min=1000 的档位: xunlian=8, deyilv=63, hint=50
         println!("  => 期望: xunlian=8, deyilv=63, hint=50");
 
@@ -391,13 +395,22 @@ mod tests {
         let train_in_region = region0.at_trains[0] as usize;
         let effect = calc_ramen_training_effect(&game, train_in_region, true);
         println!("PT=500, 吃面region0, train={train_in_region}, 友情:");
-        println!("  xunlian={} youqing={} pt_bonus={}", effect.xunlian, effect.youqing, effect.pt_bonus);
-        println!("  fail_rate_drop={} friendship={} status_limit={}", effect.fail_rate_drop, effect.friendship, effect.status_limit);
+        println!(
+            "  xunlian={} youqing={} pt_bonus={}",
+            effect.xunlian, effect.youqing, effect.pt_bonus
+        );
+        println!(
+            "  fail_rate_drop={} friendship={} status_limit={}",
+            effect.fail_rate_drop, effect.friendship, effect.status_limit
+        );
 
         // 在 at_trains 不包含的位置上测试
         let effect2 = calc_ramen_training_effect(&game, 4, true);
         println!("PT=500, 吃面region0, train=4(智), 友情:");
-        println!("  xunlian={} youqing={} pt_bonus={}", effect2.xunlian, effect2.youqing, effect2.pt_bonus);
+        println!(
+            "  xunlian={} youqing={} pt_bonus={}",
+            effect2.xunlian, effect2.youqing, effect2.pt_bonus
+        );
 
         Ok(())
     }
@@ -417,7 +430,10 @@ mod tests {
 
         let effect = calc_ramen_training_effect(&game, 0, true);
         println!("year2, PT=2000, RMJ成功, 友情:");
-        println!("  xunlian={} youqing={} deyilv={} hint={}", effect.xunlian, effect.youqing, effect.deyilv, effect.hint);
+        println!(
+            "  xunlian={} youqing={} deyilv={} hint={}",
+            effect.xunlian, effect.youqing, effect.deyilv, effect.hint
+        );
         // pt_effect(PT=2000): xunlian=12, deyilv=68, hint=70
         // rmj_success[0]: youqing=5, deyilv=80, hint=30
         println!("  => 期望: xunlian=12, youqing=5, deyilv=148, hint=100");
@@ -439,8 +455,14 @@ mod tests {
 
         let effect = calc_ramen_training_effect(&game, 0, true);
         println!("超级拉面, PT=5000, 友情:");
-        println!("  xunlian={} youqing={} pt_bonus={}", effect.xunlian, effect.youqing, effect.pt_bonus);
-        println!("  status_limit={} pt_limit={} clone_count={}", effect.status_limit, effect.pt_limit, effect.clone_count);
+        println!(
+            "  xunlian={} youqing={} pt_bonus={}",
+            effect.xunlian, effect.youqing, effect.pt_bonus
+        );
+        println!(
+            "  status_limit={} pt_limit={} clone_count={}",
+            effect.status_limit, effect.pt_limit, effect.clone_count
+        );
         // pt_effect(PT=5000): xunlian=20
         // basic(year3): xunlian=15, youqing=45, status_limit=40
         // finals base: youqing=150
@@ -465,8 +487,14 @@ mod tests {
 
         let effect = calc_ramen_training_effect(&game, 0, true);
         println!("超级拉面, PT=5000, 友情, deck_can_split=true:");
-        println!("  xunlian={} youqing={} pt_bonus={}", effect.xunlian, effect.youqing, effect.pt_bonus);
-        println!("  status_limit={} pt_limit={} clone_count={}", effect.status_limit, effect.pt_limit, effect.clone_count);
+        println!(
+            "  xunlian={} youqing={} pt_bonus={}",
+            effect.xunlian, effect.youqing, effect.pt_bonus
+        );
+        println!(
+            "  status_limit={} pt_limit={} clone_count={}",
+            effect.status_limit, effect.pt_limit, effect.clone_count
+        );
         // pt_effect(PT=5000): xunlian=20
         // basic(year3): xunlian=15, youqing=45, status_limit=40
         // finals base: youqing=150

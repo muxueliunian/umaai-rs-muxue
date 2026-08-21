@@ -15,13 +15,14 @@
 
 use anyhow::Result;
 
-use crate::game::ramen::{Operation, RamenAction, RamenGame};
-use crate::game::traits::Game;
-use crate::gamedata::{EventChoice, FreeRaceData, GAMECONSTANTS, ramen::RAMENDATA};
-use crate::global;
-
-use super::rules::{
-    calc_ramen_pt_gain, get_region_range, get_super_ramen_clone_train_options,
+use super::rules::{calc_ramen_pt_gain, get_region_range, get_super_ramen_clone_train_options};
+use crate::{
+    game::{
+        ramen::{Operation, RamenAction, RamenGame},
+        traits::Game
+    },
+    gamedata::{EventChoice, FreeRaceData, GAMECONSTANTS, ramen::RAMENDATA},
+    global
 };
 
 /// 手写策略参数化配置（权重/阈值常量）
@@ -101,7 +102,7 @@ pub struct RamenPolicyConfig {
     /// 事件干劲每点折算
     pub event_motivation_weight: f32,
     /// 事件获得 bad flag（ill/bad_trainer）的惩罚
-    pub event_bad_flag_penalty: f32,
+    pub event_bad_flag_penalty: f32
 }
 
 impl Default for RamenPolicyConfig {
@@ -132,7 +133,7 @@ impl Default for RamenPolicyConfig {
             region_hint_weight: 15.0,
             event_vital_weight: 2.2,
             event_motivation_weight: 40.0,
-            event_bad_flag_penalty: 300.0,
+            event_bad_flag_penalty: 300.0
         }
     }
 }
@@ -155,7 +156,7 @@ pub struct RamenPolicyOutput {
     /// 评分分解（调参用，进入决策日志 score_breakdown 列）
     pub breakdown: Vec<(String, f32)>,
     /// 决策原因（人类可读，调试用）
-    pub reason: String,
+    pub reason: String
 }
 
 impl RamenPolicyOutput {
@@ -172,7 +173,7 @@ impl RamenPolicyOutput {
 #[derive(Debug, Clone)]
 pub struct RamenPolicy {
     /// 参数化配置
-    pub config: RamenPolicyConfig,
+    pub config: RamenPolicyConfig
 }
 
 impl Default for RamenPolicy {
@@ -215,10 +216,7 @@ impl RamenPolicy {
                 return Ok(idx);
             }
             if is_xiahesu {
-                if let Some(idx) = actions
-                    .iter()
-                    .position(|a| a.operation == Operation::Rest)
-                {
+                if let Some(idx) = actions.iter().position(|a| a.operation == Operation::Rest) {
                     return Ok(idx);
                 }
             }
@@ -231,9 +229,10 @@ impl RamenPolicy {
         }
         // 守门 3：心情低 → 外出（回干劲）
         if uma.motivation < self.config.motivation_outing {
-            if let Some(idx) = actions.iter().position(|a| {
-                matches!(a.operation, Operation::NormalOuting | Operation::FriendOuting)
-            }) {
+            if let Some(idx) = actions
+                .iter()
+                .position(|a| matches!(a.operation, Operation::NormalOuting | Operation::FriendOuting))
+            {
                 return Ok(idx);
             }
         }
@@ -267,10 +266,7 @@ impl RamenPolicy {
         }
         let mut scores: Vec<RamenPolicyOutput> = Vec::with_capacity(actions.len());
         for a in actions {
-            let used = a
-                .special_targets
-                .map(|t| t.iter().sum::<i32>())
-                .unwrap_or(0) as f32;
+            let used = a.special_targets.map(|t| t.iter().sum::<i32>()).unwrap_or(0) as f32;
             let mut out = RamenPolicyOutput {
                 score: -used * self.config.ramen_special_cost,
                 ..Default::default()
@@ -283,12 +279,7 @@ impl RamenPolicy {
     }
 
     /// RegionSelect 阶段：按地区静态价值打分选组合（含第 3 年 120 组合全枚举，O(360) 便宜）
-    pub fn select_region(
-        &self,
-        game: &RamenGame,
-        _year_idx: usize,
-        actions: &[RamenAction],
-    ) -> Result<usize> {
+    pub fn select_region(&self, game: &RamenGame, _year_idx: usize, actions: &[RamenAction]) -> Result<usize> {
         if actions.is_empty() {
             anyhow::bail!("RegionSelect 阶段候选为空");
         }
@@ -469,17 +460,13 @@ impl RamenPolicy {
             + region.hint_count as f32 * self.config.region_hint_weight;
         out.add("region_effect", effect_val);
         // 成本：隐藏风味消耗（由 targets 决定）+ 诀窍库存机会成本
-        let hidden = a
-            .special_targets
-            .map(|t| t.iter().sum::<i32>())
-            .unwrap_or(0) as f32;
+        let hidden = a.special_targets.map(|t| t.iter().sum::<i32>()).unwrap_or(0) as f32;
         let stock_cost =
             self.config.ramen_stock_cost * 5.0 * (1.0 - (game.ramen.special_feeling as f32 + 4.0) / 12.0).max(0.2);
         out.add("hidden_cost", -hidden * self.config.ramen_special_cost);
         out.add("stock_cost", -stock_cost);
-        out.score = pt_gain * self.config.ramen_pt_weight + effect_val
-            - hidden * self.config.ramen_special_cost
-            - stock_cost;
+        out.score =
+            pt_gain * self.config.ramen_pt_weight + effect_val - hidden * self.config.ramen_special_cost - stock_cost;
         out.reason = format!("吃面/{}", region.name);
         Ok(out)
     }
@@ -506,7 +493,11 @@ impl RamenPolicy {
             .iter()
             .map(|&t| {
                 let t = t as usize;
-                if t < 5 { region.xunlian as f32 * bias[t].max(0.5) } else { 0.0 }
+                if t < 5 {
+                    region.xunlian as f32 * bias[t].max(0.5)
+                } else {
+                    0.0
+                }
             })
             .sum();
         Ok(train_val * self.config.region_xunlian_weight
@@ -547,11 +538,7 @@ fn argmax_index(scores: &[RamenPolicyOutput]) -> usize {
     scores
         .iter()
         .enumerate()
-        .max_by(|(ia, a), (ib, b)| {
-            a.score
-                .total_cmp(&b.score)
-                .then_with(|| ib.cmp(ia))
-        })
+        .max_by(|(ia, a), (ib, b)| a.score.total_cmp(&b.score).then_with(|| ib.cmp(ia)))
         .map(|(i, _)| i)
         .unwrap_or(0)
 }
@@ -584,11 +571,7 @@ fn game_race_grade(game: &RamenGame) -> f32 {
         // URA 回合固定 G1（表外）
         return 4.0;
     }
-    grades
-        .get(turn as usize)
-        .copied()
-        .unwrap_or(0)
-        .max(0) as f32
+    grades.get(turn as usize).copied().unwrap_or(0).max(0) as f32
 }
 
 /// 地区选择策略：固定顺序
@@ -620,8 +603,11 @@ pub fn fixed_super_ramen_selection() -> Result<Vec<i32>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::game::ramen::TrainingType;
-    use crate::{gamedata::init_global, utils::{get_workspace_root, init_test_logger}};
+    use crate::{
+        game::ramen::TrainingType,
+        gamedata::init_global,
+        utils::{get_workspace_root, init_test_logger}
+    };
 
     #[test]
     fn test_fixed_region_selection() -> anyhow::Result<()> {
@@ -674,7 +660,7 @@ mod tests {
         use crate::game::ramen::RamenGame;
         let inherit = crate::game::InheritInfo {
             blue_count: [15, 3, 0, 0, 0],
-            extra_count: [0, 30, 0, 0, 30, 30],
+            extra_count: [0, 30, 0, 0, 30, 30]
         };
         let deck = [302424, 302894, 303044, 302924, 303024, 303054];
         Ok(RamenGame::newgame(102601, &deck, inherit)?)
@@ -852,7 +838,7 @@ mod tests {
     fn make_free_race_game() -> anyhow::Result<RamenGame> {
         let inherit = crate::game::InheritInfo {
             blue_count: [15, 3, 0, 0, 0],
-            extra_count: [0, 30, 0, 0, 30, 30],
+            extra_count: [0, 30, 0, 0, 30, 30]
         };
         let deck = [302424, 302894, 303044, 302924, 303024, 303054];
         Ok(RamenGame::newgame(100201, &deck, inherit)?)
@@ -879,7 +865,7 @@ mod tests {
             end_turn: 26,
             count: 1,
             grade: None,
-            mask: 0,
+            mask: 0
         };
         free.update_turn_mask();
         for (turn, expect) in [(0, 14), (13, 14), (20, 7), (25, 2), (26, 1), (27, 0)] {

@@ -1,7 +1,6 @@
-use std::collections::BTreeMap;
-use std::sync::OnceLock;
 #[cfg(feature = "cli")]
 use std::sync::Mutex;
+use std::{collections::BTreeMap, sync::OnceLock};
 
 use anyhow::{Result, anyhow};
 #[cfg(feature = "cli")]

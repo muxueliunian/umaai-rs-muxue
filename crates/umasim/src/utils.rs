@@ -15,15 +15,21 @@ use log::{error, info};
 #[cfg(feature = "cli")]
 use serde::Serialize;
 
-use crate::{
-    gamedata::{
-        EventCollection, EventData, GAMECONSTANTS, GAMEDATA, GameConfig, MctsConfig, OverrideConfig,
-        OverrideGameConfig,
-    },
-    game::onsen::OnsenOrder,
-};
 #[cfg(feature = "cli")]
 use crate::gamedata::LOGGER;
+use crate::{
+    game::onsen::OnsenOrder,
+    gamedata::{
+        EventCollection,
+        EventData,
+        GAMECONSTANTS,
+        GAMEDATA,
+        GameConfig,
+        MctsConfig,
+        OverrideConfig,
+        OverrideGameConfig
+    }
+};
 
 pub type Array5 = [i32; 5];
 pub type Array6 = [i32; 6];
@@ -127,7 +133,7 @@ pub fn init_test_logger(spec: &str) -> Result<()> {
         let logger = flexi_logger::Logger::try_with_str(spec)
             .expect("log spec 解析失败")
             .format_for_stderr(log_format)
-            .log_to_stderr()      // ⚠️ 只 stderr，不写文件
+            .log_to_stderr() // ⚠️ 只 stderr，不写文件
             .start()
             .expect("flexi_logger start 失败");
         // LOGGER.set 可能失败（被其他线程抢先），但只要 start 成功，log crate 已被初始化
@@ -146,17 +152,17 @@ pub fn check_working_dir() -> Result<()> {
 }
 
 /// 获取workspace根目录路径
-/// 
+///
 /// 通过CARGO_MANIFEST_DIR环境变量定位workspace根目录，
 /// 适用于测试和需要访问workspace级别资源（如gamedata目录）的场景。
-/// 
+///
 /// # 返回值
 /// 返回workspace根目录的PathBuf，如果无法定位则返回错误。
-/// 
+///
 /// # 示例
 /// ```rust
 /// use umasim::utils::get_workspace_root;
-/// 
+///
 /// let workspace_root = get_workspace_root().expect("无法获取workspace根目录");
 /// println!("Workspace根目录: {:?}", workspace_root);
 /// ```
@@ -342,11 +348,11 @@ pub fn resolve_user_config_path() -> std::path::PathBuf {
 pub fn validate_game_config(config: &GameConfig) -> Result<()> {
     match config.scenario.as_str() {
         "basic" | "onsen" | "ramen" => {}
-        other => anyhow::bail!("未知 scenario={other:?}，应为 basic | onsen | ramen"),
+        other => anyhow::bail!("未知 scenario={other:?}，应为 basic | onsen | ramen")
     }
     match config.trainer.as_str() {
         "manual" | "random" | "handwritten" | "collector" | "neuralnet" | "mcts" => {}
-        other => anyhow::bail!("未知 trainer={other:?}"),
+        other => anyhow::bail!("未知 trainer={other:?}")
     }
     if config.cards.len() != 6 {
         anyhow::bail!("cards 长度应为 6，实际 {}", config.cards.len());
@@ -361,7 +367,7 @@ pub fn validate_game_config(config: &GameConfig) -> Result<()> {
                 "ramen_region_strategy=fixed 但 ramen_region_fixed 长度 = {}（应为 1）",
                 fixed.len()
             ),
-            None => anyhow::bail!("ramen_region_strategy=fixed 但未设置 ramen_region_fixed"),
+            None => anyhow::bail!("ramen_region_strategy=fixed 但未设置 ramen_region_fixed")
         }
     }
     Ok(())

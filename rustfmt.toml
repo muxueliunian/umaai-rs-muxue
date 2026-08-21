@@ -9,5 +9,5 @@ group_imports = "StdExternalCrate"
 overflow_delimited_expr = true
 trailing_comma = "Never"
 fn_params_layout = "Compressed"
-struct_lit_width = 32
+struct_lit_width = 30
 style_edition = "2024"

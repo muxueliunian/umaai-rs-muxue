@@ -1,6 +1,6 @@
-use serde::{Serialize, Deserialize};
-use crate::{gamedata::GAMECONSTANTS, global, utils::Array5};
+use serde::{Deserialize, Serialize};
 
+use crate::{gamedata::GAMECONSTANTS, global, utils::Array5};
 
 /// 自由比赛区间数据
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]

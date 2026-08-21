@@ -4,9 +4,7 @@
 //!
 //! 注意：合宿判断使用 `BaseGame::is_xiahesu()`，超级拉面/RMJ 回合判断使用 `RamenGame` 的方法。
 
-use rand::rngs::StdRng;
-use rand::Rng;
-use rand::seq::SliceRandom;
+use rand::{Rng, rngs::StdRng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 
 use crate::utils::Array5;
@@ -28,7 +26,7 @@ pub enum FriendEventState {
     /// 出行中（已出行次数 0~4）
     Outing(u8),
     /// 完成所有出行（5 次出行结束）
-    Complete,
+    Complete
 }
 
 impl FriendEventState {
@@ -82,7 +80,7 @@ impl FriendEventState {
                 }
                 true
             }
-            _ => false,
+            _ => false
         }
     }
 }
@@ -97,7 +95,7 @@ pub fn get_turn_special_feeling(turn: i32) -> i32 {
     match turn {
         2 | 24 | 36 | 48 | 60 => 2,
         37 | 38 | 39 | 61 | 62 | 63 => 1,
-        _ => 0,
+        _ => 0
     }
 }
 
@@ -138,8 +136,9 @@ pub const EVENT_FRIEND_UNLOCK: u32 = 830305103;
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use rand::SeedableRng;
+
+    use super::*;
 
     #[test]
     fn test_friend_event_state_lifecycle() {
@@ -198,8 +197,17 @@ mod tests {
     #[test]
     fn test_turn_special_feeling() {
         let expected: &[(i32, i32)] = &[
-            (2, 2), (24, 2), (36, 2), (37, 1), (38, 1), (39, 1),
-            (48, 2), (60, 2), (61, 1), (62, 1), (63, 1),
+            (2, 2),
+            (24, 2),
+            (36, 2),
+            (37, 1),
+            (38, 1),
+            (39, 1),
+            (48, 2),
+            (60, 2),
+            (61, 1),
+            (62, 1),
+            (63, 1)
         ];
         for &(turn, amount) in expected {
             let result = get_turn_special_feeling(turn);
@@ -223,10 +231,7 @@ mod tests {
             let types = assign_train_feeling_type(&mut rng);
             println!("第 {round} 轮角标: {types:?}");
             for (i, &ft) in types.iter().enumerate() {
-                assert!(
-                    (0..3).contains(&ft),
-                    "训练 {i} 角标无效: {ft}"
-                );
+                assert!((0..3).contains(&ft), "训练 {i} 角标无效: {ft}");
             }
         }
 
@@ -239,7 +244,10 @@ mod tests {
                 counts[ft as usize] += 1;
             }
         }
-        println!("1000 轮 x 5 训练角标分布: A={} B={} C={}", counts[0], counts[1], counts[2]);
+        println!(
+            "1000 轮 x 5 训练角标分布: A={} B={} C={}",
+            counts[0], counts[1], counts[2]
+        );
         // 期望每种约 1667，允许较大偏差
         for &c in &counts {
             assert!(c > 1000, "分布过偏: {counts:?}");

@@ -134,7 +134,10 @@ impl BaseAction {
 
     pub fn do_clinic(game: &mut BaseGame, _rng: &mut StdRng) -> Result<()> {
         diag!(">> 治病");
-        let value = ActionValue { vital: 20, ..Default::default() };
+        let value = ActionValue {
+            vital: 20,
+            ..Default::default()
+        };
         game.uma.flags.ill = false;
         game.uma.flags.bad_trainer = false;
         game.uma.add_value(&value);

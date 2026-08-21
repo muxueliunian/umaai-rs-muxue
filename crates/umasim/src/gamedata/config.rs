@@ -1,8 +1,14 @@
-use anyhow::Result;
 use std::collections::HashMap;
-use serde::{Deserialize, Serialize};
+
+use anyhow::Result;
 use log::info;
-use crate::{game::onsen::OnsenOrder, gamedata::load_json, utils::{Array5, Array6}};
+use serde::{Deserialize, Serialize};
+
+use crate::{
+    game::onsen::OnsenOrder,
+    gamedata::load_json,
+    utils::{Array5, Array6}
+};
 
 /// 训练基础值表格
 /// - 外层 Vec: 训练类型（通常5种，可扩展）
@@ -49,7 +55,6 @@ pub struct GameConstants {
     //   注入到这里。所有现有 `global!(GAMECONSTANTS).race_grades` 等引用点保持不变。
     // - **后续步骤**：若需要彻底从 `GameConstants` 移除这三个字段（改为独立全局或扩展其他结构），
     //   再统一迁移引用点（mcts_trainer、uma.rs:calc_score_with_pt_favor、base/action.rs:race_grade 等）。
-
     /// 每回合的比赛等级（72 项；URA 回合 72-77 固定 G1 不在此表）
     /// 默认值来源："game_config.toml" → "default_config.toml" → `default_race_grades()`
     #[serde(default, skip)]
@@ -552,8 +557,8 @@ fn default_race_grades() -> Vec<i32> {
     // 注意：此默认值与 gamedata/default_config.toml 中的 race_grades 保持一致；
     // 仅当 default_config.toml 缺该字段时（异常情况）才使用此处兜底
     vec![
-        0,0,0,0,0,0,0,0,0,0,0,4,0,3,4,3,3,4,3,3,2,3,1,1,3,4,3,4,2,2,1,2,1,1,1,1,
-        1,3,3,3,3,1,1,1,1,1,2,1,2,3,1,1,2,1,2,1,1,2,1,1,3,3,3,3,3,1,2,1,1,1,2,1
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 4, 3, 3, 4, 3, 3, 2, 3, 1, 1, 3, 4, 3, 4, 2, 2, 1, 2, 1, 1, 1, 1, 1,
+        3, 3, 3, 3, 1, 1, 1, 1, 1, 2, 1, 2, 3, 1, 1, 2, 1, 2, 1, 1, 2, 1, 1, 3, 3, 3, 3, 3, 1, 2, 1, 1, 1, 2, 1,
     ]
 }
 
@@ -627,8 +632,7 @@ impl GameConfig {
     /// 输出参数：日志级别、统计级别等
     pub fn output(&self) -> OutputConfig {
         OutputConfig {
-            log_level: self.log_level.clone()
-            // 步骤 3 后续：统计级别（None / Summary / Turn / Detailed）等
+            log_level: self.log_level.clone() // 步骤 3 后续：统计级别（None / Summary / Turn / Detailed）等
         }
     }
 
@@ -715,8 +719,7 @@ pub struct PolicyConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputConfig {
     /// 日志级别: "debug" | "off" | "info" | "trace"
-    pub log_level: String
-    // 步骤 3 后续：统计级别（None / Summary / Turn / Detailed）
+    pub log_level: String // 步骤 3 后续：统计级别（None / Summary / Turn / Detailed）
 }
 
 /// 开发者参数（collector、线程数、调试开关）

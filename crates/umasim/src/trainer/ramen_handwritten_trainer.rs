@@ -11,17 +11,21 @@ use anyhow::Result;
 use log::info;
 use rand::prelude::StdRng;
 
-use crate::game::ramen::{RamenGame, RamenStage};
-use crate::game::ramen::policy::RamenPolicy;
-use crate::game::{Game, Trainer};
-use crate::gamedata::{EventChoice, EventData};
+use crate::{
+    game::{
+        Game,
+        Trainer,
+        ramen::{RamenGame, RamenStage, policy::RamenPolicy}
+    },
+    gamedata::{EventChoice, EventData}
+};
 
 /// 拉面杯手写策略训练员
 pub struct RamenHandwrittenTrainer {
     /// 策略核心（参数化配置 + 各阶段打分）
     pub policy: RamenPolicy,
     /// 是否输出每步决策日志（整局跑批时建议关闭）
-    pub verbose: bool,
+    pub verbose: bool
 }
 
 impl RamenHandwrittenTrainer {
@@ -29,16 +33,13 @@ impl RamenHandwrittenTrainer {
     pub fn new() -> Self {
         Self {
             policy: RamenPolicy::default(),
-            verbose: false,
+            verbose: false
         }
     }
 
     /// 使用指定策略核心创建
     pub fn with_policy(policy: RamenPolicy) -> Self {
-        Self {
-            policy,
-            verbose: false,
-        }
+        Self { policy, verbose: false }
     }
 
     /// 速度特化配置
@@ -61,10 +62,7 @@ impl Default for RamenHandwrittenTrainer {
 
 impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     fn select_action(
-        &self,
-        game: &RamenGame,
-        actions: &[<RamenGame as Game>::Action],
-        _rng: &mut StdRng,
+        &self, game: &RamenGame, actions: &[<RamenGame as Game>::Action], _rng: &mut StdRng
     ) -> Result<usize> {
         // 单个候选直接返回（无选择空间）
         if actions.len() <= 1 {
@@ -80,12 +78,12 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
                     2 => 0,
                     23 => 1,
                     47 => 2,
-                    _ => 0,
+                    _ => 0
                 };
                 self.policy.select_region(game, year_idx, actions)?
             }
             // 其他阶段（Begin/Distribute/AfterTrain 等）不应有多个候选
-            _ => 0,
+            _ => 0
         };
         if self.verbose {
             info!(
@@ -98,12 +96,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
         Ok(idx)
     }
 
-    fn select_choice(
-        &self,
-        game: &RamenGame,
-        choices: &[Vec<EventChoice>],
-        _rng: &mut StdRng,
-    ) -> Result<usize> {
+    fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
         let idx = self.policy.select_event(game, choices)?;
         if self.verbose {
             info!("[手写][回合 {}] 事件选择: {}", game.turn(), idx + 1);
@@ -112,11 +105,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     }
 
     fn select_event_choice(
-        &self,
-        game: &RamenGame,
-        _event: &EventData,
-        choices: &[Vec<EventChoice>],
-        _rng: &mut StdRng,
+        &self, game: &RamenGame, _event: &EventData, choices: &[Vec<EventChoice>], _rng: &mut StdRng
     ) -> Result<usize> {
         let idx = self.policy.select_event(game, choices)?;
         if self.verbose {
@@ -127,18 +116,21 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
 }
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::gamedata::{GAMECONSTANTS, init_global};
-    use crate::game::ramen::RamenGame;
-    use crate::global;
-    use crate::utils::{get_workspace_root, init_test_logger};
     use rand::SeedableRng;
+
+    use super::*;
+    use crate::{
+        game::ramen::RamenGame,
+        gamedata::{GAMECONSTANTS, init_global},
+        global,
+        utils::{get_workspace_root, init_test_logger}
+    };
 
     const TEST_UMA_ID: u32 = 102601;
     const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
     const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
         blue_count: [15, 3, 0, 0, 0],
-        extra_count: [0, 30, 0, 0, 30, 30],
+        extra_count: [0, 30, 0, 0, 30, 30]
     };
 
     /// 完整 77 回合跑通（固定种子可复现），输出关键结局指标

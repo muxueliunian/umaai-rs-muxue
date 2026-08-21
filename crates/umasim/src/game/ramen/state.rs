@@ -8,12 +8,12 @@ use anyhow::Result;
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
-use super::{FeelingType, RamenStage};
-use super::rules::NPC_CHARA_IDS;
-use crate::game::{BaseGame, BasePerson, InheritInfo, PersonType};
-use crate::game::traits::Game;
-use crate::global;
-use crate::gamedata::ramen::RAMENDATA;
+use super::{FeelingType, RamenStage, rules::NPC_CHARA_IDS};
+use crate::{
+    game::{BaseGame, BasePerson, InheritInfo, PersonType, traits::Game},
+    gamedata::ramen::RAMENDATA,
+    global
+};
 
 /// 拉面杯专用状态
 ///
@@ -70,7 +70,7 @@ pub struct RamenState {
     /// - false（默认）：走标准三阶段路径（next() 按 `pending_ramen` 决定 SpecialSelect / Train）
     ///
     /// 由 `clear_pending()` 一并清空，确保不跨回合残留。
-    pub combined_decision: bool,
+    pub combined_decision: bool
 }
 
 /// 拉面效果合并（基础效果 + 地区效果 + 超级拉面效果 + Pt常驻效果）
@@ -208,9 +208,7 @@ impl RamenGame {
             idrank / 10 == 30305 && (1..=4).contains(&rank)
         });
         if !has_new_friend {
-            anyhow::bail!(
-                "卡组未携带新友人卡(idrank=303051-303054，card_id=30305)，拉面杯模拟器仅支持新友人卡组"
-            );
+            anyhow::bail!("卡组未携带新友人卡(idrank=303051-303054，card_id=30305)，拉面杯模拟器仅支持新友人卡组");
         }
         let mut ret = RamenGame {
             base: BaseGame::new(uma_id, deck_ids, inherit)?,
@@ -219,13 +217,13 @@ impl RamenGame {
             ramen: RamenState::default(),
             current_effect: RamenEffect::default(),
             deck_can_split: false,
-            internal_rng: None,
+            internal_rng: None
         };
         // 合并拉面杯剧本的友人事件 ID（base 已包含 global_events.friend_events 的 ID）
         // 让 apply_event 能正确识别 8303051xx 的友人事件并应用 friend.event_bonus / vital_bonus
-        ret.base.friend_event_ids.extend(
-            global!(RAMENDATA).friend_events.values().map(|e| e.id)
-        );
+        ret.base
+            .friend_event_ids
+            .extend(global!(RAMENDATA).friend_events.values().map(|e| e.id));
         // 五维属性上限：拉面杯剧本数据覆盖（Phase 2 步骤 1：从 constants.json 隔离到 scenario_ramen）
         // 若 scenario_ramen.json 未提供该字段，回退到全局默认值（防御）
         if let Some(limit) = global!(RAMENDATA).five_status_limit_base {
@@ -267,7 +265,7 @@ impl RamenGame {
                 chara_id: npc_id,
                 friendship: 0,
                 is_hint: false,
-                card_id: None,
+                card_id: None
             });
         }
         Ok(())
