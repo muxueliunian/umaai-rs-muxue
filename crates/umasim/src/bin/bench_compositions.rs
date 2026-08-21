@@ -10,14 +10,13 @@
 //!   [--trainer random|handwritten] [--out FILE]
 //! ```
 
-use std::collections::BTreeMap;
 use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 use rand::{SeedableRng, rngs::StdRng};
 use umasim::game::ramen::RamenGame;
 use umasim::game::{Game, InheritInfo, Trainer};
-use umasim::gamedata::{GAMEDATA, SupportCardData, init_global_with_config};
+use umasim::gamedata::{GAMEDATA, init_global_with_config};
 use umasim::global;
 use umasim::trainer::{RamenHandwrittenTrainer, RandomTrainer};
 use umasim::utils::{get_workspace_root, load_game_config};
@@ -123,7 +122,11 @@ impl Summary {
         format!(
             "{},{},{},{},{:.3},{},{},{:.3},{:.3},{:.3},{:.3},{:.3},{:.3},{:.4},{:.4}",
             self.composition.name(),
-            self.deck.iter().map(u32::to_string).collect::<Vec<_>>().join("/"),
+            self.deck
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join("/"),
             self.completed,
             self.failed,
             self.score_mean,
@@ -209,31 +212,25 @@ fn enumerate_compositions() -> Vec<Composition> {
 /// 但结果仅代表这些样本卡，不应解释为卡片强度排名。
 fn select_representatives() -> Result<[Vec<CardRepresentative>; 5]> {
     let data = global!(GAMEDATA);
-    let mut pools: [Vec<&SupportCardData>; 5] = std::array::from_fn(|_| Vec::new());
+    let mut pools: [Vec<CardRepresentative>; 5] = std::array::from_fn(|_| Vec::new());
     for card in data.card.values() {
         if card.rarity == 3 && (0..5).contains(&card.card_type) && card.card_value.len() >= 5 {
-            pools[card.card_type as usize].push(card);
+            pools[card.card_type as usize].push(CardRepresentative {
+                idrank: card.card_id * 10 + 4,
+                name: card.card_name.clone(),
+            });
         }
     }
-    let selected = std::array::try_from_fn(|card_type| {
-        pools[card_type].sort_by_key(|card| std::cmp::Reverse(card.card_id));
+    for (card_type, pool) in pools.iter_mut().enumerate() {
+        pool.sort_by_key(|card| std::cmp::Reverse(card.idrank));
         ensure!(
-            pools[card_type].len() >= 3,
+            pool.len() >= 3,
             "{} 类型满破 SSR 不足三张",
             TYPE_NAMES[card_type]
         );
-        Ok::<_, anyhow::Error>(
-            pools[card_type]
-                .iter()
-                .take(3)
-                .map(|card| CardRepresentative {
-                    idrank: card.card_id * 10 + 4,
-                    name: card.card_name.clone(),
-                })
-                .collect(),
-        )
-    })?;
-    Ok(selected)
+        pool.truncate(3);
+    }
+    Ok(pools)
 }
 
 /// 根据构成与固定友人生成六张卡组。
