@@ -4,6 +4,8 @@
 //! 本 bin 产出 RandomTrainer 的基线分布（分数/PT/RMJ/耗时），
 //! 并可选落盘每局决策轨迹（开发调参格式，见 `output::decision_log`）。
 //!
+//! 运行设施（固定种子双 RNG、单局运行、统计、CSV）复用 [`umasim::bench`]。
+//!
 //! # 用法（Release）
 //!
 //! ```text
@@ -23,13 +25,12 @@
 use std::time::Instant;
 
 use anyhow::{Context, Result};
-use rand::{SeedableRng, rngs::StdRng};
+use lexopt::Arg;
 use serde::Deserialize;
-use umasim::game::ramen::RamenGame;
-use umasim::game::{Game, InheritInfo, Trainer};
-use umasim::gamedata::{GAMECONSTANTS, init_global_with_config};
-use umasim::global;
-use umasim::output::decision_log::{DecisionLog, DecisionLogRow};
+use umasim::bench;
+use umasim::game::InheritInfo;
+use umasim::gamedata::init_global_with_config;
+use umasim::output::decision_log::DecisionLogRow;
 use umasim::trainer::{LoggingTrainer, RamenHandwrittenTrainer, RandomTrainer};
 use umasim::utils::{get_workspace_root, load_game_config};
 
@@ -73,85 +74,34 @@ impl Default for BenchConfig {
     }
 }
 
-/// 单局结果（results CSV 一行）
-struct GameResult {
-    /// 本局种子
-    seed: u64,
-    /// 结算评分
-    score: i32,
-    /// 评分等级
-    rank: String,
-    /// 五维终值
-    five_status: [i32; 5],
-    /// 技能点
-    skill_pt: i32,
-    /// 剧本 PT
-    scenario_pt: i32,
-    /// RMJ 成功年数（0-3）
-    rmj_ok: usize,
-    /// 当年吃面次数
-    eat_count: i32,
-    /// 整局耗时（毫秒，浮点）
-    elapsed_ms: f64,
-}
-
-impl GameResult {
-    /// 序列化为 CSV 行（不含表头）
-    fn to_csv_row(&self) -> String {
-        let fs = self.five_status;
-        format!(
-            "{},{},{},{},{},{},{},{},{},{},{},{},{:.3}",
-            self.seed,
-            self.score,
-            csv_escape(&self.rank),
-            fs[0],
-            fs[1],
-            fs[2],
-            fs[3],
-            fs[4],
-            self.skill_pt,
-            self.scenario_pt,
-            self.rmj_ok,
-            self.eat_count,
-            self.elapsed_ms,
-        )
-    }
-}
-
 /// results CSV 表头
-const RESULTS_HEADER: &str =
-    "seed,score,rank,speed,stamina,power,guts,wisdom,skill_pt,scenario_pt,rmj_ok,eat_count,elapsed_ms";
+const RESULTS_HEADER: [&str; 13] = [
+    "seed",
+    "score",
+    "rank",
+    "speed",
+    "stamina",
+    "power",
+    "guts",
+    "wisdom",
+    "skill_pt",
+    "scenario_pt",
+    "rmj_ok",
+    "eat_count",
+    "elapsed_ms",
+];
 
-/// CSV 字段转义（与 `output::decision_log` 同规则）
-fn csv_escape(s: &str) -> String {
-    if s.contains(',') || s.contains('"') || s.contains('\n') || s.contains('\r') {
-        format!("\"{}\"", s.replace('"', "\"\""))
-    } else {
-        s.to_string()
-    }
-}
-
-/// 解析 CLI 参数（`--key value` 或 `--flag`），覆盖 bench 配置
-fn apply_cli(mut cfg: BenchConfig, args: &[String]) -> Result<BenchConfig> {
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--runs" => {
-                cfg.runs = parse_arg(args, &mut i, "--runs")?;
-            }
-            "--seed" => {
-                cfg.seed = parse_arg(args, &mut i, "--seed")?;
-            }
-            "--log" => {
-                cfg.decision_log = true;
-            }
-            "--out" => {
-                cfg.out_dir = parse_arg(args, &mut i, "--out")?;
-            }
-            "--trainer" => {
-                cfg.trainer = parse_arg(args, &mut i, "--trainer")?;
-            }
-            "--help" | "-h" => {
+/// 解析 CLI 参数（`--key value` 或 `--key=value`），覆盖 bench 配置
+fn apply_cli(mut cfg: BenchConfig) -> Result<BenchConfig> {
+    let mut parser = lexopt::Parser::from_env();
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Arg::Long("runs") => cfg.runs = bench::parse_value(&mut parser, "runs")?,
+            Arg::Long("seed") => cfg.seed = bench::parse_value(&mut parser, "seed")?,
+            Arg::Long("log") => cfg.decision_log = true,
+            Arg::Long("out") => cfg.out_dir = bench::parse_value(&mut parser, "out")?,
+            Arg::Long("trainer") => cfg.trainer = bench::parse_value(&mut parser, "trainer")?,
+            Arg::Long("help") | Arg::Short('h') => {
                 println!(
                     "用法: bench_base [--runs N] [--seed S] [--log] [--out DIR] [--trainer random|handwritten]\n\
                      缺省参数读取 workspace 根 bench_config.toml"
@@ -159,22 +109,11 @@ fn apply_cli(mut cfg: BenchConfig, args: &[String]) -> Result<BenchConfig> {
                 std::process::exit(0);
             }
             other => {
-                anyhow::bail!("未知参数: {other}（可用 --help 查看用法）");
+                anyhow::bail!("未知参数: {other:?}（可用 --help 查看用法）");
             }
         }
-        i += 1;
     }
     Ok(cfg)
-}
-
-/// 读取 `--key value` 的 value（并推进索引）
-fn parse_arg<T: std::str::FromStr>(args: &[String], i: &mut usize, key: &str) -> Result<T> {
-    *i += 1;
-    let val = args
-        .get(*i)
-        .ok_or_else(|| anyhow::anyhow!("参数 {key} 缺少值"))?;
-    val.parse()
-        .map_err(|_| anyhow::anyhow!("参数 {key} 的值无效: {val}"))
 }
 
 /// 读取 bench_config.toml（workspace 根）；缺失时用内置默认并提示
@@ -183,8 +122,8 @@ fn load_bench_config(workspace_root: &std::path::Path) -> Result<BenchConfig> {
     if path.exists() {
         let text = std::fs::read_to_string(&path)
             .with_context(|| format!("读取 bench_config.toml 失败: {}", path.display()))?;
-        let cfg: BenchConfig = toml::from_str(&text)
-            .with_context(|| format!("解析 bench_config.toml 失败: {}", path.display()))?;
+        let cfg: BenchConfig =
+            toml::from_str(&text).with_context(|| format!("解析 bench_config.toml 失败: {}", path.display()))?;
         Ok(cfg)
     } else {
         println!("提示: 未找到 bench_config.toml，使用内置默认参数");
@@ -192,61 +131,23 @@ fn load_bench_config(workspace_root: &std::path::Path) -> Result<BenchConfig> {
     }
 }
 
-/// 跑一局（固定 seed），返回结果与决策日志
-fn run_once<T: Trainer<RamenGame>>(
-    cfg: &BenchConfig,
-    seed: u64,
-    inherit: &InheritInfo,
-    trainer: &LoggingTrainer<T>,
-) -> Result<(GameResult, DecisionLog)> {
-    // 决策 RNG 与规则层 RNG 从同一 seed 分裂派生，两轮同 seed 跑批结果完全一致
-    let mut decision_rng = StdRng::seed_from_u64(seed);
-    let rule_rng = StdRng::seed_from_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
-
-    let mut game = RamenGame::newgame(cfg.uma, &cfg.cards, inherit.clone())?;
-    game.set_internal_rng(rule_rng);
-
-    let start = Instant::now();
-    game.run_full_game(trainer, &mut decision_rng)?;
-    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
-
-    let score = game.uma.calc_score();
-    let rank = global!(GAMECONSTANTS).get_rank_name(score);
-    let result = GameResult {
-        seed,
-        score,
-        rank,
-        five_status: game.uma.five_status,
-        skill_pt: game.uma.skill_pt,
-        scenario_pt: game.ramen.scenario_pt,
-        rmj_ok: game.ramen.rmj_results.iter().filter(|&&ok| ok).count(),
-        eat_count: game.ramen.eat_count,
-        elapsed_ms,
-    };
-    Ok((result, trainer.take_records()))
-}
-
-/// 汇总：基本统计（min/max/mean/median/std）
-fn summarize(values: &[f64]) -> (f64, f64, f64, f64, f64) {
-    let n = values.len() as f64;
-    let mean = values.iter().sum::<f64>() / n;
-    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
-    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
-    let mut sorted = values.to_vec();
-    sorted.sort_by(|a, b| a.total_cmp(b));
-    let mid = sorted.len() / 2;
-    let median = if sorted.len() % 2 == 0 {
-        (sorted[mid - 1] + sorted[mid]) / 2.0
-    } else {
-        sorted[mid]
-    };
-    let variance = values
-        .iter()
-        .map(|v| (v - mean) * (v - mean))
-        .sum::<f64>()
-        / n;
-    let std = variance.sqrt();
-    (min, max, mean, median, std)
+/// 单局结果转 CSV 行（不含表头）
+fn outcome_to_row(outcome: &bench::GameOutcome) -> Vec<String> {
+    vec![
+        outcome.seed.to_string(),
+        outcome.score.to_string(),
+        outcome.rank.clone(),
+        outcome.five_status[0].to_string(),
+        outcome.five_status[1].to_string(),
+        outcome.five_status[2].to_string(),
+        outcome.five_status[3].to_string(),
+        outcome.five_status[4].to_string(),
+        outcome.skill_pt.to_string(),
+        outcome.scenario_pt.to_string(),
+        outcome.rmj_ok.to_string(),
+        outcome.eat_count.to_string(),
+        format!("{:.3}", outcome.elapsed_ms),
+    ]
 }
 
 /// 按决策阶段分组统计耗时（mean us / max us / 次数），按阶段名排序
@@ -269,8 +170,7 @@ fn main() -> Result<()> {
     let workspace_root = get_workspace_root()?;
     std::env::set_current_dir(&workspace_root)?;
 
-    let args: Vec<String> = std::env::args().collect();
-    let cfg = apply_cli(load_bench_config(&workspace_root)?, &args)?;
+    let cfg = apply_cli(load_bench_config(&workspace_root)?)?;
 
     // 初始化全局数据（注入用户可调项：race_grades / mcts_turn_bonus 等）
     let game_config = load_game_config()?;
@@ -294,61 +194,55 @@ fn main() -> Result<()> {
     for i in 0..cfg.runs {
         let seed = cfg.seed + i as u64;
         // 构造训练员（LoggingTrainer 包装；决策日志默认开启，由 --log 决定是否落盘）
-        let (result, log) = match cfg.trainer.as_str() {
-            "random" => run_once(
-                &cfg,
-                seed,
-                &inherit,
-                &LoggingTrainer::new(RandomTrainer, seed),
-            )?,
-            "handwritten" => run_once(
-                &cfg,
-                seed,
-                &inherit,
-                &LoggingTrainer::new(RamenHandwrittenTrainer::new(), seed),
-            )?,
+        let (outcome, log) = match cfg.trainer.as_str() {
+            "random" => {
+                let trainer = LoggingTrainer::new(RandomTrainer, seed);
+                let outcome = bench::run_seeded(cfg.uma, &cfg.cards, &inherit, seed, &trainer)?;
+                (outcome, trainer.take_records())
+            }
+            "handwritten" => {
+                let trainer = LoggingTrainer::new(RamenHandwrittenTrainer::new(), seed);
+                let outcome = bench::run_seeded(cfg.uma, &cfg.cards, &inherit, seed, &trainer)?;
+                (outcome, trainer.take_records())
+            }
             other => anyhow::bail!("未知 trainer: {other}（可选 random / handwritten）"),
         };
         println!(
             "  [#{:02}] seed={} score={} ({}) PT={} RMJ={}/3 耗时={:.3}ms",
             i + 1,
-            result.seed,
-            result.score,
-            result.rank,
-            result.scenario_pt,
-            result.rmj_ok,
-            result.elapsed_ms,
+            outcome.seed,
+            outcome.score,
+            outcome.rank,
+            outcome.scenario_pt,
+            outcome.rmj_ok,
+            outcome.elapsed_ms,
         );
         if cfg.decision_log {
             log.save_to(&out_dir.join(format!("bench_base_decision_{seed}.csv")))?;
         }
         all_rows.extend(log.rows);
-        results.push(result);
+        results.push(outcome);
     }
 
     // ===== 落盘结果 CSV =====
     let results_path = out_dir.join("bench_base_results.csv");
-    let mut csv = String::from(RESULTS_HEADER);
-    csv.push('\n');
-    for r in &results {
-        csv.push_str(&r.to_csv_row());
-        csv.push('\n');
-    }
-    std::fs::write(&results_path, csv)?;
+    let rows: Vec<Vec<String>> = results.iter().map(outcome_to_row).collect();
+    bench::write_csv(&results_path, &RESULTS_HEADER, &rows)?;
     println!("\n结果已写入: {}", results_path.display());
 
     // ===== 汇总 =====
     let scores: Vec<f64> = results.iter().map(|r| r.score as f64).collect();
-    let (min, max, mean, median, std) = summarize(&scores);
-    let rmj_mean =
-        results.iter().map(|r| r.rmj_ok as f64).sum::<f64>() / results.len().max(1) as f64;
+    let stats = bench::summarize(&scores);
+    let rmj_mean = results.iter().map(|r| r.rmj_ok as f64).sum::<f64>() / results.len().max(1) as f64;
     let elapsed_ms: Vec<f64> = results.iter().map(|r| r.elapsed_ms).collect();
     let total_ms = elapsed_ms.iter().sum::<f64>();
-    let throughput_ind = cfg.runs as f64 / (total_ms / 1000.0).max(1e-9);
+    let throughput = cfg.runs as f64 / (total_ms / 1000.0).max(1e-9);
+    let elapsed_stats = bench::summarize(&elapsed_ms);
 
     println!("\n===== 汇总 (runs={}, base_seed={}) =====", cfg.runs, cfg.seed);
     println!(
-        "分数: mean={mean:.0} median={median:.0} min={min:.0} max={max:.0} std={std:.0}"
+        "分数: mean={:.0} median={:.0} min={:.0} max={:.0} std={:.0}",
+        stats.mean, stats.median, stats.min, stats.max, stats.std
     );
     println!("RMJ 成功年数: 平均 {rmj_mean:.2}/3");
     println!("决策耗时 (mean/max us, 次数):");
@@ -357,14 +251,7 @@ fn main() -> Result<()> {
     }
     println!(
         "整局耗时: mean {:.3}ms, max {:.3}ms, 吞吐 {:.1} 局/s",
-        total_ms / cfg.runs.max(1) as f64,
-        max_of(&elapsed_ms),
-        throughput_ind,
+        elapsed_stats.mean, elapsed_stats.max, throughput
     );
     Ok(())
-}
-
-/// 一组 f64 的最大值（空序列返回 0）
-fn max_of(values: &[f64]) -> f64 {
-    values.iter().cloned().fold(0.0, f64::max)
 }

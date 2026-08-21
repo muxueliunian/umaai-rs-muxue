@@ -296,14 +296,16 @@ cargo run --release --bin bench_base -- --runs 100 --seed 7 --log --out logs
 
 ### `bin/bench_compositions.rs`
 
-固定种子遍历五种普通支援卡各 0..=3 张、合计 5 张再加固定友人的全部 101 种构成，输出评分、五维、训练技能 PT、RMJ 和友人出行聚合 CSV。
+固定种子遍历五种普通支援卡各 0..=3 张、合计 5 张再加固定友人的全部 101 种构成，输出评分、五维、训练技能 PT、RMJ 和友人出行聚合 CSV。运行设施复用 `umasim::bench`（`bin/bench_base.rs` 同）。
 
 ```bash
 cargo run --release --bin bench_compositions -- --runs 100 --seed 42 --trainer handwritten --out logs/bench_compositions.csv
 ```
 
+- 代表卡选择：各类型取最新 5 张满破 SSR 作候选池，跳过满破面板和值（友情+干劲+训练）<70 的弱卡，按 card_id 倒序取 3 张；`--min-panel N` / `--pool-size N` / `--pick N` 可调，`--cards-file cards.toml` 手动指定兜底（每类型满破 idrank 列表）
 - `test_enumerate_all_101_compositions` — 严格验证合法构成总数为 101，且每种合计 5 张、单类型不超过 3 张
 - `test_build_all_composition_decks` — 验证全部构成都生成 5 张普通卡 + 1 张固定友人
+- `umasim::bench` 模块测试（4 个）：seed 双 RNG 可复现 / summarize 统计 / percentile 分位 / 真实 cardDB 默认参数选卡集成验证
 
 ## 未来缩减参考（规则固化后讨论）
 

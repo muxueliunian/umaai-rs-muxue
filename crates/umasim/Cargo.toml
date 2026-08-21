@@ -59,6 +59,9 @@ int-enum = "1.2.0"
 parse-display = "0.11.0"
 # colored 无条件加载（消除 cli 关闭时的双版本 cfg gate 重复代码；非 Windows 纯 std，见顶部）
 colored.workspace = true
+# 基准工具依赖（平台无关，无条件编译；lexopt 零依赖跨平台 CLI 解析，csv 数据序列化）
+csv.workspace = true
+lexopt.workspace = true
 
 # ---- cli 依赖（仅 feature = "cli" 时编译）----
 inquire = { workspace = true, optional = true }
