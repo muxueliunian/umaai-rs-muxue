@@ -12,10 +12,12 @@
 //! - 规则层日志（`Game` / `Action` 层）在阶段 2 迁移到 [`diag!`]，可通过 `diag` feature 编译期裁剪
 
 pub mod decision;
+pub mod decision_log;
 pub mod diagnostic;
 pub mod view;
 
 pub use decision::DecisionInfo;
+pub use decision_log::{DecisionLog, DecisionLogRow};
 pub use view::GameView;
 // 注意：`#[macro_export]` 标记的 `diag!` 宏已经在 crate 根全局可见（`umasim::diag!` 可直接调用），
 // 不能再用 `pub use diagnostic::diag;` 重新导出——宏不是普通 item，不支持 re-export。

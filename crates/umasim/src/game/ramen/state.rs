@@ -5,6 +5,7 @@
 use std::ops::{Deref, DerefMut};
 
 use anyhow::Result;
+use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
 use super::{FeelingType, RamenStage};
@@ -157,7 +158,17 @@ pub struct RamenGame {
     /// 当前生效的拉面效果（每回合重新计算）
     pub current_effect: RamenEffect,
     /// 是否能触发分身
-    pub deck_can_split: bool
+    pub deck_can_split: bool,
+    /// 规则层事件 RNG（可选）
+    ///
+    /// `Game::next()` 中的吃面效果落地（分身分配）与 RMJ 事件使用此 RNG；
+    /// 为 `None` 时回退 `StdRng::from_os_rng()`（保持旧行为）。
+    /// 用途：固定种子批量模拟时注入 seed rng，保证整局完全可复现
+    /// （计划 §2-4 确定性要求；否则规则层随机性破坏基准对比与调参复现）。
+    ///
+    /// 注意：`Clone` 会复制 RNG 状态——MCTS 搜索复制状态时两个分支将共享后续
+    /// 随机序列，属已知问题，搜索接入时需按分支重置（Phase 5+）。
+    pub internal_rng: Option<StdRng>
 }
 
 impl Deref for RamenGame {
@@ -207,7 +218,8 @@ impl RamenGame {
             persons: vec![],
             ramen: RamenState::default(),
             current_effect: RamenEffect::default(),
-            deck_can_split: false
+            deck_can_split: false,
+            internal_rng: None,
         };
         // 合并拉面杯剧本的友人事件 ID（base 已包含 global_events.friend_events 的 ID）
         // 让 apply_event 能正确识别 8303051xx 的友人事件并应用 friend.event_bonus / vital_bonus
@@ -316,5 +328,13 @@ impl RamenGame {
     /// 是否为 RMJ 结算回合
     pub fn is_rmj_turn(&self) -> bool {
         matches!(self.turn, 23 | 47 | 71)
+    }
+
+    /// 注入规则层事件 RNG（固定种子复现用）
+    ///
+    /// 调用时机：`run_full_game` 之前。之后 `Game::next()` 中的规则层随机性
+    /// （吃面分身分配、RMJ 事件）全部走此 RNG，同一 seed 的整局结果可完全复现。
+    pub fn set_internal_rng(&mut self, rng: StdRng) {
+        self.internal_rng = Some(rng);
     }
 }

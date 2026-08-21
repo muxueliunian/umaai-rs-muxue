@@ -77,8 +77,7 @@ impl Game for RamenGame {
             if self.ramen.combined_decision {
                 // 合并决策：先切到 Train，再立即 ground（避免下次 next() 还要检查 combined_decision）
                 self.stage = RamenStage::Train;
-                let mut apply_rng = rand::rngs::StdRng::from_os_rng();
-                if self.ground_ramen_effects(&mut apply_rng).is_err() {
+                if self.ground_ramen_effects_with_internal_rng() {
                     crate::diag!("合并决策 ground_ramen_effects 失败");
                 }
                 self.ramen.combined_decision = false;
@@ -97,8 +96,7 @@ impl Game for RamenGame {
         // 消耗诀窍 / PT 增量 / 生成分身 / 羁绊效果 / 显示 buff + distribution
         // 这样玩家在选训练动作前能看到完整效果。
         if self.stage == RamenStage::SpecialSelect {
-            let mut apply_rng = rand::rngs::StdRng::from_os_rng();
-            if self.ground_ramen_effects(&mut apply_rng).is_err() {
+            if self.ground_ramen_effects_with_internal_rng() {
                 crate::diag!("ground_ramen_effects 失败");
             }
             self.stage = RamenStage::Train;
@@ -149,15 +147,18 @@ impl Game for RamenGame {
                 // RMJ 事件没有 player_select=true，可以直接 apply 而不需 Trainer。
                 // 事件 ID：401404(年1) / 401405(年2) / 401406(年3)，按 rmj_results[year_idx] 决定 result=2/1
                 if let Some(event) = find_rmj_event(year_idx) {
-                    let mut apply_rng = rand::rngs::StdRng::from_os_rng();
                     diag!(
                         "+ 事件: #{} {} (回合 {} 末)",
                         event.id,
                         event.name,
                         self.base.turn + 1
                     );
-                    if let Err(e) = self.apply_event(&event, 0, &mut apply_rng) {
-                        crate::diag!("RMJ 事件 #{} apply 失败: {e:?}", event.id);
+                    // 使用规则层 RNG（保证固定种子可复现）
+                    let mut apply_rng = self.take_internal_rng();
+                    let err = self.apply_event(&event, 0, &mut apply_rng).is_err();
+                    self.internal_rng = Some(apply_rng);
+                    if err {
+                        crate::diag!("RMJ 事件 #{} apply 失败: {:?}", event.id, event.name);
                     }
                 }
                 // RMJ 结算后 scenario_pt 归零，下一年重新累计
@@ -733,6 +734,26 @@ impl RamenGame {
         }
 
         Ok(())
+    }
+
+    /// 取走规则层事件 RNG（未注入时回退 os rng）
+    ///
+    /// 配合 [`Self::internal_rng`] 字段使用：调用方使用后必须放回
+    /// `self.internal_rng = Some(rng)`，否则后续规则层随机性退回 os rng。
+    fn take_internal_rng(&mut self) -> StdRng {
+        self.internal_rng.take().unwrap_or_else(rand::rngs::StdRng::from_os_rng)
+    }
+
+    /// 落地吃面效果（使用规则层 RNG）
+    ///
+    /// 与 [`Self::ground_ramen_effects`] 等价，但 RNG 取自/放回 [`Self::internal_rng`]，
+    /// 保证固定种子模拟下分身分配可复现（计划 §2-4 确定性要求）。
+    /// 返回是否出错。
+    fn ground_ramen_effects_with_internal_rng(&mut self) -> bool {
+        let mut apply_rng = self.take_internal_rng();
+        let err = self.ground_ramen_effects(&mut apply_rng).is_err();
+        self.internal_rng = Some(apply_rng);
+        err
     }
 
     /// 拉面羁绊效果（吃面或超级拉面回合触发）

@@ -2,20 +2,23 @@
 
 本文件按模块分类、用一句话描述每个测试的功能，便于快速定位和评估覆盖率。
 
-总计：**121 个测试**（含 1 个 async），分布在 `crates/umasim/src/` 与 `crates/umaai/src/` 各文件中。
+总计：**147 个测试**（含 1 个 async），分布在 `crates/umasim/src/` 与 `crates/umaai/src/` 各文件中。
 
 ## 目录
 
-- [拉面杯](#拉面杯) — 99 个
+- [拉面杯](#拉面杯) — 101 个
   - [`game.rs`](#gamers阶段流转与集成) — 36
   - [`rules.rs`](#rulesrs诀窍吃面与地区) — 27
   - [`effects.rs`](#effectsrs训练数值与得意率) — 15
   - [`action.rs`](#actionrs动作枚举与列表) — 14
   - [`events.rs`](#eventsrs友人事件与剧本事件) — 5
   - [`policy.rs`](#policyrs固定策略) — 2
+  - [`logging_trainer.rs`](#logging_trainerrs决策日志包装) — 2
 - [配置 / 数据加载](#配置--数据加载) — 10
 - [基础游戏](#基础游戏) — 8
+- [决策日志](#决策日志outputdecision_logrs) — 4
 - [其他](#其他) — 4
+- [基准测试](#基准测试binbench_basers)（bench_base 运行说明）
 
 ---
 
@@ -178,6 +181,11 @@
 - `test_fixed_region_selection` — 各年份固定地区选择
 - `test_fixed_super_ramen_selection` — 超级拉面固定选项二
 
+### `logging_trainer.rs`（决策日志包装）
+
+- `test_logging_trainer_records_full_game` — 完整局决策记录覆盖（三阶段/事件/地区选择）
+- `test_reproducible_same_seed` — 同 seed 两次整局决策序列与评分一致（可复现性）
+
 ---
 
 ## 配置 / 数据加载
@@ -224,6 +232,15 @@
 
 ---
 
+## 决策日志（`output/decision_log.rs`）
+
+- `test_csv_escape` — CSV 字段转义（逗号/引号/换行）
+- `test_csv_row_and_header` — 单行序列化 + 表头格式
+- `test_empty_log` — 空日志 CSV 输出
+- `test_save_to_roundtrip` — 落盘与读取往返
+
+---
+
 ## 其他
 
 **`neural/evaluator.rs`**
@@ -235,6 +252,27 @@
 **`crates/umaai/src/main.rs`**
 - `test_watch` — watch 模式（async）
 - `test_urafile` — URA 存档文件解析
+
+---
+
+## 基准测试（`bin/bench_base.rs`）
+
+固定种子批量跑批，产出 RandomTrainer 基线分布（分数/PT/RMJ/耗时）与决策轨迹，
+用于量化手写策略的改进（对应手写策略计划 §8「先立地基」）。
+
+```bash
+# 默认读取 workspace 根 bench_config.toml（runs=20, seed=42）
+cargo run --release --bin bench_base
+
+# 自定义局数/种子/开启决策日志/输出目录（CLI 覆盖 config）
+cargo run --release --bin bench_base -- --runs 100 --seed 7 --log --out logs
+```
+
+- 参数：`--runs N` 局数、`--seed S` 基础种子（第 i 局 = seed+i）、`--log` 落盘决策日志（默认关）、`--out DIR` 输出目录
+- 产出（默认 `logs/`）：`bench_base_results.csv`（每局一行：seed/分数/rank/五维/PT/RMJ/吃面数/耗时）+ 汇总统计
+  （分数 mean/median/min/max/std、按阶段分组的决策耗时、吞吐）；`--log` 时另产出 `bench_base_decision_<seed>.csv`
+- 可复现性：同一参数下游戏结果完全一致（决策 RNG 与规则层 `internal_rng` 均由 seed 派生；`elapsed_ms` 属运行耗时，允许波动）
+- 性能基线（2026-08-21 实测）：RandomTrainer 单局 ~1.2ms，吞吐 ~815 局/s——手写策略须保持 O(候选数) 简单才有 rollout 接入意义
 
 ---
 
