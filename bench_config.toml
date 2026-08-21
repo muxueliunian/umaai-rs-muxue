@@ -20,3 +20,5 @@ runs = 20
 seed = 42
 out_dir = "logs"
 decision_log = false
+# 训练员: "random"（基线）| "handwritten"（手写策略）
+trainer = "random"

@@ -233,11 +233,10 @@ impl Game for RamenGame {
             return Ok(vec![RamenAction::no_ramen(Operation::Race)]);
         }
 
-        // 公共判定：friend_outing / ill
-        let can_friend_outing = self.friend.out_state == FriendOutState::AfterUnlock
-            && self.base.turn < 72
-            && !self.friend.out_used.iter().all(|used| *used);
+        // 公共判定：friend_outing / ill（复用 BaseGame 通用规则）
+        let can_friend_outing = self.can_friend_outing();
         let is_ill = self.uma.flags.ill;
+        let can_race = self.can_self_race();
 
         // 按当前阶段返回候选动作
         match self.stage {
@@ -265,7 +264,7 @@ impl Game for RamenGame {
                 can_friend_outing,
                 is_ill,
                 self.is_xiahesu(),
-                self.base.turn > 12,
+                can_race,
             )),
             // 其他阶段的 list_actions 保留旧行为（虽然外部不会在此阶段调）
             _ => {
@@ -279,7 +278,7 @@ impl Game for RamenGame {
                     can_friend_outing,
                     is_ill,
                     self.is_xiahesu(),
-                    self.base.turn > 12,
+                    can_race,
                 ))
             }
         }

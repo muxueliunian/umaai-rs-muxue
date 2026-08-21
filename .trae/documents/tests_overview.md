@@ -2,20 +2,21 @@
 
 本文件按模块分类、用一句话描述每个测试的功能，便于快速定位和评估覆盖率。
 
-总计：**147 个测试**（含 1 个 async），分布在 `crates/umasim/src/` 与 `crates/umaai/src/` 各文件中。
+总计：**153 个测试**（含 1 个 async），分布在 `crates/umasim/src/` 与 `crates/umaai/src/` 各文件中。
 
 ## 目录
 
-- [拉面杯](#拉面杯) — 101 个
+- [拉面杯](#拉面杯) — 110 个
   - [`game.rs`](#gamers阶段流转与集成) — 36
   - [`rules.rs`](#rulesrs诀窍吃面与地区) — 27
   - [`effects.rs`](#effectsrs训练数值与得意率) — 15
   - [`action.rs`](#actionrs动作枚举与列表) — 14
   - [`events.rs`](#eventsrs友人事件与剧本事件) — 5
-  - [`policy.rs`](#policyrs固定策略) — 2
+  - [`policy.rs`](#policyrs固定策略与手写策略核心) — 9
   - [`logging_trainer.rs`](#logging_trainerrs决策日志包装) — 2
+  - [`ramen_handwritten_trainer.rs`](#ramen_handwritten_trainerrs手写策略测试壳) — 2
 - [配置 / 数据加载](#配置--数据加载) — 10
-- [基础游戏](#基础游戏) — 8
+- [基础游戏](#基础游戏) — 10
 - [决策日志](#决策日志outputdecision_logrs) — 4
 - [其他](#其他) — 4
 - [基准测试](#基准测试binbench_basers)（bench_base 运行说明）
@@ -176,15 +177,30 @@
 - `test_friend_visibility` — 友人可见性
 - `test_assign_train_feeling_type` — 训练角标分配每种至少1次
 
-### `policy.rs`（固定策略）
+### `policy.rs`（固定策略与手写策略核心）
 
+**固定策略**
 - `test_fixed_region_selection` — 各年份固定地区选择
 - `test_fixed_super_ramen_selection` — 超级拉面固定选项二
+
+**手写策略核心（RamenPolicy）**
+- `test_gate_ill_clinic` — 守门：生病必治病
+- `test_gate_vital_low_rest` — 守门：体力低必休息
+- `test_gate_motivation_low_outing` — 守门：心情低必外出
+- `test_train_selector_deterministic` — 健康局面确定性选训练（两次一致）
+- `test_special_selector_min_hidden` — SpecialSelect 最省隐藏风味
+- `test_event_selector_higher_value` — 事件选效果总值高者
+- `test_region_selector_valid_and_deterministic` — 地区组合可打分且确定性
 
 ### `logging_trainer.rs`（决策日志包装）
 
 - `test_logging_trainer_records_full_game` — 完整局决策记录覆盖（三阶段/事件/地区选择）
 - `test_reproducible_same_seed` — 同 seed 两次整局决策序列与评分一致（可复现性）
+
+### `ramen_handwritten_trainer.rs`（手写策略测试壳）
+
+- `test_handwritten_full_game` — 完整 77 回合跑通（评分/RMJ/吃面数输出）
+- `test_handwritten_reproducible` — 同 seed 两次整局评分一致
 
 ---
 
@@ -217,6 +233,8 @@
 **`game/base/mod.rs`**
 - `test_explain` — BaseGame explain
 - `test_newgame` — 新建基础游戏
+- `test_can_self_race_bounds` — 自选比赛边界（13-71 允许，URA 回合禁止）
+- `test_can_friend_outing_bounds` — 友人出行边界（解锁/回合 <72/次数未用完）
 
 **`game/base/basic.rs`**
 - `test_newgame` — 新建基础游戏（BasicGame）

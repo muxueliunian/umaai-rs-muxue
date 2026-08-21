@@ -26,11 +26,11 @@ use anyhow::{Context, Result};
 use rand::{SeedableRng, rngs::StdRng};
 use serde::Deserialize;
 use umasim::game::ramen::RamenGame;
-use umasim::game::{Game, InheritInfo};
+use umasim::game::{Game, InheritInfo, Trainer};
 use umasim::gamedata::{GAMECONSTANTS, init_global_with_config};
 use umasim::global;
 use umasim::output::decision_log::{DecisionLog, DecisionLogRow};
-use umasim::trainer::{LoggingTrainer, RandomTrainer};
+use umasim::trainer::{LoggingTrainer, RamenHandwrittenTrainer, RandomTrainer};
 use umasim::utils::{get_workspace_root, load_game_config};
 
 /// bench_config.toml 的配置项（CLI 参数可覆盖同名项）
@@ -52,6 +52,8 @@ struct BenchConfig {
     out_dir: String,
     /// 是否落盘决策日志
     decision_log: bool,
+    /// 训练员: "random"（基线）| "handwritten"（手写策略）
+    trainer: String,
 }
 
 /// 内置默认值（与 bench_config.toml 保持一致；文件缺失时使用）
@@ -66,6 +68,7 @@ impl Default for BenchConfig {
             seed: 42,
             out_dir: "logs".to_string(),
             decision_log: false,
+            trainer: "random".to_string(),
         }
     }
 }
@@ -145,9 +148,12 @@ fn apply_cli(mut cfg: BenchConfig, args: &[String]) -> Result<BenchConfig> {
             "--out" => {
                 cfg.out_dir = parse_arg(args, &mut i, "--out")?;
             }
+            "--trainer" => {
+                cfg.trainer = parse_arg(args, &mut i, "--trainer")?;
+            }
             "--help" | "-h" => {
                 println!(
-                    "用法: bench_base [--runs N] [--seed S] [--log] [--out DIR]\n\
+                    "用法: bench_base [--runs N] [--seed S] [--log] [--out DIR] [--trainer random|handwritten]\n\
                      缺省参数读取 workspace 根 bench_config.toml"
                 );
                 std::process::exit(0);
@@ -187,17 +193,21 @@ fn load_bench_config(workspace_root: &std::path::Path) -> Result<BenchConfig> {
 }
 
 /// 跑一局（固定 seed），返回结果与决策日志
-fn run_once(cfg: &BenchConfig, seed: u64, inherit: &InheritInfo) -> Result<(GameResult, DecisionLog)> {
+fn run_once<T: Trainer<RamenGame>>(
+    cfg: &BenchConfig,
+    seed: u64,
+    inherit: &InheritInfo,
+    trainer: &LoggingTrainer<T>,
+) -> Result<(GameResult, DecisionLog)> {
     // 决策 RNG 与规则层 RNG 从同一 seed 分裂派生，两轮同 seed 跑批结果完全一致
     let mut decision_rng = StdRng::seed_from_u64(seed);
     let rule_rng = StdRng::seed_from_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
 
-    let trainer = LoggingTrainer::new(RandomTrainer, seed);
     let mut game = RamenGame::newgame(cfg.uma, &cfg.cards, inherit.clone())?;
     game.set_internal_rng(rule_rng);
 
     let start = Instant::now();
-    game.run_full_game(&trainer, &mut decision_rng)?;
+    game.run_full_game(trainer, &mut decision_rng)?;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
     let score = game.uma.calc_score();
@@ -275,15 +285,30 @@ fn main() -> Result<()> {
     };
 
     println!(
-        "===== bench_base: uma={} cards={:?} runs={} base_seed={} =====",
-        cfg.uma, cfg.cards, cfg.runs, cfg.seed
+        "===== bench_base: uma={} cards={:?} runs={} base_seed={} trainer={} =====",
+        cfg.uma, cfg.cards, cfg.runs, cfg.seed, cfg.trainer
     );
 
     let mut results = Vec::with_capacity(cfg.runs);
     let mut all_rows: Vec<DecisionLogRow> = Vec::new();
     for i in 0..cfg.runs {
         let seed = cfg.seed + i as u64;
-        let (result, log) = run_once(&cfg, seed, &inherit)?;
+        // 构造训练员（LoggingTrainer 包装；决策日志默认开启，由 --log 决定是否落盘）
+        let (result, log) = match cfg.trainer.as_str() {
+            "random" => run_once(
+                &cfg,
+                seed,
+                &inherit,
+                &LoggingTrainer::new(RandomTrainer, seed),
+            )?,
+            "handwritten" => run_once(
+                &cfg,
+                seed,
+                &inherit,
+                &LoggingTrainer::new(RamenHandwrittenTrainer::new(), seed),
+            )?,
+            other => anyhow::bail!("未知 trainer: {other}（可选 random / handwritten）"),
+        };
         println!(
             "  [#{:02}] seed={} score={} ({}) PT={} RMJ={}/3 耗时={:.3}ms",
             i + 1,

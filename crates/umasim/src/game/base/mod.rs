@@ -50,6 +50,28 @@ pub struct BaseGame {
 }
 
 impl BaseGame {
+    /// 该回合是否允许**自选比赛**（通用规则，各剧本 list_actions 复用）
+    ///
+    /// 自选比赛仅限回合 13-71（0-based）：回合 0-12 太早（出道赛/无赛事），
+    /// URA 回合（72-77）不可自选——其中 73/75/77 为生涯决赛（`Uma::is_race_turn`
+    /// 短路为唯一动作），72/74/76 为剧本黑障回合（无可选比赛，越界 `race_grades`
+    /// 0-71 表）。
+    ///
+    /// 注意：`BasicGame::list_actions` 以 `turn > 13` 起始（较本规则晚 1 回合，
+    /// 历史行为保留），`RamenGame` 使用本方法（从 13 起）。
+    pub fn can_self_race(&self) -> bool {
+        self.turn > 12 && self.turn < 72
+    }
+
+    /// 该回合是否允许**友人出行**（通用规则，各剧本 list_actions 复用）
+    ///
+    /// 条件：友人已解锁（AfterUnlock）且未进入 URA 回合（72-77）且出行次数未用完。
+    pub fn can_friend_outing(&self) -> bool {
+        self.friend.out_state == FriendOutState::AfterUnlock
+            && self.turn < 72
+            && !self.friend.out_used.iter().all(|used| *used)
+    }
+
     pub fn explain(&self) -> Result<String> {
         let mut lines = vec![];
         lines.push(format!(
@@ -308,6 +330,74 @@ mod tests {
         println!("{}", game.explain()?);
         let score = game.uma.calc_score();
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
+        Ok(())
+    }
+
+    // ========== 通用规则：自选比赛 / 友人出行 ==========
+
+    /// 自选比赛边界：回合 12 及以前禁止；13-71 允许；72+（URA）禁止
+    #[test]
+    fn test_can_self_race_bounds() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = BaseGame::default();
+        for (turn, expect) in [
+            (0, false),
+            (12, false),
+            (13, true),
+            (14, true),
+            (71, true),
+            (72, false),
+            (73, false),
+            (74, false),
+            (75, false),
+            (76, false),
+            (77, false),
+        ] {
+            game.turn = turn;
+            let got = game.can_self_race();
+            println!("turn={turn} can_self_race={got} (期望 {expect})");
+            assert_eq!(got, expect);
+        }
+        Ok(())
+    }
+
+    /// 友人出行边界：未解锁 / URA 回合（72+） / 出行次数用完 → 禁止
+    #[test]
+    fn test_can_friend_outing_bounds() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = BaseGame::default();
+        // 与 FriendState::new 一致：out_used 长度 5（空 vec 时 all() 真空真，语义不适用）
+        game.friend.out_used = vec![false; 5];
+        game.friend.out_state = FriendOutState::AfterUnlock;
+        game.turn = 70;
+        println!("解锁+回合70: {}", game.can_friend_outing());
+        assert!(game.can_friend_outing());
+
+        // 未解锁
+        game.friend.out_state = FriendOutState::UnClicked;
+        println!("未解锁+回合70: {}", game.can_friend_outing());
+        assert!(!game.can_friend_outing());
+
+        // URA 回合
+        game.friend.out_state = FriendOutState::AfterUnlock;
+        game.turn = 72;
+        println!("解锁+回合72: {}", game.can_friend_outing());
+        assert!(!game.can_friend_outing());
+
+        // 出行次数用完
+        game.turn = 70;
+        game.friend.out_used = vec![true; 5];
+        println!("解锁+回合70+出行用完: {}", game.can_friend_outing());
+        assert!(!game.can_friend_outing());
+
         Ok(())
     }
 

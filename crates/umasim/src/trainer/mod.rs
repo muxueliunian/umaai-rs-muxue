@@ -17,6 +17,7 @@ use crate::{
 pub mod handwritten_trainer;
 pub mod logging_trainer;
 pub mod mcts_trainer;
+pub mod ramen_handwritten_trainer;
 //pub mod mean_filter_collector_trainer;
 //pub mod neural_net_trainer;
 
@@ -24,6 +25,7 @@ pub mod mcts_trainer;
 pub use handwritten_trainer::HandwrittenTrainer;
 pub use logging_trainer::LoggingTrainer;
 pub use mcts_trainer::MctsTrainer;
+pub use ramen_handwritten_trainer::RamenHandwrittenTrainer;
 //pub use mean_filter_collector_trainer::MeanFilterCollectorTrainer;
 //pub use neural_net_trainer::NeuralNetTrainer;
 

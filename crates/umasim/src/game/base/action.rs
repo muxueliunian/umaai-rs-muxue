@@ -54,7 +54,12 @@ impl BaseAction {
             game.unresolved_events.push(event);
             game.uma.set_race(game.turn);
         } else {
-            let grade = global!(GAMECONSTANTS).race_grades[game.turn as usize];
+            // URA 回合（72-77）自选比赛固定 G1：race_grades 表仅覆盖回合 0-71
+            let grade = if game.turn >= 72 {
+                4
+            } else {
+                global!(GAMECONSTANTS).race_grades[game.turn as usize]
+            };
             diag!(">> 自选比赛 G{grade} - 比赛加成: {}", game.uma.race_bonus);
             let event_name = format!("race_g{grade}");
             let mut event = system_event(&event_name)?.clone();

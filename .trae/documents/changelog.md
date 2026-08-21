@@ -6,6 +6,12 @@
 
 - **手写基础策略（HandwrittenTrainer）规划文档**：新增 `.trae/documents/handwritten_policy/` 目录（思路总纲 + 好/坏手法主线特征清单）；确定范围（只做 MCTS rollout 基策、HandwrittenTrainer 仅测试壳）、策略形态（参数化利于调参）、确定性要求、复用现有公式算法、卡组适配方案；明确输出分层（决策日志 / DecisionInfo / GameView 各司其职）与地基方案（RandomTrainer 补鲁棒性与覆盖率、简单基础策略做质量基线与调参载体）；收录玩家经验输入：好/坏手法主线特征（free_race 达标为硬守门、第三年隐藏风味需清空等）与决策频率×影响维度（高频小影响 vs 低频大影响）
 - **手写策略第一步：地基设施**：新增 `bench_base` 基准 bin + `bench_config.toml`（固定种子跑批，结果/决策日志 CSV 落盘，汇总含分数分布、按阶段决策耗时、吞吐）；新增决策日志模块 `output/decision_log.rs` 与 `LoggingTrainer`（记录每次决策的耗时与动作）；修复规则层可复现性（`RamenGame.internal_rng` 替换 `Game::next()` 内 3 处 `from_os_rng`，固定种子整局可复现）；基线：Random 20 局 score mean=30432、整局 ~1.2ms；新增 decision_log 与 logging_trainer 单元测试
+- **手写策略第二步：策略核心 + RamenHandwrittenTrainer**：
+  - `game/ramen/policy.rs` 扩展为手写策略核心：`RamenPolicyConfig`（参数化权重/阈值 + default/speed_build 预设）+ `RamenPolicy`（Train 期望收益与守门 / RamenSelect PT+效果贪心 / SpecialSelect 最省隐藏风味 / RegionSelect 静态组合打分 / 事件效果折算，确定性 argmax）
+  - 新增 `RamenHandwrittenTrainer`（`trainer/ramen_handwritten_trainer.rs`）：测试壳，直接在拉面杯规则层上重新实现，不依赖旧温泉实现
+  - 规则补充（通用化）：URA 回合 72/74/76 不可自选比赛与友人出行 → 收敛为 `BaseGame::can_self_race` / `can_friend_outing`；`do_race` URA 回合自选比赛按 G1 防越界（手写策略主动选比赛暴露）
+  - bench_base 支持 `--trainer random|handwritten` A/B；基线对比（seed 42-61，20 局）：Handwritten mean=42560 vs Random mean=30698（+39%），整局 1.15ms——v0 即可作 MCTS rollout 基策
+  - 测试：policy 守门/打分/确定性 7 个 + handwritten 完整局/可复现 2 个 + base 通用规则 2 个（共 153 个）
 - **AGENTS.md 规则微调（用户）**：精简需求澄清与重构期文档策略表述；安全注意事项补充"远程主机/设备"与"脚本间接操作需确认"
 
 ## 2026-08-20
