@@ -67,10 +67,10 @@
 ## constants.json 排名数据需人工更新
 
 - **日期**：2026-08-19
-- **状态**：待解决（待人工更新）
+- **状态**：已解决（2026-08-20，数据经用户确认）
 - **问题描述**：constants.json 中的 `rank_scores`、`rank_names`、`five_status_final_score` 为游戏排名相关数据，当前数值可能已过期，需要稍后按最新游戏版本人工核对更新
 - **排查过程**：配置系统整理（Phase 2）甄别 constants.json 各项归属时确认：这三项属固定游戏数据、不随剧本变化，保留在 constants.json，由人工更新
-- **解决方案**：待用户准备最新数据后更新三个数组
+- **解决方案**：用户提供最新数据后更新三个数组（提交 `aa756d9`）：`rank_scores` / `rank_names` 补齐至 LS24（共 298 档，速度档位上调），`five_status_final_score` 同步核对（3399 档）
 - **备注**：与配置整理方案一致，见 .trae/documents/config_refactor_plan.md
 
 ---
@@ -103,13 +103,15 @@
 ## stable 工具链下 cargo fmt 破坏 Nightly 格式
 
 - **日期**：2026-08-21
-- **状态**：已解决（2026-08-21）
+- **状态**：已解决（2026-08-22，钩子自动化 + 全库格式化）
 - **问题描述**：`rustfmt.toml` 使用 8 个 Nightly-only 选项（`imports_granularity` / `group_imports` / `trailing_comma` / `wrap_comments` 等），在 stable 工具链执行 `cargo fmt` 会静默忽略这些选项，把整个仓库重排成 stable 风格——与 git 历史 `ffddd1a`（应用仓库 rustfmt 格式）的 Nightly 格式不一致，产生大量无关 diff
 - **排查过程**：
   - `rustfmt.toml` 含 `imports_granularity = "Crate"`、`group_imports = "StdExternalCrate"`、`trailing_comma = "Never"` 等 Nightly 特性，stable rustfmt 不支持且无报错（仅 warning）
   - 环境无 `rust-toolchain` 文件、无 Nightly 工具链（`rustup toolchain list` 仅 stable），`cargo fmt` 实际以 stable 行为执行
   - 实际触发：bench 重构时执行 `cargo fmt` 误将 55 个文件、约 1900 行重排为 stable 风格，已全部还原
+  - 2026-08-22 进一步发现：Nightly 为滚动版本，`ffddd1a` 格式化时与当前 nightly（rustfmt 1.10.0-nightly 2026-08-20）规则存在漂移（trailing_comma 去尾逗号、imports 合并、多行表达式压缩等），`cargo +nightly fmt --all -- --check` 报 40 文件 387 处差异
 - **解决方案**：
   1. AGENTS.md 固化规则：项目使用 **Nightly** 格式规则，stable 工具链下**禁止执行 cargo fmt**
   2. 格式化走 Nightly：`rustup toolchain install nightly --component rustfmt` 后使用 `cargo +nightly fmt`；编译仍用 stable，互不影响
-- **备注**：Nightly 为滚动版本，rustfmt 输出偶有细微变化；如需完全固定可锁定指定日期（如 `nightly-YYYY-MM-DD`）。本次 bench 重构的 3 个新/改文件尚未跑 Nightly fmt，待 Nightly 就绪后统一格式化
+  3. **钩子自动化（2026-08-22）**：引入 cargo-husky pre-commit 钩子（`.cargo-husky/hooks/pre-commit`，构建时自动分发到 `.git/hooks/`）：有 nightly 工具链时 `cargo +nightly fmt --all -- --check` 强制检查，无 nightly 则跳过不阻塞——从源头防止 stable fmt / 未格式化代码入库；全库已应用当前 nightly 格式（提交 `fd144af`，42 文件）
+- **备注**：Nightly 为滚动版本，rustfmt 输出偶有细微变化（本次漂移即一例）；如需完全固定可锁定指定日期（如 `nightly-YYYY-MM-DD`）或引入 `rust-toolchain.toml` 固定工具链

@@ -7,6 +7,7 @@
 - **Git 钩子自动化（cargo-husky）**：引入 cargo-husky 1.5.0（workspace dev-dependencies，`user-hooks` feature）；新增 `.cargo-husky/hooks/pre-commit`：有 nightly 工具链时 `cargo +nightly fmt --all -- --check` 强制检查，无 nightly 则跳过（对齐 AGENTS.md「stable 下禁止 cargo fmt」）；构建时自动分发到 `.git/hooks/`，协作者 clone 后跑一次 test 即自动生效。钩子文件权限要求 r-x r-x r-x（cargo-husky 以 `mode & 0o555` 判定可执行）
 - **全库 rustfmt 格式化**：应用当前 nightly rustfmt（1.10.0-nightly 2026-08-20）格式，40 文件 387 处差异收敛；rustfmt.toml `struct_lit_width` 32→30（工具规范化写入）
 - **seeded_rngs 注释补充**：`bench.rs` 说明 0x9E37_79B9_7F4A_7C15 为 SplitMix64 标准 gamma 增量常数（黄金比例，有据可依非任意指纹），派生规则保持固定以保证可复现性
+- **issues 更新**：constants.json 排名数据 issue 标记已解决（rank_scores / rank_names 补齐至 LS24、five_status_final_score 核对，提交 aa756d9，数据经用户确认）；rustfmt 问题解决方案补充钩子自动化（cargo-husky pre-commit）与全库格式化（含 nightly 滚动版本漂移说明）
 
 ## 2026-08-21
 
