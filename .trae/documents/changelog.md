@@ -15,6 +15,11 @@
   - 规则补充（通用化）：URA 回合 72/74/76 不可自选比赛与友人出行 → 收敛为 `BaseGame::can_self_race` / `can_friend_outing`；`do_race` URA 回合自选比赛按 G1 防越界（手写策略主动选比赛暴露）
   - bench_base 支持 `--trainer random|handwritten` A/B；基线对比（seed 42-61，20 局）：Handwritten mean=42560 vs Random mean=30698（+39%），整局 1.15ms——v0 即可作 MCTS rollout 基策
   - 测试：policy 守门/打分/确定性 7 个 + handwritten 完整局/可复现 2 个 + base 通用规则 2 个（共 153 个）
+- **手写策略第三步：自选比赛守门 + 打分自洽性修正**（仅改 `game/ramen/policy.rs`，不动规则层）：
+  - 自选比赛（free_race）两层处理：硬守门（区间内剩余可比赛回合 ≤ 缺口+slack 时强制比赛，优先于生病/体力/心情）+ 软倾向打分（`urgency × 缺口 / 剩余回合`）；新增 `race_free_urgency_weight` / `race_gate_slack`，`race_grade_weight` 默认 900→0（实测主动比赛纯亏）
+  - 打分自洽性三修：breakdown 各项之和现等于 score（原先失败率项与实际扣分口径不一致）、`status_rate` 去掉重复相乘（原为平方）、彩圈加成纳入 `×(1-失败率)`
+  - 实测（bench_base，seed 42-81）：美浦波旁 102601 mean 43168→51168（+18.5%，UD/UC→UB/UA），一局比赛数 41→9；无声铃鹿 100201（回合 12-26 需 1 场自选比赛）无 free_race 感知时 mean 9849（育成失败）、仅软倾向 47590（20 局失败 1 局）、完整方案 49513 且零失败
+  - 测试：新增 4 个（剩余可比赛回合掩码 / 守门四场景 / breakdown 求和 / status_rate 线性），umasim 全量 157 passed；tests_overview 155→159
 - **AGENTS.md 规则微调（用户）**：精简需求澄清与重构期文档策略表述；安全注意事项补充"远程主机/设备"与"脚本间接操作需确认"
 
 ## 2026-08-20

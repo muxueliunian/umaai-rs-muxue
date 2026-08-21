@@ -17,7 +17,7 @@ use anyhow::Result;
 
 use crate::game::ramen::{Operation, RamenAction, RamenGame};
 use crate::game::traits::Game;
-use crate::gamedata::{EventChoice, GAMECONSTANTS, ramen::RAMENDATA};
+use crate::gamedata::{EventChoice, FreeRaceData, GAMECONSTANTS, ramen::RAMENDATA};
 use crate::global;
 
 use super::rules::{
@@ -56,7 +56,24 @@ pub struct RamenPolicyConfig {
     pub rest_target_vital: i32,
     // ===== 比赛 =====
     /// 比赛等级（G2/G1 等）→ 分数折算
+    ///
+    /// **仅用于「自选比赛已达标 / 本马娘无自选比赛要求」的场合**：此时比赛纯粹是
+    /// 「用一回合换属性与技能点」，实测（seed 42-81，40 局）该权重每提高一档都在
+    /// 掉分（0→51168 / 300→49129 / 900→43168），故默认 0——不主动打无意义的比赛。
     pub race_grade_weight: f32,
+    /// 自选比赛缺口的紧迫度权重
+    ///
+    /// 打分形态 `weight × 缺口场数 / 区间内剩余可比赛回合数`：区间宽裕时接近 0
+    /// （不打扰训练），越接近截止回合分值越高，自然地在后段补齐比赛。
+    /// 与 [`race_gate_slack`](Self::race_gate_slack) 的硬守门配合使用。
+    pub race_free_urgency_weight: f32,
+    /// 自选比赛硬守门的缓冲回合数
+    ///
+    /// 当「区间内剩余可比赛回合数 ≤ 缺口场数 + slack」时**强制比赛**，优先于一切打分。
+    /// 依据：自选比赛不达标直接导致育成失败（`BaseGame::check_free_race`），
+    /// 见 `.trae/documents/handwritten_policy/good_bad_labels_draft.md` §四.1。
+    /// slack=1 表示留 1 个回合的余量。
+    pub race_gate_slack: u32,
     // ===== 外出 =====
     /// 普通外出基础价值（随机事件期望）
     pub outing_base: f32,
@@ -101,7 +118,9 @@ impl Default for RamenPolicyConfig {
             rest_base: 20.0,
             rest_vital_value: 2.5,
             rest_target_vital: 55,
-            race_grade_weight: 900.0,
+            race_grade_weight: 0.0,
+            race_free_urgency_weight: 2000.0,
+            race_gate_slack: 1,
             outing_base: 15.0,
             friend_outing_bonus: 45.0,
             ramen_pt_weight: 5.0,
@@ -183,6 +202,10 @@ impl RamenPolicy {
         let is_xiahesu = game.is_xiahesu();
         let uma = &game.uma;
 
+        // 守门 0：自选比赛达标（优先于一切——不达标直接育成失败）
+        if let Some(idx) = self.free_race_gate(game, actions) {
+            return Ok(idx);
+        }
         // 守门 1：生病 → 治病（夏合宿无治病候选，休息自动治病）
         if uma.flags.ill || uma.flags.bad_trainer {
             if let Some(idx) = actions
@@ -300,6 +323,43 @@ impl RamenPolicy {
         Ok(argmax_index(&scores))
     }
 
+    // ========== 自选比赛（free_race）==========
+
+    /// 自选比赛硬守门：区间内剩余可比赛回合已不够补齐缺口时，强制返回「比赛」候选索引
+    ///
+    /// 自选比赛不达标会在 `BaseGame::check_free_race` 判定育成失败，损失远大于任何一次训练，
+    /// 因此该守门排在生病/体力/心情之前。返回 `None` 表示无需干预（无要求 / 已达标 / 仍宽裕 /
+    /// 本回合不可自选比赛）。
+    fn free_race_gate(&self, game: &RamenGame, actions: &[RamenAction]) -> Option<usize> {
+        let free = game.uma.find_free_race(game.turn())?;
+        let need = free.count.saturating_sub(game.uma.count_free_race(free));
+        if need == 0 {
+            return None;
+        }
+        if remaining_race_slots(game.turn(), free) > need + self.config.race_gate_slack {
+            return None;
+        }
+        actions.iter().position(|a| a.operation == Operation::Race)
+    }
+
+    /// 自选比赛打分
+    ///
+    /// - 有未补齐的自选比赛缺口：`urgency × 缺口 / 剩余可比赛回合`——区间宽裕时接近 0，
+    ///   越接近截止越高，与硬守门形成「软倾向 + 硬兜底」两层。
+    /// - 无要求或已达标：退化为按比赛等级折算（`race_grade_weight`，默认 0）。
+    fn score_race(&self, game: &RamenGame) -> (f32, String) {
+        if let Some(free) = game.uma.find_free_race(game.turn()) {
+            let need = free.count.saturating_sub(game.uma.count_free_race(free));
+            if need > 0 {
+                let remain = remaining_race_slots(game.turn(), free).max(1);
+                let val = self.config.race_free_urgency_weight * need as f32 / remain as f32;
+                return (val, format!("自选比赛(缺{need}场/剩{remain}回合)"));
+            }
+        }
+        let grade = game_race_grade(game);
+        (grade * self.config.race_grade_weight, format!("比赛(等级{grade})"))
+    }
+
     // ========== Train 动作打分 ==========
 
     /// 对单个 Train 阶段动作打分
@@ -317,34 +377,33 @@ impl RamenPolicy {
                     attr_gain += self.status_gain(game, i, value.status_pt[i]);
                 }
                 let pt_gain = value.status_pt[5] as f32;
-                out.add("attr", attr_gain * self.config.status_rate);
-                out.add("pt", pt_gain * self.config.pt_rate);
+                // 注：`status_gain` 内部已乘 status_rate，此处不可再乘（否则成平方）
+                let attr = attr_gain;
+                let pt = pt_gain * self.config.pt_rate;
                 // 体力成本（消耗按 train_vital_value 折算）
-                let vital_cost = (-value.vital).max(0) as f32;
-                out.add("vital_cost", -vital_cost * self.config.train_vital_value);
-                // 期望值（失败率）
+                let vital_cost = (-value.vital).max(0) as f32 * self.config.train_vital_value;
+                let shining = game.shining_count(train) as f32 * self.config.shining_bonus;
+                // 失败的期望损失：成功时才有的收益 × 失败率 + 固定失败惩罚 × 失败率
                 let fail_p = fail_rate / 100.0;
-                out.add("fail_rate", -fail_p);
-                out.score = (attr_gain * self.config.status_rate
-                    + pt_gain * self.config.pt_rate
-                    - vital_cost * self.config.train_vital_value)
-                    * (1.0 - fail_p)
-                    - self.config.failure_penalty * fail_p;
-                // 彩圈加成
-                let shining = game.shining_count(train) as f32;
-                out.add("shining", shining * self.config.shining_bonus);
-                out.score += shining * self.config.shining_bonus;
+                let gross = attr + pt - vital_cost + shining;
+                let fail_adj = -(gross * fail_p + self.config.failure_penalty * fail_p);
+                // breakdown 各项之和 == score（调参日志需自洽，见 test_breakdown_sums_to_score）
+                out.add("attr", attr);
+                out.add("pt", pt);
+                out.add("vital_cost", -vital_cost);
+                out.add("shining", shining);
+                out.add("fail_adj", fail_adj);
+                out.score = gross + fail_adj;
                 out.reason = format!(
                     "{}训练 失败率{fail_rate:.0}% 属性+{attr_gain:.0} PT+{pt_gain:.0}",
                     global!(GAMECONSTANTS).train_names[train]
                 );
             }
             Operation::Race => {
-                // 比赛价值按等级与回合时机
-                let grade = game_race_grade(game);
-                out.add("race_grade", grade);
-                out.score = grade * self.config.race_grade_weight;
-                out.reason = format!("比赛(等级{grade})");
+                let (val, reason) = self.score_race(game);
+                out.add("race", val);
+                out.score = val;
+                out.reason = reason;
             }
             Operation::Rest => {
                 // 休息价值：恢复体力×边际价值 + 基础值（体力越低越值）
@@ -495,6 +554,26 @@ fn argmax_index(scores: &[RamenPolicyOutput]) -> usize {
         })
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+/// 自选比赛区间内「当前回合及以后」还剩多少个可比赛回合
+///
+/// `FreeRaceData::mask` 已按区间与等级要求预置（bit *b* 对应回合 *b+11*）。
+/// 这里再叠加 `BaseGame::can_self_race` 的通用限制（回合 13-71 才可自选比赛），
+/// 即去掉 bit 0-1（回合 11-12）与 bit ≥ 61（回合 ≥ 72）。
+fn remaining_race_slots(turn: i32, free: &FreeRaceData) -> u32 {
+    /// 回合 13 起才可自选比赛（bit 2）
+    const LOW_CUT: u64 = !0b11;
+    /// 回合 72 起进入 URA，不可自选比赛（bit 61 及以上）
+    const HIGH_CUT: u64 = (1u64 << 61) - 1;
+
+    let mut mask = free.mask & LOW_CUT & HIGH_CUT;
+    let lo = (turn - 11).max(0);
+    if lo >= 64 {
+        return 0;
+    }
+    mask &= !0u64 << lo;
+    mask.count_ones()
 }
 
 /// 当前回合比赛等级（0 = 无比赛；等级越高越好）
@@ -764,6 +843,145 @@ mod tests {
         println!("地区选择 idx={idx1} 组合={:?}", combos[idx1]);
         assert_eq!(idx1, idx2);
         assert!(idx1 < actions.len());
+        Ok(())
+    }
+
+    // ========== 自选比赛守门 / 打分自洽性 ==========
+
+    /// 构造带自选比赛要求的 RamenGame（无声铃鹿 100201：回合 12-26 需 1 场）
+    fn make_free_race_game() -> anyhow::Result<RamenGame> {
+        let inherit = crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30],
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        Ok(RamenGame::newgame(100201, &deck, inherit)?)
+    }
+
+    /// 带「比赛」候选的 Train 阶段候选表
+    fn train_actions_with_race() -> Vec<RamenAction> {
+        let mut acts = train_actions();
+        acts.push(RamenAction::new(Operation::Race));
+        acts
+    }
+
+    /// `remaining_race_slots`：按当前回合裁剪，并排除回合 11-12 与 URA 回合
+    #[test]
+    fn test_remaining_race_slots() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        // 区间 11-26 无等级限制：mask 覆盖 bit 0-15（回合 11-26）
+        let mut free = FreeRaceData {
+            start_turn: 11,
+            end_turn: 26,
+            count: 1,
+            grade: None,
+            mask: 0,
+        };
+        free.update_turn_mask();
+        for (turn, expect) in [(0, 14), (13, 14), (20, 7), (25, 2), (26, 1), (27, 0)] {
+            let got = remaining_race_slots(turn, &free);
+            println!("turn={turn} 剩余可比赛回合={got}（期望 {expect}）");
+            assert_eq!(got, expect);
+        }
+        // 回合 11、12 被 can_self_race 排除：区间共 16 回合，可用只有 14
+        Ok(())
+    }
+
+    /// 硬守门：缺口紧张时强制比赛，宽裕 / 已达标时不干预
+    #[test]
+    fn test_free_race_gate() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let policy = RamenPolicy::default();
+        let actions = train_actions_with_race();
+
+        // 回合 20：剩余 7 个可比赛回合 > 缺口 1 + slack 1 → 不干预
+        let mut game = make_free_race_game()?;
+        game.base.turn = 20;
+        let idx = policy.free_race_gate(&game, &actions);
+        println!("回合 20 守门结果: {idx:?}");
+        assert_eq!(idx, None);
+
+        // 回合 25：只剩 2 个可比赛回合 ≤ 1 + 1 → 强制比赛
+        game.base.turn = 25;
+        let idx = policy
+            .free_race_gate(&game, &actions)
+            .ok_or_else(|| anyhow::anyhow!("回合 25 应触发自选比赛守门"))?;
+        println!("回合 25 守门选择: {}", actions[idx]);
+        assert_eq!(actions[idx].operation, Operation::Race);
+
+        // 已打过 1 场（达标）→ 不再干预
+        game.uma.set_race(20);
+        let idx = policy.free_race_gate(&game, &actions);
+        println!("达标后守门结果: {idx:?}");
+        assert_eq!(idx, None);
+
+        // 无自选比赛要求的马娘（102601）任何回合都不干预
+        let mut plain = make_game()?;
+        plain.base.turn = 25;
+        println!("无要求马娘守门结果: {:?}", policy.free_race_gate(&plain, &actions));
+        assert_eq!(policy.free_race_gate(&plain, &actions), None);
+        Ok(())
+    }
+
+    /// 打分自洽性：训练动作的 breakdown 各项之和 == score（调参日志不能撒谎）
+    #[test]
+    fn test_breakdown_sums_to_score() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = make_game()?;
+        game.uma.vital = 60;
+        let policy = RamenPolicy::default();
+        for a in train_actions_with_race() {
+            let out = policy.score_train_action(&game, &a)?;
+            let sum: f32 = out.breakdown.iter().map(|(_, v)| v).sum();
+            println!(
+                "{:<10} score={:>9.3} breakdown和={:>9.3} {:?}",
+                a.to_string(),
+                out.score,
+                sum,
+                out.breakdown
+            );
+            assert!((sum - out.score).abs() < 1e-2);
+        }
+        Ok(())
+    }
+
+    /// `status_rate` 必须线性生效（历史上被乘了两次，调参时表现为平方）
+    #[test]
+    fn test_status_rate_is_linear() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = make_game()?;
+        game.uma.vital = 100;
+        let action = RamenAction::new(Operation::Train(TrainingType::Speed));
+        let attr_of = |rate: f32| -> anyhow::Result<f32> {
+            let mut cfg = RamenPolicyConfig::default();
+            cfg.status_rate = rate;
+            let out = RamenPolicy::new(cfg).score_train_action(&game, &action)?;
+            Ok(out
+                .breakdown
+                .iter()
+                .find(|(k, _)| k == "attr")
+                .map(|(_, v)| *v)
+                .unwrap_or(0.0))
+        };
+        let (a1, a2) = (attr_of(1.0)?, attr_of(2.0)?);
+        println!("status_rate=1 → attr={a1:.3}；status_rate=2 → attr={a2:.3}（期望恰好 2 倍）");
+        assert!((a2 - a1 * 2.0).abs() < 1e-2);
         Ok(())
     }
 }

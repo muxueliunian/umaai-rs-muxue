@@ -2,17 +2,17 @@
 
 本文件按模块分类、用一句话描述每个测试的功能，便于快速定位和评估覆盖率。
 
-总计：**155 个测试**（含 1 个 async），分布在 `crates/umasim/src/` 与 `crates/umaai/src/` 各文件中。
+总计：**159 个测试**（含 1 个 async），分布在 `crates/umasim/src/` 与 `crates/umaai/src/` 各文件中。
 
 ## 目录
 
-- [拉面杯](#拉面杯) — 110 个
+- [拉面杯](#拉面杯) — 114 个
   - [`game.rs`](#gamers阶段流转与集成) — 36
   - [`rules.rs`](#rulesrs诀窍吃面与地区) — 27
   - [`effects.rs`](#effectsrs训练数值与得意率) — 15
   - [`action.rs`](#actionrs动作枚举与列表) — 14
   - [`events.rs`](#eventsrs友人事件与剧本事件) — 5
-  - [`policy.rs`](#policyrs固定策略与手写策略核心) — 9
+  - [`policy.rs`](#policyrs固定策略与手写策略核心) — 13
   - [`logging_trainer.rs`](#logging_trainerrs决策日志包装) — 2
   - [`ramen_handwritten_trainer.rs`](#ramen_handwritten_trainerrs手写策略测试壳) — 2
 - [配置 / 数据加载](#配置--数据加载) — 10
@@ -191,6 +191,12 @@
 - `test_special_selector_min_hidden` — SpecialSelect 最省隐藏风味
 - `test_event_selector_higher_value` — 事件选效果总值高者
 - `test_region_selector_valid_and_deterministic` — 地区组合可打分且确定性
+
+**自选比赛守门 / 打分自洽性**
+- `test_remaining_race_slots` — 区间内剩余可比赛回合数（按当前回合裁剪，排除回合 11-12 与 URA 段）
+- `test_free_race_gate` — 硬守门四场景（宽裕不干预 / 紧张强制比赛 / 已达标 / 无要求马娘）
+- `test_breakdown_sums_to_score` — 打分 breakdown 各项之和等于 score（决策日志自洽）
+- `test_status_rate_is_linear` — `status_rate` 线性生效（防止重复相乘成平方）
 
 ### `logging_trainer.rs`（决策日志包装）
 
