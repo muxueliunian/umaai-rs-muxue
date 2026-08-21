@@ -2,6 +2,12 @@
 
 本文件用于简要记录每次任务的修改内容。
 
+## 2026-08-22
+
+- **Git 钩子自动化（cargo-husky）**：引入 cargo-husky 1.5.0（workspace dev-dependencies，`user-hooks` feature）；新增 `.cargo-husky/hooks/pre-commit`：有 nightly 工具链时 `cargo +nightly fmt --all -- --check` 强制检查，无 nightly 则跳过（对齐 AGENTS.md「stable 下禁止 cargo fmt」）；构建时自动分发到 `.git/hooks/`，协作者 clone 后跑一次 test 即自动生效。钩子文件权限要求 r-x r-x r-x（cargo-husky 以 `mode & 0o555` 判定可执行）
+- **全库 rustfmt 格式化**：应用当前 nightly rustfmt（1.10.0-nightly 2026-08-20）格式，40 文件 387 处差异收敛；rustfmt.toml `struct_lit_width` 32→30（工具规范化写入）
+- **seeded_rngs 注释补充**：`bench.rs` 说明 0x9E37_79B9_7F4A_7C15 为 SplitMix64 标准 gamma 增量常数（黄金比例，有据可依非任意指纹），派生规则保持固定以保证可复现性
+
 ## 2026-08-21
 
 - **bench 重构**：新增 `umasim::bench` 公共设施（seed 双 RNG 分裂、`run_seeded` 单局运行、统计、CSV 落盘、代表性选卡），`bench_base` / `bench_compositions` 复用瘦身净减约 200 行；新增 `csv` / `lexopt` 依赖（无条件编译，保持 `--no-default-features` 可编译）；bench_compositions 选卡改「最新 5 张 + 面板和值≥70 + 倒序取 3」，阈值可配、`--cards-file` 兜底；屏幕输出中文（复用 `train_names`）、CSV 英文，代表卡列表移至跑批后并打印跳过卡；测试 +4（共 160）
