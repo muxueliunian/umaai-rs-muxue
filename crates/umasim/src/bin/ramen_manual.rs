@@ -1,36 +1,16 @@
 //! 拉面杯玩家手动测试程序
 //!
 //! 用 `ManualTrainer::new()`（Interactive 模式，inquire 真实终端交互）启动一局拉面杯，
-//! 让玩家手动选择每一个动作和事件选项，用于：
-//! - 验证游戏机制实际表现
-//! - 调试特定的回合/事件逻辑
-//! - 体验完整的拉面杯流程
+//! 让玩家手动选择每个动作与事件选项，用于验证机制 / 调试回合逻辑 / 体验完整流程。
 //!
-//! # 启动方式
+//! 启动：`cargo run --bin ramen_manual --release`
 //!
-//! ```bash
-//! cargo run --bin ramen_manual --release
-//! ```
+//! 配置：读取 `game_config.toml`（参考 `gamedata/default_config.toml`），仅使用
+//! `log_level` / `uma` / `cards` / `extra_count` 字段；强制 `scenario = "ramen"`、
+//! `trainer = "manual"`（不一致报错）。随机种子每次从系统熵源生成（密码学种子，
+//! 不打印、不复现）。
 //!
-//! # 配置
-//!
-//! 启动时会读取 `game_config.toml`（参考 `gamedata/default_config.toml`）。
-//! 本程序**只使用以下字段**（其他字段会被忽略或必须保持固定值）：
-//!
-//! - `log_level`：日志级别（`"info"` / `"debug"` / `"off"` 等）
-//! - `uma`：马娘 ID
-//! - `cards`：6 张支援卡 ID
-//! - `extra_count`：种马额外属性 `[速度, 耐力, 力量, 根性, 智力, 技能点]`
-//!
-//! 本程序**强制要求**以下字段为固定值（不一致会报错）：
-//!
-//! - `scenario = "ramen"`
-//! - `trainer = "manual"`
-//!
-//! 每次运行从系统熵源生成随机种子（密码学种子，不打印、不复现）。
-//!
-//! 此 binary 仅在 cli + diag feature 下编译（Cargo.toml 中
-//! `required-features = ["cli", "diag"]`）。文件级 cfg gate 防止误用其他 cfg 组合。
+//! 仅在 cli + diag feature 下编译（`required-features`，文件级 cfg gate 防误用）。
 #![cfg(all(feature = "cli", feature = "diag"))]
 
 use std::time::Instant;

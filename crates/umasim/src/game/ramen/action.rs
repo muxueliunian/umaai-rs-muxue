@@ -903,21 +903,13 @@ pub fn list_ramen_choices(available_ramens: &[usize]) -> Vec<Option<usize>> {
 
 /// 列出所有基础操作（阶段2）
 ///
-/// 返回所有可用的基础操作。
-///
 /// # 参数
 /// - `can_friend_outing`: 是否可以选择友人出行（基础判定，未叠加夏令营限制）
 /// - `is_ill`: 是否生病
 /// - `is_xiahesu`: 是否处于夏合宿回合
 ///
-/// 夏合宿禁用规则（与 `BasicGame::list_actions` 一致）：
-/// - 不允许普通外出、友人出行
-/// - 不允许治病（夏合宿休息会自动治病）
-///
-/// 回合 0-12 不允许自选比赛（`can_race = turn > 12`，即回合 13 起才允许），
-/// 避免 Train 阶段候选菜单给 Trainer 提供不可执行的自选比赛选项。
-/// 注：回合从 0 开始算，回合 11 为出道赛（生涯比赛，不走自选分支），
-/// 回合 12 无可用自选比赛，最早回合 13 起允许自选比赛。
+/// 夏合宿禁用普通外出/友人出行/治病（与 `BasicGame::list_actions` 一致，休息自动治病）。
+/// 回合 0-12 不允许自选比赛（`can_race = turn > 12`，回合 11 为出道赛、回合 12 无可用比赛）。
 pub fn list_operations(
     can_friend_outing: bool,
     is_ill: bool,
@@ -1021,19 +1013,12 @@ pub fn list_special_select_actions(
 
 /// `Train` 阶段的候选动作：所有 Operation ×（带 pending 的完整动作）
 ///
-/// 每个候选动作的 `ramen = pending_ramen`、`special_targets = Some(pending_targets)`、
-/// `operation = Op`，`Display` 时呈现完整决策。
-/// Train 阶段的候选动作
-///
 /// **重构后**：Train 阶段只承载基础操作（训练/比赛/休息等），不再带 `ramen` 和
 /// `special_targets` 字段——这两个字段已在 `SpecialSelect → Train` 过渡由
 /// [`RamenGame::ground_ramen_effects`] 落地，玩家在选训练前已看到完整 buff 和 distribution。
 ///
-/// 与三阶段流程的对应：
-/// - RamenSelect 阶段：`list_ramen_select_actions`（选面）
-/// - SpecialSelect 阶段：`list_special_select_actions`（选隐藏风味用法）
-/// - **过渡**（SpecialSelect → Train）：`ground_ramen_effects`（立即消耗 + 显示 buff）
-/// - Train 阶段：本函数（选基础操作）
+/// 三阶段流程：RamenSelect（`list_ramen_select_actions`）→ SpecialSelect
+/// （`list_special_select_actions`）→ **过渡**（`ground_ramen_effects`）→ Train（本函数）。
 ///
 /// # 参数
 /// - `can_race`: 是否允许比赛（回合 0-12 为 false，回合 13 起为 true）

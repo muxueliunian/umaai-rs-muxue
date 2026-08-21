@@ -939,27 +939,10 @@ impl OnsenGame {
         }
     }
 
-    /// 提取神经网络输入特征（1121 维）
+    /// 提取神经网络输入特征（1121 维，维度分布见 `training_sample.rs` 的 `TrainingSample::nn_input`）
     ///
     /// # 参数
     /// - `pending_choices`: 可选的事件选项列表（用于提取事件选项特征）
-    ///
-    /// # 返回
-    /// 1121 维 f32 向量：
-    /// - 全局信息（587 维）
-    ///   - 搜索参数（6 维）
-    ///   - 回合信息（78 维）
-    ///   - 马娘属性（15 维）
-    ///   - 体力与干劲（5 维）
-    ///   - 训练数值（30 维）
-    ///   - 失败率（5 维）
-    ///   - **温泉剧本特定（140 维）** - 支持温泉选择学习
-    ///   - 其他信息（61 维）
-    ///   - 事件选项特征（113 维 = 1 + 8*14）
-    ///   - 动作合法掩码（50 维）
-    ///   - 比赛回合标记（78 维）
-    ///   - 预留（6 维）
-    /// - 支援卡信息（89 维 × 6 张 = 534 维）
     pub fn extract_nn_features(&self, pending_choices: Option<&[ActionValue]>) -> Vec<f32> {
         use crate::training_sample::{CHOICE_DIM, NN_CARD_DIM, NN_INPUT_DIM, POLICY_DIM};
 
