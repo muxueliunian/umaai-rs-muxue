@@ -17,7 +17,7 @@
 scenario = "ramen"
 
 # 训练员类型: "manual" | "random" | "handwritten" | "collector" | "neuralnet" | "mcts"
-trainer = "manual"
+trainer = "handwritten"
 
 # 模拟次数（>1 时显示最高分/最低分/平均分面板）
 simulation_count = 1
