@@ -6,6 +6,7 @@ pub mod gamedata;
 pub mod neural;
 pub mod output;
 pub mod sample_collector;
+pub mod sampler;
 pub mod search;
 pub mod trainer;
 pub mod training_sample;

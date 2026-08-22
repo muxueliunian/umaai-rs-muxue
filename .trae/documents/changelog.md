@@ -3,6 +3,14 @@
 本文件用于简要记录每次任务的修改内容。
 
 ## 2026-08-22
+- **局面采样器（NN 管线 Phase 2 上半）**：新增 `sampler.rs`，为教师数据制造根局面——第一代采样空间（7 马娘 × 11 张卡池 × 3 种构成，角色冲突由 `chara_id` 实测比对排除）、按工作项序号确定性导出采样任务（卡组分层，截断回合与种子 SplitMix64 分频道派生，分片 / 续跑 / 改并行度均不变）、ε 轨迹扰动、走真实 `run_stage → select_action` 路径截断捕获；`SampleSpec` 自包含扰动参数以保证跨机回放一致，`SampleOutcome::Exhausted` 携带停止回合以区分「截断落在 URA 之后」与「扰动致育成提前失败」。根局面限定在 `RamenSelect / SpecialSelect / Train / RegionSelect` 捕获——第 1 年地区选择由 `run_begin` 内联执行、`stage` 仍是 `Begin`，这类不在阶段入口的决策点会破坏搜索的 `apply_action → next()` 契约。模块文档写明两条使用约定：必须按 index 区间分片、复现基座含 `gamedata` 与 `GameConfig`
+- **第三方库引用规范化**：`flat_search.rs` / `sampler.rs` 中 `anyhow::bail!` / `anyhow::ensure!` / `anyhow::anyhow!` 的全名引用改为 `use` 导入后直接调用
+- **支援卡类型注释订正**：`SupportCardData::card_type` 原注释写作「5团队6友人」，与 `cardDB.json` 实测相反（30305[友]=5，团队卡=6）
+- **搜索层泛型化（NN 管线 Phase 1.4，Phase 1 完成）**：新增 `search/searchable.rs` 的 `FlatSearchGame` trait（关联 rollout 训练员、CRN 阶段编号、`fork_for_rollout` 强制「克隆+重置内部 RNG」不可分割）；`FlatSearch<G>` 与 `SearchOutput<A>` 泛型化并保留默认类型参数，活跃入口零改动；采用「公共内核 + rollout 闭包」而非 trait 钩子，规避泛型 impl 方法解析导致温泉特判静默失效的陷阱；拉面根节点搜索跑通且 1/8/24 线程逐位可复现；拉面 CRN 重测 1.24x→3.73x（略优于温泉 3.65x）
+- **搜索层两处缺陷修复**：① NN leaf 微批路径（`simulate_until_terminal_or_leaf`）此前未按阶段重播种，导致 `rollout_batch_size > 1` 时 CRN 开关实际不生效，改为与 `simulate` 一致接收 rollout 种子；② UCB 终止判据由成功样本数改为已计划次数——rollout 稳定失败时成功数永远达不到 `search_n`，会死循环且触及不到「零样本」检查；③ 补 UCB 路径回归（可复现性）与候选顺序敏感性诊断（实测该根局面顺序无关）
+- **搜索层真 CRN（NN 管线 Phase 1.3）**：`RolloutSeeds::stage_seed` 支持按 `(回合, 阶段)` 重新派生随机流，`simulate` 改吃 rollout 种子并在每个阶段边界重播种，由 `SearchConfig::crn_stage_reseed` 开关控制（**默认开启**，可经 `[mcts] crn_stage_reseed` 从 toml 关闭）；新增配对相关实测（onsen 7 候选 × 200 rollout）：仅共享起始种子 corr 0.18 / 等效 1.31x，开启按阶段重播种 corr 0.69 / 等效 3.65x，证实朴素共享种子几乎无收益
+- **搜索层可复现（NN 管线 Phase 1.1/1.2）**：新增 `search/seeds.rs` 的 `RolloutSeeds`（rollout 种子按序号派生，候选索引不参与，为后续 CRN 留位），移除 `flat_search` 全部 8 处 `from_os_rng`，改为按工作项播种；`simulate_many` 改吃种子表 + 偏移并返回失败计数，UCB 按「已计划次数」记账避免失败导致候选间种子错位；rollout 失败由静默丢弃改为计数告警（全失败才报错），补 `search_group_size > 0` 校验；`flat_search` 新增可复现性回归测试（同种子一致 / 换种子生效 / 候选顺序无关），实测 1~24 线程结果逐位相同
+- **`RamenHandwrittenTrainer` 的 breakdown 缓存改 `Mutex`**：上游新增的 `RefCell<Option<String>>` 使其失去 `Sync`，而搜索层 rayon 跨线程共享同一个 rollout 决策器（`FlatSearch<RamenGame>` 因此整体不再 `Sync`，编译失败）；改 `Mutex` 恢复，锁中毒时静默跳过调试文本而非中断育成
 
 - **RNG 重构方案文档**：新增 `rng_refactor_plan.md`——无状态流随机数设计（跨策略比较的局面一致性：回合固定流/策略流分离、局号进种子、MCTS 公共随机数 CRN 预留），待实施
 - **issues 更新**：第三年地区选择无 build 自适应（score_region 对第三年地区无区分度，实测各 build 同选一组合；方案已定待实施，含临时验证测试）

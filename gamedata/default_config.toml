@@ -88,6 +88,10 @@ policy_delta = 100.0
 use_ucb = true
 search_cpuct = 1.0
 
+# 公共随机数（CRN）：按「回合+阶段」给各候选重新播种，使候选间共享同一份随机性
+# 实测等效 3.65 倍搜索次数（onsen）；关闭则退回「仅共享起始种子」
+crn_stage_reseed = true
+
 # leaf eval 微批大小（仅 max_depth>0 && rollout_evaluator="nn" 时生效）
 rollout_batch_size = 64
 

@@ -194,10 +194,10 @@ impl ActionResult {
 /// 搜索输出
 ///
 /// 包含所有动作的搜索结果和最优动作信息。
-#[derive(Debug, Default, Clone)]
-pub struct SearchOutput {
+#[derive(Debug, Clone)]
+pub struct SearchOutput<A = OnsenAction> {
     /// 动作列表
-    pub actions: Vec<OnsenAction>,
+    pub actions: Vec<A>,
 
     /// 各动作的搜索结果
     pub action_results: Vec<(ActionResult, ActionResult)>,
@@ -209,10 +209,23 @@ pub struct SearchOutput {
     pub radical_factor: f64
 }
 
-impl SearchOutput {
+/// 手写而非 `derive(Default)`：后者会给泛型参数加上多余的 `A: Default` 约束，
+/// 而空 `Vec<A>` 本就不需要 `A` 可默认构造。
+impl<A> Default for SearchOutput<A> {
+    fn default() -> Self {
+        Self {
+            actions: Vec::new(),
+            action_results: Vec::new(),
+            best_action_idx: 0,
+            radical_factor: 0.0
+        }
+    }
+}
+
+impl<A> SearchOutput<A> {
     /// 创建搜索输出
     pub fn new(
-        actions: Vec<OnsenAction>, action_results: Vec<(ActionResult, ActionResult)>, radical_factor: f64
+        actions: Vec<A>, action_results: Vec<(ActionResult, ActionResult)>, radical_factor: f64
     ) -> Self {
         // 找到加权平均分最高的动作
         let best_action_idx = action_results
@@ -235,11 +248,12 @@ impl SearchOutput {
     }
 
     /// 获取最优动作
-    pub fn best_action(&self) -> &OnsenAction {
+    pub fn best_action(&self) -> &A {
         &self.actions[self.best_action_idx]
     }
 
-    pub fn best_action_pt(&self) -> &OnsenAction {
+    /// 获取 PT 口径下的最优动作
+    pub fn best_action_pt(&self) -> &A {
         let best_action_idx = self
             .action_results
             .iter()
@@ -259,7 +273,15 @@ impl SearchOutput {
         &self.action_results[self.best_action_idx].0
     }
 
+}
+
+impl SearchOutput<OnsenAction> {
     /// 导出训练样本
+    ///
+    /// 保持温泉专属：依赖 `extract_nn_features` 的 1121 维特征与
+    /// `sample_collector::action_to_global_index` 的 50 维动作映射，
+    /// 两者都是温泉动作空间的假设，泛型化会把该假设带进其他剧本。
+    /// NN 特征编码属 Phase 2 范围。
     ///
     /// # 参数
     /// - `game`: 当前游戏状态

@@ -10,7 +10,7 @@
 //! 每次决策后把各候选的评分分解（`RamenPolicyOutput::breakdown`）缓存，
 //! 供 `LoggingTrainer` 写入决策日志 breakdown 列（调参用，见 `Trainer::last_breakdown`）。
 
-use std::cell::RefCell;
+use std::sync::Mutex;
 
 use anyhow::Result;
 use log::info;
@@ -32,7 +32,11 @@ pub struct RamenHandwrittenTrainer {
     /// 是否输出每步决策日志（整局跑批时建议关闭）
     pub verbose: bool,
     /// 最近一次决策的评分分解文本（供 LoggingTrainer 提取进决策日志）
-    last_breakdown: RefCell<Option<String>>
+    ///
+    /// 用 `Mutex` 而非 `RefCell`：搜索层要求 `Trainer: Sync`（rayon 跨线程共享同一个
+    /// rollout 决策器），`RefCell` 会让整个 `FlatSearch<RamenGame>` 失去 `Sync`。
+    /// 单局日志场景无竞争，加锁开销可忽略。
+    last_breakdown: Mutex<Option<String>>
 }
 
 impl RamenHandwrittenTrainer {
@@ -41,7 +45,7 @@ impl RamenHandwrittenTrainer {
         Self {
             policy: RamenPolicy::default(),
             verbose: false,
-            last_breakdown: RefCell::new(None)
+            last_breakdown: Mutex::new(None)
         }
     }
 
@@ -50,7 +54,7 @@ impl RamenHandwrittenTrainer {
         Self {
             policy,
             verbose: false,
-            last_breakdown: RefCell::new(None)
+            last_breakdown: Mutex::new(None)
         }
     }
 
@@ -73,7 +77,10 @@ impl RamenHandwrittenTrainer {
             .map(|(i, out)| format!("#{i} {:.0}[{}]", out.score, out.reason))
             .collect::<Vec<_>>()
             .join(" | ");
-        *self.last_breakdown.borrow_mut() = Some(text);
+        // 锁中毒说明别处 panic 过；此处只是调试文本，静默跳过而非把育成流程一起带崩
+        if let Ok(mut slot) = self.last_breakdown.lock() {
+            *slot = Some(text);
+        }
     }
 }
 
@@ -89,7 +96,9 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     ) -> Result<usize> {
         // 单个候选直接返回（无选择空间）
         if actions.len() <= 1 {
-            *self.last_breakdown.borrow_mut() = Some(format!("仅1候选: {}", actions[0]));
+            if let Ok(mut slot) = self.last_breakdown.lock() {
+                *slot = Some(format!("仅1候选: {}", actions[0]));
+            }
             return Ok(0);
         }
         let (idx, outputs) = match game.stage {
@@ -142,7 +151,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     }
 
     fn last_breakdown(&self) -> Option<String> {
-        self.last_breakdown.borrow().clone()
+        self.last_breakdown.lock().ok().and_then(|slot| slot.clone())
     }
 }
 #[cfg(test)]
