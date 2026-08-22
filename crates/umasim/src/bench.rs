@@ -72,6 +72,8 @@ pub struct GameOutcome {
     pub eat_count: i32,
     /// 五次友人出行是否全部完成。
     pub friend_all: bool,
+    /// 自选比赛是否全部达标（不达标即育成失败）。
+    pub free_race_ok: bool,
     /// 整局耗时（毫秒）。
     pub elapsed_ms: f64
 }
@@ -97,6 +99,7 @@ pub fn run_seeded<T: Trainer<RamenGame>>(
         rmj_ok: game.ramen.rmj_results.iter().filter(|&&ok| ok).count(),
         eat_count: game.ramen.eat_count,
         friend_all: game.friend.out_used.iter().all(|used| *used),
+        free_race_ok: game.uma.all_free_races_done()?,
         elapsed_ms
     })
 }

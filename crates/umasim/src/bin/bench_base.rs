@@ -20,9 +20,11 @@
 //!
 //! # 产出（默认 `logs/`）
 //!
-//! - `bench_base_results.csv`：每局一行（build、seed、分数、rank、五维、PT、RMJ、吃面数、耗时）
+//! - `bench_base_results.csv`：每局一行（build、seed、分数、rank、五维、PT、RMJ、自选比赛达标、
+//!   吃面数、耗时）
 //! - `bench_base_decision_<build>_<seed>.csv`：仅 `--log` 时，每局一份决策轨迹
-//! - 汇总打印：各 build 分组分数分布（mean/median/min/max/std）、RMJ 成功年数、按阶段分组的决策耗时、吞吐
+//! - 汇总打印：各 build 分组分数分布（mean/median/min/max/std）、RMJ 成功年数、自选比赛达标率、
+//!   按阶段分组的决策耗时、吞吐
 
 use anyhow::{Context, Result};
 use lexopt::Arg;
@@ -78,7 +80,7 @@ impl Default for BenchConfig {
 }
 
 /// results CSV 表头
-const RESULTS_HEADER: [&str; 14] = [
+const RESULTS_HEADER: [&str; 15] = [
     "build",
     "seed",
     "score",
@@ -91,6 +93,7 @@ const RESULTS_HEADER: [&str; 14] = [
     "skill_pt",
     "scenario_pt",
     "rmj_ok",
+    "free_race_ok",
     "eat_count",
     "elapsed_ms"
 ];
@@ -150,6 +153,7 @@ fn outcome_to_row(build: &str, outcome: &bench::GameOutcome) -> Vec<String> {
         outcome.skill_pt.to_string(),
         outcome.scenario_pt.to_string(),
         outcome.rmj_ok.to_string(),
+        u8::from(outcome.free_race_ok).to_string(),
         outcome.eat_count.to_string(),
         format!("{:.3}", outcome.elapsed_ms),
     ]
@@ -249,13 +253,14 @@ fn main() -> Result<()> {
                 other => anyhow::bail!("未知 trainer: {other}（可选 random / handwritten）")
             };
             println!(
-                "  [#{:02}] seed={} score={} ({}) PT={} RMJ={}/3 耗时={:.3}ms",
+                "  [#{:02}] seed={} score={} ({}) PT={} RMJ={}/3 自选比赛={} 耗时={:.3}ms",
                 i + 1,
                 outcome.seed,
                 outcome.score,
                 outcome.rank,
                 outcome.scenario_pt,
                 outcome.rmj_ok,
+                if outcome.free_race_ok { "达标" } else { "未达标" },
                 outcome.elapsed_ms,
             );
             if cfg.decision_log {
@@ -270,7 +275,7 @@ fn main() -> Result<()> {
         let stats = bench::summarize(&scores);
         let rmj_mean = outcomes.iter().map(|r| r.rmj_ok as f64).sum::<f64>() / outcomes.len().max(1) as f64;
         println!(
-            "  {} 汇总: mean={:.0} median={:.0} min={:.0} max={:.0} std={:.0} RMJ={:.2}/3",
+            "  {} 汇总: mean={:.0} median={:.0} min={:.0} max={:.0} std={:.0} RMJ={:.2}/3 自选比赛达标={:.0}%",
             build.name(),
             stats.mean,
             stats.median,
@@ -278,6 +283,7 @@ fn main() -> Result<()> {
             stats.max,
             stats.std,
             rmj_mean,
+            free_race_rate(&outcomes) * 100.0,
         );
         all_results.push(BuildResults {
             name: build.name(),
@@ -302,8 +308,15 @@ fn main() -> Result<()> {
         let rmj_mean = r.outcomes.iter().map(|o| o.rmj_ok as f64).sum::<f64>() / r.outcomes.len().max(1) as f64;
         let elapsed_mean = r.outcomes.iter().map(|o| o.elapsed_ms).sum::<f64>() / r.outcomes.len().max(1) as f64;
         println!(
-            "{:<14} mean={:>7.0} median={:>7.0} min={:>6.0} max={:>6.0} RMJ={:.2}/3 耗时={:.2}ms",
-            r.name, stats.mean, stats.median, stats.min, stats.max, rmj_mean, elapsed_mean,
+            "{:<14} mean={:>7.0} median={:>7.0} min={:>6.0} max={:>6.0} RMJ={:.2}/3 自选比赛={:>3.0}% 耗时={:.2}ms",
+            r.name,
+            stats.mean,
+            stats.median,
+            stats.min,
+            stats.max,
+            rmj_mean,
+            free_race_rate(&r.outcomes) * 100.0,
+            elapsed_mean,
         );
     }
 
@@ -325,6 +338,14 @@ fn main() -> Result<()> {
         throughput
     );
     Ok(())
+}
+
+/// 一组结果的自选比赛达标率（0.0-1.0），空序列返回 0。
+///
+/// 不达标即育成失败，故本值偏低时分数分布会被大量早停局拉垮——基线对比时先看这一项。
+fn free_race_rate(outcomes: &[bench::GameOutcome]) -> f64 {
+    let ok = outcomes.iter().filter(|o| o.free_race_ok).count();
+    ok as f64 / outcomes.len().max(1) as f64
 }
 
 /// 计算一列耗时的均值（helper，避免 inline 过长）。
