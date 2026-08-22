@@ -13,7 +13,7 @@ mod config;
 mod flat_search;
 mod result;
 mod searchable;
-mod seeds;
+pub(crate) mod seeds;
 
 pub use config::SearchConfig;
 pub use flat_search::FlatSearch;

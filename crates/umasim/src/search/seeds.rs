@@ -113,7 +113,10 @@ impl InternalSeed {
 const INTERNAL_STREAM_TAG: u64 = 0x5265_616C_5F52_4E47;
 
 /// SplitMix64 finalizer
-fn splitmix64(seed: u64) -> u64 {
+///
+/// 纯终混合，**不含** `seed += gamma` 那一步——调用方自行决定如何构造输入。
+/// `crate::sampler` 复用同一份实现，避免两处出现同名但行为不同的函数。
+pub(crate) fn splitmix64(seed: u64) -> u64 {
     let mut z = seed;
     z = (z ^ (z >> 30)).wrapping_mul(MIX_A);
     z = (z ^ (z >> 27)).wrapping_mul(MIX_B);

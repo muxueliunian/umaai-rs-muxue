@@ -3,6 +3,7 @@
 本文件用于简要记录每次任务的修改内容。
 
 ## 2026-08-22
+- **局面采样器（NN 管线 Phase 2 上半）**：新增 `sampler.rs`，为教师数据制造根局面——第一代采样空间（7 马娘 × 11 张卡池 × 3 种构成，角色冲突由 `chara_id` 实测比对排除）、按工作项序号确定性导出采样任务（卡组分层，截断回合与种子 SplitMix64 分频道派生，分片 / 续跑 / 改并行度均不变）、ε 轨迹扰动、走真实 `run_stage → select_action` 路径截断捕获；`SampleSpec` 自包含扰动参数以保证跨机回放一致，`SampleOutcome::Exhausted` 携带停止回合以区分「截断落在 URA 之后」与「扰动致育成提前失败」。根局面限定在 `RamenSelect / SpecialSelect / Train / RegionSelect` 捕获——第 1 年地区选择由 `run_begin` 内联执行、`stage` 仍是 `Begin`，这类不在阶段入口的决策点会破坏搜索的 `apply_action → next()` 契约。模块文档写明两条使用约定：必须按 index 区间分片、复现基座含 `gamedata` 与 `GameConfig`
 - **第三方库引用规范化**：`flat_search.rs` / `sampler.rs` 中 `anyhow::bail!` / `anyhow::ensure!` / `anyhow::anyhow!` 的全名引用改为 `use` 导入后直接调用
 - **支援卡类型注释订正**：`SupportCardData::card_type` 原注释写作「5团队6友人」，与 `cardDB.json` 实测相反（30305[友]=5，团队卡=6）
 
