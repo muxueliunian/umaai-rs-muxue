@@ -28,13 +28,21 @@
 //! - **只喂原始状态分量与纯计数派生量**：不喂任何带权重的估值。
 //!   自选比赛缺口、剩余合格回合是原始状态的确定性函数、不含权重判断，故编码；
 //!   而「这个训练值多少分」之类的打分结果一律不进特征。
+//! - **人头下标 ≠ 卡组下标**：拉面的 `init_persons` 只放 5 张训练卡再追加理事长，
+//!   友人卡到回合 2 才加入，于是理事长占人头 5、友人卡占人头 6，而 `deck[5]` 是友人卡。
+//!   cards 段与 persons 段之间的互相引用一律按 `card_id` 反查，不假设两个序列同序。
+//!
+//! # 已知未覆盖
+//!
+//! - `RamenGame::current_effect` 恒为全零（上游遗留的死字段），原先为它保留的 14 维
+//!   已移除。若上游后续真正填充该字段，需要重新加回并给样本打新的 schema 版本号。
 
 use anyhow::{Result, bail, ensure};
 
 use super::{
     FeelingType, RamenStage,
     policy::remaining_race_slots,
-    state::{RamenEffect, RamenGame}
+    state::RamenGame
 };
 use crate::{
     game::{FriendCardState, FriendOutState, Game, PersonType},
@@ -49,7 +57,8 @@ pub const CARD_NUM: usize = 6;
 
 /// 人头序列长度
 ///
-/// 开局 6 个（支援卡），回合 2 加剧本友人与 NPC，回合 12 加记者，最终 13 个。
+/// 开局 6 个（0-4 五张训练卡 + 5 理事长），回合 2 加剧本友人（人头 6）与 5 个 NPC
+/// （7-11），回合 12 加记者（12），最终 13 个。**注意人头下标与卡组槽位不同序**。
 /// 固定为最大值并用「已登场」掩码位标记，使维度恒定；未登场的整行为 0。
 pub const PERSON_NUM: usize = 13;
 
@@ -65,8 +74,6 @@ const G_FACILITY: usize = 6;
 const G_RAMEN: usize = 18;
 /// global 段：诀窍角标
 const G_MARK: usize = 16;
-/// global 段：本回合生效的拉面效果
-const G_EFFECT: usize = 14;
 /// global 段：友人
 const G_FRIEND: usize = 15;
 /// global 段：地区
@@ -75,8 +82,7 @@ const G_REGION: usize = 35;
 const G_RACE: usize = 10;
 
 /// global 段总维度
-pub const GLOBAL_DIM: usize =
-    G_TURN + G_UMA + G_FLAGS + G_FACILITY + G_RAMEN + G_MARK + G_EFFECT + G_FRIEND + G_REGION + G_RACE;
+pub const GLOBAL_DIM: usize = G_TURN + G_UMA + G_FLAGS + G_FACILITY + G_RAMEN + G_MARK + G_FRIEND + G_REGION + G_RACE;
 
 /// 单张支援卡的特征维度
 pub const CARD_DIM: usize = 35;
@@ -374,11 +380,6 @@ fn encode_global(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
         Ok(())
     })?;
 
-    w.block("effect", G_EFFECT, |w| {
-        encode_effect(&game.current_effect, w);
-        Ok(())
-    })?;
-
     w.block("friend", G_FRIEND, |w| {
         let f = &game.base.friend;
         w.onehot(Some(friend_card_index(f.card_state)), FRIEND_CARD_NUM);
@@ -395,24 +396,6 @@ fn encode_global(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
     w.block("region", G_REGION, |w| encode_regions(game, w))?;
     w.block("race", G_RACE, |w| encode_races(game, w))?;
     Ok(())
-}
-
-/// 编码一份拉面效果（本回合生效的合并效果）
-fn encode_effect(e: &RamenEffect, w: &mut FeatureWriter) {
-    w.num(e.vital, SCALE_VITAL);
-    w.num(e.motivation, SCALE_SMALL);
-    w.num(e.saihou, SCALE_PCT);
-    w.num(e.xunlian, SCALE_PCT);
-    w.num(e.youqing, SCALE_PCT);
-    w.num(e.pt_bonus, SCALE_PCT);
-    w.num(e.train_limit, SCALE_PCT);
-    w.num(e.pt_limit, SCALE_PCT);
-    w.raw(e.fail_rate_drop / SCALE_PCT);
-    w.num(e.friendship, SCALE_PCT);
-    w.num(e.deyilv, SCALE_PCT);
-    w.num(e.hint, SCALE_SMALL);
-    w.num(e.clone, SCALE_SMALL);
-    w.flag(e.hint_special);
 }
 
 /// 编码地区段：当年选中的 3 个地区展开成效果数值，而非地区 id
@@ -507,8 +490,10 @@ fn encode_cards(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
             w.num(e.event_effect_up, SCALE_PCT);
             w.num(e.event_recovery_amount_up, SCALE_PCT);
             w.num(e.hint_count_bonus, SCALE_SMALL);
-            // 该卡对应的人头当前在哪个训练位（人头下标 0..5 与卡组槽位同序）
-            let slot = slots.get(i).copied().flatten();
+            // 该卡对应的人头当前在哪个训练位。
+            // 人头下标 ≠ 卡组下标（拉面里理事长占人头 5、友人卡在人头 6），必须按 card_id 反查。
+            let person_idx = game.persons.iter().position(|p| p.card_id == Some(card.card_id));
+            let slot = person_idx.and_then(|pi| slots.get(pi).copied().flatten());
             w.onehot(slot, TRAIN_NUM);
             w.flag(slot.is_some());
             Ok(())
@@ -520,7 +505,6 @@ fn encode_cards(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
 /// 编码 persons 段（第二个置换等变序列，未登场的人头整行为 0）
 fn encode_persons(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
     let slots = person_train_slots(game);
-    let friend_idx = game.base.friend.person_index;
     for i in 0..PERSON_NUM {
         w.block("person", PERSON_DIM, |w| {
             let Some(p) = game.persons.get(i) else {
@@ -536,9 +520,11 @@ fn encode_persons(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
             let slot = slots.get(i).copied().flatten();
             w.onehot(slot, TRAIN_NUM);
             w.flag(slot.is_some());
-            w.flag(i == friend_idx);
-            // 对应的支援卡槽位（人头下标 0..5 与卡组同序）
-            let card_slot = p.card_id.and_then(|_| if i < CARD_NUM { Some(i) } else { None });
+            // 剧本友人旗标。不能用 `friend.person_index`——它在回合 0-1 还是卡组下标，
+            // 要到 `add_friend_and_npcs` 才改成真正的人头下标，期间会把理事长标成友人。
+            w.flag(p.person_type == PersonType::ScenarioCard);
+            // 对应的支援卡槽位。人头下标 ≠ 卡组下标，按 card_id 反查。
+            let card_slot = p.card_id.and_then(|cid| game.base.deck.iter().position(|c| c.card_id == cid));
             w.onehot(card_slot, CARD_NUM);
             w.flag(card_slot.is_some());
             Ok(())
@@ -609,7 +595,7 @@ fn friend_out_index(s: FriendOutState) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use anyhow::Result;
+    use anyhow::{Result, anyhow};
 
     use super::*;
     use crate::{
@@ -617,6 +603,13 @@ mod tests {
         sampler::{SamplerConfig, SamplingSpace, sample_position},
         utils::{get_workspace_root, init_test_logger}
     };
+
+    /// 校验结果标记：`OK` / `NG`
+    ///
+    /// 项目约定测试用 `println` 输出而非 `assert`，故把判定结果打成可扫读的前缀。
+    fn check(ok: bool) -> &'static str {
+        if ok { "OK" } else { "NG" }
+    }
 
     /// 造一个开局局面（默认卡组 102601）
     fn make_game() -> Result<RamenGame> {
@@ -626,6 +619,79 @@ mod tests {
         };
         let deck = [302424, 302894, 303044, 302924, 303024, 303054];
         RamenGame::newgame(102601, &deck, inherit)
+    }
+
+    /// 回归：cards 段与 persons 段按 `card_id` 互相反查，不假设两个序列同序
+    ///
+    /// 拉面布局下理事长占人头 5、友人卡占人头 6，而友人卡在 `deck[5]`。
+    /// 修复前编码器用「人头下标 == 卡组下标」的假设，会把卡槽 5 连到理事长的训练位，
+    /// 并让人头 6 的卡链接整个丢失。
+    #[test]
+    fn test_card_person_cross_lookup() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = make_game()?;
+        game.add_friend_and_npcs()?;
+
+        let friend_person = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::ScenarioCard)
+            .ok_or_else(|| anyhow!("友人卡人头应存在"))?;
+        let friend_deck =
+            Game::deck_index_of(&game, friend_person).ok_or_else(|| anyhow!("友人卡应能反查到卡组槽位"))?;
+        println!("友人卡: 人头 {friend_person} -> 卡组 {friend_deck}");
+        println!(
+            "[{}] 本用例的前提是两个下标不相等",
+            check(friend_person != friend_deck)
+        );
+
+        // 把友人卡放进 2 号训练位（力），理事长放进 0 号
+        let yayoi_person = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::Yayoi)
+            .ok_or_else(|| anyhow!("理事长人头应存在"))?;
+        game.base.distribution = vec![vec![]; TRAIN_NUM];
+        game.base.distribution[0] = vec![yayoi_person as i32];
+        game.base.distribution[2] = vec![friend_person as i32];
+
+        let v = encode(&game)?;
+
+        // card 块尾部布局：onehot(slot, TRAIN_NUM) + flag(slot.is_some())
+        let card_base = GLOBAL_DIM + friend_deck * CARD_DIM;
+        let card_slot_onehot = card_base + CARD_DIM - 1 - TRAIN_NUM;
+        let card_in_train = v[card_base + CARD_DIM - 1];
+        println!(
+            "卡槽 {friend_deck} 的训练位 onehot = {:?}, 在训练标志 = {card_in_train}",
+            &v[card_slot_onehot..card_slot_onehot + TRAIN_NUM]
+        );
+        println!("[{}] 友人卡所在的卡槽应标记为「在训练中」", check(card_in_train == 1.0));
+        println!("[{}] 友人卡的卡槽应指向 2 号训练位", check(v[card_slot_onehot + 2] == 1.0));
+
+        // person 块尾部布局：onehot(card_slot, CARD_NUM) + flag(card_slot.is_some())
+        let person_base = GLOBAL_DIM + CARD_NUM * CARD_DIM + friend_person * PERSON_DIM;
+        let card_slot_onehot = person_base + PERSON_DIM - 1 - CARD_NUM;
+        println!(
+            "人头 {friend_person} 的卡槽 onehot = {:?}",
+            &v[card_slot_onehot..card_slot_onehot + CARD_NUM]
+        );
+        println!("[{}] 友人卡人头应有卡链接", check(v[person_base + PERSON_DIM - 1] == 1.0));
+        println!(
+            "[{}] 友人卡人头应链接到卡组槽位 {friend_deck}",
+            check(v[card_slot_onehot + friend_deck] == 1.0)
+        );
+
+        // 理事长是无卡人头：不应有任何卡链接
+        let yayoi_base = GLOBAL_DIM + CARD_NUM * CARD_DIM + yayoi_person * PERSON_DIM;
+        println!(
+            "[{}] 理事长(人头 {yayoi_person}) 不应有卡链接",
+            check(v[yayoi_base + PERSON_DIM - 1] == 0.0)
+        );
+
+        Ok(())
     }
 
     /// 各分块宽度之和必须等于声明的总维度（纯常量校验，不跑局面）
@@ -638,7 +704,7 @@ mod tests {
             ("facility", G_FACILITY),
             ("ramen", G_RAMEN),
             ("mark", G_MARK),
-            ("effect", G_EFFECT),
+
             ("friend", G_FRIEND),
             ("region", G_REGION),
             ("race", G_RACE)

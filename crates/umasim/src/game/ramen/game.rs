@@ -467,18 +467,21 @@ impl Game for RamenGame {
     }
 
     fn deyilv(&mut self, person_index: i32) -> Result<f32> {
-        if person_index < 6 {
-            let (eff, lock) = self.deck[person_index as usize].calc_training_effect(self, 0)?;
-            self.deck[person_index as usize].effect = eff.clone();
-            if lock {
-                self.deck[person_index as usize].is_locked = true;
-            }
-            // 卡得意率 + 剧本得意率总加成（参见 calc_scenario_deyilv）
-            let scenario_deyilv = super::effects::calc_scenario_deyilv(self);
-            Ok(eff.deyilv + scenario_deyilv as f32)
-        } else {
-            Ok(0.0)
+        // 人头下标 ≠ 卡组下标：负数、越界、无卡人头（理事长 / 记者 / NPC）一律返回 0
+        let Ok(person_index) = usize::try_from(person_index) else {
+            return Ok(0.0);
+        };
+        let Some(di) = Game::deck_index_of(self, person_index) else {
+            return Ok(0.0);
+        };
+        let (eff, lock) = self.deck[di].calc_training_effect(self, 0)?;
+        self.deck[di].effect = eff.clone();
+        if lock {
+            self.deck[di].is_locked = true;
         }
+        // 卡得意率 + 剧本得意率总加成（参见 calc_scenario_deyilv）
+        let scenario_deyilv = super::effects::calc_scenario_deyilv(self);
+        Ok(eff.deyilv + scenario_deyilv as f32)
     }
 
     fn has_group_buff(&self) -> bool {
@@ -649,10 +652,12 @@ impl Game for RamenGame {
     fn distribute_hint(&mut self, rng: &mut impl Rng) -> Result<()> {
         let base_hint_rate = global!(GAMECONSTANTS).base_hint_rate / 100.0;
         let hint_bonus_pct = self.calc_hint_bonus_pct() as f64;
-        let hint_probs: Vec<_> = self
+        // 人头下标 ≠ 卡组下标：预抽 (card_id, hint 概率加成)，循环内按 card_id 反查。
+        // 这里不能调 deck_index_of——它借 &self，与 persons_mut() 冲突。
+        let hint_probs: Vec<(u32, i32)> = self
             .deck()
             .iter()
-            .map(|card| card.card_value().hint_prob_increase)
+            .map(|card| (card.card_id, card.card_value().hint_prob_increase))
             .collect();
         // hint_special 生效时，位于 at_trains 训练位置的所有支援卡 (PersonType::Card) is_hint 都强制为 true
         // 生效条件：当前回合吃了面 + ramen_basic_effect[year].hint_special == true + 支援卡种类>=4
@@ -664,7 +669,11 @@ impl Game for RamenGame {
         };
         for person in self.persons_mut() {
             if person.person_type() == PersonType::Card {
-                let card_bonus = (100 + hint_probs[person.person_index() as usize]) as f64 / 100.0;
+                let bonus = person
+                    .card_id()
+                    .and_then(|cid| hint_probs.iter().find(|(id, _)| *id == cid))
+                    .map_or(0, |(_, bonus)| *bonus);
+                let card_bonus = (100 + bonus) as f64 / 100.0;
                 let hint_prob = base_hint_rate * card_bonus * (1.0 + hint_bonus_pct / 100.0);
                 person.set_hint(rng.random_bool(hint_prob));
             }
@@ -1922,11 +1931,19 @@ mod tests {
 
     use super::*;
     use crate::{
-        game::{PersonType, ramen::events::assign_train_feeling_type},
+        game::{CardTrainingEffect, PersonType, ramen::events::assign_train_feeling_type},
         gamedata::{ActionValue, EventChoice, init_global},
         trainer::{ManualTrainer, RandomTrainer},
         utils::{get_workspace_root, init_test_logger}
     };
+
+    /// 校验结果标记：`OK` / `NG`
+    ///
+    /// 项目约定测试用 `println` 输出而非 `assert`，故把判定结果打成可扫读的前缀。
+    /// 回归失效时看输出里的 `NG` 即可定位，不中断后续用例的诊断信息。
+    fn check(ok: bool) -> &'static str {
+        if ok { "OK" } else { "NG" }
+    }
 
     // 测试用公共参数
     // [速]杏目, [智]青春永驻, [耐]名将怒涛, [速]洛林军歌, [速]里见光钻, [友]骏川手纲
@@ -2392,7 +2409,7 @@ mod tests {
         // ========== 普通回合（year 2, PT=1000, RMJ 成功） ==========
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
         game.base.turn = 30; // year 2
-        game.add_friend_and_npcs()?; // person[0..5] 是支援卡
+        game.add_friend_and_npcs()?; // person[0..4] 是训练卡，5 是理事长，6 是友人卡
         game.ramen.scenario_pt = 1000;
         game.ramen.rmj_results = vec![true]; // year 1 RMJ 成功
 
@@ -2423,10 +2440,36 @@ mod tests {
         // 期望：actual_deyilv = card_deyilv_only + (pt(5000档=80) + rmj_success[2]=250) = +330
         assert_eq!(actual_deyilv2, card_deyilv_only2 + 330.0);
 
-        // ========== person_index >= 6 返回 0 ==========
-        let actual = game2.deyilv(6)?;
-        assert_eq!(actual, 0.0);
-        println!("person_index >= 6: deyilv={actual}");
+        // ========== 无卡人头返回 0，友人卡按自己的卡组槽位取值 ==========
+        // 旧断言写死「person_index >= 6 返回 0」，但拉面布局下人头 6 正是友人卡。
+        // 这里按 PersonType 定位，不依赖任何硬编码下标。
+        let yayoi_idx = game2
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::Yayoi)
+            .ok_or_else(|| anyhow!("找不到理事长人头"))?;
+        let yayoi_deyilv = game2.deyilv(yayoi_idx as i32)?;
+        println!(
+            "[{}] 理事长(人头 {yayoi_idx}) 无卡，deyilv 应为 0：实际 {yayoi_deyilv}",
+            check(yayoi_deyilv == 0.0)
+        );
+
+        let friend_idx = game2
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::ScenarioCard)
+            .ok_or_else(|| anyhow!("找不到友人卡人头"))?;
+        let friend_deck_idx = Game::deck_index_of(&game2, friend_idx).ok_or_else(|| anyhow!("友人卡反查卡组失败"))?;
+        let friend_card_deyilv = game2.deck[friend_deck_idx].effect.deyilv;
+        let friend_deyilv = game2.deyilv(friend_idx as i32)?;
+        println!(
+            "[{}] 友人卡(人头 {friend_idx} -> 卡组 {friend_deck_idx}): 期望 {} 实际 {friend_deyilv}",
+            check(friend_deyilv == friend_card_deyilv + 330.0),
+            friend_card_deyilv + 330.0
+        );
+
+        // 负数人头下标不再 panic
+        println!("deyilv(-1)={}", game2.deyilv(-1)?);
 
         Ok(())
     }
@@ -3542,14 +3585,17 @@ mod tests {
         Ok(())
     }
 
-    /// 上游遗留问题排查：人头下标与卡组槽位错位的实测
+    /// 回归：人头下标与卡组槽位的映射（羁绊双份一致性）
     ///
     /// 拉面的 `init_persons` 过滤掉友人卡，导致 `persons[5]` = 理事长、`persons[6]` = 友人卡，
-    /// 而 `deck[5]` 是友人卡。`add_friendship` 的 `person_index < 6` 守卫会把**理事长**的羁绊
-    /// 写进 `deck[5].friendship`（友人卡那份拷贝），后者又被 `SupportCard::calc_training_effect`
-    /// 用于固有解锁判定。本测试跑完整一局，打印三份羁绊的终值供对照。
+    /// 而 `deck[5]` 是友人卡。修复前 `add_friendship` 的 `person_index < 6` 守卫会把**理事长**
+    /// 的羁绊写进 `deck[5].friendship`（友人卡那份拷贝），后者又被
+    /// `SupportCard::calc_training_effect` 用于固有解锁判定。
+    ///
+    /// 修复后 `add_friendship` 按 `card_id` 反查卡组槽位，本测试跑完整一局校验：
+    /// 友人卡的两份羁绊一致，前 5 张训练卡的两份羁绊一致。
     #[test]
-    fn test_person_deck_index_mismatch_full_game() -> Result<()> {
+    fn test_person_deck_index_mapping_full_game() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         let _ = init_test_logger("warn");
@@ -3610,16 +3656,27 @@ mod tests {
                     game.deck[i].friendship, game.persons[i].friendship
                 );
             }
+
+            // 回归校验：友人卡的两份羁绊必须同步（修复前 deck[5] 跟的是理事长）
+            println!(
+                "  [{}] deck[5](友人卡) 的羁绊应与 persons[6](友人卡本人) 同步",
+                check(game.deck[5].friendship == game.persons[6].friendship)
+            );
+            // 前 5 张训练卡本来就同序，作为对照必须始终一致
+            let card_sync = (0..5).all(|i| game.deck[i].friendship == game.persons[i].friendship);
+            println!("  [{}] 前 5 张训练卡的两份羁绊应一致", check(card_sync));
         }
         Ok(())
     }
 
-    /// 上游遗留问题排查：`default_calc_training_buff` 的 `index < 6` 把理事长当成 `deck[5]`
+    /// 回归：`default_calc_training_buff` 按 `card_id` 反查卡组，不再拿人头下标当卡组下标
     ///
-    /// `traits.rs:349` 用 `index < 6` 把人头下标当卡组下标。拉面里 `persons[5]` 是理事长、
+    /// 修复前 `traits.rs` 用 `index < 6` 把人头下标当卡组下标。拉面里 `persons[5]` 是理事长、
     /// `persons[6]` 是友人卡，于是理事长会顶着友人卡的训练加成进训练，而友人卡本人被整个跳过。
+    ///
+    /// 修复后：理事长（无卡人头）的 buff 恒为空，友人卡拿到自己在 `deck` 里那张卡的效果。
     #[test]
-    fn test_training_buff_index_mismatch() -> Result<()> {
+    fn test_training_buff_person_deck_mapping() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         let _ = init_test_logger("warn");
@@ -3649,19 +3706,38 @@ mod tests {
         let buff_card = game.calc_training_buff(0)?;
         println!("只放 [智]青春(人头1) 的训练 buff: {:?}", buff_card);
 
+        // 回归校验 1：理事长是无卡人头，反查不到卡组槽位，buff 必须为空
         println!(
-            "理事长 buff 是否等于 deck[5]([友]骏川) 的卡效果? xunlian={:?} vs deck[5].effect.xunlian={:?}",
-            buff_yayoi.xunlian, game.deck[5].effect.xunlian
+            "[{}] 理事长不应携带任何支援卡加成",
+            check(buff_yayoi == CardTrainingEffect::default())
         );
 
-        // 固有阈值判定读的是 deck[5].friendship，而它由理事长的羁绊回写
+        // 回归校验 2：友人卡的 buff 必须等于它自己那张卡（deck[5]）算出的效果
+        // 注意：走一遍 `CardTrainingEffect::add` 才能和聚合结果对齐（deyilv 不参与聚合）
+        let (mut friend_effect, _) = game.deck[5].calc_training_effect(&game, 0)?;
+        if !game.is_shining_at(6, 0) {
+            friend_effect.youqing = 0.0;
+        }
+        let expect_friend = CardTrainingEffect::default().add(&friend_effect);
+        println!("[{}] 友人卡(人头6) 的 buff 应来自 deck[5]", check(buff_friend == expect_friend));
+
+        // 回归校验 3：训练卡对照组不受影响
+        let (mut card1_effect, _) = game.deck[1].calc_training_effect(&game, 0)?;
+        if !game.is_shining_at(1, 0) {
+            card1_effect.youqing = 0.0;
+        }
+        let expect_card1 = CardTrainingEffect::default().add(&card1_effect);
+        println!("[{}] 训练卡(人头1) 的 buff 应来自 deck[1]", check(buff_card == expect_card1));
+
+        // 固有阈值判定读的是 deck[..].friendship。修复后理事长不再触发任何卡的固有。
         game.deck[5].friendship = 60;
         game.distribution[0] = vec![5];
         let buff_unlocked = game.calc_training_buff(0)?;
         println!("把 deck[5].friendship 抬到 60 后，理事长(人头5) 的训练 buff: {:?}", buff_unlocked);
-        game.deck[5].friendship = 59;
-        let buff_locked = game.calc_training_buff(0)?;
-        println!("deck[5].friendship = 59 时: {:?}", buff_locked);
+        println!(
+            "[{}] 理事长不应因 deck[5] 羁绊而解锁固有",
+            check(buff_unlocked == CardTrainingEffect::default())
+        );
         Ok(())
     }
 }

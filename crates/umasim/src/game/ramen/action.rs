@@ -717,11 +717,8 @@ impl RamenAction {
                 if game.persons[person_index].person_type != PersonType::Card {
                     continue;
                 }
-                let hint_count = if person_index < 6 {
-                    1 + game.deck[person_index].effect.hint_count_bonus
-                } else {
-                    1
-                };
+                // 人头下标 ≠ 卡组下标，取 hint_count_bonus 前先反查
+                let hint_count = 1 + game.deck_index_of(person_index).map_or(0, |di| game.deck[di].effect.hint_count_bonus);
                 for _ in 0..hint_count {
                     self.push_hint_event(game, person_index, rng)?;
                 }
@@ -731,11 +728,8 @@ impl RamenAction {
                 return Ok(());
             }
             let person_index = p as usize;
-            let hint_count = if person_index < 6 {
-                1 + game.deck[person_index].effect.hint_count_bonus
-            } else {
-                1
-            };
+            // 人头下标 ≠ 卡组下标，取 hint_count_bonus 前先反查
+            let hint_count = 1 + game.deck_index_of(person_index).map_or(0, |di| game.deck[di].effect.hint_count_bonus);
             for _ in 0..hint_count {
                 self.push_hint_event(game, person_index, rng)?;
             }
@@ -750,18 +744,20 @@ impl RamenAction {
     fn push_hint_event(&self, game: &mut super::RamenGame, person_index: usize, rng: &mut impl Rng) -> Result<()> {
         let attr_prob = system_event_prob("hint_attr")?;
         let max_hint = global!(GAMECONSTANTS).max_hint_per_card;
-        if person_index < 6 {
+        // 人头下标 ≠ 卡组下标：反查得到卡组槽位才走支援卡分支，
+        // 无卡人头（理事长 / 记者 / NPC）按 hint_level=1 处理，且名字取人头自己的
+        if let Some(di) = game.deck_index_of(person_index) {
             // 支援卡 hint 等级上限：超过则只触发属性事件（不加技能）
-            let hint_level = (1 + game.deck[person_index].card_value().hint_level)
+            let hint_level = (1 + game.deck[di].card_value().hint_level)
                 .min(5)
-                .min(max_hint - game.deck[person_index].total_hints);
+                .min(max_hint - game.deck[di].total_hints);
             let mut hint_event = if hint_level <= 0 || rng.random_bool(attr_prob) {
                 EventData::hint_attr_event(game.persons[person_index].train_type as usize, person_index)?
             } else {
-                game.deck[person_index].total_hints += hint_level;
+                game.deck[di].total_hints += hint_level;
                 EventData::hint_skill_event(hint_level, person_index)
             };
-            hint_event.name = format!("{} - {}", hint_event.name, game.deck[person_index].short_name());
+            hint_event.name = format!("{} - {}", hint_event.name, game.deck[di].short_name());
             game.base.unresolved_events.push(hint_event);
         } else {
             let hint_level = 1;
@@ -770,7 +766,7 @@ impl RamenAction {
             } else {
                 EventData::hint_skill_event(hint_level, person_index)
             };
-            hint_event.name = format!("{} - {}", hint_event.name, game.deck[person_index].short_name());
+            hint_event.name = format!("{} - {}", hint_event.name, game.persons[person_index].short_name());
             game.base.unresolved_events.push(hint_event);
         }
         Ok(())

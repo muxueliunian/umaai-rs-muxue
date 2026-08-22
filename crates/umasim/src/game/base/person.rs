@@ -7,7 +7,9 @@ use crate::{game::*, gamedata::GAMEDATA, global};
 /// 训练人头信息（动态）
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct BasePerson {
-    /// 人头顺序 0-5为支援卡 >6理事长 NPC和记者
+    /// 人头顺序。**不保证与卡组槽位同序**：base / onsen 是 0-5 支援卡、6 理事长，
+    /// 但拉面是 0-4 训练卡、5 理事长、6 友人卡、7-11 NPC、12 记者。
+    /// 需要由人头访问卡组时走 `Game::deck_index_of` 反查，不要拿本字段当卡组下标。
     pub person_index: i32,
     /// 人头类型
     pub person_type: PersonType,
@@ -95,6 +97,9 @@ impl Person for BasePerson {
     }
     fn hint(&self) -> bool {
         self.is_hint
+    }
+    fn card_id(&self) -> Option<u32> {
+        self.card_id
     }
 }
 
