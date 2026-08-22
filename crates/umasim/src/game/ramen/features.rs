@@ -256,14 +256,22 @@ pub fn encode(game: &RamenGame) -> Result<Vec<f32>> {
     Ok(w.buf)
 }
 
-/// 人头下标到所在训练位的反查表；不在任何训练位时为 `None`
-fn person_train_slots(game: &RamenGame) -> Vec<Option<usize>> {
-    let mut slots = vec![None; game.persons.len()];
+/// 人头下标到所在训练位的反查表（multi-hot 掩码）
+///
+/// **必须是 multi-hot 而非单个 `Option<usize>`**：拉面的分身不新建人头，而是把同一个
+/// `person_index` 再 push 进另一个训练位（见 `RamenGame` 的地区分身与超级拉面分身），
+/// 因此一个人头会同时出现在 `distribution` 的多行。用「最后写入的训练位」表示会让
+/// 彩圈分身在特征里直接消失，只保留编号最大的那一位。
+///
+/// 返回长度为 `persons.len()`，每项是长度 [`TRAIN_NUM`] 的布尔掩码；负数下标
+/// （空位占位）与越界下标一律忽略。
+fn person_train_slots(game: &RamenGame) -> Vec<[bool; TRAIN_NUM]> {
+    let mut slots = vec![[false; TRAIN_NUM]; game.persons.len()];
     for (t, row) in game.base.distribution.iter().enumerate().take(TRAIN_NUM) {
         for &p in row {
             if let Ok(idx) = usize::try_from(p) {
                 if idx < slots.len() {
-                    slots[idx] = Some(t);
+                    slots[idx][t] = true;
                 }
             }
         }
@@ -493,9 +501,12 @@ fn encode_cards(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
             // 该卡对应的人头当前在哪个训练位。
             // 人头下标 ≠ 卡组下标（拉面里理事长占人头 5、友人卡在人头 6），必须按 card_id 反查。
             let person_idx = game.persons.iter().position(|p| p.card_id == Some(card.card_id));
-            let slot = person_idx.and_then(|pi| slots.get(pi).copied().flatten());
-            w.onehot(slot, TRAIN_NUM);
-            w.flag(slot.is_some());
+            let mask = person_idx.and_then(|pi| slots.get(pi)).copied().unwrap_or([false; TRAIN_NUM]);
+            // multi-hot：同一张卡的分身会同时占多个训练位
+            for in_train in mask {
+                w.flag(in_train);
+            }
+            w.flag(mask.iter().any(|x| *x));
             Ok(())
         })?;
     }
@@ -517,9 +528,12 @@ fn encode_persons(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
             w.num(p.friendship, SCALE_PCT);
             w.flag(p.is_hint);
             w.flag(true); // 已登场
-            let slot = slots.get(i).copied().flatten();
-            w.onehot(slot, TRAIN_NUM);
-            w.flag(slot.is_some());
+            let mask = slots.get(i).copied().unwrap_or([false; TRAIN_NUM]);
+            // multi-hot：分身会让同一个人头同时占多个训练位
+            for in_train in mask {
+                w.flag(in_train);
+            }
+            w.flag(mask.iter().any(|x| *x));
             // 剧本友人旗标。不能用 `friend.person_index`——它在回合 0-1 还是卡组下标，
             // 要到 `add_friend_and_npcs` 才改成真正的人头下标，期间会把理事长标成友人。
             w.flag(p.person_type == PersonType::ScenarioCard);
@@ -689,6 +703,54 @@ mod tests {
         println!(
             "[{}] 理事长(人头 {yayoi_person}) 不应有卡链接",
             check(v[yayoi_base + PERSON_DIM - 1] == 0.0)
+        );
+
+        Ok(())
+    }
+
+    /// 回归：分身占据的多个训练位必须全部编进特征（multi-hot，不是最后写入的那一个）
+    ///
+    /// 拉面的分身不新建人头，而是把同一个 `person_index` 再 push 进另一个训练位。
+    /// 修复前 `person_train_slots` 用 `slots[idx] = Some(t)` 后写覆盖，
+    /// 彩圈分身在特征里直接消失，只保留编号最大的训练位。
+    #[test]
+    fn test_split_person_multi_hot() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = make_game()?;
+        game.add_friend_and_npcs()?;
+
+        // 人头 0（第一张训练卡）同时出现在 1 号与 3 号训练位，模拟分身
+        game.base.distribution = vec![vec![]; TRAIN_NUM];
+        game.base.distribution[1] = vec![0];
+        game.base.distribution[3] = vec![0];
+
+        let v = encode(&game)?;
+        let deck_idx = Game::deck_index_of(&game, 0).ok_or_else(|| anyhow!("人头 0 应能反查到卡组槽位"))?;
+
+        // card 块尾部：TRAIN_NUM 个训练位标志 + 1 个「在训练中」标志
+        let card_base = GLOBAL_DIM + deck_idx * CARD_DIM;
+        let card_mask = &v[card_base + CARD_DIM - 1 - TRAIN_NUM..card_base + CARD_DIM - 1];
+        println!("卡槽 {deck_idx} 的训练位掩码 = {card_mask:?}");
+        println!(
+            "[{}] 分身应同时占 1 号与 3 号训练位",
+            check(card_mask[1] == 1.0 && card_mask[3] == 1.0)
+        );
+        println!(
+            "[{}] 未占用的训练位应为 0",
+            check(card_mask[0] == 0.0 && card_mask[2] == 0.0 && card_mask[4] == 0.0)
+        );
+
+        // person 块的训练位掩码位于「已登场」之后
+        let person_base = GLOBAL_DIM + CARD_NUM * CARD_DIM;
+        let person_mask_start = person_base + PERSON_TYPE_NUM + TRAIN_TYPE_NUM + 3;
+        let person_mask = &v[person_mask_start..person_mask_start + TRAIN_NUM];
+        println!("人头 0 的训练位掩码 = {person_mask:?}");
+        println!(
+            "[{}] persons 段同样应是 multi-hot",
+            check(person_mask[1] == 1.0 && person_mask[3] == 1.0)
         );
 
         Ok(())

@@ -103,7 +103,7 @@
   - `/* */` 块里仍有 `if pidx < 6 { game.deck[pidx] }`。目前是死代码，但解开注释会把友人卡打成「非支援卡」。
 - **其他待办（非 bug，属清理）**：
   - `game/ramen/rng_consistency.rs` 的 `run_turns` 用 `for i in 0..6` 同时锁 `deck[i]` 与 `persons[i]` 的羁绊。拉面下 `persons[5]` 是理事长、友人卡（人头 6）没被锁到。当前不影响该测试要验证的结论（分布权重走 `deyilv` → 读 `deck`，6 张卡都锁到了；友人卡靠 group buff 闪彩、不看羁绊），但语义上应改成按 `PersonType::Card | ScenarioCard` 遍历。
-  - `features.rs` 的 `person_train_slots` 对分身仍是 last-write one-hot（本文件「NN 特征编码器首版的五处编码缺陷」记为已改 multi-hot，实际是 `slots[idx] = Some(t)` 后写覆盖）。接教师数据前需确认。
+  - ~~`features.rs` 的 `person_train_slots` 对分身仍是 last-write one-hot~~ —— **已修（2026-08-23）**。本文件「NN 特征编码器首版的五处编码缺陷」原记为已改 multi-hot，实际仍是 `slots[idx] = Some(t)` 后写覆盖（Codex 评审独立复现）。已改为 `Vec<[bool; TRAIN_NUM]>` 掩码，cards 段与 persons 段同步改为逐位写标志，维度不变。该文件是我们自己的代码，不涉及上游授权范围。
 
 ---
 
@@ -139,7 +139,7 @@
   5. **Train 阶段 `pending_ramen` 与 `current_ramen` 重复编码**（Codex 提出）：`ground_ramen_effects`（`game.rs:775-778`）设置 `current_ramen` 后不清 `pending_ramen`，`clear_pending()` 要到下一回合 `run_begin`（`game.rs:1109`）才调用。对游戏无害，但编码器把同一个选择编了两遍，其中 pending 已是语义上的残留。
 - **解决方案**：
   1. 卡与人头的对应改为按 `card_id` 双向 `position()` 反查，不再依赖下标相等
-  2. 训练位编码由 one-hot 改 multi-hot（维度不变），正确表达分身
+  2. 训练位编码由 one-hot 改 multi-hot（维度不变），正确表达分身 —— **订正：此条在 `ef99478` 同样未落地**，`person_train_slots` 直到 2026-08-23 才真正改为 multi-hot 掩码
   3. 移除 `current_effect` 的 14 维块
   4. 新增 `regions_ready` 掩码位，未就绪时地区块整体写 0，不查 id 0
   5. Train 阶段只编 `current_ramen`
