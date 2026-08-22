@@ -103,7 +103,7 @@
 ## stable 工具链下 cargo fmt 破坏 Nightly 格式
 
 - **日期**：2026-08-21
-- **状态**：已解决（2026-08-22，钩子自动化 + 全库格式化）
+- **状态**：已解决（2026-08-22，手动执行方案；钩子自动化已撤销）
 - **问题描述**：`rustfmt.toml` 使用 8 个 Nightly-only 选项（`imports_granularity` / `group_imports` / `trailing_comma` / `wrap_comments` 等），在 stable 工具链执行 `cargo fmt` 会静默忽略这些选项，把整个仓库重排成 stable 风格——与 git 历史 `ffddd1a`（应用仓库 rustfmt 格式）的 Nightly 格式不一致，产生大量无关 diff
 - **排查过程**：
   - `rustfmt.toml` 含 `imports_granularity = "Crate"`、`group_imports = "StdExternalCrate"`、`trailing_comma = "Never"` 等 Nightly 特性，stable rustfmt 不支持且无报错（仅 warning）
@@ -112,6 +112,6 @@
   - 2026-08-22 进一步发现：Nightly 为滚动版本，`ffddd1a` 格式化时与当前 nightly（rustfmt 1.10.0-nightly 2026-08-20）规则存在漂移（trailing_comma 去尾逗号、imports 合并、多行表达式压缩等），`cargo +nightly fmt --all -- --check` 报 40 文件 387 处差异
 - **解决方案**：
   1. AGENTS.md 固化规则：项目使用 **Nightly** 格式规则，stable 工具链下**禁止执行 cargo fmt**
-  2. 格式化走 Nightly：`rustup toolchain install nightly --component rustfmt` 后使用 `cargo +nightly fmt`；编译仍用 stable，互不影响
-  3. **钩子自动化（2026-08-22）**：引入 cargo-husky pre-commit 钩子（`.cargo-husky/hooks/pre-commit`，构建时自动分发到 `.git/hooks/`）：有 nightly 工具链时 `cargo +nightly fmt --all -- --check` 强制检查，无 nightly 则跳过不阻塞——从源头防止 stable fmt / 未格式化代码入库；全库已应用当前 nightly 格式（提交 `fd144af`，42 文件）
+  2. **cargo fmt 只能由用户手动执行**（2026-08-22 更新）：AGENTS.md 明确「禁用 cargo fmt」——格式化由用户手动执行（`cargo +nightly fmt --all`），Agent 不执行 fmt，避免强制重新读取代码；编译仍用 stable，互不影响
+  3. **钩子自动化已撤销（2026-08-22 用户决策）**：cargo-husky 依赖、`.cargo-husky/hooks/pre-commit` 与生成的 `.git/hooks/pre-commit` 均已移除，不再自动检查格式——从源头防止 stable fmt 改为**流程约定**（提交前用户手动跑 nightly fmt）；全库已应用当前 nightly 格式（提交 `fd144af`，42 文件），该次格式化保留
 - **备注**：Nightly 为滚动版本，rustfmt 输出偶有细微变化（本次漂移即一例）；如需完全固定可锁定指定日期（如 `nightly-YYYY-MM-DD`）或引入 `rust-toolchain.toml` 固定工具链

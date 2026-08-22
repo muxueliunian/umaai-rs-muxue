@@ -11,6 +11,7 @@
 - **bench 通用卡组构成设施**：bench.rs 新增 `DeckComposition`（5 张普通卡数量分布 + 预设短名，`kind_count`/`name`/`name_zh`/`build_deck`/`make_deck` 一步自动选代表卡生成卡组）+ `PLAYER_BUILDS`（7 种主流玩家 build：speed 3,1,0,0,1 / stamina 2,2,0,0,1 / power_wisdom 0,0,2,0,3 / speed_wisdom 2,1,0,0,2 / wisdom 1,1,0,0,3 / average 1,0,1,1,2 / guts_wisdom 0,0,0,3,2，数据来自玩家经验）；bench_compositions 迁移复用（删本地 Composition/build_deck，101 枚举改用 DeckComposition）；测试 +2（build 形状 / 真实 cardDB 下 7 build 一步生成卡组）
 - **guts_wisdom 删除（用户决策）**：按玩家讨论暂时删除 guts_wisdom build（原为 7 种中的对照项，仅 2 种普通卡、不满足拉面杯「支援卡种类≥4」门槛）；PLAYER_BUILDS 变 6 种，注释保留恢复说明
 - **PLAYER_BUILDS 外置到 bench_config.toml（用户决策）**：`DeckComposition.name` 改为 `String`（支持 serde 解析）；`PLAYER_BUILDS` const 改为 `default_player_builds()`（内置兜底）+ `load_player_builds()`（读取 bench_config.toml 的 `[[player_builds]]` 段，文件缺失/未配置/为空时回退默认，校验名称非空唯一、合计 5 张、单类型 ≤3）；bench_config.toml 新增 6 个 build 段（用户可直接手动调整）；bench.rs 测试重构：默认形状 / 校验拒绝 / 真实配置读取 / 真实 cardDB 生成卡组（4 个）
+- **cargo-husky 钩子撤销（用户决策）+ cargo fmt 手动化**：移除 cargo-husky 依赖（workspace Cargo.toml 注释保留、umasim dev-dependencies 删除、Cargo.lock 清理 7 行）与 `.cargo-husky/hooks/pre-commit`、生成的 `.git/hooks/pre-commit`；AGENTS.md rustfmt 规则改为「禁用 cargo fmt：只能由用户手动执行」（原因：fmt 会强制 Agent 重新读取代码；stable 下会搞乱格式）；issues 的 rustfmt 条目更新为手动执行方案（钩子自动化已撤销，全库格式化 `fd144af` 保留）；编译验证通过（仅既有 unused import 警告）
 
 ## 2026-08-21
 

@@ -61,7 +61,7 @@
 ### 代码质量
 1. **嵌入代码检查**：处理Rust和其他语言（如XML）的嵌入代码时，需要仔细检查，避免出现语法错误
 2. **Trait实现**：工具类方法，如果符合Rust的标准Trait（如`From`，`TryFrom`，`Deref`，`Display`等）应优先实现这些Trait
-3. **rustfmt规则**: 目前项目使用**Nightly**格式规则，如果在**stable**工具链下，禁止执行cargo fmt，会搞乱格式
+3. **禁用cargo fmt**: cargo fmt 命令只能由用户手动执行。原因：（1）cargo fmt会强制Agent重新读取代码（2）项目使用**Nightly**格式规则，在**stable**工具链下会搞乱格式
 
 ## 工具使用
 ### 可在Powershell环境下额外使用的工具
