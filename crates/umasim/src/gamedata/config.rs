@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use anyhow::Result;
+use anyhow::{Result, ensure};
 use log::info;
 use serde::{Deserialize, Serialize};
 
@@ -761,16 +761,34 @@ pub struct OverrideGameConfig {
 }
 
 /// 简化的覆盖配置 - GameConfig部分
+///
+/// 所有字段均为可选覆盖（`None` = 不覆盖 default 值），对应 game_config.toml
+/// 「只写你要改的项」的语义；`deny_unknown_fields` 让拼错/未支持的字段显式报错，
+/// 避免静默忽略。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct OverrideConfig {
-    /// 种马额外属性
-    pub extra_count: Array6,
-    /// 温泉选择是否使用蒙特卡洛
-    pub mcts_selected_onsen: bool,
-    /// 日志级别
-    pub log_level: String,
-    /// 线程数
-    pub num_threads: usize,
+    /// 马娘 ID（可选覆盖）
+    #[serde(default)]
+    pub uma: Option<u32>,
+    /// 卡组（可选覆盖）
+    #[serde(default)]
+    pub cards: Option<[u32; 6]>,
+    /// 种马蓝因子个数（可选覆盖）
+    #[serde(default)]
+    pub blue_count: Option<Array5>,
+    /// 种马额外属性（可选覆盖）
+    #[serde(default)]
+    pub extra_count: Option<Array6>,
+    /// 温泉选择是否使用蒙特卡洛（可选覆盖）
+    #[serde(default)]
+    pub mcts_selected_onsen: Option<bool>,
+    /// 日志级别（可选覆盖）
+    #[serde(default)]
+    pub log_level: Option<String>,
+    /// 线程数（可选覆盖）
+    #[serde(default)]
+    pub num_threads: Option<usize>,
     /// 蒙特卡洛每回合期望得分加成（可选覆盖；Phase 2 步骤 1 引入）
     #[serde(default)]
     pub mcts_turn_bonus: Option<i32>,
@@ -787,21 +805,124 @@ impl OverrideGameConfig {
         let mut ret = game.clone();
 
         ret.onsen_order = self.onsen_order;
-        ret.extra_count = self.config_override.extra_count;
-        ret.log_level = self.config_override.log_level;
-        ret.mcts_selected_onsen = self.config_override.mcts_selected_onsen;
-        ret.mcts.search_n = self.mcts.search_n;
-        ret.mcts.radical_factor_max = self.mcts.radical_factor_max;
-        ret.collector.threads = self.config_override.num_threads;
-        if let Some(v) = self.config_override.mcts_turn_bonus {
+        let o = self.config_override;
+        if let Some(v) = o.uma {
+            ret.uma = v;
+        }
+        if let Some(v) = o.cards {
+            ret.cards = v;
+        }
+        if let Some(v) = o.blue_count {
+            ret.blue_count = v;
+        }
+        if let Some(v) = o.extra_count {
+            ret.extra_count = v;
+        }
+        if let Some(v) = o.log_level {
+            ret.log_level = v;
+        }
+        if let Some(v) = o.mcts_selected_onsen {
+            ret.mcts_selected_onsen = v;
+        }
+        if let Some(v) = o.num_threads {
+            ret.collector.threads = v;
+        }
+        if let Some(v) = o.mcts_turn_bonus {
             ret.mcts_turn_bonus = v;
         }
-        if let Some(v) = self.config_override.pt_favor_rate {
+        if let Some(v) = o.pt_favor_rate {
             ret.pt_favor_rate = v;
         }
-        if let Some(v) = self.config_override.race_grades {
+        if let Some(v) = o.race_grades {
             ret.race_grades = v;
         }
+        ret.mcts.search_n = self.mcts.search_n;
+        ret.mcts.radical_factor_max = self.mcts.radical_factor_max;
         ret
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 构造全 None 的覆盖配置（= 不覆盖任何字段）。
+    fn empty_override() -> OverrideConfig {
+        OverrideConfig {
+            uma: None,
+            cards: None,
+            blue_count: None,
+            extra_count: None,
+            mcts_selected_onsen: None,
+            log_level: None,
+            num_threads: None,
+            mcts_turn_bonus: None,
+            pt_favor_rate: None,
+            race_grades: None
+        }
+    }
+
+    fn wrap(cfg: OverrideConfig) -> OverrideGameConfig {
+        OverrideGameConfig {
+            onsen_order: OnsenOrder::default(),
+            config_override: cfg,
+            mcts: MctsConfig::default()
+        }
+    }
+
+    /// 全 None 不覆盖：merge 后与 default 完全一致。
+    #[test]
+    fn test_override_merge_all_none_keeps_default() -> Result<()> {
+        let base = GameConfig::default_for_init();
+        let merged = wrap(empty_override()).merge(&base);
+        println!(
+            "全 None merge: uma={} cards={:?} blue_count={:?} extra_count={:?}",
+            merged.uma, merged.cards, merged.blue_count, merged.extra_count
+        );
+        ensure!(merged.uma == base.uma, "uma 不应被覆盖");
+        ensure!(merged.cards == base.cards, "cards 不应被覆盖");
+        ensure!(merged.blue_count == base.blue_count, "blue_count 不应被覆盖");
+        ensure!(merged.extra_count == base.extra_count, "extra_count 不应被覆盖");
+        Ok(())
+    }
+
+    /// 部分覆盖：uma/cards/blue_count/extra_count 生效，其余字段保留 default。
+    #[test]
+    fn test_override_merge_partial_overrides() -> Result<()> {
+        let base = GameConfig::default_for_init();
+        let mut o = empty_override();
+        o.uma = Some(100901);
+        o.cards = Some([302424, 302894, 303044, 302924, 303024, 303054]);
+        o.blue_count = Some([15, 0, 0, 0, 3]);
+        o.extra_count = Some([10, 10, 20, 20, 20, 40]);
+        let merged = wrap(o).merge(&base);
+        println!(
+            "部分覆盖 merge: uma={} cards={:?} blue_count={:?} extra_count={:?}",
+            merged.uma, merged.cards, merged.blue_count, merged.extra_count
+        );
+        ensure!(merged.uma == 100901, "uma 应被覆盖为 100901");
+        ensure!(merged.cards[0] == 302424, "cards 应被覆盖");
+        ensure!(merged.blue_count == [15, 0, 0, 0, 3], "blue_count 应被覆盖");
+        ensure!(merged.extra_count == [10, 10, 20, 20, 20, 40], "extra_count 应被覆盖");
+        // 未覆盖字段保留 default
+        ensure!(merged.scenario == base.scenario, "scenario 应保留 default");
+        Ok(())
+    }
+
+    /// deny_unknown_fields：未知字段解析显式报错，不再静默忽略。
+    #[test]
+    fn test_override_config_denies_unknown_fields() -> Result<()> {
+        let text = r#"
+[config_override]
+uma = 100901
+bogus_field = 1
+
+[onsen_order]
+year1 = [1, 2, 3]
+"#;
+        let result: Result<OverrideGameConfig, _> = toml::from_str(text);
+        println!("未知字段解析结果 = {}", result.is_err());
+        ensure!(result.is_err(), "未知字段应报错而非静默忽略");
+        Ok(())
     }
 }

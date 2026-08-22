@@ -13,6 +13,7 @@
 - **PLAYER_BUILDS 外置到 bench_config.toml（用户决策）**：`DeckComposition.name` 改为 `String`（支持 serde 解析）；`PLAYER_BUILDS` const 改为 `default_player_builds()`（内置兜底）+ `load_player_builds()`（读取 bench_config.toml 的 `[[player_builds]]` 段，文件缺失/未配置/为空时回退默认，校验名称非空唯一、合计 5 张、单类型 ≤3）；bench_config.toml 新增 6 个 build 段（用户可直接手动调整）；bench.rs 测试重构：默认形状 / 校验拒绝 / 真实配置读取 / 真实 cardDB 生成卡组（4 个）
 - **cargo-husky 钩子撤销（用户决策）+ cargo fmt 手动化**：移除 cargo-husky 依赖（workspace Cargo.toml 注释保留、umasim dev-dependencies 删除、Cargo.lock 清理 7 行）与 `.cargo-husky/hooks/pre-commit`、生成的 `.git/hooks/pre-commit`；AGENTS.md rustfmt 规则改为「禁用 cargo fmt：只能由用户手动执行」（原因：fmt 会强制 Agent 重新读取代码；stable 下会搞乱格式）；issues 的 rustfmt 条目更新为手动执行方案（钩子自动化已撤销，全库格式化 `fd144af` 保留）；编译验证通过（仅既有 unused import 警告）
 - **player_builds 配置形态改为 Map（用户决策）**：`[player_builds] name = [counts]` 一行一个 build（key 即 build 名，TOML 天然保证非空唯一，删除校验中的名称检查）；indexmap 提升为直接依赖（serde feature，原为 toml 传递依赖，无新增下载）；toml 启用 `preserve_order` feature 保证声明序（否则 toml 内部 BTreeMap 中转会打乱顺序）；移除内置默认 build（`default_player_builds`）——bench_config.toml 为唯一来源，未配置 `player_builds` 时直接报错；bench_config.toml 相应改造；测试调整：校验用例精简 + 新增保序性测试
+- **game_config.toml 加载修复**：修复用户配置路径错误（此前从未被加载、一直走兜底默认）；`[config_override]` 全字段可选覆盖（新增 uma/cards/blue_count）+ 未知字段显式报错；测试 +4，issues 记录
 
 ## 2026-08-21
 

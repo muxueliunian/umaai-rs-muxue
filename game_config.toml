@@ -1,16 +1,23 @@
 # 用户覆盖配置（Phase 2 步骤 2+3 改造）
 # 这里只写你要改的项；未列出则使用 default_config.toml 的开发默认。
+# [config_override] 段字段均为可选覆盖（None = 不覆盖 default）；未知字段会解析报错（防拼错）。
 # 完整段说明见 default_config.toml 顶部"配置段"块：simulation / search / policy / output / dev
 
 # ---------- 常用区：[config_override] 段 ----------
 [config_override]
+uma = 101901
+cards = [302424, 302894, 303044, 302924, 303024, 303054]
+blue_count = [15, 0, 0, 0, 3]
 log_level = "info"
 
 # 线程数（建议 = CPU 核心数；特定处理器如 Intel 14900k 若崩溃/蓝屏可改为 8）
 num_threads = 24
 
 # 种马额外属性 [速度, 耐力, 力量, 根性, 智力, 技能点]
-extra_count = [10, 0, 0, 20, 20, 40]
+extra_count = [10, 10, 20, 20, 20, 40]
+
+# 温泉选择是否允许蒙特卡洛自由发挥（安卓马建议 false 减少世界线；须写在本段内才生效）
+mcts_selected_onsen = true
 
 # ---------- 常用区：[mcts] 段（覆盖默认搜索参数）----------
 [mcts]
@@ -31,6 +38,3 @@ radical_factor_max = 1.4
 year1 = [1, 3, 2]
 year2 = [7, 5, 4, 2]
 year3 = [8, 9, 4, 2, 6]
-
-# 温泉选择是否允许蒙特卡洛自由发挥（安卓马建议 false 减少世界线）
-mcts_selected_onsen = true

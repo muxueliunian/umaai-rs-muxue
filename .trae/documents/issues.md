@@ -115,3 +115,21 @@
   2. **cargo fmt 只能由用户手动执行**（2026-08-22 更新）：AGENTS.md 明确「禁用 cargo fmt」——格式化由用户手动执行（`cargo +nightly fmt --all`），Agent 不执行 fmt，避免强制重新读取代码；编译仍用 stable，互不影响
   3. **钩子自动化已撤销（2026-08-22 用户决策）**：cargo-husky 依赖、`.cargo-husky/hooks/pre-commit` 与生成的 `.git/hooks/pre-commit` 均已移除，不再自动检查格式——从源头防止 stable fmt 改为**流程约定**（提交前用户手动跑 nightly fmt）；全库已应用当前 nightly 格式（提交 `fd144af`，42 文件），该次格式化保留
 - **备注**：Nightly 为滚动版本，rustfmt 输出偶有细微变化（本次漂移即一例）；如需完全固定可锁定指定日期（如 `nightly-YYYY-MM-DD`）或引入 `rust-toolchain.toml` 固定工具链
+
+## game_config.toml 从未被加载（路径 bug）+ [config_override] 字段不合并
+
+- **日期**：2026-08-22
+- **状态**：已解决（2026-08-22）
+- **问题描述**：用户在 `game_config.toml` 修改 `uma`/`cards`/`extra_count` 后实际不生效——`load_game_config` 合并结果仍是 default 值（`uma=102601`、`extra_count=[0;6]`），用户配置形同虚设
+- **排查过程**：
+  - 临时诊断测试（load_game_config 打印合并结果）发现 `extra_count=[0;6]` ——这正是「用户配置不存在」兜底分支的默认值，证明走了兜底而非正常解析
+  - 根因一（路径）：`USER_CONFIG_REL_PATH = "../game_config.toml"`（相对 `gamedata/` 的语义，Phase 2 步骤 4 引入），但 `resolve_user_config_path` 用 `current_dir().join(..)` 拼接，解析为「工作目录上一级」——文件不存在 → `cfg_path.exists()` 为 false → 永远走兜底，game_config.toml 从未被解析
+  - 根因二（字段）：`OverrideConfig` 只有 `extra_count` 等 7 个字段且均必填（无 `serde(default)`），`uma`/`cards`/`blue_count` 不在其中——即便路径修复，这些字段也会被 serde 静默忽略；且 merge 无条件覆盖（缺写时用兜底值覆盖 default，与「只写要改的项」注释语义冲突）
+  - 兜底机制（用户配置不存在时静默回退）掩盖了此 bug：程序一直正常跑，只是配置从未生效
+- **解决方案**：
+  1. 路径修复：`USER_CONFIG_REL_PATH` 改为 `"game_config.toml"`（工作目录根，与注释语义一致）
+  2. `OverrideConfig` 全字段 `Option` 化（`#[serde(default)]`，`None` = 不覆盖）：新增 `uma`/`cards`/`blue_count`，现有 `extra_count`/`mcts_selected_onsen`/`log_level`/`num_threads` 改可选；merge 全部 `if let Some` 覆盖——真正实现「只写你要改的项」
+  3. 加固：`#[serde(deny_unknown_fields)]`——拼错/未支持的字段显式报错，杜绝静默忽略
+  4. `game_config.toml`：顶层 `mcts_selected_onsen`（原在遗留段，同样静默失效）移入 `[config_override]` 段；注释更新可选覆盖语义
+  5. 测试 +4：merge 全 None 不覆盖 / 部分覆盖生效 / deny_unknown_fields 报错 / 用户配置路径定位 + 真实文件合并集成验证（`uma=100901` 生效）
+- **备注**：`ramen_region_strategy` / `ramen_region_fixed`（game_config.toml 注释中的「顶层覆盖」）同样不在 `OverrideGameConfig` 结构内，目前无法通过 game_config.toml 覆盖（未启用，暂缓处理）；`OverrideGameConfig` 顶层未知字段（如遗留的顶层 `mcts_selected_onsen` 写法）仍静默忽略，如需可后续加 deny

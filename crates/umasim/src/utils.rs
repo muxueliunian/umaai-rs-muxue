@@ -3,7 +3,7 @@ use std::io::Write;
 #[cfg(feature = "cli")]
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Result, anyhow, ensure};
 use colored::Colorize;
 #[cfg(feature = "cli")]
 use comfy_table::Table;
@@ -313,7 +313,7 @@ pub fn split_status(status_pt: &Array6) -> Result<(&Array5, i32)> {
 /// 默认配置（开发者默认值）相对于 data 根目录的相对路径
 pub const DEFAULT_CONFIG_REL_PATH: &str = "default_config.toml";
 /// 用户配置（覆盖层）相对于工作目录的相对路径
-pub const USER_CONFIG_REL_PATH: &str = "../game_config.toml";
+pub const USER_CONFIG_REL_PATH: &str = "game_config.toml";
 /// data 根目录（gamedata/）相对于工作目录的相对路径
 pub const DATA_DIR_REL_PATH: &str = "gamedata";
 /// 环境变量名：覆盖 data 根目录的绝对路径
@@ -393,10 +393,13 @@ pub fn load_game_config() -> Result<GameConfig> {
         OverrideGameConfig {
             onsen_order: OnsenOrder::default(),
             config_override: OverrideConfig {
-                extra_count: [0; 6],
-                mcts_selected_onsen: false,
-                log_level: "info".to_string(), // 兜底，merge 后会被 default 覆盖
-                num_threads: 0,
+                uma: None,
+                cards: None,
+                blue_count: None,
+                extra_count: None,
+                mcts_selected_onsen: None,
+                log_level: None,
+                num_threads: None,
                 mcts_turn_bonus: None,
                 pt_favor_rate: None,
                 race_grades: None
@@ -454,5 +457,35 @@ mod tests {
         let p = resolve_default_config_path();
         // 默认相对路径应以 "gamedata/default_config.toml" 结尾
         assert!(p.ends_with("default_config.toml"));
+    }
+
+    /// 用户配置路径应定位到工作目录根下的 game_config.toml（曾误写为
+    /// `../game_config.toml` 导致用户配置从未被加载）。
+    #[test]
+    fn test_resolve_user_config_path_points_to_workspace_root() {
+        let p = resolve_user_config_path();
+        println!("用户配置路径: {}", p.display());
+        assert!(p.ends_with("game_config.toml"));
+        assert!(!p.to_string_lossy().contains(".."), "不应含上级目录跳转: {}", p.display());
+    }
+
+    /// 集成：真实 game_config.toml 的 [config_override] 段应被合并（uma/cards/extra_count）。
+    ///
+    /// 依赖当前 game_config.toml 内容（uma=100901、cards 六张、extra_count 非零）。
+    #[test]
+    fn test_load_game_config_merges_user_overrides() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(&workspace_root)?;
+        let cfg = load_game_config()?;
+        println!(
+            "合并结果: uma={} cards={:?} blue_count={:?} extra_count={:?}",
+            cfg.uma, cfg.cards, cfg.blue_count, cfg.extra_count
+        );
+        ensure!(cfg.uma == 100901, "game_config.toml 的 uma 应被合并（当前 100901）");
+        ensure!(
+            cfg.extra_count != [0; 6],
+            "extra_count 不应为兜底默认值（用户配置应被加载）"
+        );
+        Ok(())
     }
 }
