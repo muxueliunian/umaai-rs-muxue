@@ -3,6 +3,7 @@
 本文件用于简要记录每次任务的修改内容。
 
 ## 2026-08-22
+- **第三方库引用规范化**：`flat_search.rs` / `sampler.rs` 中 `anyhow::bail!` / `anyhow::ensure!` / `anyhow::anyhow!` 的全名引用改为 `use` 导入后直接调用
 - **支援卡类型注释订正**：`SupportCardData::card_type` 原注释写作「5团队6友人」，与 `cardDB.json` 实测相反（30305[友]=5，团队卡=6）
 
 - **搜索层泛型化（NN 管线 Phase 1.4，Phase 1 完成）**：新增 `search/searchable.rs` 的 `FlatSearchGame` trait（关联 rollout 训练员、CRN 阶段编号、`fork_for_rollout` 强制「克隆+重置内部 RNG」不可分割）；`FlatSearch<G>` 与 `SearchOutput<A>` 泛型化并保留默认类型参数，活跃入口零改动；采用「公共内核 + rollout 闭包」而非 trait 钩子，规避泛型 impl 方法解析导致温泉特判静默失效的陷阱；拉面根节点搜索跑通且 1/8/24 线程逐位可复现；拉面 CRN 重测 1.24x→3.73x（略优于温泉 3.65x）

@@ -5,7 +5,7 @@
 //! - 均匀分配：每个动作平均分配搜索次数（并行化）
 //! - UCB 分配：根据 UCB 公式动态分配搜索资源（C++ UmaAi 风格）
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail, ensure};
 use log::{debug, warn};
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
@@ -168,9 +168,9 @@ where
         F: Fn(&G, &G::Action, u64) -> Result<SearchScore> + Sync
     {
         if actions.is_empty() {
-            anyhow::bail!("没有可用动作");
+            bail!("没有可用动作");
         }
-        anyhow::ensure!(
+        ensure!(
             G::SUPPORTS_TRUNCATED_LEAF || self.config.max_depth == 0,
             "本剧本没有 leaf 估值器，max_depth 必须为 0（当前 {}）",
             self.config.max_depth
@@ -201,7 +201,7 @@ where
         // 某候选一次都没跑成功时其统计全是空的，继续用下去等于拿垃圾数据排序
         for (i, (result, _)) in action_results.iter().enumerate() {
             if result.count() == 0 {
-                anyhow::bail!("候选动作 {i} 的全部 rollout 均失败，搜索结果不可用");
+                bail!("候选动作 {i} 的全部 rollout 均失败，搜索结果不可用");
             }
         }
 
@@ -341,7 +341,7 @@ where
         let num_actions = actions.len();
         let mut action_results: Vec<(ActionResult, ActionResult)> = vec![Default::default(); num_actions];
         let group_size = self.config.search_group_size;
-        anyhow::ensure!(group_size > 0, "search_group_size 不能为 0（UCB 分配会死循环）");
+        ensure!(group_size > 0, "search_group_size 不能为 0（UCB 分配会死循环）");
         let use_parallel = self.use_parallel_simulation();
 
         // 各候选**已计划**的 rollout 次数（≠ 已成功次数）
@@ -834,7 +834,7 @@ mod tests {
             self.captured
                 .borrow_mut()
                 .take()
-                .ok_or_else(|| anyhow::anyhow!("整局结束仍未遇到多候选决策点"))
+                .ok_or_else(|| anyhow!("整局结束仍未遇到多候选决策点"))
         }
     }
 
@@ -912,7 +912,7 @@ mod tests {
         cap.got
             .borrow_mut()
             .take()
-            .ok_or_else(|| anyhow::anyhow!("整局结束仍未遇到多候选决策点"))
+            .ok_or_else(|| anyhow!("整局结束仍未遇到多候选决策点"))
     }
 
     /// 样本均值
@@ -1118,7 +1118,7 @@ mod tests {
         cap.got
             .borrow_mut()
             .take()
-            .ok_or_else(|| anyhow::anyhow!("整局结束仍未遇到多候选决策点"))
+            .ok_or_else(|| anyhow!("整局结束仍未遇到多候选决策点"))
     }
 
     /// 跑一次拉面根节点搜索，返回各候选统计
