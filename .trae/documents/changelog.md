@@ -8,11 +8,16 @@
 - **搜索层两处缺陷修复**：① NN leaf 微批路径（`simulate_until_terminal_or_leaf`）此前未按阶段重播种，导致 `rollout_batch_size > 1` 时 CRN 开关实际不生效，改为与 `simulate` 一致接收 rollout 种子；② UCB 终止判据由成功样本数改为已计划次数——rollout 稳定失败时成功数永远达不到 `search_n`，会死循环且触及不到「零样本」检查；③ 补 UCB 路径回归（可复现性）与候选顺序敏感性诊断（实测该根局面顺序无关）
 - **搜索层真 CRN（NN 管线 Phase 1.3）**：`RolloutSeeds::stage_seed` 支持按 `(回合, 阶段)` 重新派生随机流，`simulate` 改吃 rollout 种子并在每个阶段边界重播种，由 `SearchConfig::crn_stage_reseed` 开关控制（**默认开启**，可经 `[mcts] crn_stage_reseed` 从 toml 关闭）；新增配对相关实测（onsen 7 候选 × 200 rollout）：仅共享起始种子 corr 0.18 / 等效 1.31x，开启按阶段重播种 corr 0.69 / 等效 3.65x，证实朴素共享种子几乎无收益
 - **搜索层可复现（NN 管线 Phase 1.1/1.2）**：新增 `search/seeds.rs` 的 `RolloutSeeds`（rollout 种子按序号派生，候选索引不参与，为后续 CRN 留位），移除 `flat_search` 全部 8 处 `from_os_rng`，改为按工作项播种；`simulate_many` 改吃种子表 + 偏移并返回失败计数，UCB 按「已计划次数」记账避免失败导致候选间种子错位；rollout 失败由静默丢弃改为计数告警（全失败才报错），补 `search_group_size > 0` 校验；`flat_search` 新增可复现性回归测试（同种子一致 / 换种子生效 / 候选顺序无关），实测 1~24 线程结果逐位相同
-- **自选比赛守门测试补充**：小栗帽两段区间专项 + 无比赛候选时不 panic
+- **诀窍槽 NPC 数量修正（按训练位置实际分配）**：`fill_feeling_gauge`（生效层）此前硬编码 npc_count=5，改为与显示层一致；新增集成测试验证不同 NPC 数（2/4）的加成差异
+- **删除过时测试**：`test_load_game_config_merges_user_overrides` 按用户确认删除
+- **自选比赛守门修复（等级过滤 + 摆烂 + 达标后停止）**：①守门与软倾向仅在本回合等级满足（mask 内）时强制/加分；②剩余有效回合少于缺口（打完也不够）判定为摆烂
+- **决策日志 breakdown 接入**：`RamenPolicy` 拆出 `decide_*`（返回选中索引 + 各候选评分分解），守门触发时记录详细原因（体力/心情/自选比赛缺口与等级要求）；`Trainer` 新增 `last_breakdown` 默认方法，`RamenHandwrittenTrainer` 缓存、`LoggingTrainer` 提取进 CSV breakdown 列（此前为预留空列）
+- **`RamenHandwrittenTrainer` 的 breakdown 缓存改 `Mutex`**：上游新增的 `RefCell<Option<String>>` 使其失去 `Sync`，而搜索层 rayon 跨线程共享同一个 rollout 决策器（`FlatSearch<RamenGame>` 因此整体不再 `Sync`，编译失败）；改 `Mutex` 恢复，锁中毒时静默跳过调试文本而非中断育成
 - **cargo-husky 钩子引入并撤销（用户决策）+ cargo fmt 手动化**：pre-commit rustfmt 检查钩子（nightly 强制 / stable 跳过）引入后，因 fmt 改由用户手动执行而移除；AGENTS.md 新增「禁用 cargo fmt」规则；全库应用当前 nightly rustfmt 格式
 - **bench 玩家 build 预置**：`DeckComposition` + `PLAYER_BUILDS`（7 种主流玩家 build，guts_wisdom 按玩家讨论删除）外置到 bench_config.toml `[player_builds]`（Map 形态一行一个，IndexMap 保声明序，无内置默认、未配置报错）
 - **game_config.toml 加载修复**：修复用户配置路径错误（此前从未被加载、一直走兜底默认）；`[config_override]` 全字段可选覆盖（新增 uma/cards/blue_count）+ 未知字段显式报错
 - **issues 更新**：constants 排名数据（补齐至 LS24）与 rustfmt 条目状态更新
+- **bench_base 按玩家 build 分组**：读取 `[player_builds]` 遍历分组跑批（每组 runs 局），开头打印马娘名与各 build 卡组的卡名；结果 CSV 合并单文件加 build 列，决策日志文件名含 build 前缀；`cards` 字段废弃、新增 `friend`（友人卡 idrank）——当前仅拉面杯生效（bench 设施绑定 RamenGame 且剧本数据无友人卡字段），跨剧本泛化留待重构
 
 ## 2026-08-21
 

@@ -6,6 +6,11 @@
 //!
 //! 与旧 `HandwrittenTrainer`（温泉杯）无架构耦合：本实现直接在拉面杯规则层
 //! （`RamenGame` / `RamenAction` / `policy.rs`）上重新实现。
+//!
+//! 每次决策后把各候选的评分分解（`RamenPolicyOutput::breakdown`）缓存，
+//! 供 `LoggingTrainer` 写入决策日志 breakdown 列（调参用，见 `Trainer::last_breakdown`）。
+
+use std::sync::Mutex;
 
 use anyhow::Result;
 use log::info;
@@ -15,7 +20,7 @@ use crate::{
     game::{
         Game,
         Trainer,
-        ramen::{RamenGame, RamenStage, policy::RamenPolicy}
+        ramen::{RamenGame, RamenStage, policy::RamenPolicy, policy::RamenPolicyOutput}
     },
     gamedata::{EventChoice, EventData}
 };
@@ -25,7 +30,13 @@ pub struct RamenHandwrittenTrainer {
     /// 策略核心（参数化配置 + 各阶段打分）
     pub policy: RamenPolicy,
     /// 是否输出每步决策日志（整局跑批时建议关闭）
-    pub verbose: bool
+    pub verbose: bool,
+    /// 最近一次决策的评分分解文本（供 LoggingTrainer 提取进决策日志）
+    ///
+    /// 用 `Mutex` 而非 `RefCell`：搜索层要求 `Trainer: Sync`（rayon 跨线程共享同一个
+    /// rollout 决策器），`RefCell` 会让整个 `FlatSearch<RamenGame>` 失去 `Sync`。
+    /// 单局日志场景无竞争，加锁开销可忽略。
+    last_breakdown: Mutex<Option<String>>
 }
 
 impl RamenHandwrittenTrainer {
@@ -33,13 +44,18 @@ impl RamenHandwrittenTrainer {
     pub fn new() -> Self {
         Self {
             policy: RamenPolicy::default(),
-            verbose: false
+            verbose: false,
+            last_breakdown: Mutex::new(None)
         }
     }
 
     /// 使用指定策略核心创建
     pub fn with_policy(policy: RamenPolicy) -> Self {
-        Self { policy, verbose: false }
+        Self {
+            policy,
+            verbose: false,
+            last_breakdown: Mutex::new(None)
+        }
     }
 
     /// 速度特化配置
@@ -51,6 +67,20 @@ impl RamenHandwrittenTrainer {
     pub fn verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
         self
+    }
+
+    /// 缓存本次决策的评分分解（各候选 `score + reason` 摘要）
+    fn stash_breakdown(&self, outputs: &[RamenPolicyOutput]) {
+        let text = outputs
+            .iter()
+            .enumerate()
+            .map(|(i, out)| format!("#{i} {:.0}[{}]", out.score, out.reason))
+            .collect::<Vec<_>>()
+            .join(" | ");
+        // 锁中毒说明别处 panic 过；此处只是调试文本，静默跳过而非把育成流程一起带崩
+        if let Ok(mut slot) = self.last_breakdown.lock() {
+            *slot = Some(text);
+        }
     }
 }
 
@@ -66,12 +96,15 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     ) -> Result<usize> {
         // 单个候选直接返回（无选择空间）
         if actions.len() <= 1 {
+            if let Ok(mut slot) = self.last_breakdown.lock() {
+                *slot = Some(format!("仅1候选: {}", actions[0]));
+            }
             return Ok(0);
         }
-        let idx = match game.stage {
-            RamenStage::RamenSelect => self.policy.select_ramen(game, actions)?,
-            RamenStage::SpecialSelect => self.policy.select_special(game, actions)?,
-            RamenStage::Train => self.policy.select_train(game, actions)?,
+        let (idx, outputs) = match game.stage {
+            RamenStage::RamenSelect => self.policy.decide_ramen(game, actions)?,
+            RamenStage::SpecialSelect => self.policy.decide_special(game, actions)?,
+            RamenStage::Train => self.policy.decide_train(game, actions)?,
             // 地区选择：第 1/2/3 年分别在 turn 2/23/47 触发（第 3 年 fixed 策略不走 trainer）
             RamenStage::RegionSelect => {
                 let year_idx = match game.turn() {
@@ -80,11 +113,12 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
                     47 => 2,
                     _ => 0
                 };
-                self.policy.select_region(game, year_idx, actions)?
+                self.policy.decide_region(game, year_idx, actions)?
             }
             // 其他阶段（Begin/Distribute/AfterTrain 等）不应有多个候选
-            _ => 0
+            _ => (0, vec![])
         };
+        self.stash_breakdown(&outputs);
         if self.verbose {
             info!(
                 "[手写][回合 {}] 阶段 {:?} 选择: {}",
@@ -97,7 +131,8 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     }
 
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
-        let idx = self.policy.select_event(game, choices)?;
+        let (idx, outputs) = self.policy.decide_event(game, choices)?;
+        self.stash_breakdown(&outputs);
         if self.verbose {
             info!("[手写][回合 {}] 事件选择: {}", game.turn(), idx + 1);
         }
@@ -107,11 +142,16 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     fn select_event_choice(
         &self, game: &RamenGame, _event: &EventData, choices: &[Vec<EventChoice>], _rng: &mut StdRng
     ) -> Result<usize> {
-        let idx = self.policy.select_event(game, choices)?;
+        let (idx, outputs) = self.policy.decide_event(game, choices)?;
+        self.stash_breakdown(&outputs);
         if self.verbose {
             info!("[手写][回合 {}] 事件选择: {}", game.turn(), idx + 1);
         }
         Ok(idx)
+    }
+
+    fn last_breakdown(&self) -> Option<String> {
+        self.last_breakdown.lock().ok().and_then(|slot| slot.clone())
     }
 }
 #[cfg(test)]

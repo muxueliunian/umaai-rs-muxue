@@ -3,17 +3,18 @@
 # 独立于游戏配置 game_config.toml：本文件固定批量模拟与基线输出参数，
 # 不参与游戏运行时配置。字段含义：
 #
-#   uma / cards          马娘与卡组（默认与 default_config.toml 的 simulation 段一致）
+#   uma                 马娘 ID
+#   friend              固定友人卡 idrank（build 卡组生成用）
 #   blue_count / extra_count  继承因子（InheritInfo）
-#   runs                 批量局数
+#   runs                 每个 build 的批量局数
 #   seed                 基础种子（第 i 局 = seed + i）
 #   out_dir              输出目录（相对 workspace 根）
 #   decision_log         是否落盘决策日志（rollout 海量场景默认关闭）
 #
 # CLI 参数可覆盖同名字段：--runs N --seed S --log（强制开启）--out DIR
 
-uma = 101901
-cards = [302424, 302894, 303044, 302924, 303024, 303054]
+uma = 102601
+friend = 303054
 blue_count = [15, 0, 0, 0, 3]
 extra_count = [10, 10, 20, 20, 20, 40]
 runs = 20

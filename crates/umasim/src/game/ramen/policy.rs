@@ -195,8 +195,11 @@ impl RamenPolicy {
 
     // ========== 阶段选择入口（确定性 argmax）==========
 
-    /// Train 阶段：守门（生病/体力/心情）→ 否则按收益打分选最优
-    pub fn select_train(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<usize> {
+    /// Train 阶段决策：守门（自选比赛/生病/体力/心情）→ 否则按收益打分选最优
+    ///
+    /// 返回 `(选中索引, 各候选评分分解)`——评分供决策日志 breakdown 列（调参用）；
+    /// 守门触发时评分列表为单元素（记录守门原因），不重复打分。
+    pub fn decide_train(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         if actions.is_empty() {
             anyhow::bail!("Train 阶段候选为空");
         }
@@ -205,7 +208,14 @@ impl RamenPolicy {
 
         // 守门 0：自选比赛达标（优先于一切——不达标直接育成失败）
         if let Some(idx) = self.free_race_gate(game, actions) {
-            return Ok(idx);
+            return Ok((
+                idx,
+                vec![RamenPolicyOutput {
+                    score: f32::MAX,
+                    reason: format!("守门: {}", self.free_race_gate_reason(game)),
+                    ..Default::default()
+                }],
+            ));
         }
         // 守门 1：生病 → 治病（夏合宿无治病候选，休息自动治病）
         if uma.flags.ill || uma.flags.bad_trainer {
@@ -213,18 +223,30 @@ impl RamenPolicy {
                 .iter()
                 .position(|a| a.operation == Operation::Clinic && !is_xiahesu)
             {
-                return Ok(idx);
+                return Ok((idx, vec![RamenPolicyOutput {
+                    score: f32::MAX,
+                    reason: "守门: 生病治病".to_string(),
+                    ..Default::default()
+                }]));
             }
             if is_xiahesu {
                 if let Some(idx) = actions.iter().position(|a| a.operation == Operation::Rest) {
-                    return Ok(idx);
+                    return Ok((idx, vec![RamenPolicyOutput {
+                        score: f32::MAX,
+                        reason: "守门: 夏合宿休息(自动治病)".to_string(),
+                        ..Default::default()
+                    }]));
                 }
             }
         }
         // 守门 2：体力低 → 休息（防失败率崩盘；优先于心情、训练）
         if uma.vital < self.config.vital_rest {
             if let Some(idx) = actions.iter().position(|a| a.operation == Operation::Rest) {
-                return Ok(idx);
+                return Ok((idx, vec![RamenPolicyOutput {
+                    score: f32::MAX,
+                    reason: format!("守门: 体力{}<{}休息", uma.vital, self.config.vital_rest),
+                    ..Default::default()
+                }]));
             }
         }
         // 守门 3：心情低 → 外出（回干劲）
@@ -233,20 +255,37 @@ impl RamenPolicy {
                 .iter()
                 .position(|a| matches!(a.operation, Operation::NormalOuting | Operation::FriendOuting))
             {
-                return Ok(idx);
+                return Ok((idx, vec![RamenPolicyOutput {
+                    score: f32::MAX,
+                    reason: format!("守门: 心情{}<{}外出", uma.motivation, self.config.motivation_outing),
+                    ..Default::default()
+                }]));
             }
         }
 
         // 打分选择
+        let scores = self.score_train_actions(game, actions)?;
+        Ok((argmax_index(&scores), scores))
+    }
+
+    /// 对所有 Train 阶段候选打分（守门通过后调用）
+    pub fn score_train_actions(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<Vec<RamenPolicyOutput>> {
         let mut scores: Vec<RamenPolicyOutput> = Vec::with_capacity(actions.len());
         for a in actions {
             scores.push(self.score_train_action(game, a)?);
         }
-        Ok(argmax_index(&scores))
+        Ok(scores)
+    }
+
+    /// Train 阶段：守门（生病/体力/心情）→ 否则按收益打分选最优（仅索引）
+    pub fn select_train(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<usize> {
+        Ok(self.decide_train(game, actions)?.0)
     }
 
     /// RamenSelect 阶段：吃面收益（PT + 地区效果）与不吃面比较，贪心
-    pub fn select_ramen(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<usize> {
+    ///
+    /// 返回 `(选中索引, 各候选评分分解)`。
+    pub fn decide_ramen(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         if actions.is_empty() {
             anyhow::bail!("RamenSelect 阶段候选为空");
         }
@@ -255,12 +294,19 @@ impl RamenPolicy {
         for a in actions {
             scores.push(self.score_ramen_action(game, a)?);
         }
-        Ok(argmax_index(&scores))
+        Ok((argmax_index(&scores), scores))
+    }
+
+    /// RamenSelect 阶段（仅索引）
+    pub fn select_ramen(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<usize> {
+        Ok(self.decide_ramen(game, actions)?.0)
     }
 
     /// SpecialSelect 阶段：最省隐藏风味（保留库存）；候选已按 sum(t) 升序，
     /// 这里显式按 -sum(targets) 打分，不依赖排序保证
-    pub fn select_special(&self, _game: &RamenGame, actions: &[RamenAction]) -> Result<usize> {
+    pub fn decide_special(
+        &self, _game: &RamenGame, actions: &[RamenAction]
+    ) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         if actions.is_empty() {
             anyhow::bail!("SpecialSelect 阶段候选为空");
         }
@@ -275,11 +321,18 @@ impl RamenPolicy {
             out.reason = format!("隐藏风味消耗 {used}");
             scores.push(out);
         }
-        Ok(argmax_index(&scores))
+        Ok((argmax_index(&scores), scores))
+    }
+
+    /// SpecialSelect 阶段（仅索引）
+    pub fn select_special(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<usize> {
+        Ok(self.decide_special(game, actions)?.0)
     }
 
     /// RegionSelect 阶段：按地区静态价值打分选组合（含第 3 年 120 组合全枚举，O(360) 便宜）
-    pub fn select_region(&self, game: &RamenGame, _year_idx: usize, actions: &[RamenAction]) -> Result<usize> {
+    pub fn decide_region(
+        &self, game: &RamenGame, _year_idx: usize, actions: &[RamenAction]
+    ) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         if actions.is_empty() {
             anyhow::bail!("RegionSelect 阶段候选为空");
         }
@@ -295,11 +348,16 @@ impl RamenPolicy {
             out.reason = format!("{combo:?}");
             scores.push(out);
         }
-        Ok(argmax_index(&scores))
+        Ok((argmax_index(&scores), scores))
     }
 
-    /// 事件选项打分
-    pub fn select_event(&self, game: &RamenGame, choices: &[Vec<EventChoice>]) -> Result<usize> {
+    /// RegionSelect 阶段（仅索引）
+    pub fn select_region(&self, game: &RamenGame, year_idx: usize, actions: &[RamenAction]) -> Result<usize> {
+        Ok(self.decide_region(game, year_idx, actions)?.0)
+    }
+
+    /// 事件选项打分（返回各候选评分分解）
+    pub fn decide_event(&self, game: &RamenGame, choices: &[Vec<EventChoice>]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         if choices.is_empty() {
             anyhow::bail!("事件候选为空");
         }
@@ -311,7 +369,12 @@ impl RamenPolicy {
             }
             scores.push(out);
         }
-        Ok(argmax_index(&scores))
+        Ok((argmax_index(&scores), scores))
+    }
+
+    /// 事件选项打分（仅索引）
+    pub fn select_event(&self, game: &RamenGame, choices: &[Vec<EventChoice>]) -> Result<usize> {
+        Ok(self.decide_event(game, choices)?.0)
     }
 
     // ========== 自选比赛（free_race）==========
@@ -320,29 +383,80 @@ impl RamenPolicy {
     ///
     /// 自选比赛不达标会在 `BaseGame::check_free_race` 判定育成失败，损失远大于任何一次训练，
     /// 因此该守门排在生病/体力/心情之前。返回 `None` 表示无需干预（无要求 / 已达标 / 仍宽裕 /
-    /// 本回合不可自选比赛）。
+    /// 本回合等级不满足 / 剩余有效回合不足（摆烂））。
+    ///
+    /// 等级语义：`free.mask` 已按 `race_grades[i] <= grade` 过滤（grade=2 表示 G2 及以上，
+    /// G3 不计数），见 [`FreeRaceData::update_turn_mask`](crate::gamedata::FreeRaceData::update_turn_mask)。
+    /// 当前回合若不在 mask 内（等级不满足），打了也不计入达标——强制无意义，不干预；
+    /// 剩余有效回合少于缺口（即使全部打完也补不齐，摆烂）时同样不强制，
+    /// 由正常打分决策并记录原因（`free_race_gate_reason` 进决策日志 breakdown）。
     fn free_race_gate(&self, game: &RamenGame, actions: &[RamenAction]) -> Option<usize> {
         let free = game.uma.find_free_race(game.turn())?;
         let need = free.count.saturating_sub(game.uma.count_free_race(free));
+        // 达标后直到区间结束不再干预（软倾向同理由 `score_race` 降级为普通比赛分）
         if need == 0 {
             return None;
         }
-        if remaining_race_slots(game.turn(), free) > need + self.config.race_gate_slack {
+        let remain = remaining_race_slots(game.turn(), free);
+        // 摆烂：剩余有效回合少于缺口，打完也补不齐 → 不再强制（原因进决策日志）
+        if remain < need {
+            return None;
+        }
+        if remain > need + self.config.race_gate_slack {
+            return None;
+        }
+        // 本回合等级不满足：打了不计数，不强制（留给后续有效回合）
+        if !race_turn_qualified(game.turn(), free) {
             return None;
         }
         actions.iter().position(|a| a.operation == Operation::Race)
     }
 
+    /// 自选比赛守门的详细原因（供决策日志 breakdown 记录摆烂/强制情形）
+    fn free_race_gate_reason(&self, game: &RamenGame) -> String {
+        let Some(free) = game.uma.find_free_race(game.turn()) else {
+            return "无自选比赛要求".to_string();
+        };
+        let need = free.count.saturating_sub(game.uma.count_free_race(free));
+        let remain = remaining_race_slots(game.turn(), free);
+        let grade_note = match free.grade {
+            Some(g) => {
+                let name = ["?", "G1", "G2", "G3", "OP"][g.min(4) as usize];
+                format!("要求{name}及以上")
+            }
+            None => "无等级要求".to_string()
+        };
+        if need == 0 {
+            format!("自选比赛已达标({grade_note}), 区间剩余回合不再干预")
+        } else if remain < need {
+            format!(
+                "自选比赛缺{need}场({grade_note})但只剩{remain}个有效回合, 打完也不够(摆烂), 不再强制"
+            )
+        } else if !race_turn_qualified(game.turn(), free) {
+            format!("自选比赛缺{need}场({grade_note}), 本回合等级不满足, 不白打")
+        } else {
+            format!(
+                "自选比赛缺{need}场/剩{remain}回合({grade_note}), 剩余回合不足需强制补赛",
+            )
+        }
+    }
+
     /// 自选比赛打分
     ///
-    /// - 有未补齐的自选比赛缺口：`urgency × 缺口 / 剩余可比赛回合`——区间宽裕时接近 0，
-    ///   越接近截止越高，与硬守门形成「软倾向 + 硬兜底」两层。
+    /// - 有未补齐缺口且**本回合等级满足**：`urgency × 缺口 / 剩余可比赛回合`——区间宽裕时
+    ///   接近 0（不打扰训练），越接近截止越高，与硬守门形成「软倾向 + 硬兜底」两层。
+    /// - 本回合等级不满足：打也不计数，不给 urgency（降级为普通比赛分，避免白打浪费回合）。
+    /// - 剩余有效回合少于缺口（摆烂，打完也不够）：同样不给 urgency（打了也白打）。
     /// - 无要求或已达标：退化为按比赛等级折算（`race_grade_weight`，默认 0）。
     fn score_race(&self, game: &RamenGame) -> (f32, String) {
         if let Some(free) = game.uma.find_free_race(game.turn()) {
             let need = free.count.saturating_sub(game.uma.count_free_race(free));
-            if need > 0 {
-                let remain = remaining_race_slots(game.turn(), free).max(1);
+            if need > 0 && race_turn_qualified(game.turn(), free) {
+                let remain = remaining_race_slots(game.turn(), free);
+                // 摆烂：剩余有效回合少于缺口，打完也不够 → 不再引导比赛
+                if remain < need {
+                    return (0.0, format!("自选比赛(缺{need}场/剩{remain}回合,摆烂)"));
+                }
                 let val = self.config.race_free_urgency_weight * need as f32 / remain as f32;
                 return (val, format!("自选比赛(缺{need}场/剩{remain}回合)"));
             }
@@ -541,6 +655,19 @@ fn argmax_index(scores: &[RamenPolicyOutput]) -> usize {
         .max_by(|(ia, a), (ib, b)| a.score.total_cmp(&b.score).then_with(|| ib.cmp(ia)))
         .map(|(i, _)| i)
         .unwrap_or(0)
+}
+
+/// 当前回合是否满足自选比赛区间的等级要求（mask 含当前回合 bit）
+///
+/// `free.mask` 的 bit *b* 对应回合 *b+11*，且已按 `race_grades[i] <= grade` 过滤
+/// （如 grade=2 → G1/G2 计入、G3 不计）。本回合不在 mask 内时打了也不计入
+/// `count_free_race`，策略不应为达标目的打它。
+fn race_turn_qualified(turn: i32, free: &FreeRaceData) -> bool {
+    let bit = turn - 11;
+    if bit < 0 || bit >= 64 {
+        return false;
+    }
+    free.mask & (1u64 << bit) != 0
 }
 
 /// 自选比赛区间内「当前回合及以后」还剩多少个可比赛回合
@@ -836,12 +963,18 @@ mod tests {
 
     /// 构造带自选比赛要求的 RamenGame（无声铃鹿 100201：回合 12-26 需 1 场）
     fn make_free_race_game() -> anyhow::Result<RamenGame> {
+        make_free_race_game_uma(100201)
+    }
+
+    /// 构造指定马娘的自选比赛测试局（默认卡组；102601 无要求 / 100201 无等级 /
+    /// 101901 回合 46-59 需 3 场 G1 及以上）
+    fn make_free_race_game_uma(uma_id: u32) -> anyhow::Result<RamenGame> {
         let inherit = crate::game::InheritInfo {
             blue_count: [15, 3, 0, 0, 0],
             extra_count: [0, 30, 0, 0, 30, 30]
         };
         let deck = [302424, 302894, 303044, 302924, 303024, 303054];
-        Ok(RamenGame::newgame(100201, &deck, inherit)?)
+        Ok(RamenGame::newgame(uma_id, &deck, inherit)?)
     }
 
     /// 带「比赛」候选的 Train 阶段候选表
@@ -917,23 +1050,40 @@ mod tests {
         Ok(())
     }
 
-    /// 构造小栗帽 100603 的 RamenGame（两段自选比赛要求：12-23 需 1 场；48-59 需 2 场限 G1）
-    fn make_oguri_game() -> anyhow::Result<RamenGame> {
-        let inherit = crate::game::InheritInfo {
-            blue_count: [12, 0, 0, 0, 6],
-            extra_count: [10, 0, 0, 20, 20, 40],
-        };
-        let deck = [302984, 302924, 303024, 303044, 302894, 303054];
-        Ok(RamenGame::newgame(100603, &deck, inherit)?)
+    /// 等级过滤：`race_turn_qualified` 正确判定本回合是否满足区间等级要求
+    ///
+    /// 语义：mask 按 `race_grades[i] <= grade` 过滤。grade=1 → 仅 G1 回合有效；
+    /// grade=2 → G1/G2 有效（G3 及以下不算）。用 101901（回合 46-59 需 G1）验证。
+    #[test]
+    fn test_race_turn_qualified() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let game = make_free_race_game_uma(101901)?;
+        let free = game.uma.find_free_race(50).expect("101901 回合 50 应在区间 46-59 内");
+        println!("101901 free_race: {free:?}");
+        assert_eq!(free.grade, Some(1)); // G1 及以上
+
+        // 回合 46/48/49/52/54/57 为 G2/G3（race_grades > 1）→ 不满足
+        for turn in [46, 48, 49, 52, 54, 57] {
+            let ok = race_turn_qualified(turn, free);
+            println!("turn={turn} (非G1) qualified={ok}");
+            assert!(!ok, "turn={turn} 不应满足 G1 要求");
+        }
+        // 回合 47/50/51/53/55/56/58/59 为 G1 → 满足
+        for turn in [47, 50, 51, 53, 55, 56, 58, 59] {
+            let ok = race_turn_qualified(turn, free);
+            println!("turn={turn} (G1) qualified={ok}");
+            assert!(ok, "turn={turn} 应满足 G1 要求");
+        }
+        Ok(())
     }
 
-    /// 小栗帽 100603 专项：两段区间 + 限 G1 的守门行为
-    ///
-    /// 该马娘是采样空间里最硬的用例——第二段要求回合 48-59 内打满 2 场 G1，
-    /// 可比赛回合数远少于区间长度。逐回合扫描而非硬编码回合号，
-    /// 使测试不随 `race_grades` 常量表调整而失效。
+    /// 等级不满足回合不强制：G2 回合即使剩余回合紧张也不强制补赛（打了不计数，白打）
     #[test]
-    fn test_free_race_gate_oguri_two_intervals() -> anyhow::Result<()> {
+    fn test_free_race_gate_skips_nonqualified_turn() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         let _ = init_test_logger("error");
@@ -941,85 +1091,108 @@ mod tests {
 
         let policy = RamenPolicy::default();
         let actions = train_actions_with_race();
-        let mut game = make_oguri_game()?;
 
-        // 两段区间必须从 DB 正确读出
-        let intervals: Vec<(u32, u32, u32, Option<u32>)> = game
-            .uma
-            .get_data()?
-            .free_races
-            .iter()
-            .map(|f| (f.start_turn, f.end_turn, f.count, f.grade))
-            .collect();
-        println!("100603 自选比赛区间: {intervals:?}");
-        assert_eq!(intervals.len(), 2);
-        assert_eq!((intervals[0].0, intervals[0].1, intervals[0].2), (12, 23, 1));
-        assert_eq!((intervals[1].0, intervals[1].1, intervals[1].2), (48, 59, 2));
-        assert!(intervals[1].3.is_some(), "第二段应带等级限制");
+        // 101901 回合 46-59 需 3 场 G1；已打 1 场有效（turn 47）→ 缺口 2。
+        // 回合 57（G2，等级不满足）：剩余有效回合 58/59 共 2 ≤ 缺口2+slack1 → 若等级满足会强制
+        let mut game = make_free_race_game_uma(101901)?;
+        game.uma.set_race(47);
+        game.base.turn = 57;
+        let idx = policy.free_race_gate(&game, &actions);
+        println!("回合 57 (G2) 守门结果: {idx:?}（应为 None，不打白打）");
+        assert_eq!(idx, None);
 
-        // 限 G1 使第二段的可比赛回合数显著少于区间长度（12 回合）
-        let free2 = game
-            .uma
-            .find_free_race(48)
-            .ok_or_else(|| anyhow::anyhow!("回合 48 应落在第二段区间内"))?;
-        let slots2 = remaining_race_slots(48, free2);
-        println!("第二段（48-59，限 G1）可比赛回合数: {slots2}");
-        assert!(slots2 >= 2, "可比赛回合数不足以打满 2 场，规则或掩码有误");
-        assert!(slots2 < 12, "限 G1 未生效：可比赛回合数不应等于区间长度");
-
-        // 逐回合扫描第一段：找到守门首次触发的回合
-        let first_gate = (12..=23).find(|&turn| {
-            game.base.turn = turn;
-            policy.free_race_gate(&game, &actions).is_some()
-        });
-        let first_gate = first_gate.ok_or_else(|| anyhow::anyhow!("第一段守门从未触发"))?;
-        println!("第一段守门首次触发回合: {first_gate}");
-        game.base.turn = first_gate;
+        // 同一局回合 58（G1，等级满足）：剩余有效回合 58/59 共 2 ≤ 缺口2+slack1 → 强制
+        game.base.turn = 58;
         let idx = policy
             .free_race_gate(&game, &actions)
-            .ok_or_else(|| anyhow::anyhow!("守门应返回候选下标"))?;
-        assert_eq!(actions[idx].operation, Operation::Race);
-
-        // 打满第一段后，第一段区间内不再干预
-        game.uma.set_race(first_gate);
-        game.base.turn = 23;
-        println!("第一段达标后回合 23 守门: {:?}", policy.free_race_gate(&game, &actions));
-        assert_eq!(policy.free_race_gate(&game, &actions), None);
-
-        // 第二段缺 2 场：扫描触发回合，并确认返回比赛
-        let second_gate = (48..=59).find(|&turn| {
-            game.base.turn = turn;
-            policy.free_race_gate(&game, &actions).is_some()
-        });
-        let second_gate = second_gate.ok_or_else(|| anyhow::anyhow!("第二段守门从未触发"))?;
-        println!("第二段（缺 2 场）守门首次触发回合: {second_gate}");
-        game.base.turn = second_gate;
-        let idx = policy
-            .free_race_gate(&game, &actions)
-            .ok_or_else(|| anyhow::anyhow!("第二段守门应返回候选下标"))?;
+            .ok_or_else(|| anyhow::anyhow!("回合 58 (G1) 应触发强制补赛"))?;
+        println!("回合 58 (G1) 守门选择: {}", actions[idx]);
         assert_eq!(actions[idx].operation, Operation::Race);
         Ok(())
     }
 
-    /// 守门在候选表不含「比赛」时必须返回 None，不得 panic
-    ///
-    /// 生病 / 体力不足等情形下 `Operation::Race` 可能不在候选中，
-    /// 此时守门只能放弃干预，交由规则层判定育成失败，而不是越界取下标。
+    /// 达标后区间内不再干预：缺口清零后任何回合（含最后回合）都不强制
     #[test]
-    fn test_free_race_gate_without_race_candidate() -> anyhow::Result<()> {
+    fn test_free_race_gate_quiet_after_done() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         let _ = init_test_logger("error");
         let _ = init_global();
 
         let policy = RamenPolicy::default();
-        let actions = train_actions(); // 不含 Operation::Race
-        let mut game = make_oguri_game()?;
-        // 推到第一段最后一个回合，缺口最紧张
-        game.base.turn = 23;
-        let got = policy.free_race_gate(&game, &actions);
-        println!("无比赛候选时守门结果: {got:?}");
-        assert_eq!(got, None);
+        let actions = train_actions_with_race();
+
+        // 101901：回合 46-59 需 3 场 G1。已打满 3 场有效比赛 → 达标
+        let mut game = make_free_race_game_uma(101901)?;
+        for turn in [47, 50, 51] {
+            game.uma.set_race(turn);
+        }
+        for turn in 52..=59 {
+            game.base.turn = turn;
+            let idx = policy.free_race_gate(&game, &actions);
+            println!("达标后回合 {turn} 守门结果: {idx:?}");
+            assert_eq!(idx, None, "达标后回合 {turn} 不应再触发强制比赛");
+        }
+        Ok(())
+    }
+
+    /// 摆烂：有效回合打光仍未补齐时不强制，且守门原因完整记录（进决策日志 breakdown）
+    #[test]
+    fn test_free_race_gate_giveup_recorded() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let policy = RamenPolicy::default();
+        let actions = train_actions_with_race();
+
+        // 101901：缺口 3，但已打到回合 59 仍未打满（只打了 1 场）→ 摆烂
+        let mut game = make_free_race_game_uma(101901)?;
+        game.uma.set_race(47); // 只打了 1 场有效比赛
+        game.base.turn = 59;
+        let idx = policy.free_race_gate(&game, &actions);
+        println!("回合 59 缺口未补齐守门结果: {idx:?}（最后回合仍缺口 → 不强制摆烂）");
+        assert_eq!(idx, None);
+
+        // 守门原因文本完整（含缺口/等级要求/摆烂说明），供决策日志 breakdown 记录
+        let reason = policy.free_race_gate_reason(&game);
+        println!("守门原因: {reason}");
+        assert!(reason.contains("缺2场"), "原因应含缺口: {reason}");
+        assert!(reason.contains("摆烂"), "原因应说明摆烂: {reason}");
+
+        // 等级不满足时的原因（回合 54 G2，还有有效回合）
+        game.base.turn = 54;
+        let reason = policy.free_race_gate_reason(&game);
+        println!("等级不满足原因: {reason}");
+        assert!(reason.contains("等级不满足"), "原因应说明等级不满足: {reason}");
+        Ok(())
+    }
+
+    /// 软倾向：等级不满足回合不给 urgency 分（比赛降级为普通分，避免白打）
+    #[test]
+    fn test_score_race_skips_nonqualified_turn() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let policy = RamenPolicy::default();
+
+        // 101901 回合 54（G2，等级不满足）：比赛分应为 0（race_grade_weight=0），reason 说明等级
+        let mut game = make_free_race_game_uma(101901)?;
+        game.base.turn = 54;
+        let (val, reason) = policy.score_race(&game);
+        println!("回合 54 (G2) score_race: val={val} reason={reason}");
+        assert_eq!(val, 0.0, "等级不满足回合不应给 urgency 分");
+        assert!(reason.starts_with("比赛"), "reason 应为普通比赛分: {reason}");
+
+        // 回合 55（G1，等级满足，缺口 3、剩 4 有效回合）：给 urgency 分
+        game.base.turn = 55;
+        let (val, reason) = policy.score_race(&game);
+        println!("回合 55 (G1) score_race: val={val} reason={reason}");
+        assert!(val > 0.0, "等级满足回合应给 urgency 分");
+        assert!(reason.contains("自选比赛"), "reason 应为自选比赛: {reason}");
         Ok(())
     }
 
