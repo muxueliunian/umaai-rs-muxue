@@ -1439,7 +1439,7 @@ mod tests {
             FeelingType::B
         ]);
         game.stage = RamenStage::Train;
-        let mut rng = StdRng::seed_from_u64(42);
+        let _rng = StdRng::seed_from_u64(42);
         let action = RamenAction::new(Operation::Train(TrainingType::Speed));
         let base_dist = calc_gauge_base_distribution(&game.ramen.selected_regions);
         let gauge_limit = crate::game::ramen::rules::GAUGE_LIMIT;

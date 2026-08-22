@@ -12,18 +12,14 @@ use std::time::Instant;
 use anyhow::Result;
 #[cfg(feature = "cli")]
 use colored::Colorize;
-#[cfg(feature = "cli")]
-use indicatif::{ProgressBar, ProgressStyle};
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use umasim::{
     game::{Game, InheritInfo, Trainer, basic::BasicGame, onsen::game::OnsenGame},
-    gamedata::{GAMECONSTANTS, GameConfig, init_global_with_config},
+    gamedata::{GAMECONSTANTS, init_global_with_config},
     global,
-    sample_collector::GameSample,
     trainer::*,
-    training_sample::TrainingSampleBatch,
     utils::{init_logger, load_game_config}
 };
 

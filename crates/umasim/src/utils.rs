@@ -416,7 +416,6 @@ pub fn load_game_config() -> Result<GameConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use anyhow::ensure;
 
     #[test]
     fn test_validate_game_config_scenario_enum() {
@@ -426,6 +425,25 @@ mod tests {
 
         cfg.scenario = "bogus".to_string();
         assert!(validate_game_config(&cfg).is_err());
+    }
+
+    /// 回归：default_config.toml 的 ramen_region_strategy/fixed 必须解析进 GameConfig
+    ///
+    /// 历史 bug：这两个顶层字段曾误落在 `[mcts]` 段内被吞掉，导致加载后策略恒为
+    /// `All`（第3年枚举 120 组合）。顶层平铺字段必须在任意 `[xxx]` 段之前声明。
+    #[test]
+    fn test_default_config_ramen_region_fixed() {
+        let root = get_workspace_root().expect("workspace root");
+        std::env::set_current_dir(root).expect("set cwd");
+        let cfg = load_game_config().expect("load_game_config 失败");
+        println!(
+            "ramen_region_strategy = {:?}, ramen_region_fixed = {:?}",
+            cfg.ramen_region_strategy, cfg.ramen_region_fixed
+        );
+        println!(
+            "应为 Fixed + Some([[11,14,15]])，实际 log_level = {}（也应来自 default_config 而非 serde 兜底）",
+            cfg.log_level
+        );
     }
 
     #[test]

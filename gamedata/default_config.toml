@@ -53,6 +53,17 @@ pt_favor_rate = 8.0
 # 比赛等级表（72 项，回合 0-71；URA 回合 72-77 固定 G1 不在此表）
 race_grades = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 4, 3, 3, 4, 3, 3, 2, 3, 1, 1, 3, 4, 3, 4, 2, 2, 1, 2, 1, 1, 1, 1, 1, 3, 3, 3, 3, 1, 1, 1, 1, 1, 2, 1, 2, 3, 1, 1, 2, 1, 2, 1, 1, 2, 1, 1, 3, 3, 3, 3, 3, 1, 2, 1, 1, 1, 2, 1]
 
+# ---------- policy（拉面杯第3年地区选择策略，Phase 2 步骤 5 接入）----------
+# 仅对第3年生效（解决 C(10,3)=120 组合性能问题）；第1/2年固定走 all 枚举。
+# 注意：本段字段必须在任意 [xxx] 段之前声明（顶层平铺），否则会被前一个段吞掉。
+# ramen_region_strategy: "all"（默认；枚举 120 组合）| "fixed"（按 ramen_region_fixed 单组合，跳过枚举）
+ramen_region_strategy = "fixed"
+# 仅当 ramen_region_strategy="fixed" 时生效
+ramen_region_fixed = [[11, 14, 15]]
+
+# ---------- output ----------
+log_level = "info"
+
 
 [mcts]
 # 每个动作搜索次数（默认 12288；计算太慢可选 8192/4096）
@@ -82,17 +93,6 @@ rollout_batch_size = 64
 
 # leaf eval 评估器（handwritten/nn）
 rollout_evaluator = "handwritten"
-
-
-# ---------- policy（拉面杯第3年地区选择策略，Phase 2 步骤 5 接入）----------
-# 仅对第3年生效（解决 C(10,3)=120 组合性能问题）；第1/2年固定走 all 枚举。
-# ramen_region_strategy: "all"（默认；枚举 120 组合）| "fixed"（按 ramen_region_fixed 单组合，跳过枚举）
-ramen_region_strategy = "fixed"
-# 仅当 ramen_region_strategy="fixed" 时生效
-ramen_region_fixed = [[11, 14, 15]]
-
-# ---------- output ----------
-log_level = "info"
 
 
 # ---------- dev（collector 数据收集，仅 generate_mean_filtered_data bin 使用）----------

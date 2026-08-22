@@ -40,6 +40,9 @@ pub struct TurnDecision {
     pub candidates: Vec<String>,
     /// 与 [`Self::candidates`] 等长的**内联效果预览**（渲染时默认色；无预览为空串）
     pub candidate_details: Vec<String>,
+    /// 与 [`Self::candidates`] 等长的**配方信息**（RamenSelect 吃面候选的原始诀窍
+    /// 配方，渲染时 cyan；无配方为空串）
+    pub candidate_recipes: Vec<String>,
     /// 选中的候选索引
     pub selected: usize,
     /// 选中候选的可读文本（选项名）
@@ -51,11 +54,17 @@ pub struct TurnDecision {
 /// 包装任意 [`Trainer<RamenGame>`]，在每次 `select_action` / `select_event_choice`
 /// 时把候选列表与选中项记入 [`Self::log`]，供上层输出"候选 / 选择"两节文本。
 /// 决策本身委托给被包装的 inner trainer，不改变任何行为。
+///
+/// `verbose = true` 时为**实时输出模式**（ramen_manual 等交互场景）：
+/// 决策前先打印候选列表（选项名亮黄 + 内联预览白色），决策后打印选择确认；
+/// `log` 仍照常记录，测试可复用。
 pub struct RecordingTrainer<T> {
     /// 被包装的真实训练员
     pub inner: T,
     /// 全部决策记录（按发生顺序）
-    pub log: RefCell<Vec<TurnDecision>>
+    pub log: RefCell<Vec<TurnDecision>>,
+    /// 是否实时打印候选列表与选择（默认 false：仅记录）
+    pub verbose: bool
 }
 
 impl<T> RecordingTrainer<T> {
@@ -63,13 +72,20 @@ impl<T> RecordingTrainer<T> {
     pub fn new(inner: T) -> Self {
         Self {
             inner,
-            log: RefCell::new(Vec::new())
+            log: RefCell::new(Vec::new()),
+            verbose: false
         }
     }
 
     /// 追加一条决策记录
     fn record(
-        &self, game: &RamenGame, stage: &str, candidates: Vec<String>, candidate_details: Vec<String>, selected: usize
+        &self,
+        game: &RamenGame,
+        stage: &str,
+        candidates: Vec<String>,
+        candidate_details: Vec<String>,
+        candidate_recipes: Vec<String>,
+        selected: usize
     ) {
         let selected_desc = candidates.get(selected).cloned().unwrap_or_default();
         self.log.borrow_mut().push(TurnDecision {
@@ -77,32 +93,64 @@ impl<T> RecordingTrainer<T> {
             stage: stage.to_string(),
             candidates,
             candidate_details,
+            candidate_recipes,
             selected,
             selected_desc
         });
     }
 
-    /// 候选的可读文本（选项名 + 内联效果预览）：
-    /// - Train 阶段训练候选：`(速训练, 速60 力15 39pt 体力-22 诀窍槽 A+6 B+5 C+8)`
-    /// - RamenSelect 阶段吃面候选：`(吃面/中山-全, (训+20,友情+50,...))`
-    /// - 其他动作：`(Display 文本, 空)`
-    fn candidate_text(&self, game: &RamenGame, a: &RamenAction) -> Result<(String, String)> {
+    /// 候选的可读文本（选项名 + 配方 + 内联效果预览）：
+    /// - Train 阶段训练候选：`(速训练, "", 速60 力15 39pt 体力-22 诀窍槽 A+6 B+5 C+8)`
+    /// - RamenSelect 阶段吃面候选：`(吃面/中山-全, 配方A2B0C3, (训+20,友情+50,...))`
+    /// - 其他动作：`(Display 文本, "", "")`
+    fn candidate_text(&self, game: &RamenGame, a: &RamenAction) -> Result<(String, String, String)> {
         match game.stage {
             RamenStage::Train => {
                 if let Some(BaseAction::Train(train)) = a.as_base_action() {
                     let text = game.train_candidate_preview(train as usize)?;
-                    return Ok(Self::split_preview(&text));
+                    let (name, detail) = Self::split_preview(&text);
+                    return Ok((name, String::new(), detail));
                 }
             }
             RamenStage::RamenSelect => {
                 if let Some(region_idx) = a.ramen {
                     let text = game.ramen_candidate_preview(region_idx)?;
-                    return Ok(Self::split_preview(&text));
+                    let (name, detail) = Self::split_preview(&text);
+                    // 当前拉面的原始诀窍配方（如 A2 B0 C3）
+                    let recipe = crate::gamedata::ramen::RAMENDATA
+                        .get()
+                        .and_then(|data| data.region_feeling.get(region_idx))
+                        .map(|&[fa, fb, fc]| format!("配方A{fa}B{fb}C{fc}"))
+                        .unwrap_or_default();
+                    return Ok((name, recipe, detail));
                 }
             }
             _ => {}
         }
-        Ok((a.to_string(), String::new()))
+        Ok((a.to_string(), String::new(), String::new()))
+    }
+
+    /// 实时输出模式的候选列表渲染（选项名亮黄、内联预览白色）
+    pub fn render_candidates(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<String> {
+        let mut lines = vec![];
+        lines.push(format!(
+            "== 候选 [回合 {} · {:?}] {} 个 ==",
+            game.turn() + 1,
+            game.stage,
+            actions.len()
+        ));
+        for (i, a) in actions.iter().enumerate() {
+            let (name, recipe, detail) = self.candidate_text(game, a)?;
+            let mut parts = vec![format!("  {}. {}", i + 1, name.bright_yellow())];
+            if !recipe.is_empty() {
+                parts.push(recipe.cyan().to_string());
+            }
+            if !detail.is_empty() {
+                parts.push(detail);
+            }
+            lines.push(parts.join(" "));
+        }
+        Ok(lines.join("\n"))
     }
 
     /// 把 `"选项名 效果预览..."` 拆成 `(选项名, 效果预览)`；无空格时预览为空
@@ -128,40 +176,91 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for RecordingTrainer<T> {
     fn select_action(
         &self, game: &RamenGame, actions: &[<RamenGame as Game>::Action], rng: &mut StdRng
     ) -> Result<usize> {
+        // 实时模式：先展示候选（含内联预览），再交 inner 决策
+        if self.verbose {
+            println!("{}", self.render_candidates(game, actions)?);
+        }
         let idx = self.inner.select_action(game, actions, rng)?;
+        if self.verbose {
+            if let Some(a) = actions.get(idx) {
+                println!("→ 选择: {}\n", a.to_string().bright_yellow());
+            }
+        }
         let pairs = actions
             .iter()
             .map(|a| self.candidate_text(game, a))
             .collect::<Result<Vec<_>>>()?;
-        let candidates: Vec<String> = pairs.iter().map(|(name, _)| name.clone()).collect();
-        let candidate_details: Vec<String> = pairs.iter().map(|(_, detail)| detail.clone()).collect();
+        let candidates: Vec<String> = pairs.iter().map(|(name, _, _)| name.clone()).collect();
+        let candidate_recipes: Vec<String> = pairs.iter().map(|(_, recipe, _)| recipe.clone()).collect();
+        let candidate_details: Vec<String> = pairs.iter().map(|(_, _, detail)| detail.clone()).collect();
         let stage = format!("{:?}", game.stage);
-        self.record(game, &stage, candidates, candidate_details, idx);
+        self.record(game, &stage, candidates, candidate_details, candidate_recipes, idx);
         Ok(idx)
     }
 
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
+        if self.verbose {
+            println!(
+                "== 候选 [回合 {} · 事件] {} 个 ==",
+                game.turn() + 1,
+                choices.len()
+            );
+            for (i, x) in choices.iter().enumerate() {
+                let text = x.iter().map(|y| y.explain()).collect::<Vec<_>>().join(" | ");
+                println!("  {}. {}", i + 1, text.bright_yellow());
+            }
+        }
         let idx = self.inner.select_choice(game, choices, rng)?;
+        if self.verbose {
+            let text = choices[idx]
+                .iter()
+                .map(|y| y.explain())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            println!("→ 选择: {}\n", text.bright_yellow());
+        }
         let candidates: Vec<String> = choices
             .iter()
             .map(|x| x.iter().map(|y| y.explain()).collect::<Vec<_>>().join(" | "))
             .collect();
         let candidate_details = vec![String::new(); candidates.len()];
-        self.record(game, "事件", candidates, candidate_details, idx);
+        let candidate_recipes = vec![String::new(); candidates.len()];
+        self.record(game, "事件", candidates, candidate_details, candidate_recipes, idx);
         Ok(idx)
     }
 
     fn select_event_choice(
         &self, game: &RamenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
     ) -> Result<usize> {
+        if self.verbose {
+            println!(
+                "== 候选 [回合 {} · 事件#{}] {} 个 ==",
+                game.turn() + 1,
+                event.id,
+                choices.len()
+            );
+            for (i, x) in choices.iter().enumerate() {
+                let text = x.iter().map(|y| y.explain()).collect::<Vec<_>>().join(" | ");
+                println!("  {}. {}", i + 1, text.bright_yellow());
+            }
+        }
         let idx = self.inner.select_event_choice(game, event, choices, rng)?;
+        if self.verbose {
+            let text = choices[idx]
+                .iter()
+                .map(|y| y.explain())
+                .collect::<Vec<_>>()
+                .join(" | ");
+            println!("→ 选择: {}\n", text.bright_yellow());
+        }
         let candidates: Vec<String> = choices
             .iter()
             .map(|x| x.iter().map(|y| y.explain()).collect::<Vec<_>>().join(" | "))
             .collect();
         let candidate_details = vec![String::new(); candidates.len()];
+        let candidate_recipes = vec![String::new(); candidates.len()];
         let stage = format!("事件#{}({:?})", event.id, game.stage);
-        self.record(game, &stage, candidates, candidate_details, idx);
+        self.record(game, &stage, candidates, candidate_details, candidate_recipes, idx);
         Ok(idx)
     }
 }
@@ -208,12 +307,17 @@ pub fn render_decision(d: &TurnDecision) -> String {
     ));
     for (i, c) in d.candidates.iter().enumerate() {
         let mark = if i == d.selected { "  ⇐ 选中" } else { "" };
+        let recipe = d.candidate_recipes.get(i).cloned().unwrap_or_default();
         let detail = d.candidate_details.get(i).cloned().unwrap_or_default();
-        if detail.is_empty() {
-            lines.push(format!("  {}. {}{}", i + 1, c.bright_yellow(), mark));
-        } else {
-            lines.push(format!("  {}. {} {}{}", i + 1, c.bright_yellow(), detail, mark));
+        let mut parts = vec![format!("  {}. {}", i + 1, c.bright_yellow())];
+        if !recipe.is_empty() {
+            parts.push(recipe.cyan().to_string());
         }
+        if !detail.is_empty() {
+            parts.push(detail);
+        }
+        let line = parts.join(" ");
+        lines.push(if mark.is_empty() { line } else { format!("{line} {mark}") });
     }
     lines.join("\n")
 }
@@ -366,6 +470,34 @@ mod tests {
         }
         println!();
         println!("回合结束: turn={} stage={:?}", game.turn(), game.stage);
+        Ok(())
+    }
+
+    /// verbose 实时输出模式演示：包装 ManualTrainer（mock 全选第一），
+    /// 跑前 3 个回合观察决策前的候选列表（亮黄选项名 + 白色内联预览）与选择确认
+    #[test]
+    fn test_verbose_demo() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let seed = 42u64;
+        let (mut decision_rng, rule_rng) = seeded_rngs(seed);
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.set_internal_rng(rule_rng);
+        let mut trainer = RecordingTrainer::new(crate::trainer::ManualTrainer::with_mock_inputs(vec![]));
+        trainer.verbose = true;
+
+        println!("===== verbose 实时输出演示（前 3 回合）=====");
+        // 正确推进 3 个回合（turn 0/1/2），到 turn 3 的 Begin 前停止
+        while game.turn() < 3 {
+            game.run_stage(&trainer, &mut decision_rng)?;
+            if !game.next() {
+                break;
+            }
+        }
+        println!("已记录 {} 条决策", trainer.log_len());
         Ok(())
     }
 }

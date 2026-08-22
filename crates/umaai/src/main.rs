@@ -2,26 +2,23 @@
 //!
 //! author: curran
 use std::{
-    path::Path,
-    sync::{Mutex, atomic::Ordering},
+    sync::Mutex,
     time::Instant
 };
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use colored::Colorize;
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
 use serde::Serialize;
 use text_to_ascii_art::to_art;
-use umaai::utils::get_stack_size;
 use umasim::{
     game::{
         Game,
-        InheritInfo,
         Trainer,
         onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame}
     },
-    gamedata::{init_global, init_global_with_config},
+    gamedata::init_global_with_config,
     neural::Evaluator,
     search::SearchConfig,
     trainer::MctsTrainer,

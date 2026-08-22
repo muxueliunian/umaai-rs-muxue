@@ -22,6 +22,7 @@ use umasim::{
     game::{Game, InheritInfo, ramen::RamenGame},
     gamedata::{GAMECONSTANTS, init_global_with_config},
     global,
+    output::RecordingTrainer,
     trainer::ManualTrainer,
     utils::{init_logger_stdout, load_game_config}
 };
@@ -78,7 +79,10 @@ fn main() -> Result<()> {
 
     let mut rng = StdRng::from_os_rng();
     let mut game = RamenGame::newgame(uma_id, &deck, inherit)?;
-    let trainer = ManualTrainer::new();
+    // RecordingTrainer 包装 ManualTrainer：verbose 实时输出候选列表（选项名亮黄 +
+    // 内联预览白色）与选择确认，同时记录全部决策供后续分析
+    let mut trainer = RecordingTrainer::new(ManualTrainer::new());
+    trainer.verbose = true;
 
     println!("=== 开局状态 ===");
     println!("{}", game.explain()?);

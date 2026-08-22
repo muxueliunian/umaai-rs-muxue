@@ -772,6 +772,8 @@ impl RamenGame {
 
         // 3. 显示 buff + distribution（玩家在选训练前看到效果）
         crate::diag!("---- 吃面后 ----");
+        // 吃面后插入一行马娘状态（诀窍/PT 消耗后的最新状态）
+        crate::diag!("{}", self.uma.explain()?);
         let ramen_info = self.explain_ramen_info();
         if !ramen_info.is_empty() {
             crate::diag!("{}", ramen_info);
@@ -1074,7 +1076,8 @@ impl RamenGame {
         // 三阶段决策 pending 防御性清空（Train 阶段结束后已清，但再确保一次）
         self.ramen.clear_pending();
 
-        diag!("-----------------------------------------");
+        // 回合标题（turn_flow 风格分节；每回合一次）
+        diag!("────────── 回合 {} · 回合开始 ──────────", self.base.turn + 1);
         diag!("{}", self.explain()?);
         // 显示拉面杯信息（剧本机制未开启或URA回合时简化显示）
         let ramen_info = self.explain_ramen_info();
@@ -1262,15 +1265,9 @@ impl RamenGame {
             return Ok(());
         }
         // 第1/2年 或 第3年 all 策略：枚举所有组合
+        // （明细组合由 RecordingTrainer verbose 候选栏展示，这里不重复打印）
         let combos = super::rules::get_region_combinations(year_idx)?;
         diag!("==== 第{}年 地区选择 ({}种组合) ====", year, combos.len());
-        for (i, combo) in combos.iter().enumerate() {
-            let names: Vec<&str> = combo
-                .iter()
-                .filter_map(|&idx| ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str()))
-                .collect();
-            diag!("  {}: {}", i + 1, names.join(", "));
-        }
         let actions: Vec<RamenAction> = combos
             .iter()
             .map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c)))
@@ -1585,7 +1582,7 @@ impl RamenGame {
     /// 暂时屏蔽（训练数值计算明细）：调用点已注释，需要时恢复调用并删除本 allow。
     #[allow(dead_code)]
     fn collect_train_lines(
-        &self, lines: &mut Vec<String>, headers: &[String], dist: &[Vec<i32>], show_ramen: bool
+        &self, lines: &mut Vec<String>, headers: &[String], _dist: &[Vec<i32>], show_ramen: bool
     ) -> Result<()> {
         for train in 0..5 {
             lines.push(self.train_value_line(&headers[train], train, show_ramen)?);

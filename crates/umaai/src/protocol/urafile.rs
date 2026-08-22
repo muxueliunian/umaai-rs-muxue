@@ -9,7 +9,6 @@ use anyhow::{Result, anyhow, bail};
 use colored::Colorize;
 use log::{info, warn};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use os_str_bytes::OsStrBytes;
 use serde_json::Value;
 use umasim::utils::pause;
 

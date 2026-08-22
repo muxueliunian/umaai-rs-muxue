@@ -910,7 +910,7 @@ mod tests {
 
         let game = make_game()?;
         let policy = RamenPolicy::default();
-        use crate::gamedata::{ActionValue, EventData};
+        use crate::gamedata::ActionValue;
         let low = EventChoice {
             prob: 100,
             value: ActionValue {

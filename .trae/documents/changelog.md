@@ -4,23 +4,13 @@
 
 ## 2026-08-22
 
-- **ramen_manual 屏幕输出整理（Agent 对话文本流方向，进行中）**：
-  - 新增 `turn_flow` 渲染层：`RecordingTrainer` 记录每次决策的候选/选择，`render_turn_situation` / `render_decision` 分节渲染；固定种子基线测试输出完整回合信息（局面/候选/选择/效果）
-  - 候选内联预览：Train 候选带训练数值 + 失败率 + 诀窍槽（与生效逻辑同口径，核心计算提取复用）；RamenSelect 候选带吃面完整效果（基础 + 地区加成 + 常驻，友情加成不因非友情训练丢失）
-  - 显示着色：候选选项名亮黄、内联效果白色；体力文字按档位着色（低红 / 中黄 / 正常绿）；分布表人物着色（彩圈亮绿去加号、hint 感叹号亮黄、友人绿），无色环境自动回退原标记
-  - 动作文本清理（选择阶段去掉机器痕迹）；事件输出三段式（信息 / 选项 / 选择）；回合状态去重（每回合仅一次）
-  - 暂时屏蔽训练效果分解与分布表数值明细输出（需要时从代码恢复）
-- **comfy-table 启用 custom_styling**：修复彩色单元格 ANSI 宽度计算错乱（ansi-str / console 保持传递依赖）
-- **文档归档**：config_refactor_plan / log_refactor_plan 移入 archive（用户操作）
-- **诀窍槽 NPC 数量修正（按训练位置实际分配）**：`fill_feeling_gauge`（生效层）此前硬编码 npc_count=5，改为与显示层一致；新增集成测试验证不同 NPC 数（2/4）的加成差异
-- **删除过时测试**：`test_load_game_config_merges_user_overrides` 按用户确认删除
-- **自选比赛守门修复（等级过滤 + 摆烂 + 达标后停止）**：①守门与软倾向仅在本回合等级满足（mask 内）时强制/加分；②剩余有效回合少于缺口（打完也不够）判定为摆烂
-- **决策日志 breakdown 接入**：`RamenPolicy` 拆出 `decide_*`（返回选中索引 + 各候选评分分解），守门触发时记录详细原因（体力/心情/自选比赛缺口与等级要求）；`Trainer` 新增 `last_breakdown` 默认方法，`RamenHandwrittenTrainer` 缓存、`LoggingTrainer` 提取进 CSV breakdown 列（此前为预留空列）
-- **cargo-husky 钩子引入并撤销（用户决策）+ cargo fmt 手动化**：pre-commit rustfmt 检查钩子（nightly 强制 / stable 跳过）引入后，因 fmt 改由用户手动执行而移除；AGENTS.md 新增「禁用 cargo fmt」规则；全库应用当前 nightly rustfmt 格式
-- **bench 玩家 build 预置**：`DeckComposition` + `PLAYER_BUILDS`（7 种主流玩家 build，guts_wisdom 按玩家讨论删除）外置到 bench_config.toml `[player_builds]`（Map 形态一行一个，IndexMap 保声明序，无内置默认、未配置报错）
-- **game_config.toml 加载修复**：修复用户配置路径错误（此前从未被加载、一直走兜底默认）；`[config_override]` 全字段可选覆盖（新增 uma/cards/blue_count）+ 未知字段显式报错
-- **issues 更新**：constants 排名数据（补齐至 LS24）与 rustfmt 条目状态更新
-- **bench_base 按玩家 build 分组**：读取 `[player_builds]` 遍历分组跑批（每组 runs 局），开头打印马娘名与各 build 卡组的卡名；结果 CSV 合并单文件加 build 列，决策日志文件名含 build 前缀；`cards` 字段废弃、新增 `friend`（友人卡 idrank）——当前仅拉面杯生效（bench 设施绑定 RamenGame 且剧本数据无友人卡字段），跨剧本泛化留待重构
+- **ramen_manual 屏幕输出整理（Agent 对话文本流风格）**：新增 turn_flow 渲染层与固定种子基线测试；候选内联预览（训练数值 / 吃面完整效果 / 诀窍配方）并分层着色；事件三段式、回合状态去重；ramen_manual 接入实时候选栏与选择确认；训练诊断输出暂屏蔽
+- **第3年地区选择修复**：ramen_region 配置字段落错 TOML 段导致预设失效（恒枚举 120 组合），移回顶层后 fixed 预设生效
+- **comfy-table custom_styling**：修复彩色表格 ANSI 宽度错乱
+- **自选比赛守门 + 决策日志 breakdown**：等级过滤 / 摆烂判定 / 达标后停止，候选评分分解入决策日志
+- **诀窍槽 NPC 按实际人数计算**、game_config.toml 加载修复、cargo-husky 撤销与 fmt 手动化、bench 玩家 build 外置与分组跑批
+- **显示微调（用户）**：比赛加成信息亮品红；清理未使用 import
+- **文档归档**：config_refactor_plan / log_refactor_plan 移入 archive
 
 ## 2026-08-21
 
