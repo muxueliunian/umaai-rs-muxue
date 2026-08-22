@@ -3,7 +3,7 @@ use std::io::Write;
 #[cfg(feature = "cli")]
 use std::sync::{Mutex, OnceLock};
 
-use anyhow::{Result, anyhow, ensure};
+use anyhow::{Result, anyhow};
 use colored::Colorize;
 #[cfg(feature = "cli")]
 use comfy_table::Table;
@@ -416,6 +416,7 @@ pub fn load_game_config() -> Result<GameConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::ensure;
 
     #[test]
     fn test_validate_game_config_scenario_enum() {
