@@ -148,7 +148,13 @@ pub struct MctsConfig {
     pub search_cpuct: f64,
     /// 预期搜索标准差
     #[serde(default = "default_mcts_expected_search_stdev")]
-    pub expected_search_stdev: f64
+    pub expected_search_stdev: f64,
+    /// 是否按 `(回合, 阶段)` 重新播种 rollout 随机流（公共随机数 / CRN）
+    ///
+    /// 开启后同一决策点各候选在同一阶段共享随机性，候选排序的配对方差显著下降
+    /// （onsen 实测等效 3.65 倍搜索次数）。关闭则退回「仅共享起始种子」。
+    #[serde(default = "default_mcts_crn_stage_reseed")]
+    pub crn_stage_reseed: bool
 }
 
 impl Default for MctsConfig {
@@ -163,7 +169,8 @@ impl Default for MctsConfig {
             use_ucb: default_mcts_use_ucb(),
             search_group_size: default_mcts_search_group_size(),
             search_cpuct: default_mcts_search_cpuct(),
-            expected_search_stdev: default_mcts_expected_search_stdev()
+            expected_search_stdev: default_mcts_expected_search_stdev(),
+            crn_stage_reseed: default_mcts_crn_stage_reseed()
         }
     }
 }
@@ -206,6 +213,11 @@ fn default_mcts_search_cpuct() -> f64 {
 
 fn default_mcts_expected_search_stdev() -> f64 {
     2200.0
+}
+
+/// [`MctsConfig::crn_stage_reseed`] 默认值
+fn default_mcts_crn_stage_reseed() -> bool {
+    true
 }
 
 /// 训练数据生成（collector）配置

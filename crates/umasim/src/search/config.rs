@@ -54,7 +54,22 @@ pub struct SearchConfig {
     /// C++ UmaAi 默认值: 1.0
     pub search_cpuct: f64,
 
-    pub expected_search_stdev: f64
+    pub expected_search_stdev: f64,
+
+    /// 是否在每个 `(回合, 阶段)` 边界重新播种 rollout 随机流（真 CRN 开关）
+    ///
+    /// - `true`（默认）：每进入一个阶段按 `(rollout 种子, 回合, 阶段)` 重新播种，
+    ///   使各候选在同一 `(回合, 阶段)` 上抽到同一份随机性，配对真正成立。
+    /// - `false`：各候选的第 j 次 rollout 只共享**起始**种子。候选执行后状态立刻分叉、
+    ///   随机数消耗长度不同，顺序流就此错位——那只是可复现的独立抽样，不是 CRN。
+    ///
+    /// 实测（onsen，回合 0 Train，7 候选 × 200 rollout）：关闭时平均配对相关 0.18、
+    /// 等效 1.31 倍；开启后 0.69、等效 **3.65 倍**（区间 2.44–8.62）。
+    /// 倍率定义为 `(Var_a + Var_b) / Var(X_a - X_b)`，衡量的是**候选排序**的配对方差。
+    ///
+    /// 注：该倍率测自 onsen，拉面剧本状态分叉更剧烈，相关性预计更弱，
+    /// **不得直接据此下调** [`search_n`](Self::search_n)，需在目标剧本上重测。
+    pub crn_stage_reseed: bool
 }
 
 impl Default for SearchConfig {
@@ -68,7 +83,8 @@ impl Default for SearchConfig {
             use_ucb: true,
             search_group_size: 256,
             search_cpuct: 1.0,
-            expected_search_stdev: 2200.0
+            expected_search_stdev: 2200.0,
+            crn_stage_reseed: true
         }
     }
 }
@@ -134,6 +150,12 @@ impl SearchConfig {
         self
     }
 
+    /// 启用/禁用按阶段重播种（真 CRN 开关，见 [`crn_stage_reseed`](Self::crn_stage_reseed)）
+    pub fn with_crn_stage_reseed(mut self, enabled: bool) -> Self {
+        self.crn_stage_reseed = enabled;
+        self
+    }
+
     pub fn new_game_config(game_config: &GameConfig) -> Self {
         let search_config = SearchConfig::default()
             .with_search_n(game_config.mcts.search_n)
@@ -144,7 +166,8 @@ impl SearchConfig {
             .with_ucb(game_config.mcts.use_ucb)
             .with_search_group_size(game_config.mcts.search_group_size)
             .with_search_cpuct(game_config.mcts.search_cpuct)
-            .with_expected_search_stdev(game_config.mcts.expected_search_stdev);
+            .with_expected_search_stdev(game_config.mcts.expected_search_stdev)
+            .with_crn_stage_reseed(game_config.mcts.crn_stage_reseed);
         search_config
     }
 }

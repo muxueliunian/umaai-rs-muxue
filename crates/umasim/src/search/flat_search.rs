@@ -20,7 +20,7 @@ use crate::neural::{ThreadLocalNeuralNetLeafEvaluator, ThreadLocalNeuralNetLeafS
 use crate::{
     game::{
         Game,
-        onsen::{action::OnsenAction, game::OnsenGame}
+        onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame}
     },
     gamedata::EventChoice,
     neural::{Evaluator, HandwrittenEvaluator, ValueOutput}
@@ -194,6 +194,20 @@ impl FlatSearch {
         let remain_turns = (TOTAL_TURN.saturating_sub(turn)) as f64;
         let factor = (remain_turns / TOTAL_TURN as f64).powf(0.5);
         factor * self.config.radical_factor_max
+    }
+
+    /// 按当前 `(回合, 阶段)` 重新播种 rollout 随机流（真 CRN）
+    ///
+    /// 仅在 [`SearchConfig::crn_stage_reseed`] 开启时生效；关闭时保持顺序流，
+    /// 各候选只共享起始种子。
+    ///
+    /// 注：`Dig`/`Upgrade` 两条特判 rollout 路径不经过此处（它们不按阶段推进），
+    /// 故这两类候选目前不参与阶段级对齐。
+    fn reseed_for_stage(&self, rng: &mut StdRng, rollout_seed: u64, game: &OnsenGame) {
+        if !self.config.crn_stage_reseed {
+            return;
+        }
+        *rng = StdRng::seed_from_u64(RolloutSeeds::stage_seed(rollout_seed, game.turn, stage_id(&game.stage)));
     }
 
     /// 均匀分配搜索（并行化）
@@ -381,8 +395,7 @@ impl FlatSearch {
             // 这是 CRN 在不等样本数下的标准做法。
             let offset = planned[best_action_idx];
             let run_one = |k: usize| -> Option<(f64, f64)> {
-                let mut rng = StdRng::seed_from_u64(seeds.seed_at(offset + k));
-                match self.simulate(game, action, &mut rng) {
+                match self.simulate(game, action, seeds.seed_at(offset + k)) {
                     Ok(v) => Some(v),
                     Err(e) => {
                         debug!("[搜索][UCB] rollout {} 失败: {e}", offset + k);
@@ -460,7 +473,13 @@ impl FlatSearch {
     ///
     /// # 返回
     /// 最终分数
-    fn simulate(&self, game: &OnsenGame, action: &OnsenAction, rng: &mut StdRng) -> Result<(f64, f64)> {
+    /// 单次 rollout
+    ///
+    /// `seed` 为该次 rollout 的种子（由 [`RolloutSeeds::seed_at`] 给出，所有候选共享）。
+    /// 开启 [`SearchConfig::crn_stage_reseed`] 时，每进入一个阶段会按
+    /// `(seed, 回合, 阶段)` 重新播种，使各候选在同一阶段抽到同一份随机性。
+    fn simulate(&self, game: &OnsenGame, action: &OnsenAction, seed: u64) -> Result<(f64, f64)> {
+        let rng = &mut StdRng::seed_from_u64(seed);
         if matches!(action, OnsenAction::Dig(_)) {
             self.simulate_onsen_select(game, action, rng)
         } else if matches!(action, OnsenAction::Upgrade(_)) {
@@ -478,6 +497,7 @@ impl FlatSearch {
             // max_depth==0：保持旧行为，rollout 跑到终局
             if self.config.max_depth == 0 {
                 while sim_game.next() {
+                    self.reseed_for_stage(rng, seed, &sim_game);
                     sim_game.run_stage(&trainer_hw, rng)?;
                 }
                 sim_game.on_simulation_end(&trainer_hw, rng)?;
@@ -497,6 +517,7 @@ impl FlatSearch {
                     finished = true;
                     break;
                 }
+                self.reseed_for_stage(rng, seed, &sim_game);
                 sim_game.run_stage(&trainer_hw, rng)?;
                 if (sim_game.turn - start_turn) >= max_depth {
                     break;
@@ -596,8 +617,7 @@ impl FlatSearch {
         // 默认循环：handwritten 评估（onnx 关闭时也走这条）
         let mut failed = 0usize;
         for k in 0..n {
-            let mut rng = StdRng::seed_from_u64(seeds.seed_at(offset + k));
-            match self.simulate(game, action, &mut rng) {
+            match self.simulate(game, action, seeds.seed_at(offset + k)) {
                 Ok(score) => {
                     result.add(score.0);
                     result_pt.add(score.1);
@@ -712,6 +732,20 @@ impl FlatSearch {
             sim_game.uma().calc_score() as f64,
             sim_game.uma().calc_score_with_pt_favor() as f64
         ))
+    }
+}
+
+/// 回合阶段编号（种子派生用）
+///
+/// 显式 match 而非依赖枚举判别值：`OnsenTurnStage` 的变体顺序若调整，
+/// 这里会编译报错提醒同步，而不是静默改变所有历史种子。
+fn stage_id(stage: &OnsenTurnStage) -> u64 {
+    match stage {
+        OnsenTurnStage::Begin => 0,
+        OnsenTurnStage::Distribute => 1,
+        OnsenTurnStage::Bathing => 2,
+        OnsenTurnStage::Train => 3,
+        OnsenTurnStage::AfterTrain => 4
     }
 }
 
@@ -867,6 +901,72 @@ mod tests {
         }
     }
 
+    /// 捕获首个多候选决策点的**局面本身**（CRN 测量需要直接调 `simulate`）
+    struct RootCapture {
+        /// 捕获到的 (根局面, 候选表)
+        got: RefCell<Option<(OnsenGame, Vec<OnsenAction>)>>
+    }
+
+    impl Trainer<OnsenGame> for RootCapture {
+        fn select_action(&self, game: &OnsenGame, actions: &[OnsenAction], _rng: &mut StdRng) -> Result<usize> {
+            if self.got.borrow().is_none() && actions.len() >= 2 {
+                *self.got.borrow_mut() = Some((game.clone(), actions.to_vec()));
+            }
+            Ok(0)
+        }
+
+        fn select_choice(&self, _game: &OnsenGame, _choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// 取首个多候选决策点的根局面与候选表
+    fn root_state() -> Result<(OnsenGame, Vec<OnsenAction>)> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let inherit = InheritInfo {
+            blue_count: [12, 0, 0, 0, 6],
+            extra_count: [10, 0, 0, 20, 20, 40]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let mut game = OnsenGame::newgame(102601, &deck, inherit)?;
+        let cap = RootCapture { got: RefCell::new(None) };
+        let mut rng = StdRng::seed_from_u64(20260822);
+        while game.next() {
+            game.run_stage(&cap, &mut rng)?;
+            if cap.got.borrow().is_some() {
+                break;
+            }
+        }
+        cap.got
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("整局结束仍未遇到多候选决策点"))
+    }
+
+    /// 样本均值
+    fn mean_of(xs: &[f64]) -> f64 {
+        xs.iter().sum::<f64>() / xs.len().max(1) as f64
+    }
+
+    /// 样本方差（无偏）
+    fn var_of(xs: &[f64]) -> f64 {
+        let m = mean_of(xs);
+        xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (xs.len().saturating_sub(1)).max(1) as f64
+    }
+
+    /// Pearson 相关系数
+    fn corr_of(a: &[f64], b: &[f64]) -> f64 {
+        let (ma, mb) = (mean_of(a), mean_of(b));
+        let cov: f64 = a.iter().zip(b).map(|(x, y)| (x - ma) * (y - mb)).sum();
+        let da: f64 = a.iter().map(|x| (x - ma).powi(2)).sum::<f64>().sqrt();
+        let db: f64 = b.iter().map(|y| (y - mb).powi(2)).sum::<f64>().sqrt();
+        if da <= 0.0 || db <= 0.0 { 0.0 } else { cov / (da * db) }
+    }
+
     /// 回归基准专用配置
     ///
     /// 强制 `use_ucb=false`：UCB 的样本分配依赖分数，代码一改样本数就变，
@@ -940,6 +1040,96 @@ mod tests {
             println!("动作 {i}: 正序 n={} mean={:.6} | 逆序 n={} mean={:.6}", a.n, a.mean, b.n, b.mean);
         }
         assert_eq!(normal, reversed, "各动作统计量不应随候选顺序变化");
+        Ok(())
+    }
+
+    /// CRN 收益实测：配对相关系数与等效样本倍率
+    ///
+    /// 对同一根局面，各候选在 rollout 序号 j 上共享种子，逐 j 收集分数，
+    /// 再按候选两两计算：
+    ///
+    /// - `corr`：配对相关系数。越高说明「同一份未来随机性」共享得越充分。
+    /// - `倍率`：`(Var_a + Var_b) / Var(X_a - X_b)`。独立抽样时分母等于分子，
+    ///   倍率为 1；配对生效则分母变小、倍率 > 1，等价于把 `search_n` 放大同样倍数。
+    ///
+    /// 关闭 / 开启 `crn_stage_reseed` 各测一次，差值即按阶段重播种的真实收益。
+    /// 计划中「等效 4–10 倍」为无实测支撑的预期值，以本测试输出为准。
+    ///
+    /// 耗时较长（每配置 候选数 × ROLLOUTS 次整局 rollout），故标记 ignore：
+    /// `cargo test --release -p umasim --lib test_crn_pairing_gain -- --ignored --nocapture`
+    #[test]
+    #[ignore = "CRN 收益测量，耗时较长，按需手动运行"]
+    fn test_crn_pairing_gain() -> Result<()> {
+        /// 每候选 rollout 次数
+        const ROLLOUTS: usize = 200;
+
+        let (game, actions) = root_state()?;
+        println!("根局面: 回合 {} 阶段 {:?}，候选 {} 个
+", game.turn, game.stage, actions.len());
+
+        for reseed in [false, true] {
+            let cfg = SearchConfig::default().with_crn_stage_reseed(reseed);
+            let search = FlatSearch::new(cfg);
+            let seeds = RolloutSeeds::from_root(20260822);
+
+            // scores[候选][rollout 序号]
+            let mut scores: Vec<Vec<f64>> = Vec::with_capacity(actions.len());
+            for (i, action) in actions.iter().enumerate() {
+                let col: Vec<(usize, Result<(f64, f64)>)> = (0..ROLLOUTS)
+                    .into_par_iter()
+                    .map(|j| (j, search.simulate(&game, action, seeds.seed_at(j))))
+                    .collect();
+                let mut ok_scores = Vec::with_capacity(col.len());
+                let mut first_err: Option<String> = None;
+                for (_, r) in col {
+                    match r {
+                        Ok(v) => ok_scores.push(v.0),
+                        Err(e) => {
+                            if first_err.is_none() {
+                                first_err = Some(e.to_string());
+                            }
+                        }
+                    }
+                }
+                // 失败会让配对错位（不同候选丢掉的 j 不同），必须先确认没有失败
+                println!(
+                    "  候选 {i}: 成功 {}/{ROLLOUTS}{}",
+                    ok_scores.len(),
+                    first_err.map(|e| format!("，首个失败: {e}")).unwrap_or_default()
+                );
+                scores.push(ok_scores);
+            }
+
+            let label = if reseed { "开启按阶段重播种" } else { "仅共享起始种子" };
+            println!("===== {label} =====");
+
+            let mut corrs = Vec::new();
+            let mut gains = Vec::new();
+            for a in 0..scores.len() {
+                for b in (a + 1)..scores.len() {
+                    let (xa, xb) = (&scores[a], &scores[b]);
+                    let n = xa.len().min(xb.len());
+                    if n < 2 {
+                        continue;
+                    }
+                    let diff: Vec<f64> = (0..n).map(|j| xa[j] - xb[j]).collect();
+                    let indep = var_of(&xa[..n]) + var_of(&xb[..n]);
+                    let paired = var_of(&diff);
+                    let gain = if paired > 0.0 { indep / paired } else { f64::NAN };
+                    corrs.push(corr_of(&xa[..n], &xb[..n]));
+                    gains.push(gain);
+                }
+            }
+            println!(
+                "候选对数 {} | 平均 corr = {:.4} | 平均等效倍率 = {:.2}x | 倍率区间 [{:.2}, {:.2}]",
+                corrs.len(),
+                mean_of(&corrs),
+                mean_of(&gains),
+                gains.iter().cloned().fold(f64::INFINITY, f64::min),
+                gains.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+            );
+            println!();
+        }
         Ok(())
     }
 }

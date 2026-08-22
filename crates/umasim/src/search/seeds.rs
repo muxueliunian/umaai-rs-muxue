@@ -65,13 +65,37 @@ impl RolloutSeeds {
     ///
     /// **不吃候选索引**，理由见模块文档。同一 `rollout` 序号在所有候选上返回同一值。
     pub fn seed_at(&self, rollout: usize) -> u64 {
-        let mut z = self
-            .root
-            .wrapping_add((rollout as u64).wrapping_add(1).wrapping_mul(GOLDEN_GAMMA));
-        z = (z ^ (z >> 30)).wrapping_mul(MIX_A);
-        z = (z ^ (z >> 27)).wrapping_mul(MIX_B);
-        z ^ (z >> 31)
+        splitmix64(
+            self.root
+                .wrapping_add((rollout as u64).wrapping_add(1).wrapping_mul(GOLDEN_GAMMA))
+        )
     }
+
+    /// 由 rollout 种子再派生「该 rollout 在指定 `(回合, 阶段)` 上的随机流种子」
+    ///
+    /// 这是把「共享起始种子」升级为**真 CRN** 的关键：候选执行后消耗的随机数个数不同，
+    /// 顺序流会就此错位；每进入一个阶段就按 `(rollout 种子, 回合, 阶段)` 重新播种，
+    /// 则无论此前消耗多少，各候选在同一 `(回合, 阶段)` 上抽到的都是同一份随机性。
+    ///
+    /// 对齐的正是 CRN 的大头——下一回合的人头分配与事件抽签。
+    ///
+    /// 不吃候选索引，理由同 [`Self::seed_at`]。
+    pub fn stage_seed(rollout_seed: u64, turn: i32, stage: u64) -> u64 {
+        // 回合可能为负（未初始化局面），转 u64 前先做无符号重解释，避免符号扩展碰撞
+        let turn_bits = (turn as i64) as u64;
+        let mixed = rollout_seed
+            .wrapping_add(turn_bits.wrapping_add(1).wrapping_mul(GOLDEN_GAMMA))
+            .wrapping_add(stage.wrapping_add(1).wrapping_mul(MIX_A));
+        splitmix64(mixed)
+    }
+}
+
+/// SplitMix64 finalizer
+fn splitmix64(seed: u64) -> u64 {
+    let mut z = seed;
+    z = (z ^ (z >> 30)).wrapping_mul(MIX_A);
+    z = (z ^ (z >> 27)).wrapping_mul(MIX_B);
+    z ^ (z >> 31)
 }
 
 #[cfg(test)]
@@ -111,6 +135,44 @@ mod tests {
         let same = (0..256).filter(|&j| a.seed_at(j) == b.seed_at(j)).count();
         println!("root=42 与 root=43 在前 256 个序号上的碰撞数: {same}");
         assert_eq!(same, 0, "不同根种子不应产生相同序列");
+    }
+
+    /// 阶段派生必须确定，且 (回合, 阶段) 任一不同即给出不同种子
+    #[test]
+    fn test_stage_seed_distinct_per_turn_and_stage() {
+        let base = RolloutSeeds::from_root(42).seed_at(3);
+        let mut seen = Vec::new();
+        for turn in 0..78i32 {
+            for stage in 0..5u64 {
+                seen.push(RolloutSeeds::stage_seed(base, turn, stage));
+            }
+        }
+        let total = seen.len();
+        seen.sort_unstable();
+        seen.dedup();
+        println!("78 回合 × 5 阶段 = {total} 个组合，产出 {} 个不同种子", seen.len());
+        assert_eq!(seen.len(), total, "(回合, 阶段) 组合不得碰撞");
+
+        // 确定性
+        let a = RolloutSeeds::stage_seed(base, 12, 3);
+        let b = RolloutSeeds::stage_seed(base, 12, 3);
+        assert_eq!(a, b, "同参数必须给出同种子");
+    }
+
+    /// 不同 rollout 的同一 (回合, 阶段) 必须是不同随机流
+    ///
+    /// 否则所有 rollout 在该阶段会抽到完全一样的结果，方差直接塌掉。
+    #[test]
+    fn test_stage_seed_distinct_per_rollout() {
+        let seeds = RolloutSeeds::from_root(42);
+        let got: Vec<u64> = (0..512)
+            .map(|j| RolloutSeeds::stage_seed(seeds.seed_at(j), 20, 3))
+            .collect();
+        let mut uniq = got.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        println!("512 个 rollout 在 (回合 20, 阶段 3) 上产出 {} 个不同种子", uniq.len());
+        assert_eq!(uniq.len(), got.len(), "不同 rollout 在同一阶段不得共用随机流");
     }
 
     /// `from_rng` 由入口 RNG 决定，故入口种子固定时根种子也固定
