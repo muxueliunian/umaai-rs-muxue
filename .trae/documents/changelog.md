@@ -8,7 +8,8 @@
 - **全库 rustfmt 格式化**：应用当前 nightly rustfmt（1.10.0-nightly 2026-08-20）格式，40 文件 387 处差异收敛；rustfmt.toml `struct_lit_width` 32→30（工具规范化写入）
 - **seeded_rngs 注释补充**：`bench.rs` 说明 0x9E37_79B9_7F4A_7C15 为 SplitMix64 标准 gamma 增量常数（黄金比例，有据可依非任意指纹），派生规则保持固定以保证可复现性
 - **issues 更新**：constants.json 排名数据 issue 标记已解决（rank_scores / rank_names 补齐至 LS24、five_status_final_score 核对，提交 aa756d9，数据经用户确认）；rustfmt 问题解决方案补充钩子自动化（cargo-husky pre-commit）与全库格式化（含 nightly 滚动版本漂移说明）
-- **bench 通用卡组构成设施**：bench.rs 新增 `DeckComposition`（5 张普通卡数量分布 + 预设短名，`kind_count`/`name`/`name_zh`/`build_deck`/`make_deck` 一步自动选代表卡生成卡组）+ `PLAYER_BUILDS`（7 种主流玩家 build：speed 3,1,0,0,1 / stamina 2,2,0,0,1 / power_wisdom 0,0,2,0,3 / speed_wisdom 2,1,0,0,2 / wisdom 1,1,0,0,3 / average 1,0,1,1,2 / guts_wisdom 0,0,0,3,2，数据来自玩家经验）；bench_compositions 迁移复用（删本地 Composition/build_deck，101 枚举改用 DeckComposition）；guts_wisdom 仅 2 种卡不满足拉面杯「支援卡种类≥4」门槛（deck_can_split=false，hint_special 等额外加成不生效）但可正常模拟，作为对照 build 保留；测试 +2（build 形状 / 真实 cardDB 下 7 build 一步生成卡组）
+- **bench 通用卡组构成设施**：bench.rs 新增 `DeckComposition`（5 张普通卡数量分布 + 预设短名，`kind_count`/`name`/`name_zh`/`build_deck`/`make_deck` 一步自动选代表卡生成卡组）+ `PLAYER_BUILDS`（7 种主流玩家 build：speed 3,1,0,0,1 / stamina 2,2,0,0,1 / power_wisdom 0,0,2,0,3 / speed_wisdom 2,1,0,0,2 / wisdom 1,1,0,0,3 / average 1,0,1,1,2 / guts_wisdom 0,0,0,3,2，数据来自玩家经验）；bench_compositions 迁移复用（删本地 Composition/build_deck，101 枚举改用 DeckComposition）；测试 +2（build 形状 / 真实 cardDB 下 7 build 一步生成卡组）
+- **guts_wisdom 删除（用户决策）**：按玩家讨论暂时删除 guts_wisdom build（原为 7 种中的对照项，仅 2 种普通卡、不满足拉面杯「支援卡种类≥4」门槛）；PLAYER_BUILDS 变 6 种，注释保留恢复说明
 
 ## 2026-08-21
 

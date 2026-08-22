@@ -275,11 +275,11 @@ pub struct DeckComposition {
 ///
 /// 数量分布来自玩家经验整理（2026-08-22），数组下标即序号：
 /// 1. `speed` 3速1耐1智；2. `stamina` 2耐2速1智；3. `power_wisdom` 2力3智；
-/// 4. `speed_wisdom` 2速1耐2智；5. `wisdom` 1速1耐3智；6. `average` 1速1力1根2智；
-/// 7. `guts_wisdom` 3根2智——**仅 2 种普通卡，不满足拉面杯「支援卡种类 ≥ 4」
-/// 的门槛**（`deck_can_split` 为 false，hint_special 等额外加成不生效），
-/// 作为对照 build 保留，仍可正常模拟。
-pub const PLAYER_BUILDS: [DeckComposition; 7] = [
+/// 4. `speed_wisdom` 2速1耐2智；5. `wisdom` 1速1耐3智；6. `average` 1速1力1根2智。
+///
+/// 曾收录 `guts_wisdom`（3根2智，仅 2 种普通卡、不满足拉面杯「支援卡种类 ≥ 4」
+/// 门槛），按玩家讨论（2026-08-22）暂时删除；如后续需要对照可恢复。
+pub const PLAYER_BUILDS: [DeckComposition; 6] = [
     DeckComposition {
         counts: [3, 1, 0, 0, 1],
         name: "speed"
@@ -303,10 +303,6 @@ pub const PLAYER_BUILDS: [DeckComposition; 7] = [
     DeckComposition {
         counts: [1, 0, 1, 1, 2],
         name: "average"
-    },
-    DeckComposition {
-        counts: [0, 0, 0, 3, 2],
-        name: "guts_wisdom"
     }
 ];
 
@@ -453,10 +449,13 @@ mod tests {
         Ok(())
     }
 
-    /// PLAYER_BUILDS：7 种 build 均为 5 张普通卡、种类数符合预期（guts_wisdom 仅 2 种）。
+    /// PLAYER_BUILDS：6 种 build 均为 5 张普通卡、种类数符合预期（全部 ≥2）。
     #[test]
     fn test_player_builds_shape() -> Result<()> {
-        ensure!(PLAYER_BUILDS.len() == 7, "主流 build 应为 7 种");
+        ensure!(
+            PLAYER_BUILDS.len() == 6,
+            "主流 build 应为 6 种（guts_wisdom 已按玩家讨论删除）"
+        );
         for build in &PLAYER_BUILDS {
             ensure!(
                 build.counts.iter().sum::<usize>() == 5,
@@ -467,16 +466,14 @@ mod tests {
         }
         let kinds: Vec<usize> = PLAYER_BUILDS.iter().map(DeckComposition::kind_count).collect();
         println!("各 build 普通卡种类数: {kinds:?}");
-        ensure!(kinds[0] == 3, "speed 应为 3 种");
-        ensure!(kinds[6] == 2, "guts_wisdom 应为 2 种（不满足 4 种卡门槛）");
         ensure!(
-            kinds.iter().enumerate().all(|(idx, &k)| { k >= 2 || idx == 6 }),
-            "除 guts_wisdom 外其余 build 至少 2 种卡"
+            kinds.iter().all(|&k| k >= 2),
+            "所有 build 应至少 2 种卡，实际 {kinds:?}"
         );
         Ok(())
     }
 
-    /// 集成验证：真实 cardDB 上 7 种 build 均能一步生成 6 张卡（5 普通 + 1 友人）。
+    /// 集成验证：真实 cardDB 上 6 种 build 均能一步生成 6 张卡（5 普通 + 1 友人）。
     #[test]
     fn test_player_builds_make_deck_live_data() -> Result<()> {
         use crate::{
