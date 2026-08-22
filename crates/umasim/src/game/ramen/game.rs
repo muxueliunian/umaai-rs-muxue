@@ -1588,6 +1588,8 @@ impl RamenGame {
                             && self.persons[p as usize].person_type == crate::game::PersonType::Card
                     })
                     .count();
+                // NPC 数量 = 本训练位置实际分配的 Npc 人数（`ramen_memo_cn.md` 算例：
+                // NPC数量=3 时加成 floor(3/2)，非固定 5；与生效层 `fill_feeling_gauge` 一致）
                 let npc_count = dist[train]
                     .iter()
                     .filter(|&&p| {

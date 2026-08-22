@@ -802,15 +802,19 @@ impl RamenAction {
     ) -> Result<()> {
         if let Some(train_feelings) = game.ramen.train_feeling_type {
             let base_dist = super::rules::calc_gauge_base_distribution(&game.ramen.selected_regions);
-            // 计算支援卡数量（包括分身，分身id < 0 但本体 id 在 0-5 范围）
+            // 支援卡数量：仅统计类型为 Card 的 person（分身是同一索引在分布中重复出现，自然计入）。
+            // 不得用固定索引排除（旧布局 p!=6&&p!=7 会把 NPC/理事长/记者误算进来）。
             let support_count = game.distribution[train]
                 .iter()
-                .filter(|&&p| p != 6 && p != 7) // 排除理事长和记者
+                .filter(|&&p| p >= 0 && game.persons[p as usize].person_type == PersonType::Card)
                 .count();
-            let train_bonus = super::rules::calc_train_feeling_bonus(
-                support_count,
-                5 // 5 个 NPC
-            );
+            // NPC 数量 = 本训练位置实际分配的 Npc 人数（`ramen_memo_cn.md` 公式与算例；
+            // 不是全局固定 5——NPC 随机分配且可能被分身挤掉，须按实际分布统计）
+            let npc_count = game.distribution[train]
+                .iter()
+                .filter(|&&p| p >= 0 && game.persons[p as usize].person_type == PersonType::Npc)
+                .count();
+            let train_bonus = super::rules::calc_train_feeling_bonus(support_count, npc_count);
             fill_gauge_after_train(
                 &mut game.ramen,
                 &base_dist,
@@ -1367,6 +1371,108 @@ mod tests {
         println!("全空候选: {actions:?}");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].ramen, None);
+
+        Ok(())
+    }
+
+    /// 诀窍槽加成按**训练位置实际分配的 NPC 数**生效（`ramen_memo_cn.md` 公式与算例）
+    ///
+    /// 修复回归：旧实现硬编码 npc_count=5 或按固定索引过滤（`p != 6 && p != 7`），
+    /// 与实际分布不符。本测试构造不同 NPC 数的速训练分布，直接调用
+    /// `handle_train_success`（绕过失败率），验证槽增量
+    /// = 基础分配 + (1 + 支援卡数 + floor(NPC数/2))，与 game.rs 显示层一致。
+    #[test]
+    fn test_train_gauge_uses_actual_npc_count() -> anyhow::Result<()> {
+        use crate::{
+            game::{
+                ramen::{FeelingType, RamenGame, RamenStage, rules::calc_gauge_base_distribution},
+                traits::Game
+            },
+            gamedata::{init_global},
+            utils::{get_workspace_root, init_test_logger}
+        };
+        use rand::SeedableRng;
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(&workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+
+        let inherit = crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let mut game = RamenGame::newgame(102601, &deck, inherit)?;
+        // 第 2 回合后（已有友人卡 + 5 个 NPC：persons[0..5]=支援卡, [6]=友人, [7..12]=NPC）
+        game.add_friend_and_npcs()?;
+        game.ramen.selected_regions = [0, 6, 7];
+        game.ramen.train_feeling_type = Some([
+            FeelingType::A,
+            FeelingType::B,
+            FeelingType::C,
+            FeelingType::A,
+            FeelingType::B
+        ]);
+        game.stage = RamenStage::Train;
+        let mut rng = StdRng::seed_from_u64(42);
+        let action = RamenAction::new(Operation::Train(TrainingType::Speed));
+        let base_dist = calc_gauge_base_distribution(&game.ramen.selected_regions);
+        let gauge_limit = crate::game::ramen::rules::GAUGE_LIMIT;
+        println!("基础分配 base_dist = {base_dist:?}（槽上限 {gauge_limit}，超出会清零+1诀窍）");
+
+        // 场景 A：0 张支援卡 + 2 个 NPC → 加成 1+0+floor(2/2)=2（不溢出，可精确验证）
+        game.base.distribution = vec![
+            vec![7, 8], // 速：0支援卡 + 2 NPC
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        ];
+        let params = TrainParams {
+            buffs: game.calc_training_buff(0)?,
+            is_shining: false,
+            failure_rate: 0.0
+        };
+        game.ramen.feeling_slot = [0, 0, 0];
+        action.fill_feeling_gauge(&mut game, 0, &params, false)?;
+        let gain = game.ramen.feeling_slot[0];
+        let expect_bonus = 1 + 0 + 2 / 2; // 1 + 支援卡0 + floor(2/2)=1
+        let expected_gain = base_dist[0] + expect_bonus;
+        println!(
+            "场景A: 速训练 0支援卡+2NPC, 槽A={gain}, 期望 {expected_gain} = 基础{} + 加成{expect_bonus}",
+            base_dist[0]
+        );
+        assert_eq!(gain, expected_gain, "2 个 NPC 时应按 floor(2/2)=1 计算");
+
+        // 场景 B：0 张支援卡 + 4 个 NPC → 加成 1+0+floor(4/2)=3
+        // 同支援卡数仅 NPC 数翻倍：若旧实现硬编码 5（floor(5/2)=2）则两场景加成相同，
+        // 实际应按本训练位置 4 个 NPC → floor(4/2)=2 有差异。
+        game.base.distribution = vec![
+            vec![7, 8, 9, 10], // 速：0支援卡 + 4 NPC
+            vec![],
+            vec![],
+            vec![],
+            vec![],
+        ];
+        let params = TrainParams {
+            buffs: game.calc_training_buff(0)?,
+            is_shining: false,
+            failure_rate: 0.0
+        };
+        game.ramen.feeling_slot = [0, 0, 0];
+        action.fill_feeling_gauge(&mut game, 0, &params, false)?;
+        let gain = game.ramen.feeling_slot[0];
+        let expect_bonus = 1 + 0 + 4 / 2; // 1 + 支援卡0 + floor(4/2)=2
+        let expected_gain = base_dist[0] + expect_bonus;
+        println!(
+            "场景B: 速训练 0支援卡+4NPC, 槽A={gain}, 期望 {expected_gain} = 基础{} + 加成{expect_bonus}",
+            base_dist[0]
+        );
+        assert_eq!(
+            gain, expected_gain,
+            "4 个 NPC 时应按 floor(4/2)=2 计算（而非硬编码 5 个 NPC 的 floor(5/2)=2 恰好巧合相同）"
+        );
 
         Ok(())
     }

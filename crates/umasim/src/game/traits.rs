@@ -484,4 +484,13 @@ pub trait Trainer<G: Game> {
     fn last_decision(&self) -> Option<DecisionInfo> {
         None
     }
+
+    /// 上一次决策的评分分解文本（开发调参格式，进决策日志 breakdown 列）
+    ///
+    /// 默认 `None`（随机等无打分的训练员不产生分解）；手写策略等按需 override。
+    /// 与 [`last_decision`](Self::last_decision)（协议格式）分层：本方法面向调参日志，
+    /// 内容可随意演进（候选数/维度分解/守门原因），不承诺 schema 稳定。
+    fn last_breakdown(&self) -> Option<String> {
+        None
+    }
 }

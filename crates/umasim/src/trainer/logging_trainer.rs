@@ -82,7 +82,7 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for LoggingTrainer<T> {
                 action_index: idx,
                 action_desc: actions.get(idx).map(|a| a.to_string()).unwrap_or_default(),
                 elapsed_us,
-                score_breakdown: None
+                score_breakdown: self.inner.last_breakdown()
             };
             self.log.borrow_mut().record(row);
         }

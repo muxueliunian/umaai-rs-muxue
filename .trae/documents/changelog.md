@@ -4,6 +4,10 @@
 
 ## 2026-08-22
 
+- **诀窍槽 NPC 数量修正（按训练位置实际分配）**：`fill_feeling_gauge`（生效层）此前硬编码 npc_count=5，改为与显示层一致；新增集成测试验证不同 NPC 数（2/4）的加成差异
+- **删除过时测试**：`test_load_game_config_merges_user_overrides` 按用户确认删除
+- **自选比赛守门修复（等级过滤 + 摆烂 + 达标后停止）**：①守门与软倾向仅在本回合等级满足（mask 内）时强制/加分；②剩余有效回合少于缺口（打完也不够）判定为摆烂
+- **决策日志 breakdown 接入**：`RamenPolicy` 拆出 `decide_*`（返回选中索引 + 各候选评分分解），守门触发时记录详细原因（体力/心情/自选比赛缺口与等级要求）；`Trainer` 新增 `last_breakdown` 默认方法，`RamenHandwrittenTrainer` 缓存、`LoggingTrainer` 提取进 CSV breakdown 列（此前为预留空列）
 - **cargo-husky 钩子引入并撤销（用户决策）+ cargo fmt 手动化**：pre-commit rustfmt 检查钩子（nightly 强制 / stable 跳过）引入后，因 fmt 改由用户手动执行而移除；AGENTS.md 新增「禁用 cargo fmt」规则；全库应用当前 nightly rustfmt 格式
 - **bench 玩家 build 预置**：`DeckComposition` + `PLAYER_BUILDS`（7 种主流玩家 build，guts_wisdom 按玩家讨论删除）外置到 bench_config.toml `[player_builds]`（Map 形态一行一个，IndexMap 保声明序，无内置默认、未配置报错）
 - **game_config.toml 加载修复**：修复用户配置路径错误（此前从未被加载、一直走兜底默认）；`[config_override]` 全字段可选覆盖（新增 uma/cards/blue_count）+ 未知字段显式报错

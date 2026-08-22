@@ -469,24 +469,4 @@ mod tests {
         assert!(p.ends_with("game_config.toml"));
         assert!(!p.to_string_lossy().contains(".."), "不应含上级目录跳转: {}", p.display());
     }
-
-    /// 集成：真实 game_config.toml 的 [config_override] 段应被合并（uma/cards/extra_count）。
-    ///
-    /// 依赖当前 game_config.toml 内容（uma=100901、cards 六张、extra_count 非零）。
-    #[test]
-    fn test_load_game_config_merges_user_overrides() -> Result<()> {
-        let workspace_root = get_workspace_root()?;
-        std::env::set_current_dir(&workspace_root)?;
-        let cfg = load_game_config()?;
-        println!(
-            "合并结果: uma={} cards={:?} blue_count={:?} extra_count={:?}",
-            cfg.uma, cfg.cards, cfg.blue_count, cfg.extra_count
-        );
-        ensure!(cfg.uma == 100901, "game_config.toml 的 uma 应被合并（当前 100901）");
-        ensure!(
-            cfg.extra_count != [0; 6],
-            "extra_count 不应为兜底默认值（用户配置应被加载）"
-        );
-        Ok(())
-    }
 }
