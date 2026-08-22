@@ -302,9 +302,13 @@ impl FlatSearch {
 
         // 第二阶段：UCB 动态分配
         loop {
-            // 检查是否有动作达到 search_n
-            let max_count = action_results.iter().map(|r| r.0.count()).max().unwrap_or(0);
-            if max_count >= self.config.search_n as u32 {
+            // 终止判据用**已计划**次数，不能用 ActionResult::count()（成功次数）
+            //
+            // 用成功次数会在 rollout 稳定失败时死循环：失败只增加 planned、不增加 count，
+            // 于是 count 永远达不到 search_n，而 search() 末尾的「零样本」检查在本函数
+            // 返回之后才执行，根本到不了。拉面接入初期规则报错概率更高，必须堵住。
+            let max_planned = planned.iter().copied().max().unwrap_or(0);
+            if max_planned >= self.config.search_n {
                 break;
             }
 
@@ -322,8 +326,7 @@ impl FlatSearch {
                 // 每次 rollout 由工作项序号自行播种：结果与线程调度无关
                 let offset = planned[best_action_idx];
                 let run_leaf = |k: usize| -> Option<SimOutcome> {
-                    let mut rng = StdRng::seed_from_u64(seeds.seed_at(offset + k));
-                    match self.simulate_until_terminal_or_leaf(game, action, &mut rng) {
+                    match self.simulate_until_terminal_or_leaf(game, action, seeds.seed_at(offset + k)) {
                         Ok(v) => Some(v),
                         Err(e) => {
                             debug!("[搜索][UCB nn leaf] rollout {} 失败: {e}", offset + k);
@@ -569,8 +572,7 @@ impl FlatSearch {
 
             let mut failed = 0usize;
             for k in 0..n {
-                let mut rng = StdRng::seed_from_u64(seeds.seed_at(offset + k));
-                let outcome = match self.simulate_until_terminal_or_leaf(game, action, &mut rng) {
+                let outcome = match self.simulate_until_terminal_or_leaf(game, action, seeds.seed_at(offset + k)) {
                     Ok(v) => v,
                     Err(e) => {
                         debug!("[搜索][nn leaf] rollout {} 失败: {e}", offset + k);
@@ -632,9 +634,12 @@ impl FlatSearch {
     }
 
     #[cfg(feature = "onnx")]
-    fn simulate_until_terminal_or_leaf(
-        &self, game: &OnsenGame, action: &OnsenAction, rng: &mut StdRng
-    ) -> Result<SimOutcome> {
+    /// 单次 rollout，跑到终局或 `max_depth` 截断处（NN leaf 微批路径用）
+    ///
+    /// `seed` 语义与 [`Self::simulate`] 一致：同一 rollout 序号在所有候选上共享，
+    /// 且按 `(回合, 阶段)` 重播种，使本路径与 [`Self::simulate`] 的 CRN 行为一致。
+    fn simulate_until_terminal_or_leaf(&self, game: &OnsenGame, action: &OnsenAction, seed: u64) -> Result<SimOutcome> {
+        let rng = &mut StdRng::seed_from_u64(seed);
         // Dig/Upgrade 目前仍走完整模拟（未对齐 max_depth）；这里直接复用现有路径，视为 Terminal
         if matches!(action, OnsenAction::Dig(_)) {
             let (s, pt) = self.simulate_onsen_select(game, action, rng)?;
@@ -657,6 +662,7 @@ impl FlatSearch {
         // max_depth==0：保持旧行为，rollout 跑到终局
         if self.config.max_depth == 0 {
             while sim_game.next() {
+                self.reseed_for_stage(rng, seed, &sim_game);
                 sim_game.run_stage(&trainer_hw, rng)?;
             }
             sim_game.on_simulation_end(&trainer_hw, rng)?;
@@ -676,6 +682,7 @@ impl FlatSearch {
                 finished = true;
                 break;
             }
+            self.reseed_for_stage(rng, seed, &sim_game);
             sim_game.run_stage(&trainer_hw, rng)?;
             if (sim_game.turn - start_turn) >= max_depth {
                 break;
@@ -975,8 +982,24 @@ mod tests {
         SearchConfig::default().with_search_n(16).with_ucb(false)
     }
 
-    /// 跑一局到首个多候选决策点，返回该点的搜索统计
+    /// 回归基准配置（UCB 路径）
+    ///
+    /// `use_ucb` 默认为 `true`，是活跃入口实际走的路径，必须单独覆盖。
+    /// `group_size` 取小值以免单次搜索过久。
+    fn regression_config_ucb() -> SearchConfig {
+        SearchConfig::default()
+            .with_search_n(16)
+            .with_ucb(true)
+            .with_search_group_size(4)
+    }
+
+    /// 跑一局到首个多候选决策点，返回该点的搜索统计（均匀分配）
     fn capture(seed: u64, reverse: bool) -> Result<Vec<ActionDigest>> {
+        capture_with(regression_config(), seed, reverse)
+    }
+
+    /// 同 [`capture`]，但可指定搜索配置
+    fn capture_with(config: SearchConfig, seed: u64, reverse: bool) -> Result<Vec<ActionDigest>> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         let _ = init_test_logger("error");
@@ -989,7 +1012,7 @@ mod tests {
         let deck = [302424, 302894, 303044, 302924, 303024, 303054];
         let mut game = OnsenGame::newgame(102601, &deck, inherit)?;
 
-        let trainer = CapturingTrainer::new(regression_config(), seed, reverse);
+        let trainer = CapturingTrainer::new(config, seed, reverse);
         // 局面推进本身用固定种子，保证根局面在各次运行间一致
         let mut rng = StdRng::seed_from_u64(20260822);
         while game.next() {
@@ -1040,6 +1063,50 @@ mod tests {
             println!("动作 {i}: 正序 n={} mean={:.6} | 逆序 n={} mean={:.6}", a.n, a.mean, b.n, b.mean);
         }
         assert_eq!(normal, reversed, "各动作统计量不应随候选顺序变化");
+        Ok(())
+    }
+
+    /// 回归 4：UCB 路径下同一 seed 两次搜索必须一致
+    ///
+    /// `use_ucb` 默认为 `true`，是 `umaai` / `umasim` 活跃入口实际走的路径。
+    /// 回归 1~3 写死 `use_ucb=false`（UCB 分配依赖分数，不适合当泛型化的尺子），
+    /// 但可复现性本身在 UCB 下同样必须成立，故单独覆盖。
+    #[test]
+    fn test_search_ucb_reproducible() -> Result<()> {
+        let a = capture_with(regression_config_ucb(), 42, false)?;
+        let b = capture_with(regression_config_ucb(), 42, false)?;
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            println!("动作 {i}: n={} mean={:.6} | n={} mean={:.6}", x.n, x.mean, y.n, y.mean);
+        }
+        assert_eq!(a, b, "UCB 路径下同一 seed 两次搜索结果必须一致");
+        Ok(())
+    }
+
+    /// UCB 路径的候选顺序敏感性（诊断用，不断言）
+    ///
+    /// UCB 按分数动态分配预算且平局时取索引最小者，故候选重排**可能**改变各动作
+    /// 拿到的样本数——这是算法固有性质，不是可复现性缺陷。本测试只打印差异供观察；
+    /// 泛型化的顺序无关性护栏由均匀分配的回归 3 承担。
+    #[test]
+    fn test_search_ucb_order_sensitivity() -> Result<()> {
+        let normal = capture_with(regression_config_ucb(), 42, false)?;
+        let reversed = capture_with(regression_config_ucb(), 42, true)?;
+        let mut diff = 0usize;
+        for (i, (a, b)) in normal.iter().zip(reversed.iter()).enumerate() {
+            let same = a == b;
+            if !same {
+                diff += 1;
+            }
+            println!(
+                "动作 {i}: 正序 n={} mean={:.6} | 逆序 n={} mean={:.6} | {}",
+                a.n,
+                a.mean,
+                b.n,
+                b.mean,
+                if same { "一致" } else { "不同" }
+            );
+        }
+        println!("UCB 下候选重排导致 {diff}/{} 个动作统计不同", normal.len());
         Ok(())
     }
 
