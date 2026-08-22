@@ -12,25 +12,28 @@
 //! 比较方差退回独立抽样——那不是 CRN，只是可复现的独立抽样。
 //! 故 [`RolloutSeeds::seed_at`] **只吃 rollout 序号**。
 //!
-//! # 尚未实现的部分
+//! # CRN 对齐的承担者（RNG Refactor Plan v2 §5.2）
 //!
-//! 共享种子只保证各候选 rollout 的**起始流位置**相同。候选一经执行状态立刻分叉，
-//! 后续随机数消耗长度不同，第 t+1 回合抽的未必是同一件事。真正的对齐需要
-//! 按 `(turn, stage)` 重播种（计划 Phase 1.3），本模块只提供其种子来源。
-//! 在那之前，**不应对外宣称已实现 CRN**。
+//! - **拉面（规则层接管）**：rollout 分支经 [`crate::search::FlatSearchGame::fork_for_rollout`]
+//!   注入 `rule_master = seed_at(j)`，规则层每回合按 `(rule_master, turn)` 派生
+//!   回合固定流/策略流——同一轮内各候选面对逐位一致的随机未来，无需按阶段重播种。
+//! - **温泉（外挂 CRN 保留）**：onsen 规则层未改造，仍由 [`RolloutSeeds::stage_seed`]
+//!   按 `(rollout 种子, 回合, 阶段)` 重播种对齐（`crn_stage_reseed` 开关）。
+//!
+//! `InternalSeed` 已随拉面接驳退役（规则层直接注入 rollout 种子，无需分频道派生）。
 
-use rand::{RngCore, rngs::StdRng};
+
+use crate::rng::splitmix64;
 
 /// SplitMix64 的 gamma 增量常数（黄金比例）
 ///
-/// 与 [`crate::bench::seeded_rngs`] 同源，保持全仓库种子派生常数一致。
-/// 具体取值无关紧要，关键是固定不变——可复现性依赖它在代码演进中保持稳定。
+/// 与 [`crate::bench::seeded_rngs`]、[`crate::rng::GAMMA`] 同源，保持全仓库
+/// 种子派生常数一致。具体取值无关紧要，关键是固定不变——可复现性依赖它在
+/// 代码演进中保持稳定。
 const GOLDEN_GAMMA: u64 = 0x9E37_79B9_7F4A_7C15;
 
-/// SplitMix64 finalizer 的两个混淆常数
+/// SplitMix64 finalizer 混淆常数 A（仅 [`RolloutSeeds::stage_seed`] 使用，冻结不可改）
 const MIX_A: u64 = 0xBF58_476D_1CE4_E5B9;
-/// 见 [`MIX_A`]
-const MIX_B: u64 = 0x94D0_49BB_1331_11EB;
 
 /// 一次搜索内所有候选共享的 rollout 种子表
 ///
@@ -47,7 +50,7 @@ impl RolloutSeeds {
     /// 从搜索入口 RNG 抽取根种子
     ///
     /// 只抽一次，使外层（如 `MctsTrainer` 的整局种子）能罩住整次搜索。
-    pub fn from_rng(rng: &mut StdRng) -> Self {
+    pub fn from_rng(rng: &mut impl rand::Rng) -> Self {
         Self { root: rng.next_u64() }
     }
 
@@ -73,11 +76,9 @@ impl RolloutSeeds {
 
     /// 由 rollout 种子再派生「该 rollout 在指定 `(回合, 阶段)` 上的随机流种子」
     ///
-    /// 这是把「共享起始种子」升级为**真 CRN** 的关键：候选执行后消耗的随机数个数不同，
-    /// 顺序流会就此错位；每进入一个阶段就按 `(rollout 种子, 回合, 阶段)` 重新播种，
-    /// 则无论此前消耗多少，各候选在同一 `(回合, 阶段)` 上抽到的都是同一份随机性。
-    ///
-    /// 对齐的正是 CRN 的大头——下一回合的人头分配与事件抽签。
+    /// **仅温泉（外挂 CRN）使用**：onsen 规则层未改造，靠每进入一个阶段按
+    /// `(rollout 种子, 回合, 阶段)` 重新播种，使各候选在同一 `(回合, 阶段)` 上
+    /// 抽到同一份随机性。拉面规则层已由无状态流接管，不再调用本方法。
     ///
     /// 不吃候选索引，理由同 [`Self::seed_at`]。
     pub fn stage_seed(rollout_seed: u64, turn: i32, stage: u64) -> u64 {
@@ -90,42 +91,9 @@ impl RolloutSeeds {
     }
 }
 
-/// 规则层内部随机流的种子（与搜索主 RNG 分频道）
-///
-/// 必须与 rollout 主种子**不同值**：两个 `StdRng::seed_from_u64(同一值)` 是同一条流，
-/// 直接复用会让规则层与决策层抽到相同序列。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InternalSeed(u64);
-
-impl InternalSeed {
-    /// 由 rollout 种子派生规则层种子
-    pub fn derive(rollout_seed: u64) -> Self {
-        Self(splitmix64(rollout_seed ^ INTERNAL_STREAM_TAG))
-    }
-
-    /// 取出种子值
-    pub fn get(&self) -> u64 {
-        self.0
-    }
-}
-
-/// 规则层随机流的频道标记（任取的固定常数，只需与主流区分开）
-const INTERNAL_STREAM_TAG: u64 = 0x5265_616C_5F52_4E47;
-
-/// SplitMix64 finalizer
-///
-/// 纯终混合，**不含** `seed += gamma` 那一步——调用方自行决定如何构造输入。
-/// `crate::sampler` 复用同一份实现，避免两处出现同名但行为不同的函数。
-pub(crate) fn splitmix64(seed: u64) -> u64 {
-    let mut z = seed;
-    z = (z ^ (z >> 30)).wrapping_mul(MIX_A);
-    z = (z ^ (z >> 27)).wrapping_mul(MIX_B);
-    z ^ (z >> 31)
-}
-
 #[cfg(test)]
 mod tests {
-    use rand::SeedableRng;
+    use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
 
@@ -198,28 +166,6 @@ mod tests {
         uniq.dedup();
         println!("512 个 rollout 在 (回合 20, 阶段 3) 上产出 {} 个不同种子", uniq.len());
         assert_eq!(uniq.len(), got.len(), "不同 rollout 在同一阶段不得共用随机流");
-    }
-
-    /// 规则层种子必须与 rollout 主种子不同值，且随 rollout 变化
-    #[test]
-    fn test_internal_seed_separated_from_main() {
-        let seeds = RolloutSeeds::from_root(42);
-        let mut collisions = 0;
-        let mut got = Vec::new();
-        for j in 0..256 {
-            let main = seeds.seed_at(j);
-            let internal = InternalSeed::derive(main);
-            if internal.get() == main {
-                collisions += 1;
-            }
-            got.push(internal.get());
-        }
-        println!("规则层种子与主种子相同的次数: {collisions}");
-        assert_eq!(collisions, 0, "规则层种子不得与主种子同值（同值即同一条流）");
-
-        got.sort_unstable();
-        got.dedup();
-        assert_eq!(got.len(), 256, "不同 rollout 的规则层种子不得碰撞");
     }
 
     /// `from_rng` 由入口 RNG 决定，故入口种子固定时根种子也固定

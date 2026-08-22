@@ -4,7 +4,7 @@
 //!
 //! 注意：合宿判断使用 `BaseGame::is_xiahesu()`，超级拉面/RMJ 回合判断使用 `RamenGame` 的方法。
 
-use rand::{Rng, rngs::StdRng, seq::SliceRandom};
+use rand::{Rng, seq::SliceRandom};
 use serde::{Deserialize, Serialize};
 
 use crate::utils::Array5;
@@ -109,7 +109,7 @@ pub fn get_turn_special_feeling(turn: i32) -> i32 {
 ///
 /// # 返回值
 /// `Array5`（`[i32; 5]`），分别对应速度/耐力/力量/根性/智力训练的诀窍类型角标（0=A, 1=B, 2=C）。
-pub fn assign_train_feeling_type(rng: &mut StdRng) -> Array5 {
+pub fn assign_train_feeling_type(rng: &mut impl Rng) -> Array5 {
     let mut result = [0i32; 5];
     // 前3个位置保证每种类型各出现1次
     let mut base = [0, 1, 2];
@@ -136,7 +136,7 @@ pub const EVENT_FRIEND_UNLOCK: u32 = 830305103;
 
 #[cfg(test)]
 mod tests {
-    use rand::SeedableRng;
+    use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
 

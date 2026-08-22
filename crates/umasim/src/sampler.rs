@@ -53,7 +53,7 @@ use crate::{
     },
     gamedata::{EventChoice, GAMEDATA},
     global,
-    search::seeds::splitmix64,
+    rng::splitmix64,
     trainer::RamenHandwrittenTrainer
 };
 
@@ -74,8 +74,8 @@ const TURN_STREAM_TAG: u64 = 0x5455_524E_5F44_5257;
 
 /// 按 `(基底, 序号, 频道)` 派生一个独立种子
 ///
-/// 终混合直接复用 [`crate::search::seeds`] 的那一份——两个模块各写一个同名
-/// `splitmix64` 但行为不同（一个含 `seed += gamma` 一个不含），是很容易踩的坑。
+/// 终混合直接复用 [`crate::rng::splitmix64`] 的那一份（全仓库唯一权威实现），
+/// 避免各模块各写一个同名但行为不同的函数。
 fn derive_seed(base: u64, index: u64, tag: u64) -> u64 {
     splitmix64(base ^ tag ^ index.wrapping_add(1).wrapping_mul(GOLDEN_GAMMA))
 }
@@ -590,9 +590,9 @@ pub fn sample_from_spec(spec: SampleSpec) -> Result<SampleOutcome> {
     }
 
     // 双流分裂沿用 bench 的既有契约：决策流与规则层内部流互不相关
-    let (mut decision_rng, rule_rng) = seeded_rngs(spec.seed);
+    let (mut decision_rng, rule_master) = seeded_rngs(spec.seed, 0);
     let mut game = RamenGame::newgame(spec.uma, &spec.deck, spec.inherit.clone())?;
-    game.set_internal_rng(rule_rng);
+    game.set_rule_master(rule_master);
 
     let trainer = SamplingTrainer {
         inner: RamenHandwrittenTrainer::new(),

@@ -232,17 +232,18 @@ fn main() -> Result<()> {
 
         let mut outcomes = Vec::with_capacity(cfg.runs);
         for i in 0..cfg.runs {
-            let seed = cfg.seed + i as u64;
+            let run_idx = i as u64;
+            let log_seed = cfg.seed + run_idx; // 决策日志标签（局号可读）
             // 构造训练员（LoggingTrainer 包装；决策日志默认开启，由 --log 决定是否落盘）
             let (outcome, log) = match cfg.trainer.as_str() {
                 "random" => {
-                    let trainer = LoggingTrainer::new(RandomTrainer, seed);
-                    let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, seed, &trainer)?;
+                    let trainer = LoggingTrainer::new(RandomTrainer, log_seed);
+                    let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())
                 }
                 "handwritten" => {
-                    let trainer = LoggingTrainer::new(RamenHandwrittenTrainer::new(), seed);
-                    let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, seed, &trainer)?;
+                    let trainer = LoggingTrainer::new(RamenHandwrittenTrainer::new(), log_seed);
+                    let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())
                 }
                 other => anyhow::bail!("未知 trainer: {other}（可选 random / handwritten）")
@@ -258,7 +259,7 @@ fn main() -> Result<()> {
                 outcome.elapsed_ms,
             );
             if cfg.decision_log {
-                log.save_to(&out_dir.join(format!("bench_base_decision_{}_{seed}.csv", build.name())))?;
+                log.save_to(&out_dir.join(format!("bench_base_decision_{}_{}.csv", build.name(), run_idx)))?;
             }
             all_rows.extend(log.rows);
             outcomes.push(outcome);

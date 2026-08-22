@@ -24,7 +24,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use rand::{Rng, rngs::StdRng};
+use rand::rngs::StdRng;
 use tract_onnx::prelude::*;
 
 use super::{Evaluator, ValueOutput};

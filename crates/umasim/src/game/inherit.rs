@@ -1,6 +1,6 @@
 use std::default::Default;
 
-use rand::{Rng, rngs::StdRng};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 //use colored::Colorize;
@@ -34,7 +34,7 @@ impl InheritInfo {
     }
 
     /// 获取局中继承属性
-    pub fn inherit(&self, rng: &mut StdRng) -> Array6 {
+    pub fn inherit(&self, rng: &mut impl Rng) -> Array6 {
         let mut ret = Array6::default();
         let extra_scale: f64 = rng.random_range(0.0..2.0);
         for i in 0..5 {
@@ -56,7 +56,7 @@ impl InheritInfo {
     }
 
     /// 获取局中继承上限 0-8
-    pub fn inherit_limit(&self, _rng: &mut StdRng) -> Array5 {
+    pub fn inherit_limit(&self, _rng: &mut impl Rng) -> Array5 {
         let mut ret = self.blue_count.clone();
         for i in 0..5 {
             ret[i] = (ret[i] as f32 * 5.33) as i32;
@@ -68,7 +68,7 @@ impl InheritInfo {
 #[cfg(test)]
 mod tests {
     use anyhow::Result;
-    use rand::SeedableRng;
+    use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
 

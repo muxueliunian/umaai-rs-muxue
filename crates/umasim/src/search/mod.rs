@@ -19,4 +19,4 @@ pub use config::SearchConfig;
 pub use flat_search::FlatSearch;
 pub use result::{ActionResult, SearchOutput};
 pub use searchable::{FlatSearchGame, RolloutHost, SearchScore};
-pub use seeds::{InternalSeed, RolloutSeeds};
+pub use seeds::RolloutSeeds;

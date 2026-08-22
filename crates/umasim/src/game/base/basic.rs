@@ -50,7 +50,7 @@ impl Display for BasicAction {
 impl ActionEnum for BasicAction {
     type Game = BasicGame;
     // Train需要在当前类型里实现，其他操作可以使用BaseAction里默认的实现
-    fn apply(&self, game: &mut Self::Game, rng: &mut StdRng) -> Result<()> {
+    fn apply(&self, game: &mut Self::Game, rng: &mut impl Rng) -> Result<()> {
         match &self.0 {
             BaseAction::Train(train) => self.do_train(game, *train as usize, rng),
             _ => self.0.apply(game, rng)
@@ -63,7 +63,7 @@ impl ActionEnum for BasicAction {
 }
 
 impl BasicAction {
-    pub fn do_train(&self, game: &mut BasicGame, train: usize, rng: &mut StdRng) -> Result<()> {
+    pub fn do_train(&self, game: &mut BasicGame, train: usize, rng: &mut impl Rng) -> Result<()> {
         // sanity check
         if train >= 5 {
             return Err(anyhow!("训练等级越界: {train}"));
@@ -296,7 +296,7 @@ impl Game for BasicGame {
         }
     }
 
-    fn generate_events(&self, rng: &mut StdRng) -> Vec<EventData> {
+    fn generate_events(&self, rng: &mut impl Rng) -> Vec<EventData> {
         let mut events = vec![];
         let no_event_turns = &global!(GAMECONSTANTS).no_event_turns;
         // 剧本事件
@@ -442,7 +442,7 @@ impl Game for BasicGame {
     }
 
     /// 使事件生效（无选项）。修改羁绊和特殊事件的部分需要在当前类型里完成
-    fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()> {
+    fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut impl Rng) -> Result<()> {
         if let Some(result) = self.base.apply_event(event, choice, rng) {
             if let Some(person_index) = &event.person_index
                 && result.value.friendship != 0

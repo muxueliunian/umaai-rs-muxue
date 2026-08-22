@@ -2,7 +2,7 @@ use std::fmt::Display;
 
 use anyhow::Result;
 use colored::Colorize;
-use rand::rngs::StdRng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -71,7 +71,7 @@ impl Display for OnsenAction {
 impl ActionEnum for OnsenAction {
     type Game = OnsenGame;
 
-    fn apply(&self, game: &mut Self::Game, rng: &mut StdRng) -> Result<()> {
+    fn apply(&self, game: &mut Self::Game, rng: &mut impl Rng) -> Result<()> {
         match self {
             // ========== 训练动作 ==========
             OnsenAction::Train(train_type) => {

@@ -14,6 +14,8 @@ pub mod game;
 pub mod policy;
 pub mod rules;
 pub mod state;
+#[cfg(test)]
+mod rng_consistency;
 
 pub use action::*;
 use enum_iterator::Sequence;

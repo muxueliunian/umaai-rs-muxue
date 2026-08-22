@@ -231,9 +231,10 @@ fn run_composition<T: Trainer<RamenGame>>(
     let mut failed = 0_usize;
 
     for run_idx in 0..cfg.runs {
-        let seed = cfg.seed + run_idx as u64;
-        let trainer = make_trainer(seed);
-        match bench::run_seeded(DEFAULT_UMA, &deck, &DEFAULT_INHERIT, seed, &trainer) {
+        let run_idx_u = run_idx as u64;
+        let log_seed = cfg.seed + run_idx_u; // 决策日志标签（局号可读）
+        let trainer = make_trainer(log_seed);
+        match bench::run_seeded(DEFAULT_UMA, &deck, &DEFAULT_INHERIT, cfg.seed, run_idx_u, &trainer) {
             Ok(outcome) => {
                 scores.push(outcome.score);
                 for (idx, value) in outcome.five_status.iter().enumerate() {
@@ -245,7 +246,7 @@ fn run_composition<T: Trainer<RamenGame>>(
             }
             Err(error) => {
                 failed += 1;
-                eprintln!("构成 {} seed={} 模拟失败: {error:#}", composition.name_zh(), seed);
+                eprintln!("构成 {} seed={} 模拟失败: {error:#}", composition.name_zh(), log_seed);
             }
         }
     }

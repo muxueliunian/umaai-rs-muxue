@@ -12,7 +12,8 @@ use super::{FeelingType, RamenStage, rules::NPC_CHARA_IDS};
 use crate::{
     game::{BaseGame, BasePerson, InheritInfo, PersonType, traits::Game},
     gamedata::ramen::RAMENDATA,
-    global
+    global,
+    rng::{EventRng, StrategyRng, StreamTag, TurnFixedRng, derive_seed}
 };
 
 /// 拉面杯专用状态
@@ -168,7 +169,25 @@ pub struct RamenGame {
     ///
     /// 注意：`Clone` 会复制 RNG 状态——MCTS 搜索复制状态时两个分支将共享后续
     /// 随机序列，属已知问题，搜索接入时需按分支重置（Phase 5+）。
-    pub internal_rng: Option<StdRng>
+    pub internal_rng: Option<StdRng>,
+    /// 本局规则主种子（bench 局号派生，RNG Refactor Plan v2 §4.2）
+    ///
+    /// `None` 时规则层随机回退旧行为（用调用方传入的 rng）；`Some` 时
+    /// 回合固定流 / 策略流按 `(rule_master, turn)` 派生（见 [`Self::reset_turn_streams`]）。
+    pub rule_master: Option<u64>,
+    /// 回合固定流（人头分布/角标/hint/回合开始事件）
+    ///
+    /// 与策略完全无关：同一种子、同一回合，任何策略看到的局面逐位相同。
+    pub turn_fixed: Option<TurnFixedRng>,
+    /// 策略流（训练成败/分身/吃面落地/策略触发事件）
+    ///
+    /// 仅 apply 真实动作时消耗；同一回合内 counter 从 0 计数。
+    pub strategy: Option<StrategyRng>,
+    /// 事件流（回合开始事件链：unlock 判定/事件生成/事件应用，v2 §4.3 三流）
+    ///
+    /// 事件的触发依赖事件历史（策略状态），但随机本身独立成轴——事件历史差异
+    /// 只影响事件流自身，不污染局面流与策略流。
+    pub event: Option<EventRng>
 }
 
 impl Deref for RamenGame {
@@ -217,7 +236,11 @@ impl RamenGame {
             ramen: RamenState::default(),
             current_effect: RamenEffect::default(),
             deck_can_split: false,
-            internal_rng: None
+            internal_rng: None,
+            rule_master: None,
+            turn_fixed: None,
+            strategy: None,
+            event: None
         };
         // 合并拉面杯剧本的友人事件 ID（base 已包含 global_events.friend_events 的 ID）
         // 让 apply_event 能正确识别 8303051xx 的友人事件并应用 friend.event_bonus / vital_bonus
@@ -332,7 +355,41 @@ impl RamenGame {
     ///
     /// 调用时机：`run_full_game` 之前。之后 `Game::next()` 中的规则层随机性
     /// （吃面分身分配、RMJ 事件）全部走此 RNG，同一 seed 的整局结果可完全复现。
+    /// 注：这是旧机制的注入入口，规则层改造（v2 §7 步骤 3）完成后由
+    /// [`Self::set_rule_master`] 取代。
     pub fn set_internal_rng(&mut self, rng: StdRng) {
         self.internal_rng = Some(rng);
+    }
+
+    /// 注入本局规则主种子（RNG Refactor Plan v2 §4.2）
+    ///
+    /// 调用时机：`run_full_game` 之前。之后每回合开始（`run_begin`）会按
+    /// `(rule_master, turn)` 重置回合固定流与策略流，使同一 seed 的整局
+    /// 规则随机完全可复现，且与策略选择无关。
+    pub fn set_rule_master(&mut self, master: u64) {
+        self.rule_master = Some(master);
+        self.reset_turn_streams();
+    }
+
+    /// 按当前 `(rule_master, turn)` 重置两条规则流（counter 归零）
+    ///
+    /// 回合固定流 master = `derive_seed(rule_master, [turn])`；
+    /// 策略流 master = `derive_seed(rule_master, [turn, STRATEGY_TAG])`。
+    /// 未注入 rule_master 时清空两条流（规则层回退旧行为）。
+    /// 调用时机：`run_begin` 回合开始时（每次进入 Begin 阶段）。
+    pub fn reset_turn_streams(&mut self) {
+        match self.rule_master {
+            Some(master) => {
+                let turn = self.base.turn as u64;
+                self.turn_fixed = Some(TurnFixedRng::new(derive_seed(master, &[turn])));
+                self.strategy = Some(StrategyRng::new(derive_seed(master, &[turn, StreamTag::Strategy.tag()])));
+                self.event = Some(EventRng::new(derive_seed(master, &[turn, StreamTag::Event.tag()])));
+            }
+            None => {
+                self.turn_fixed = None;
+                self.strategy = None;
+                self.event = None;
+            }
+        }
     }
 }

@@ -11,7 +11,7 @@
 use std::fmt::Display;
 
 use anyhow::{Result, anyhow};
-use rand::{Rng, rngs::StdRng, seq::IndexedRandom};
+use rand::{Rng, seq::IndexedRandom};
 use serde::{Deserialize, Serialize};
 
 use super::{
@@ -230,7 +230,7 @@ impl Operation {
 impl ActionEnum for RamenAction {
     type Game = super::RamenGame;
 
-    fn apply(&self, game: &mut super::RamenGame, rng: &mut StdRng) -> Result<()> {
+    fn apply(&self, game: &mut super::RamenGame, rng: &mut impl Rng) -> Result<()> {
         use super::RamenStage;
         match game.stage {
             RamenStage::RamenSelect => {
@@ -368,7 +368,7 @@ impl RamenAction {
     /// - 分配算法：出现的训练范围由`training_limit_options`指定
     /// - 随机选择训练位置，如果分配失败则重新随机
     /// - 特殊规则：同一训练不能存在相同卡的`Person`和分身
-    pub fn distribute_super_ramen_clones(game: &mut super::RamenGame, rng: &mut StdRng) -> Result<()> {
+    pub fn distribute_super_ramen_clones(game: &mut super::RamenGame, rng: &mut impl Rng) -> Result<()> {
         if !game.is_super_ramen_turn() || !game.deck_can_split {
             return Ok(());
         }
@@ -497,7 +497,7 @@ impl RamenAction {
     /// 1. 计算基础参数（buffs、失败率、拉面效果）
     /// 2. 判定成功/失败
     /// 3. 成功时应用训练值和后续事件
-    fn do_train(&self, game: &mut super::RamenGame, train: usize, rng: &mut StdRng) -> Result<()> {
+    fn do_train(&self, game: &mut super::RamenGame, train: usize, rng: &mut impl Rng) -> Result<()> {
         if train >= 5 {
             return Err(anyhow!("训练类型越界: {train}"));
         }
@@ -618,7 +618,7 @@ impl RamenAction {
     }
 
     /// 处理训练失败
-    fn handle_train_failure(&self, game: &mut super::RamenGame, failure_rate: f32, rng: &mut StdRng) -> Result<()> {
+    fn handle_train_failure(&self, game: &mut super::RamenGame, failure_rate: f32, rng: &mut impl Rng) -> Result<()> {
         // 再判断一次，如果还失败就是大失败
         if rng.random_bool(failure_rate as f64 / 100.0) {
             diag!("训练大失败!");
@@ -634,7 +634,7 @@ impl RamenAction {
 
     /// 处理训练成功
     fn handle_train_success(
-        &self, game: &mut super::RamenGame, train: usize, params: &TrainParams, rng: &mut StdRng
+        &self, game: &mut super::RamenGame, train: usize, params: &TrainParams, rng: &mut impl Rng
     ) -> Result<()> {
         // calc_training_value 内部已两阶段计算（含拉面 buff），直接使用结果
         let final_value = game.calc_training_value(&params.buffs, train)?;
@@ -653,7 +653,7 @@ impl RamenAction {
     }
 
     /// 处理训练后的羁绊和事件
-    fn handle_post_train(&self, game: &mut super::RamenGame, train: usize, rng: &mut StdRng) -> Result<()> {
+    fn handle_post_train(&self, game: &mut super::RamenGame, train: usize, rng: &mut impl Rng) -> Result<()> {
         let friendship_bonus = if game.uma.flags.aijiao { 9 } else { 7 };
         let mut hint_persons = vec![];
         let mut friend_clicked = false;
@@ -700,7 +700,7 @@ impl RamenAction {
     ///   所有 PersonType::Card 的 hint 事件，每个支援卡触发 `1 + hint_count_bonus` 次
     /// - 否则：从 hint_persons 中随机选一个触发 `1 + hint_count_bonus` 次（保留温泉杯逻辑）
     fn handle_hint_event(
-        &self, game: &mut super::RamenGame, train: usize, hint_persons: &[i32], rng: &mut StdRng
+        &self, game: &mut super::RamenGame, train: usize, hint_persons: &[i32], rng: &mut impl Rng
     ) -> Result<()> {
         if hint_persons.is_empty() {
             return Ok(());
@@ -747,7 +747,7 @@ impl RamenAction {
     ///
     /// 支援卡根据 hint_level / total_hints 上限决定属性事件还是技能事件；
     /// 非支援卡统一按 hint_level=1 处理。
-    fn push_hint_event(&self, game: &mut super::RamenGame, person_index: usize, rng: &mut StdRng) -> Result<()> {
+    fn push_hint_event(&self, game: &mut super::RamenGame, person_index: usize, rng: &mut impl Rng) -> Result<()> {
         let attr_prob = system_event_prob("hint_attr")?;
         let max_hint = global!(GAMECONSTANTS).max_hint_per_card;
         if person_index < 6 {
@@ -777,7 +777,7 @@ impl RamenAction {
     }
 
     /// 处理友人点击事件（使用拉面杯友人事件）
-    fn handle_friend_click(&self, game: &mut super::RamenGame, _rng: &mut StdRng) -> Result<()> {
+    fn handle_friend_click(&self, game: &mut super::RamenGame, _rng: &mut impl Rng) -> Result<()> {
         let ramen_data = global!(RAMENDATA);
         match game.friend.out_state {
             FriendOutState::UnClicked => {
@@ -1415,7 +1415,7 @@ mod tests {
             gamedata::{init_global},
             utils::{get_workspace_root, init_test_logger}
         };
-        use rand::SeedableRng;
+        use rand::{SeedableRng, rngs::StdRng};
 
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(&workspace_root)?;

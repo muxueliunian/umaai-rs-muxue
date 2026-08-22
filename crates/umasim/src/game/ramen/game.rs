@@ -82,7 +82,7 @@ impl Game for RamenGame {
             if self.ramen.combined_decision {
                 // 合并决策：先切到 Train，再立即 ground（避免下次 next() 还要检查 combined_decision）
                 self.stage = RamenStage::Train;
-                if self.ground_ramen_effects_with_internal_rng() {
+                if self.ground_ramen_effects_with_strategy() {
                     crate::diag!("合并决策 ground_ramen_effects 失败");
                 }
                 self.ramen.combined_decision = false;
@@ -101,7 +101,7 @@ impl Game for RamenGame {
         // 消耗诀窍 / PT 增量 / 生成分身 / 羁绊效果 / 显示 buff + distribution
         // 这样玩家在选训练动作前能看到完整效果。
         if self.stage == RamenStage::SpecialSelect {
-            if self.ground_ramen_effects_with_internal_rng() {
+            if self.ground_ramen_effects_with_strategy() {
                 crate::diag!("ground_ramen_effects 失败");
             }
             self.stage = RamenStage::Train;
@@ -158,10 +158,23 @@ impl Game for RamenGame {
                 // 事件 ID：401404(年1) / 401405(年2) / 401406(年3)，按 rmj_results[year_idx] 决定 result=2/1
                 if let Some(event) = find_rmj_event(year_idx) {
                     diag!("+ 事件: #{} {} (回合 {} 末)", event.id, event.name, self.base.turn + 1);
-                    // 使用规则层 RNG（保证固定种子可复现）
-                    let mut apply_rng = self.take_internal_rng();
-                    let err = self.apply_event(&event, 0, &mut apply_rng).is_err();
-                    self.internal_rng = Some(apply_rng);
+                    // 回合固定流（RMJ 固定触发，v2 §4.3）；未注入 rule_master 时
+                    // 回退旧 internal_rng（再未注入则 os rng），保持改造前可复现性
+                    let err = match self.turn_fixed.take() {
+                        Some(mut f) => {
+                            let e = self.apply_event(&event, 0, &mut f).is_err();
+                            self.turn_fixed = Some(f);
+                            e
+                        }
+                        None => match self.internal_rng.take() {
+                            Some(mut r) => {
+                                let e = self.apply_event(&event, 0, &mut r).is_err();
+                                self.internal_rng = Some(r);
+                                e
+                            }
+                            None => self.apply_event(&event, 0, &mut StdRng::from_os_rng()).is_err()
+                        }
+                    };
                     if err {
                         crate::diag!("RMJ 事件 #{} apply 失败: {:?}", event.id, event.name);
                     }
@@ -286,7 +299,7 @@ impl Game for RamenGame {
         }
     }
 
-    fn generate_events(&self, rng: &mut StdRng) -> Vec<EventData> {
+    fn generate_events(&self, rng: &mut impl Rng) -> Vec<EventData> {
         let mut events = vec![];
         let no_event_turns = &global!(GAMECONSTANTS).no_event_turns;
 
@@ -333,21 +346,9 @@ impl Game for RamenGame {
         }
 
         if !no_event_turns.contains(&self.base.turn) {
-            // 友人出门事件判定
-            if self.friend.out_state == FriendOutState::BeforeUnlock {
-                let friendship = self.persons[self.friend.person_index as usize].friendship;
-                let out_prob = if friendship < 60 {
-                    system_event_prob("friend_unlock_low")
-                } else {
-                    system_event_prob("friend_unlock_high")
-                }
-                .expect("friend_unlock_* prob key not found");
-                if rng.random_bool(out_prob) {
-                    let ramen_data = global!(RAMENDATA);
-                    events.push(ramen_data.friend_events["out"].clone());
-                    return events;
-                }
-            }
+            // 友人出门事件判定已移至 `run_begin`（策略相关随机 → 策略流，v2 §4.3）：
+            // 若留在此处消费回合固定流，固定流的消耗量会随策略（是否点击友人）
+            // 变化，导致角标/分布/hint 跨策略错位。
             // 一般随机事件
             let weights = WeightedIndex::new(global!(GAMECONSTANTS).get_event_distribution()).expect("event weights");
             match weights.sample(rng) {
@@ -382,7 +383,7 @@ impl Game for RamenGame {
         events
     }
 
-    fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()> {
+    fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut impl Rng) -> Result<()> {
         // RMJ 事件特殊处理：根据 rmj_results[year_idx] 选择 result=2 或 result=1 的分支
         if let Some(year_idx) = rmj_event_year(event.id) {
             if let Some(choice_group) = event.choices.first() {
@@ -645,7 +646,7 @@ impl Game for RamenGame {
         }
     }
 
-    fn distribute_hint(&mut self, rng: &mut StdRng) -> Result<()> {
+    fn distribute_hint(&mut self, rng: &mut impl Rng) -> Result<()> {
         let base_hint_rate = global!(GAMECONSTANTS).base_hint_rate / 100.0;
         let hint_bonus_pct = self.calc_hint_bonus_pct() as f64;
         let hint_probs: Vec<_> = self
@@ -693,6 +694,32 @@ impl Game for RamenGame {
 }
 
 impl RamenGame {
+    /// 友人解锁事件判定（策略相关随机 → 策略流，v2 §4.3）
+    //
+    // 从 `generate_events` 移出：触发条件依赖 `friend.out_state`（是否点击友人，
+    // 策略相关）。若留在此处消耗回合固定流，固定流的消耗量会随策略变化，
+    // 导致角标/分布/hint 跨策略错位。
+    fn try_friend_unlock(&self, rng: &mut impl Rng) -> Option<EventData> {
+        if global!(GAMECONSTANTS).no_event_turns.contains(&self.base.turn)
+            || self.friend.out_state != FriendOutState::BeforeUnlock
+        {
+            return None;
+        }
+        let friendship = self.persons[self.friend.person_index as usize].friendship;
+        let out_prob = if friendship < 60 {
+            system_event_prob("friend_unlock_low")
+        } else {
+            system_event_prob("friend_unlock_high")
+        }
+        .expect("friend_unlock_* prob key not found");
+        if rng.random_bool(out_prob) {
+            let ramen_data = global!(RAMENDATA);
+            Some(ramen_data.friend_events["out"].clone())
+        } else {
+            None
+        }
+    }
+
     /// 分布表单元格的彩色呈现（仅在允许颜色时调用）
     ///
     /// 颜色规则：
@@ -743,7 +770,7 @@ impl RamenGame {
     ///
     /// # 参数
     /// - `rng`：随机数生成器（分身分配使用）
-    pub fn ground_ramen_effects(&mut self, rng: &mut StdRng) -> Result<()> {
+    pub fn ground_ramen_effects(&mut self, rng: &mut impl Rng) -> Result<()> {
         // 1. 消耗诀窍 + PT 增量 + current_ramen + 分身（仅当 pending_ramen.is_some()）
         if let Some(ramen_idx) = self.ramen.pending_ramen {
             let targets = self.ramen.pending_special_targets;
@@ -785,24 +812,27 @@ impl RamenGame {
         Ok(())
     }
 
-    /// 取走规则层事件 RNG（未注入时回退 os rng）
+    /// 落地吃面效果（使用策略流）
     ///
-    /// 配合 [`Self::internal_rng`] 字段使用：调用方使用后必须放回
-    /// `self.internal_rng = Some(rng)`，否则后续规则层随机性退回 os rng。
-    fn take_internal_rng(&mut self) -> StdRng {
-        self.internal_rng.take().unwrap_or_else(rand::rngs::StdRng::from_os_rng)
-    }
-
-    /// 落地吃面效果（使用规则层 RNG）
-    ///
-    /// 与 [`Self::ground_ramen_effects`] 等价，但 RNG 取自/放回 [`Self::internal_rng`]，
-    /// 保证固定种子模拟下分身分配可复现（计划 §2-4 确定性要求）。
-    /// 返回是否出错。
-    fn ground_ramen_effects_with_internal_rng(&mut self) -> bool {
-        let mut apply_rng = self.take_internal_rng();
-        let err = self.ground_ramen_effects(&mut apply_rng).is_err();
-        self.internal_rng = Some(apply_rng);
-        err
+    /// 分身分配属策略交互随机（v2 §4.3），RNG 取自/放回 [`Self::strategy`]；
+    /// 未注入 rule_master 时回退旧 `internal_rng`（再未注入则 os rng），
+    /// 保持与规则层改造前一致的可复现性契约。返回是否出错。
+    fn ground_ramen_effects_with_strategy(&mut self) -> bool {
+        match self.strategy.take() {
+            Some(mut s) => {
+                let err = self.ground_ramen_effects(&mut s).is_err();
+                self.strategy = Some(s);
+                err
+            }
+            None => match self.internal_rng.take() {
+                Some(mut r) => {
+                    let err = self.ground_ramen_effects(&mut r).is_err();
+                    self.internal_rng = Some(r);
+                    err
+                }
+                None => self.ground_ramen_effects(&mut StdRng::from_os_rng()).is_err()
+            }
+        }
     }
 
     /// 拉面羁绊效果（吃面或超级拉面回合触发）
@@ -838,7 +868,7 @@ impl RamenGame {
     /// - 满员规则：每个训练位置最多 5 人；已满则优先挤掉 NPC
     /// - 同一训练不能存在相同卡的 `Person` 和分身
     /// - 分身不计算得意率，不包含友人卡
-    fn distribute_region_clones(&mut self, region_id: usize, rng: &mut StdRng) -> Result<()> {
+    fn distribute_region_clones(&mut self, region_id: usize, rng: &mut impl Rng) -> Result<()> {
         let ramen_data = global!(RAMENDATA);
         let region = &ramen_data.ramen_region_effect[region_id];
 
@@ -1073,6 +1103,8 @@ impl RamenGame {
 
     /// Begin 阶段：动态人头管理、隐藏风味、事件处理
     fn run_begin<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
+        // 回合开始：重置两条规则流（注入 rule_master 后每回合从 0 计数，v2 §4.2）
+        self.reset_turn_streams();
         // 三阶段决策 pending 防御性清空（Train 阶段结束后已清，但再确保一次）
         self.ramen.clear_pending();
 
@@ -1110,17 +1142,49 @@ impl RamenGame {
             }
         }
 
-        // 休息心得
-        if self.uma.flags.refresh_mind > 0 {
-            self.update_refresh_mind(rng);
+        // ===== 事件流：回合开始事件链（v2 §4.3 三流第三轴）=====
+        // 事件（马娘事件/支援卡连续事件）的随机独立于策略与局面——虽然是否触发
+        // 依赖事件历史（`events` 计数 / max_time / 卡事件 8001-8003，策略状态），
+        // 但随机序列本身与策略无关，故独立成 `event` 流：事件历史的差异只影响
+        // 事件流自身，不污染局面流（角标/分布/hint，`run_distribute` 独占）与
+        // 策略流（训练/分身/比赛）。
+        let mut ev = self.event.take();
+        // 休息心得结束判定（refresh_mind 由事件设置，随事件链走事件流）
+        match ev.as_mut() {
+            Some(s) => {
+                if self.uma.flags.refresh_mind > 0 {
+                    self.update_refresh_mind(s);
+                }
+            }
+            None => {
+                if self.uma.flags.refresh_mind > 0 {
+                    self.update_refresh_mind(rng);
+                }
+            }
         }
-
-        // 生成回合前事件（含随机事件和强制事件）
-        let mut events = self.generate_events(rng);
+        // 友人解锁判定（触发条件依赖 friend.out_state——是否点击友人）
+        let unlock_event = match ev.as_mut() {
+            Some(s) => self.try_friend_unlock(s),
+            None => self.try_friend_unlock(rng),
+        };
+        // 事件生成（随机部分；Fixed 剧本事件无随机，天然逐位一致）
+        let mut events = match ev.as_mut() {
+            Some(s) => self.generate_events(s),
+            None => self.generate_events(rng),
+        };
+        if unlock_event.is_some() {
+            // 解锁触发时取代一般随机事件（与原语义一致）
+            events = unlock_event.into_iter().collect();
+        }
         self.add_mandatory_events(&mut events)?;
+        // 事件应用（结果随机）
         for event in &events {
-            self.run_event(event, trainer, rng)?;
+            match ev.as_mut() {
+                Some(s) => self.run_event_on(event, trainer, rng, s)?,
+                None => self.run_event(event, trainer, rng)?,
+            }
         }
+        self.event = ev;
 
         // 超级拉面回合自动效果
         if self.is_super_ramen_turn() {
@@ -1163,19 +1227,44 @@ impl RamenGame {
     }
 
     /// Distribute 阶段：分配人头和角标
-    fn run_distribute(&mut self, rng: &mut StdRng) -> Result<()> {
+    ///
+    /// 随机来源：角标/人头分布/hint 走**回合固定流**（与策略无关，v2 §4.3）；
+    /// 超级拉面分身分配走**策略流**（分身属策略交互随机）。
+    /// 未注入 rule_master 时两者均回退旧行为（用传入 rng）。
+    fn run_distribute(&mut self, rng: &mut impl Rng) -> Result<()> {
         if self.is_race_turn() {
             self.reset_distribution();
         } else {
-            let raw_types = assign_train_feeling_type(rng);
-            let feelings: [FeelingType; 5] = raw_types.map(|v| FeelingType::try_from(v).unwrap_or(FeelingType::A));
-            self.ramen.train_feeling_type = Some(feelings);
-            self.distribute_all(rng)?;
-            self.distribute_hint(rng)?;
+            // 回合固定流：角标 + 人头分布 + hint
+            let mut fixed = self.turn_fixed.take();
+            match fixed.as_mut() {
+                Some(f) => {
+                    let raw_types = assign_train_feeling_type(f);
+                    let feelings: [FeelingType; 5] =
+                        raw_types.map(|v| FeelingType::try_from(v).unwrap_or(FeelingType::A));
+                    self.ramen.train_feeling_type = Some(feelings);
+                    self.distribute_all(f)?;
+                    self.distribute_hint(f)?;
+                }
+                None => {
+                    let raw_types = assign_train_feeling_type(rng);
+                    let feelings: [FeelingType; 5] =
+                        raw_types.map(|v| FeelingType::try_from(v).unwrap_or(FeelingType::A));
+                    self.ramen.train_feeling_type = Some(feelings);
+                    self.distribute_all(rng)?;
+                    self.distribute_hint(rng)?;
+                }
+            }
+            self.turn_fixed = fixed;
 
-            // 超级拉面分身在 distribute_all 之后分配
+            // 超级拉面分身在 distribute_all 之后分配（策略流）
             if self.is_super_ramen_turn() {
-                super::action::RamenAction::distribute_super_ramen_clones(self, rng)?;
+                let mut strat = self.strategy.take();
+                match strat.as_mut() {
+                    Some(s) => super::action::RamenAction::distribute_super_ramen_clones(self, s)?,
+                    None => super::action::RamenAction::distribute_super_ramen_clones(self, rng)?,
+                }
+                self.strategy = strat;
             }
 
             diag!("训练:\n{}", self.explain_distribution()?);
@@ -1184,11 +1273,26 @@ impl RamenGame {
     }
 
     /// Train 阶段：选择并执行动作
+    ///
+    /// Trainer 决策走决策流（`rng`）；动作执行（训练成败/休息/外出等）走**策略流**。
     fn run_train<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
         let actions = self.list_actions()?;
         let selection = trainer.select_action(self, &actions, rng)?;
-        self.apply_action(&actions[selection], rng)?;
+        self.apply_action_with_strategy(&actions[selection], rng)?;
         Ok(())
+    }
+
+    /// 用策略流执行动作（策略交互随机，v2 §4.3）
+    ///
+    /// 未注入 rule_master 时回退旧行为：用传入的决策 rng 执行。
+    fn apply_action_with_strategy(&mut self, action: &RamenAction, rng: &mut StdRng) -> Result<()> {
+        let mut strat = self.strategy.take();
+        let result = match strat.as_mut() {
+            Some(s) => self.apply_action(action, s),
+            None => self.apply_action(action, rng),
+        };
+        self.strategy = strat;
+        result
     }
 
     /// RamenSelect 阶段：选择吃哪碗面（含不吃）
@@ -1200,8 +1304,8 @@ impl RamenGame {
         if self.is_race_turn() {
             let actions = self.list_actions()?;
             // actions 此时仅含 [no_ramen(Race)]，但 trainer 不必要再选；
-            // 直接应用比赛行为（与旧行为兼容）。
-            self.apply_action(&actions[0], rng)?;
+            // 直接应用比赛行为（与旧行为兼容，比赛无随机，走策略流无副作用）。
+            self.apply_action_with_strategy(&actions[0], rng)?;
             // race_turn 不进入 SpecialSelect/Train，直接跳到 AfterTrain
             self.stage = RamenStage::AfterTrain;
             // 立即处理 AfterTrain 阶段遗留的 unresolved_events（如 race_career）
@@ -1213,7 +1317,7 @@ impl RamenGame {
 
         let actions = self.list_actions()?;
         let selection = trainer.select_action(self, &actions, rng)?;
-        self.apply_action(&actions[selection], rng)?;
+        self.apply_action_with_strategy(&actions[selection], rng)?;
         // apply 已根据 ramen None/Some 自动切到 Train 或 SpecialSelect
         Ok(())
     }
@@ -1224,18 +1328,55 @@ impl RamenGame {
     fn run_special_select<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
         let actions = self.list_actions()?;
         let selection = trainer.select_action(self, &actions, rng)?;
-        self.apply_action(&actions[selection], rng)?;
+        self.apply_action_with_strategy(&actions[selection], rng)?;
         // apply 已切到 Train
         Ok(())
     }
 
     /// AfterTrain 阶段：处理后续事件
+    ///
+    /// 事件结果随机走**策略流**（策略触发事件，v2 §4.3）；事件决策仍走决策流。
     fn run_after_train<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
         let after_events = std::mem::take(&mut self.base.unresolved_events);
-        for event in &after_events {
-            self.run_event(event, trainer, rng)?;
+        let mut strat = self.strategy.take();
+        match strat.as_mut() {
+            Some(s) => {
+                for event in &after_events {
+                    self.run_event_on(event, trainer, rng, s)?;
+                }
+            }
+            None => {
+                // 回退旧行为（未注入 rule_master）：与规则层改造前一致
+                for event in &after_events {
+                    self.run_event(event, trainer, rng)?;
+                }
+            }
         }
+        self.strategy = strat;
         Ok(())
+    }
+
+    /// 事件执行：决策（player_select 选项）走 `decision_rng`，事件结果随机走 `rule_rng`
+    //
+    // 与 `Game::run_event` 默认实现（决策/规则共流）不同：规则层改造后事件结果
+    // 必须由调用点决定用哪条规则流——回合开始固定事件用固定流，策略触发事件用策略流。
+    fn run_event_on<T: Trainer<Self>>(
+        &mut self, event: &EventData, trainer: &T, decision_rng: &mut StdRng, rule_rng: &mut impl Rng
+    ) -> Result<()> {
+        diag!("【事件】#{} {}", event.id, event.name);
+        if event.player_select && event.choices.len() > 1 {
+            for (index, choice) in event.choices.iter().enumerate() {
+                diag!("  选项 {}: {}", index + 1, crate::explain::Explain::event_choice(choice));
+            }
+            let selection = trainer.select_event_choice(self, event, &event.choices, decision_rng)?;
+            if selection >= event.choices.len() {
+                return Err(anyhow!("事件选项索引超出范围: selection={selection}, choices_len={}", event.choices.len()));
+            }
+            diag!("  → 选择 选项 {}", selection + 1);
+            self.apply_event(&event, selection, rule_rng)
+        } else {
+            self.apply_event(&event, 0, rule_rng)
+        }
     }
 
     /// 年度地区选择（在 NextTurn 阶段 RMJ 结算后调用，通过 Trainer 统一接口决策）
@@ -1261,7 +1402,7 @@ impl RamenGame {
                 .collect();
             diag!("==== 第3年 地区选择（Fixed 策略）: {} ====", names.join(", "));
             let action = RamenAction::no_ramen(Operation::RegionSelect(combo));
-            self.apply_action(&action, rng)?;
+            self.apply_action_with_strategy(&action, rng)?;
             return Ok(());
         }
         // 第1/2年 或 第3年 all 策略：枚举所有组合
@@ -1273,7 +1414,7 @@ impl RamenGame {
             .map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c)))
             .collect();
         let selection = trainer.select_action(self, &actions, rng)?;
-        self.apply_action(&actions[selection], rng)
+        self.apply_action_with_strategy(&actions[selection], rng)
     }
 
     /// SuperRamenSelect 阶段：超级拉面选择
@@ -1320,7 +1461,7 @@ impl RamenGame {
     /// 更新休息心得
     ///
     /// 当 refresh_mind > 0 时，每回合开始时体力+5，并根据概率判定是否结束。
-    fn update_refresh_mind(&mut self, rng: &mut StdRng) {
+    fn update_refresh_mind(&mut self, rng: &mut impl Rng) {
         let t = self.uma.flags.refresh_mind as usize;
         if t > 0 {
             diag!("休息心得已持续 {t} 回合 -->");

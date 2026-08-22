@@ -37,14 +37,18 @@ pub fn type_name_zh(card_type: usize) -> String {
         .unwrap_or_else(|| TYPE_NAMES[card_type].to_string())
 }
 
-/// 从单一 seed 分裂决策 RNG 与规则层 RNG，保证固定种子整局可复现。
+/// 从基准基种子与局号派生决策 RNG 与规则主种子（RNG Refactor Plan v2 §4.2）
 ///
-/// 第二个种子用 SplitMix64 的标准 gamma 增量常数（黄金比例 `0x9E37_79B9_7F4A_7C15`，
-/// 有据可依的标准常数，非任意指纹）异或派生，使两条 RNG 序列互不相关；具体常数
-/// 无关紧要，关键是固定不变——规则层可复现性依赖此派生在代码演进中保持稳定。
-pub fn seeded_rngs(seed: u64) -> (StdRng, StdRng) {
-    let rule_seed = seed ^ 0x9E37_79B9_7F4A_7C15;
-    (StdRng::seed_from_u64(seed), StdRng::seed_from_u64(rule_seed))
+/// 每局独立（替代旧 `base + i` 加法）：
+/// - 规则主种子 `rule_master_i = splitmix64(base_seed ^ i)`
+/// - 决策种子 `decision_i    = splitmix64(base_seed ^ i ^ DECISION_TAG)`
+///
+/// 派生常数冻结不可改（可复现性契约）：决策流由 StdRng（有状态，Trainer 自由消耗），
+/// 规则层由 `rule_master` 注入 RamenGame 后按 `(master, turn)` 派生无状态流。
+pub fn seeded_rngs(base_seed: u64, run_idx: u64) -> (StdRng, u64) {
+    let rule_master = crate::rng::derive_seed(base_seed, &[run_idx]);
+    let decision_seed = crate::rng::derive_seed(base_seed, &[run_idx, crate::rng::DECISION_TAG]);
+    (StdRng::seed_from_u64(decision_seed), rule_master)
 }
 
 /// 单局完整结果。
@@ -72,19 +76,19 @@ pub struct GameOutcome {
     pub elapsed_ms: f64
 }
 
-/// 跑一局固定种子的完整拉面杯（统一 `LoggingTrainer` 包装，注入规则层 RNG）。
+/// 跑一局固定种子的完整拉面杯（统一 `LoggingTrainer` 包装，注入规则主种子）。
 pub fn run_seeded<T: Trainer<RamenGame>>(
-    uma: u32, deck: &[u32; 6], inherit: &InheritInfo, seed: u64, trainer: &LoggingTrainer<T>
+    uma: u32, deck: &[u32; 6], inherit: &InheritInfo, base_seed: u64, run_idx: u64, trainer: &LoggingTrainer<T>
 ) -> Result<GameOutcome> {
-    let (mut decision_rng, rule_rng) = seeded_rngs(seed);
+    let (mut decision_rng, rule_master) = seeded_rngs(base_seed, run_idx);
     let mut game = RamenGame::newgame(uma, deck, inherit.clone())?;
-    game.set_internal_rng(rule_rng);
+    game.set_rule_master(rule_master);
     let start = Instant::now();
     game.run_full_game(trainer, &mut decision_rng)?;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
     let score = game.uma.calc_score();
     Ok(GameOutcome {
-        seed,
+        seed: rule_master,
         score,
         rank: global!(GAMECONSTANTS).get_rank_name(score),
         five_status: game.uma.five_status,
@@ -404,16 +408,16 @@ pub fn parse_value<T: std::str::FromStr>(parser: &mut lexopt::Parser, key: &str)
 mod tests {
     use super::*;
 
-    /// 验证同 seed 派生一致、不同 seed 派生不同（可复现性根基）。
+    /// 验证同 (base, idx) 派生一致、不同局号派生不同（可复现性根基）。
     #[test]
     fn test_seeded_rngs_reproducible() {
         use rand::RngCore;
-        let (mut d1, mut r1) = seeded_rngs(42);
-        let (mut d2, mut r2) = seeded_rngs(42);
-        let (mut d3, _r3) = seeded_rngs(43);
+        let (mut d1, r1) = seeded_rngs(42, 0);
+        let (mut d2, r2) = seeded_rngs(42, 0);
+        let (mut d3, r3) = seeded_rngs(42, 1);
         let (a1, b1, c1) = (d1.next_u32(), d2.next_u32(), d3.next_u32());
-        let (a2, b2) = (r1.next_u32(), r2.next_u32());
-        println!("同 seed 决策 RNG 首值 {a1} == {b1}? 不同 seed {c1}; 规则 RNG 首值 {a2} == {b2}?");
+        println!("base=42 局0 决策首值 {a1} == 局0 {b1}? 局1 {c1} 不同?");
+        println!("规则主种子 局0: {r1:#018x} == {r2:#018x}? 局1: {r3:#018x} 不同?");
     }
 
     /// 验证 summarize 对已知序列的 min/max/mean/median/std 计算。

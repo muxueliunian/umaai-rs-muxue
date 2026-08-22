@@ -149,10 +149,9 @@ pub struct MctsConfig {
     /// 预期搜索标准差
     #[serde(default = "default_mcts_expected_search_stdev")]
     pub expected_search_stdev: f64,
-    /// 是否按 `(回合, 阶段)` 重新播种 rollout 随机流（公共随机数 / CRN）
+    /// 是否按 `(回合, 阶段)` 重新播种 rollout 随机流（外挂 CRN，仅 onsen 生效）
     ///
-    /// 开启后同一决策点各候选在同一阶段共享随机性，候选排序的配对方差显著下降
-    /// （onsen 实测等效 3.65 倍搜索次数）。关闭则退回「仅共享起始种子」。
+    /// 拉面规则层已由无状态流接管（RNG Refactor Plan v2 §5.2），不受此开关影响。
     #[serde(default = "default_mcts_crn_stage_reseed")]
     pub crn_stage_reseed: bool
 }

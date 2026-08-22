@@ -11,9 +11,8 @@
 //! OS 随机数，可复现性与 CRN 一起失效，且**不会有任何报错**。
 
 use anyhow::Result;
-use rand::{SeedableRng, rngs::StdRng};
+use rand::rngs::StdRng;
 
-use super::seeds::InternalSeed;
 use crate::game::{
     Game, Trainer,
     onsen::{OnsenTurnStage, game::OnsenGame},
@@ -56,10 +55,11 @@ where
     /// 构造默认 rollout 决策器
     fn default_rollout_trainer() -> Self::RolloutTrainer;
 
-    /// CRN 种子派生用的阶段编号
+    /// CRN 种子派生用的阶段编号（onsen 外挂重播种用，v2 §5.2）
     ///
     /// 必须显式 `match`，**不得依赖枚举判别值**：变体顺序若调整，显式 match 会
     /// 编译报错提醒同步，而判别值会静默改变所有历史种子。
+    /// 注：拉面规则层已由无状态流接管，不再调用本方法（保留实现仅为满足 trait）。
     fn crn_stage_key(&self) -> u64;
 
     /// 为一次 rollout 建立分支，并初始化剧本内部随机流
@@ -115,6 +115,7 @@ impl FlatSearchGame for RamenGame {
         crate::trainer::RamenHandwrittenTrainer::new()
     }
 
+    /// 拉面 stage key（保留实现仅为满足 trait；规则层接管后不再被调用）
     fn crn_stage_key(&self) -> u64 {
         match self.stage {
             RamenStage::Begin => 0,
@@ -130,23 +131,15 @@ impl FlatSearchGame for RamenGame {
         }
     }
 
-    /// 拉面有**第二条**随机流 `internal_rng`（吃面落地分身、RMJ 事件走它）
+    /// 拉面规则层为无状态流（RNG Refactor Plan v2 §5.2）
     ///
-    /// 两个失效模式都必须防住：
-    /// - 克隆出来是 `None` → `take_internal_rng()` 回退 `StdRng::from_os_rng()`，
-    ///   每个候选每次 rollout 各摸一次 OS 随机数，搜索种子完全管不住规则层；
-    /// - 根局面已 `set_internal_rng` → `Clone` 复制状态，所有候选共享同一份后续
-    ///   内部流，形成意外且错位的弱 CRN。
-    ///
-    /// 故一律用与主种子分频道的 [`InternalSeed`] 重新注入。
-    ///
-    /// 注意：这只保证**每次 rollout 起点**的内部流受控且各候选配对，
-    /// **不是阶段级 CRN**——`Game::next()` 内部就会消费 `internal_rng`，
-    /// 而阶段重播种发生在 `next()` 之后，已经太晚。彻底解法是让规则层随机性
-    /// 显式传入（改 `Game::next` 签名），那触及拉面状态机，不在 Phase 1 范围。
+    /// rollout 分支 = 克隆局面 + 注入 `rule_master = rollout 种子`：规则层
+    /// 每回合按 `(rule_master, turn)` 派生固定流/策略流，所有候选共享同一
+    /// rollout 种子时面对逐位一致的随机未来——CRN 对齐由规则层自身承担，
+    /// 搜索层不再需要按阶段重播种。
     fn fork_for_rollout(&self, rollout_seed: u64) -> Self {
         let mut game = self.clone();
-        game.set_internal_rng(StdRng::seed_from_u64(InternalSeed::derive(rollout_seed).get()));
+        game.set_rule_master(rollout_seed);
         game
     }
 }

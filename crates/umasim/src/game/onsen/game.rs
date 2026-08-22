@@ -4,11 +4,7 @@ use anyhow::{Result, anyhow};
 use colored::Colorize;
 #[cfg(feature = "cli")]
 use comfy_table::{ColumnConstraint, Table, Width};
-use rand::{
-    Rng,
-    rngs::StdRng,
-    seq::{IndexedRandom, IteratorRandom}
-};
+use rand::{Rng, rngs::StdRng, seq::{IndexedRandom, IteratorRandom}};
 use rand_distr::{Distribution, weighted::WeightedIndex};
 
 use crate::{
@@ -242,7 +238,7 @@ impl OnsenGame {
     */
 
     /// 判断友人出门事件
-    pub fn check_friend_out_event(&self, rng: &mut StdRng) -> Option<EventData> {
+    pub fn check_friend_out_event(&self, rng: &mut impl Rng) -> Option<EventData> {
         if self.friend.out_state == FriendOutState::BeforeUnlock {
             let friendship = self.persons[self.friend.person_index as usize].friendship;
             let out_prob = if friendship < 60 {
@@ -401,7 +397,7 @@ impl OnsenGame {
 
     /// 训练后超回复触发判定
     /// 在训练消耗体力后调用，判定是否触发超回复
-    pub fn update_super_on_vital_cost(&mut self, vital_cost: i32, rng: &mut StdRng) {
+    pub fn update_super_on_vital_cost(&mut self, vital_cost: i32, rng: &mut impl Rng) {
         if !self.bathing.is_super_ready && self.turn >= 2 {
             // 计算触发概率
             let prob = self.calc_super_prob(vital_cost);
@@ -420,7 +416,7 @@ impl OnsenGame {
     /// - 砂层: 速+2, 耐+1, 智+2, 体-3
     /// - 土层: 速+2, 力+1, 根+2, 体-3
     /// - 岩层: 耐+1, 力+2, 智+2, 体-3
-    pub fn do_dig(&mut self, value: &[i32; 3], rng: &mut StdRng) -> bool {
+    pub fn do_dig(&mut self, value: &[i32; 3], rng: &mut impl Rng) -> bool {
         let dig_bonus = &global!(ONSENDATA).dig_bonus;
         let mut total_bonus = Array6::default();
 
@@ -478,7 +474,7 @@ impl OnsenGame {
     }
 
     /// 生成Hint事件
-    pub fn do_hint(&mut self, person_index: usize, has_friendship: bool, rng: &mut StdRng) -> Result<()> {
+    pub fn do_hint(&mut self, person_index: usize, has_friendship: bool, rng: &mut impl Rng) -> Result<()> {
         let attr_prob = system_event_prob("hint_attr")?;
         let max_hint_per_card = global!(GAMECONSTANTS).max_hint_per_card;
         let hint_level = if person_index < 6 {
@@ -518,7 +514,7 @@ impl OnsenGame {
 
     /// 执行训练，不包括剧本操作
     /// 返回训练是否成功，体力消耗
-    pub fn do_train(&mut self, train: usize, rng: &mut StdRng) -> Result<(bool, i32)> {
+    pub fn do_train(&mut self, train: usize, rng: &mut impl Rng) -> Result<(bool, i32)> {
         // sanity check 训练等级越界
         if train >= 5 {
             return Err(anyhow!("训练等级越界: {train}"));
@@ -679,7 +675,7 @@ impl OnsenGame {
     }
 
     /// 考虑剧本加成的Hint判定，也可以用于使用Hint buff后再对没有叹号的卡判定一次Hint
-    pub fn onsen_distribute_hint(&mut self, rng: &mut StdRng) -> Result<()> {
+    pub fn onsen_distribute_hint(&mut self, rng: &mut impl Rng) -> Result<()> {
         let base_hint_rate = global!(GAMECONSTANTS).base_hint_rate / 100.0;
         let hint_probs: Vec<_> = self
             .deck()
@@ -702,7 +698,7 @@ impl OnsenGame {
     ///
     /// # 返回
     /// 体力消耗值（用于超回复判定）
-    pub fn do_pr(&mut self, _rng: &mut StdRng) -> Result<i32> {
+    pub fn do_pr(&mut self, _rng: &mut impl Rng) -> Result<i32> {
         diag!(">> PR");
         let pr_value = &global!(ONSENDATA).pr_base_value;
         self.uma.add_value(pr_value);
@@ -718,7 +714,7 @@ impl OnsenGame {
     /// 3. 干劲提升（根据温泉效果配置）
     /// 4. 超回复效果应用（如果 is_super_ready）
     /// 5. 消耗温泉券，设置 buff_remain_turn = 2
-    pub fn do_use_ticket(&mut self, rng: &mut StdRng) -> Result<()> {
+    pub fn do_use_ticket(&mut self, rng: &mut impl Rng) -> Result<()> {
         // 检查温泉券
         if self.bathing.ticket_num <= 0 {
             return Err(anyhow!("没有温泉券"));
@@ -816,7 +812,7 @@ impl OnsenGame {
     ///
     /// 在 Distribute 阶段调用，为 extra_support_indices 中的卡分配额外训练位置
     /// 每张卡分配到其当前未在的随机一个训练位置（不超过5人）
-    pub fn distribute_extra_supports(&mut self, rng: &mut StdRng) -> Result<()> {
+    pub fn distribute_extra_supports(&mut self, rng: &mut impl Rng) -> Result<()> {
         // 检查温泉效果是否激活且有追加支援卡效果
         if self.bathing.buff_remain_turn == 0 || self.scenario_buff.onsen.split == 0 || !self.deck_can_split {
             return Ok(());
@@ -927,7 +923,7 @@ impl OnsenGame {
     }
 
     /// 更新休息心得
-    pub fn update_refresh_mind(&mut self, rng: &mut StdRng) {
+    pub fn update_refresh_mind(&mut self, rng: &mut impl Rng) {
         let t = self.uma.flags.refresh_mind as usize;
         if t > 0 {
             diag!("休息心得已持续 {t} 回合 -->");
@@ -1432,7 +1428,7 @@ impl Game for OnsenGame {
         }
     }
 
-    fn generate_events(&self, rng: &mut StdRng) -> Vec<EventData> {
+    fn generate_events(&self, rng: &mut impl Rng) -> Vec<EventData> {
         let no_event_turns = &global!(GAMECONSTANTS).no_event_turns;
         // 通用剧本事件
         let mut scenario_events = self.list_turn_events(&global_events().story_events);
@@ -1482,7 +1478,7 @@ impl Game for OnsenGame {
         }
     }
     /// 使事件生效（无选项）。修改羁绊和特殊事件的部分需要在当前类型里完成
-    fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()> {
+    fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut impl Rng) -> Result<()> {
         if let Some(result) = self.base.apply_event(event, choice, rng) {
             // 判定超回复
             if result.value.vital < 0 {

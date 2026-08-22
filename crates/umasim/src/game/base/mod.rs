@@ -7,7 +7,7 @@ pub use action::*;
 use anyhow::Result;
 use hashbrown::HashMap;
 pub use person::*;
-use rand::{rngs::StdRng, seq::IndexedRandom};
+use rand::{Rng, seq::IndexedRandom};
 
 use crate::{
     diag,
@@ -151,7 +151,7 @@ impl BaseGame {
         (self.train_level_count[train] / 4 + 1).max(0).min(5) as usize
     }
     /// 随机选择一个能发生的事件
-    pub fn random_select_event(&self, events: &[EventData], rng: &mut StdRng) -> Option<EventData> {
+    pub fn random_select_event(&self, events: &[EventData], rng: &mut impl Rng) -> Option<EventData> {
         let available_events: Vec<_> = events
             .iter()
             .filter(|e| {
@@ -166,7 +166,7 @@ impl BaseGame {
     }
 
     /// 已经选择了选项choice，随机决定结果
-    pub fn random_select_choice_result(&self, choices: &[EventChoice], rng: &mut StdRng) -> Option<EventChoice> {
+    pub fn random_select_choice_result(&self, choices: &[EventChoice], rng: &mut impl Rng) -> Option<EventChoice> {
         if choices.is_empty() {
             None
         } else if choices.len() == 1 {
@@ -180,7 +180,7 @@ impl BaseGame {
         }
     }
     /// 使事件生效，并随机决定结果, 返回实际生效的效果
-    pub fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Option<EventChoice> {
+    pub fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut impl Rng) -> Option<EventChoice> {
         self.events.entry(event.id).and_modify(|x| *x += 1).or_insert(1);
         if !event.choices.is_empty() {
             if let Some(mut choice_result) = self.random_select_choice_result(&event.choices[choice], rng) {
@@ -238,7 +238,7 @@ impl BaseGame {
         (self.turn >= 36 && self.turn < 40) || (self.turn >= 60 && self.turn < 64)
     }
 
-    pub fn generate_card_event(&self, person_index: i32, rng: &mut StdRng) -> Option<EventData> {
+    pub fn generate_card_event(&self, person_index: i32, rng: &mut impl Rng) -> Option<EventData> {
         // 支援卡事件. 再精细一点模拟 后一段事件发生次数不能多于前一段事件
         let card_event_times: Vec<_> = vec![8001, 8002, 8003]
             .iter()

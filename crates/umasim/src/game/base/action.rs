@@ -1,7 +1,7 @@
 use std::fmt::Display;
 
 use anyhow::{Result, anyhow};
-use rand::{Rng, rngs::StdRng};
+use rand::Rng;
 use rand_distr::{Distribution, weighted::WeightedIndex};
 use serde::{Deserialize, Serialize};
 use colored::Colorize;
@@ -45,7 +45,7 @@ impl Display for BaseAction {
 // 在具体类型中可以直接调用BaseAction的方法得到BaseGame的变换，然后再把结果转为自己的Game类型
 // 但是do_train需要具体类型自己实现，因为BaseGame没有实现Game Trait，不能使用Game Trait里计算训练数值的方法
 impl BaseAction {
-    pub fn do_race(game: &mut BaseGame, _rng: &mut StdRng) -> Result<()> {
+    pub fn do_race(game: &mut BaseGame, _rng: &mut impl Rng) -> Result<()> {
         let race_bonus = (100 + game.uma.race_bonus) as f32 / 100.0;
         if game.uma.is_race_turn(game.turn) {
             diag!("{}", format!(
@@ -76,7 +76,7 @@ impl BaseAction {
         Ok(())
     }
 
-    pub fn do_sleep(game: &mut BaseGame, rng: &mut StdRng) -> Result<()> {
+    pub fn do_sleep(game: &mut BaseGame, rng: &mut impl Rng) -> Result<()> {
         if game.is_xiahesu() {
             let value = ActionValue {
                 vital: 40,
@@ -108,7 +108,7 @@ impl BaseAction {
         Ok(())
     }
 
-    pub fn do_friend_outing(game: &mut BaseGame, _rng: &mut StdRng) -> Result<()> {
+    pub fn do_friend_outing(game: &mut BaseGame, _rng: &mut impl Rng) -> Result<()> {
         let mut which = 0;
         while which < 5 && game.friend.out_used[which] {
             which += 1;
@@ -125,7 +125,7 @@ impl BaseAction {
         }
     }
 
-    pub fn do_normal_outing(game: &mut BaseGame, rng: &mut StdRng) -> Result<()> {
+    pub fn do_normal_outing(game: &mut BaseGame, rng: &mut impl Rng) -> Result<()> {
         let event_name = format!("normal_outing_{}", rng.random_range(1..=3));
         game.unresolved_events.push(system_event(&event_name)?.clone());
         // 抓娃娃
@@ -137,7 +137,7 @@ impl BaseAction {
         Ok(())
     }
 
-    pub fn do_clinic(game: &mut BaseGame, _rng: &mut StdRng) -> Result<()> {
+    pub fn do_clinic(game: &mut BaseGame, _rng: &mut impl Rng) -> Result<()> {
         diag!(">> 治病");
         let value = ActionValue {
             vital: 20,
@@ -153,7 +153,7 @@ impl BaseAction {
 /// 实现基础动作对基础游戏状态的变换，作为实际剧本动作的一部分
 impl ActionEnum for BaseAction {
     type Game = BaseGame;
-    fn apply(&self, game: &mut Self::Game, rng: &mut StdRng) -> Result<()> {
+    fn apply(&self, game: &mut Self::Game, rng: &mut impl Rng) -> Result<()> {
         match self {
             BaseAction::Train(_) => Err(anyhow!("BaseGame没有实现训练，需要在具体类型中重新实现")),
             BaseAction::Race => BaseAction::do_race(game, rng),

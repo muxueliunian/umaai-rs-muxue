@@ -182,11 +182,10 @@ mod tests {
         let _ = init_global();
 
         let seed: u64 = 42;
-        let mut decision_rng = StdRng::seed_from_u64(seed);
-        let rule_rng = StdRng::seed_from_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
+        let (mut decision_rng, rule_master) = crate::bench::seeded_rngs(seed, 0);
         let trainer = RamenHandwrittenTrainer::new();
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
-        game.set_internal_rng(rule_rng);
+        game.set_rule_master(rule_master);
         game.run_full_game(&trainer, &mut decision_rng)?;
 
         let score = game.uma.calc_score();
@@ -216,11 +215,10 @@ mod tests {
         let seed: u64 = 7;
         let mut scores = Vec::new();
         for _ in 0..2 {
-            let mut decision_rng = StdRng::seed_from_u64(seed);
-            let rule_rng = StdRng::seed_from_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
+            let (mut decision_rng, rule_master) = crate::bench::seeded_rngs(seed, 0);
             let trainer = RamenHandwrittenTrainer::new();
             let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
-            game.set_internal_rng(rule_rng);
+            game.set_rule_master(rule_master);
             game.run_full_game(&trainer, &mut decision_rng)?;
             scores.push(game.uma.calc_score());
         }

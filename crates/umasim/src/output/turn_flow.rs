@@ -407,9 +407,9 @@ mod tests {
         let _ = init_global();
 
         let seed = 42u64;
-        let (mut decision_rng, rule_rng) = seeded_rngs(seed);
+        let (mut decision_rng, rule_master) = seeded_rngs(seed, 0);
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
-        game.set_internal_rng(rule_rng);
+        game.set_rule_master(rule_master);
         let trainer = RecordingTrainer::new(RamenHandwrittenTrainer::default());
 
         // 真实跑到回合 31 开始（turn=31, stage=Begin）
@@ -483,9 +483,9 @@ mod tests {
         let _ = init_global();
 
         let seed = 42u64;
-        let (mut decision_rng, rule_rng) = seeded_rngs(seed);
+        let (mut decision_rng, rule_master) = seeded_rngs(seed, 0);
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
-        game.set_internal_rng(rule_rng);
+        game.set_rule_master(rule_master);
         let mut trainer = RecordingTrainer::new(crate::trainer::ManualTrainer::with_mock_inputs(vec![]));
         trainer.verbose = true;
 

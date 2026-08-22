@@ -55,7 +55,7 @@ pub trait ActionEnum: Debug + Display + Clone + PartialEq {
     type Game;
 
     /// visitor，调用具体动作
-    fn apply(&self, game: &mut Self::Game, rng: &mut StdRng) -> Result<()>;
+    fn apply(&self, game: &mut Self::Game, rng: &mut impl Rng) -> Result<()>;
 
     /// 尝试转变为BaseAction以获取基础行动类型
     fn as_base_action(&self) -> Option<BaseAction> {
@@ -95,9 +95,9 @@ pub trait Game: Clone {
     /// 获取当前可能的可控行动
     fn list_actions(&self) -> Result<Vec<Self::Action>>;
     /// 生成当前回合的事件
-    fn generate_events(&self, rng: &mut StdRng) -> Vec<EventData>;
+    fn generate_events(&self, rng: &mut impl Rng) -> Vec<EventData>;
     /// 应用事件效果，一些特殊事件需要用到rng和Result
-    fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut StdRng) -> Result<()>;
+    fn apply_event(&mut self, event: &EventData, choice: usize, rng: &mut impl Rng) -> Result<()>;
     /// 执行事件，如果有选项，交给Trainer去决定
     ///
     /// 决策策略：
@@ -150,7 +150,7 @@ pub trait Game: Clone {
             .collect()
     }
     /// provided: 执行指定动作
-    fn apply_action(&mut self, action: &Self::Action, rng: &mut StdRng) -> Result<()> {
+    fn apply_action(&mut self, action: &Self::Action, rng: &mut impl Rng) -> Result<()> {
         action.apply(self, rng)
     }
     /// provided: 列出动作，交给训练员判定并执行
@@ -201,7 +201,7 @@ pub trait Game: Clone {
     }
     /// 追加分配一个在persons里已经存在的人头, -1为不在
     /// 如果要新加角色 需要手动添加到persons里
-    fn distribute_person(&mut self, person_index: i32, allow_absent: bool, rng: &mut StdRng) -> Result<i32> {
+    fn distribute_person(&mut self, person_index: i32, allow_absent: bool, rng: &mut impl Rng) -> Result<i32> {
         let person = self.persons()[person_index as usize].clone();
         let train_type = person.train_type() as usize;
         // 计算不在率
@@ -254,7 +254,7 @@ pub trait Game: Clone {
         }
     }
     /// 重新分配所有人头
-    fn distribute_all(&mut self, rng: &mut StdRng) -> Result<()> {
+    fn distribute_all(&mut self, rng: &mut impl Rng) -> Result<()> {
         let sequence = vec![
             PersonType::Yayoi,
             PersonType::Reporter,
@@ -274,7 +274,7 @@ pub trait Game: Clone {
         Ok(())
     }
     /// 分配Hint. 注意同一个卡的不同分身会同时触发Hint
-    fn distribute_hint(&mut self, rng: &mut StdRng) -> Result<()> {
+    fn distribute_hint(&mut self, rng: &mut impl Rng) -> Result<()> {
         let base_hint_rate = global!(GAMECONSTANTS).base_hint_rate / 100.0;
         let hint_probs: Vec<_> = self
             .deck()

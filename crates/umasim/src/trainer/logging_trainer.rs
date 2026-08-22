@@ -172,11 +172,10 @@ mod tests {
 
     /// 完整 77 回合跑一局（固定 seed），返回决策序列
     fn run_full(seed: u64) -> Result<Vec<(i32, String, usize)>> {
-        let mut decision_rng = StdRng::seed_from_u64(seed);
-        let rule_rng = StdRng::seed_from_u64(seed ^ 0x9E37_79B9_7F4A_7C15);
+        let (mut decision_rng, rule_master) = crate::bench::seeded_rngs(seed, 0);
         let trainer = LoggingTrainer::new(RandomTrainer, seed);
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
-        game.set_internal_rng(rule_rng);
+        game.set_rule_master(rule_master);
         game.run_full_game(&trainer, &mut decision_rng)?;
         let log = trainer.take_records();
         println!(
@@ -199,11 +198,10 @@ mod tests {
         let _ = init_test_logger("error");
         let _ = init_global();
 
-        let mut decision_rng = StdRng::seed_from_u64(42);
-        let rule_rng = StdRng::seed_from_u64(42_u64.wrapping_sub(1));
+        let (mut decision_rng, rule_master) = crate::bench::seeded_rngs(42, 0);
         let trainer = LoggingTrainer::new(RandomTrainer, 42);
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
-        game.set_internal_rng(rule_rng);
+        game.set_rule_master(rule_master);
         game.run_full_game(&trainer, &mut decision_rng)?;
 
         let log = trainer.take_records();

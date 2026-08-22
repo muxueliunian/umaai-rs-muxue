@@ -218,10 +218,12 @@ where
         factor * self.config.radical_factor_max
     }
 
-    /// 按当前 `(回合, 阶段)` 重新播种 rollout 随机流（真 CRN）
+    /// 按当前 `(回合, 阶段)` 重新播种 rollout 随机流（外挂 CRN）
     ///
-    /// 仅在 [`SearchConfig::crn_stage_reseed`] 开启时生效；关闭时保持顺序流，
-    /// 各候选只共享起始种子。
+    /// **仅规则层未改造的剧本（onsen）使用**：onsen 的规则随机仍走传入的
+    /// `&mut StdRng`，靠本方法按 `(rollout 种子, 回合, 阶段)` 重播种对齐各候选；
+    /// 拉面规则层已由无状态流接管（RNG Refactor Plan v2 §5.2，`fork_for_rollout`
+    /// 注入 rule_master），其 rollout 路径不再调用本方法。
     pub fn reseed_for_stage(&self, rng: &mut StdRng, rollout_seed: u64, game: &G) {
         if !self.config.crn_stage_reseed {
             return;
@@ -244,7 +246,6 @@ where
         let mut sim_game = game.fork_for_rollout(seed);
         sim_game.apply_action(action, rng)?;
         while sim_game.next() {
-            self.reseed_for_stage(rng, seed, &sim_game);
             sim_game.run_stage(&self.rollout_trainer, rng)?;
         }
         sim_game.on_simulation_end(&self.rollout_trainer, rng)?;
