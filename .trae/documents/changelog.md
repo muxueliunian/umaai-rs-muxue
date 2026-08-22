@@ -8,6 +8,7 @@
 - **bench 玩家 build 预置**：`DeckComposition` + `PLAYER_BUILDS`（7 种主流玩家 build，guts_wisdom 按玩家讨论删除）外置到 bench_config.toml `[player_builds]`（Map 形态一行一个，IndexMap 保声明序，无内置默认、未配置报错）
 - **game_config.toml 加载修复**：修复用户配置路径错误（此前从未被加载、一直走兜底默认）；`[config_override]` 全字段可选覆盖（新增 uma/cards/blue_count）+ 未知字段显式报错
 - **issues 更新**：constants 排名数据（补齐至 LS24）与 rustfmt 条目状态更新
+- **bench_base 按玩家 build 分组**：读取 `[player_builds]` 遍历分组跑批（每组 runs 局），开头打印马娘名与各 build 卡组的卡名；结果 CSV 合并单文件加 build 列，决策日志文件名含 build 前缀；`cards` 字段废弃、新增 `friend`（友人卡 idrank）——当前仅拉面杯生效（bench 设施绑定 RamenGame 且剧本数据无友人卡字段），跨剧本泛化留待重构
 
 ## 2026-08-21
 
