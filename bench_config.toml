@@ -12,41 +12,26 @@
 #
 # CLI 参数可覆盖同名字段：--runs N --seed S --log（强制开启）--out DIR
 
-uma = 102601
+uma = 100901
 cards = [302424, 302894, 303044, 302924, 303024, 303054]
-blue_count = [12, 0, 0, 0, 6]
-extra_count = [10, 0, 0, 20, 20, 40]
+blue_count = [15, 0, 0, 0, 3]
+extra_count = [10, 10, 20, 20, 20, 40]
 runs = 20
-seed = 42
+seed = 61444
 out_dir = "logs"
 decision_log = false
 # 训练员: "random"（基线）| "handwritten"（手写策略）
 trainer = "random"
 
 # 玩家 build 预置（玩家主流卡组构成，5 张普通卡 + 1 张友人卡）
-# 由 bench::load_player_builds 读取；缺失/未配置时回退代码内置默认。
-# 约束：name 非空唯一、counts 合计 = 5、单类型 ≤ 3。
-# 说明：普通卡类型顺序 = [速, 耐, 力, 根, 智]。
-[[player_builds]]
-name = "speed"
-counts = [3, 1, 0, 0, 1]
-
-[[player_builds]]
-name = "stamina"
-counts = [2, 2, 0, 0, 1]
-
-[[player_builds]]
-name = "power_wisdom"
-counts = [0, 0, 2, 0, 3]
-
-[[player_builds]]
-name = "speed_wisdom"
-counts = [2, 1, 0, 0, 2]
-
-[[player_builds]]
-name = "wisdom"
-counts = [1, 1, 0, 0, 3]
-
-[[player_builds]]
-name = "average"
-counts = [1, 0, 1, 1, 2]
+# 由 bench::load_player_builds 读取；未配置时基准直接报错（必须显式配置）。
+# key 为 build 名（TOML 保证非空唯一），value 为普通卡数量分布（合计 = 5、单类型 ≤ 3）。
+# 说明：普通卡类型顺序 = [速, 耐, 力, 根, 智]；遍历保声明序。
+[player_builds]
+speed = [3, 1, 0, 0, 1]
+stamina = [2, 2, 0, 0, 1]
+power_wisdom = [0, 0, 2, 0, 3]
+speed_wisdom = [2, 1, 0, 0, 2]
+wisdom = [1, 1, 0, 0, 3]
+sta0_wis2 = [1, 0, 1, 1, 2]
+spd2_gut0 = [2, 1, 1, 0, 1]

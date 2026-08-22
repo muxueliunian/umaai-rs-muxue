@@ -75,3 +75,4 @@ tokio = { workspace = true, optional = true }
 
 # ---- onnx 依赖（仅 feature = "onnx" 时编译；tract-onnx 0.22 自带 tract_ndarray）----
 tract-onnx = { workspace = true, optional = true }
+indexmap.workspace = true

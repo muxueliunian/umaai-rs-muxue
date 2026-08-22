@@ -2627,6 +2627,7 @@ dependencies = [
  "flexi_logger",
  "fs-err",
  "hashbrown 0.16.1",
+ "indexmap 2.14.0",
  "indicatif",
  "inquire",
  "int-enum",

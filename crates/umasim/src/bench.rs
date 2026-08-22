@@ -11,7 +11,8 @@
 
 use std::{path::Path, time::Instant};
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context, Result, bail, ensure};
+use indexmap::IndexMap;
 use rand::{SeedableRng, rngs::StdRng};
 use serde::Deserialize;
 
@@ -273,57 +274,19 @@ pub struct DeckComposition {
     pub name: String
 }
 
-/// 内置默认的主流玩家 build（兜底：bench_config.toml 缺失或未配置 `[[player_builds]]` 时使用）。
-///
-/// 数量分布来自玩家经验整理（2026-08-22），顺序即序号：
-/// 1. `speed` 3速1耐1智；2. `stamina` 2耐2速1智；3. `power_wisdom` 2力3智；
-/// 4. `speed_wisdom` 2速1耐2智；5. `wisdom` 1速1耐3智；6. `average` 1速1力1根2智。
-///
-/// 曾收录 `guts_wisdom`（3根2智，仅 2 种普通卡、不满足拉面杯「支援卡种类 ≥ 4」
-/// 门槛），按玩家讨论（2026-08-22）暂时删除；如后续需要对照可恢复。
-pub fn default_player_builds() -> Vec<DeckComposition> {
-    vec![
-        DeckComposition {
-            counts: [3, 1, 0, 0, 1],
-            name: "speed".to_string()
-        },
-        DeckComposition {
-            counts: [2, 2, 0, 0, 1],
-            name: "stamina".to_string()
-        },
-        DeckComposition {
-            counts: [0, 0, 2, 0, 3],
-            name: "power_wisdom".to_string()
-        },
-        DeckComposition {
-            counts: [2, 1, 0, 0, 2],
-            name: "speed_wisdom".to_string()
-        },
-        DeckComposition {
-            counts: [1, 1, 0, 0, 3],
-            name: "wisdom".to_string()
-        },
-        DeckComposition {
-            counts: [1, 0, 1, 1, 2],
-            name: "average".to_string()
-        },
-    ]
-}
-
-/// bench_config.toml 中 `[[player_builds]]` 段的解析容器（其余字段忽略）。
+/// bench_config.toml 中 `[player_builds]` 段的解析容器（其余字段忽略）。
 #[derive(Debug, Default, Deserialize)]
 struct BenchPlayerBuilds {
-    /// 玩家 build 列表（name + counts）。
+    /// 玩家 build：key 即 build 名，value 为普通卡数量分布（保声明序）。
     #[serde(default)]
-    player_builds: Vec<DeckComposition>
+    player_builds: IndexMap<String, [usize; 5]>
 }
 
-/// 校验玩家 build 列表：名称非空且唯一、普通卡合计 5 张、单类型不超过 3 张。
+/// 校验玩家 build 列表：普通卡合计 5 张、单类型不超过 3 张。
+///
+/// 名称校验由 TOML 结构保证（table key 天然非空且唯一，重复 key 解析即报错）。
 fn validate_player_builds(builds: &[DeckComposition]) -> Result<()> {
-    let mut names = std::collections::HashSet::new();
     for build in builds {
-        ensure!(!build.name.is_empty(), "player_builds 存在空名称条目");
-        ensure!(names.insert(&build.name), "player_builds 名称重复: {}", build.name);
         ensure!(
             build.counts.iter().sum::<usize>() == 5,
             "build {} 普通卡合计应为 5 张，实际 {:?}",
@@ -340,36 +303,33 @@ fn validate_player_builds(builds: &[DeckComposition]) -> Result<()> {
     Ok(())
 }
 
-/// 读取玩家 build 列表（bench_config.toml 的 `[[player_builds]]` 段）。
+/// 读取玩家 build 列表（bench_config.toml 的 `[player_builds]` 段）。
 ///
-/// 文件缺失、未配置该段或列表为空时回退 [`default_player_builds`]（内置兜底，
-/// 保证 `make_deck` 零配置可用）；配置存在则校验（名称非空唯一、合计 5 张、
-/// 单类型 ≤3），校验失败返回错误提示。
+/// build 名即 table key（非空唯一由 TOML 保证），value 为普通卡数量分布；
+/// 遍历保声明序（`IndexMap`）。未配置该段或列表为空时报错（必须显式配置）；
+/// 配置存在则校验（合计 5 张、单类型 ≤3），校验失败返回错误提示。
 ///
 /// ```toml
 /// # bench_config.toml 示例
-/// [[player_builds]]
-/// name = "speed"
-/// counts = [3, 1, 0, 0, 1]
+/// [player_builds]
+/// speed = [3, 1, 0, 0, 1]
+/// stamina = [2, 2, 0, 0, 1]
 /// ```
 pub fn load_player_builds() -> Result<Vec<DeckComposition>> {
     let path = get_workspace_root()?.join("bench_config.toml");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(default_player_builds());
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("读取 bench_config.toml 失败: {}", path.display()));
-        }
-    };
+    let text = fs_err::read_to_string(&path)?;
     let cfg: BenchPlayerBuilds = toml::from_str(&text)
         .with_context(|| format!("解析 bench_config.toml 的 player_builds 段失败: {}", path.display()))?;
     if cfg.player_builds.is_empty() {
-        return Ok(default_player_builds());
+        bail!("需要配置 player_builds 卡组比例");
     }
-    validate_player_builds(&cfg.player_builds)?;
-    Ok(cfg.player_builds)
+    let builds: Vec<DeckComposition> = cfg
+        .player_builds
+        .into_iter()
+        .map(|(name, counts)| DeckComposition { name, counts })
+        .collect();
+    validate_player_builds(&builds)?;
+    Ok(builds)
 }
 
 impl DeckComposition {
@@ -515,48 +475,13 @@ mod tests {
         Ok(())
     }
 
-    /// 默认 builds：6 种 build 均为 5 张普通卡、种类数符合预期（全部 ≥2）。
-    #[test]
-    fn test_default_player_builds_shape() -> Result<()> {
-        let builds = default_player_builds();
-        ensure!(
-            builds.len() == 6,
-            "默认主流 build 应为 6 种（guts_wisdom 已按玩家讨论删除）"
-        );
-        for build in &builds {
-            ensure!(
-                build.counts.iter().sum::<usize>() == 5,
-                "build {} 普通卡总数应为 5，实际 {:?}",
-                build.name,
-                build.counts
-            );
-        }
-        let kinds: Vec<usize> = builds.iter().map(DeckComposition::kind_count).collect();
-        println!("各 build 普通卡种类数: {kinds:?}");
-        ensure!(
-            kinds.iter().all(|&k| k >= 2),
-            "所有 build 应至少 2 种卡，实际 {kinds:?}"
-        );
-        Ok(())
-    }
-
     /// 校验函数：名称重复 / 合计不是 5 / 单类型超 3 都应报错。
     #[test]
     fn test_validate_player_builds_rejects_bad() -> Result<()> {
         let bad = |name: &str, counts: [usize; 5]| DeckComposition { name: name.to_string(), counts };
-        let dup = vec![bad("a", [3, 1, 0, 0, 1]), bad("a", [2, 2, 0, 0, 1])];
         let not_five = vec![bad("b", [3, 1, 0, 0, 0])];
         let over_three = vec![bad("c", [4, 1, 0, 0, 0])];
-        let empty_name = vec![DeckComposition {
-            name: String::new(),
-            counts: [3, 1, 0, 0, 1]
-        }];
-        for (label, builds) in [
-            ("名称重复", dup),
-            ("合计非5", not_five),
-            ("单类型超3", over_three),
-            ("空名称", empty_name)
-        ] {
+        for (label, builds) in [("合计非5", not_five), ("单类型超3", over_three)] {
             let result = validate_player_builds(&builds);
             println!("{label}: 校验结果 = {}", result.is_err());
             ensure!(result.is_err(), "{label} 应校验失败");
@@ -568,7 +493,23 @@ mod tests {
         Ok(())
     }
 
-    /// 从真实 bench_config.toml 读取玩家 build（当前与默认一致：6 种，含 speed/average）。
+    /// 保序性：`[player_builds]` 反序列化后遍历顺序与 TOML 声明顺序一致。
+    #[test]
+    fn test_player_builds_preserve_order() -> Result<()> {
+        let text = r#"
+[player_builds]
+speed = [3, 1, 0, 0, 1]
+wisdom = [1, 1, 0, 0, 3]
+average = [1, 0, 1, 1, 2]
+"#;
+        let cfg: BenchPlayerBuilds = toml::from_str(text)?;
+        let names: Vec<&String> = cfg.player_builds.keys().collect();
+        println!("反序列化顺序: {names:?}");
+        ensure!(names == vec!["speed", "wisdom", "average"], "应保声明序（非字母序）");
+        Ok(())
+    }
+
+    /// 从真实 bench_config.toml 读取玩家 build（数量与名称以配置文件为准）。
     #[test]
     fn test_load_player_builds_from_config() -> Result<()> {
         use crate::utils::get_workspace_root;

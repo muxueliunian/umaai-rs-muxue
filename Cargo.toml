@@ -34,7 +34,7 @@ serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 thiserror = "2.0.17"
 tokio = { version = "1.48.0", features = ["full"] }
-toml = "0.9.8"
+toml = { version = "0.9.8", features = ["preserve_order"] }
 inquire = "0.9.1"
 ratatui = { version = "0.29.0", features = ["all-widgets", "macros", "palette", "serde"] }
 text-to-ascii-art = "0.1.10"
@@ -43,6 +43,9 @@ flexi_logger = "0.31.7"
 # ONNX 推理
 tract-onnx = "0.22.0"
 ndarray = "0.17.1"
+
+# 保序 map（bench player_builds 解析；已由 toml 间接依赖，仅提升为直接依赖）
+indexmap = { version = "2.14.0", features = ["serde"] }
 
 # Git 钩子分发（cargo-husky：构建时把 .cargo-husky/hooks/ 复制到 .git/hooks/）
 # cargo-husky = { version = "1.5.0", default-features = false, features = ["user-hooks"] }
