@@ -4,6 +4,8 @@
 
 ## 2026-08-22
 
+- **搜索层可复现（NN 管线 Phase 1.1/1.2）**：新增 `search/seeds.rs` 的 `RolloutSeeds`（rollout 种子按序号派生，候选索引不参与，为后续 CRN 留位），移除 `flat_search` 全部 8 处 `from_os_rng`，改为按工作项播种；`simulate_many` 改吃种子表 + 偏移并返回失败计数，UCB 按「已计划次数」记账避免失败导致候选间种子错位；rollout 失败由静默丢弃改为计数告警（全失败才报错），补 `search_group_size > 0` 校验；`flat_search` 新增可复现性回归测试（同种子一致 / 换种子生效 / 候选顺序无关），实测 1~24 线程结果逐位相同
+- **自选比赛守门测试补充**：小栗帽两段区间专项 + 无比赛候选时不 panic
 - **cargo-husky 钩子引入并撤销（用户决策）+ cargo fmt 手动化**：pre-commit rustfmt 检查钩子（nightly 强制 / stable 跳过）引入后，因 fmt 改由用户手动执行而移除；AGENTS.md 新增「禁用 cargo fmt」规则；全库应用当前 nightly rustfmt 格式
 - **bench 玩家 build 预置**：`DeckComposition` + `PLAYER_BUILDS`（7 种主流玩家 build，guts_wisdom 按玩家讨论删除）外置到 bench_config.toml `[player_builds]`（Map 形态一行一个，IndexMap 保声明序，无内置默认、未配置报错）
 - **game_config.toml 加载修复**：修复用户配置路径错误（此前从未被加载、一直走兜底默认）；`[config_override]` 全字段可选覆盖（新增 uma/cards/blue_count）+ 未知字段显式报错

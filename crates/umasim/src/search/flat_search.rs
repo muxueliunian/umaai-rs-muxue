@@ -6,13 +6,14 @@
 //! - UCB 分配：根据 UCB 公式动态分配搜索资源（C++ UmaAi 风格）
 
 use anyhow::Result;
-use log::debug;
+use log::{debug, warn};
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 
 use super::{
     config::{SearchConfig, TOTAL_TURN},
-    result::{ActionResult, SearchOutput}
+    result::{ActionResult, SearchOutput},
+    seeds::RolloutSeeds
 };
 #[cfg(feature = "onnx")]
 use crate::neural::{ThreadLocalNeuralNetLeafEvaluator, ThreadLocalNeuralNetLeafStatsSnapshot};
@@ -163,12 +164,23 @@ impl FlatSearch {
             self.config.use_ucb
         );
 
+        // 本次搜索的 rollout 种子表：所有候选共享，由传入 rng 派生（可复现性入口）
+        let seeds = RolloutSeeds::from_rng(rng);
+        debug!("[回合 {}] 搜索根种子 = {:#018x}", game.turn, seeds.root());
+
         // 根据配置选择搜索策略
         let action_results = if self.config.use_ucb {
-            self.search_ucb(game, &actions, radical_factor, rng)?
+            self.search_ucb(game, &actions, radical_factor, &seeds)?
         } else {
-            self.search_uniform(game, &actions)?
+            self.search_uniform(game, &actions, &seeds)?
         };
+
+        // 某候选一次都没跑成功时其统计全是空的，继续用下去等于拿垃圾数据排序
+        for (i, (result, _)) in action_results.iter().enumerate() {
+            if result.count() == 0 {
+                anyhow::bail!("候选动作 {i} 的全部 rollout 均失败，搜索结果不可用");
+            }
+        }
 
         Ok(SearchOutput::new(actions.to_vec(), action_results, radical_factor))
     }
@@ -186,49 +198,49 @@ impl FlatSearch {
 
     /// 均匀分配搜索（并行化）
     ///
-    /// 每个动作平均分配 search_n 次搜索，使用 Rayon 并行化。
-    fn search_uniform(&self, game: &OnsenGame, actions: &[OnsenAction]) -> Result<Vec<(ActionResult, ActionResult)>> {
-        let use_parallel = self.use_parallel_simulation();
-        if use_parallel {
-            let ret = actions
-                .par_iter()
-                .map(|action| {
-                    let mut result = ActionResult::new();
-                    let mut result_pt = ActionResult::new();
-                    // 每个线程初始化一次 RNG
-                    let mut thread_rng = StdRng::from_os_rng();
-                    let _ = self.simulate_many(
-                        game,
-                        action,
-                        self.config.search_n,
-                        &mut thread_rng,
-                        &mut result,
-                        &mut result_pt
-                    );
-                    (result, result_pt)
-                })
-                .collect();
-            Ok(ret)
+    /// 每个动作平均分配 `search_n` 次搜索，使用 Rayon 并行化。
+    ///
+    /// 所有候选的第 j 次 rollout 共用 `seeds.seed_at(j)`（CRN 载体，见
+    /// [`RolloutSeeds`]），故并行粒度不影响结果：每次 rollout 的随机流由
+    /// 工作项序号唯一决定，与线程调度无关。
+    ///
+    /// 注：此处按候选并行，并行度上限即候选数（≤10）。改为按
+    /// `(候选, rollout)` 扁平并行可提升吞吐且结果位级不变，
+    /// 但现有粒度可能另有原因，留作后续性能对照实验。
+    fn search_uniform(
+        &self, game: &OnsenGame, actions: &[OnsenAction], seeds: &RolloutSeeds
+    ) -> Result<Vec<(ActionResult, ActionResult)>> {
+        let n = self.config.search_n;
+        let run = |action: &OnsenAction| -> Result<(ActionResult, ActionResult, usize)> {
+            let mut result = ActionResult::new();
+            let mut result_pt = ActionResult::new();
+            // offset=0：均匀分配下每个候选都从 rollout 0 开始，天然完全配对
+            let failed = self.simulate_many(game, action, n, seeds, 0, &mut result, &mut result_pt)?;
+            Ok((result, result_pt, failed))
+        };
+
+        let collected: Vec<(ActionResult, ActionResult, usize)> = if self.use_parallel_simulation() {
+            actions.par_iter().map(run).collect::<Result<Vec<_>>>()?
         } else {
-            let ret = actions
-                .iter()
-                .map(|action| {
-                    let mut result = ActionResult::new();
-                    let mut result_pt = ActionResult::new();
-                    let mut thread_rng = StdRng::from_os_rng();
-                    let _ = self.simulate_many(
-                        game,
-                        action,
-                        self.config.search_n,
-                        &mut thread_rng,
-                        &mut result,
-                        &mut result_pt
-                    );
-                    (result, result_pt)
-                })
-                .collect();
-            Ok(ret)
+            actions.iter().map(run).collect::<Result<Vec<_>>>()?
+        };
+
+        Ok(Self::split_failures(collected, "均匀分配"))
+    }
+
+    /// 拆出失败计数并汇总告警，返回各候选的 (score, pt) 统计
+    ///
+    /// rollout 失败会让该候选的样本数少于计划值，静默丢弃会把「跑失败」
+    /// 混同于「跑出来分低」。此处不中断搜索（避免偶发失败拖垮实时通道层），
+    /// 但必须在日志里留下痕迹。
+    fn split_failures(
+        collected: Vec<(ActionResult, ActionResult, usize)>, stage: &str
+    ) -> Vec<(ActionResult, ActionResult)> {
+        let total_failed: usize = collected.iter().map(|(_, _, f)| f).sum();
+        if total_failed > 0 {
+            warn!("[搜索][{stage}] {total_failed} 次 rollout 失败，对应候选的样本数少于计划值");
         }
+        collected.into_iter().map(|(r, r_pt, _)| (r, r_pt)).collect()
     }
 
     /// UCB 动态分配搜索
@@ -239,41 +251,37 @@ impl FlatSearch {
     /// # UCB 公式
     /// search_value = value + cpuct * expected_stdev * sqrt(total_n) / n
     fn search_ucb(
-        &self, game: &OnsenGame, actions: &[OnsenAction], radical_factor: f64, _rng: &mut StdRng
+        &self, game: &OnsenGame, actions: &[OnsenAction], radical_factor: f64, seeds: &RolloutSeeds
     ) -> Result<Vec<(ActionResult, ActionResult)>> {
         let num_actions = actions.len();
         let mut action_results: Vec<(ActionResult, ActionResult)> = vec![Default::default(); num_actions];
         let group_size = self.config.search_group_size;
+        anyhow::ensure!(group_size > 0, "search_group_size 不能为 0（UCB 分配会死循环）");
         let use_parallel = self.use_parallel_simulation();
 
+        // 各候选**已计划**的 rollout 次数（≠ 已成功次数）
+        //
+        // 种子偏移必须用计划次数而非 `ActionResult::count()`：后者会因 rollout 失败
+        // 而少计，导致同一 rollout 序号在不同候选上错位，破坏配对。
+        let mut planned = vec![0usize; num_actions];
+
         // 第一阶段：每个动作先搜一组（并行）
-        let initial_results: Vec<_> = if use_parallel {
-            actions
-                .par_iter()
-                .map(|action| {
-                    let mut result = ActionResult::new();
-                    let mut result_pt = ActionResult::new();
-                    let mut thread_rng = StdRng::from_os_rng();
-                    let _ = self.simulate_many(game, action, group_size, &mut thread_rng, &mut result, &mut result_pt);
-                    (result, result_pt)
-                })
-                .collect()
+        let run_initial = |action: &OnsenAction| -> Result<(ActionResult, ActionResult, usize)> {
+            let mut result = ActionResult::new();
+            let mut result_pt = ActionResult::new();
+            let failed = self.simulate_many(game, action, group_size, seeds, 0, &mut result, &mut result_pt)?;
+            Ok((result, result_pt, failed))
+        };
+        let initial: Vec<(ActionResult, ActionResult, usize)> = if use_parallel {
+            actions.par_iter().map(run_initial).collect::<Result<Vec<_>>>()?
         } else {
-            actions
-                .iter()
-                .map(|action| {
-                    let mut result = ActionResult::new();
-                    let mut result_pt = ActionResult::new();
-                    let mut thread_rng = StdRng::from_os_rng();
-                    let _ = self.simulate_many(game, action, group_size, &mut thread_rng, &mut result, &mut result_pt);
-                    (result, result_pt)
-                })
-                .collect()
+            actions.iter().map(run_initial).collect::<Result<Vec<_>>>()?
         };
 
         // 合并初始结果
-        for (i, result) in initial_results.into_iter().enumerate() {
+        for (i, result) in Self::split_failures(initial, "UCB 首组").into_iter().enumerate() {
             action_results[i] = result;
+            planned[i] = group_size;
         }
 
         let mut total_n = (group_size * num_actions) as f64;
@@ -297,26 +305,29 @@ impl FlatSearch {
             if self.config.max_depth > 0 && self.leaf_nn().is_some() && self.rollout_batch_size > 1 {
                 let nn = self.leaf_nn().expect("nn");
 
-                let outcomes: Vec<_> = if use_parallel {
-                    (0..group_size)
-                        .into_par_iter()
-                        // E4.3-7)：每个 worker 只初始化一次 RNG，避免 tight loop 里反复 from_os_rng()
-                        .map_init(
-                            || StdRng::from_os_rng(),
-                            |rng, _| self.simulate_until_terminal_or_leaf(game, action, rng).ok()
-                        )
-                        .filter_map(|x| x)
-                        .collect()
-                } else {
-                    let mut out = Vec::with_capacity(group_size);
-                    let mut thread_rng = StdRng::from_os_rng();
-                    for _ in 0..group_size {
-                        if let Ok(v) = self.simulate_until_terminal_or_leaf(game, action, &mut thread_rng) {
-                            out.push(v);
+                // 每次 rollout 由工作项序号自行播种：结果与线程调度无关
+                let offset = planned[best_action_idx];
+                let run_leaf = |k: usize| -> Option<SimOutcome> {
+                    let mut rng = StdRng::seed_from_u64(seeds.seed_at(offset + k));
+                    match self.simulate_until_terminal_or_leaf(game, action, &mut rng) {
+                        Ok(v) => Some(v),
+                        Err(e) => {
+                            debug!("[搜索][UCB nn leaf] rollout {} 失败: {e}", offset + k);
+                            None
                         }
                     }
-                    out
                 };
+                let outcomes: Vec<_> = if use_parallel {
+                    (0..group_size).into_par_iter().filter_map(run_leaf).collect()
+                } else {
+                    (0..group_size).filter_map(run_leaf).collect()
+                };
+                if outcomes.len() < group_size {
+                    warn!(
+                        "[搜索][UCB nn leaf] {} 次 rollout 失败，样本数少于计划值",
+                        group_size - outcomes.len()
+                    );
+                }
 
                 let mut leaf_features: Vec<f32> = Vec::new();
                 let mut leaf_pt_bias: Vec<f64> = Vec::new();
@@ -359,34 +370,44 @@ impl FlatSearch {
                     }
                 }
                 // nn leaf 微批路径已完成本组搜索，跳过默认循环
+                planned[best_action_idx] += group_size;
                 total_n += group_size as f64;
                 continue;
             }
             // 默认循环：handwritten 评估（onnx 关闭时也走这条）
-            let scores: Vec<_> = if use_parallel {
-                (0..group_size)
-                    .into_par_iter()
-                    // E4.3-7)：每个 worker 只初始化一次 RNG，避免 tight loop 里反复 from_os_rng()
-                    .map_init(|| StdRng::from_os_rng(), |rng, _| self.simulate(game, action, rng).ok())
-                    .filter_map(|x| x)
-                    .collect()
-            } else {
-                // 单线程分支：复用同一个 RNG，避免每次 rollout 都 from_os_rng() 的高开销
-                let mut out = Vec::with_capacity(group_size);
-                let mut thread_rng = StdRng::from_os_rng();
-                for _ in 0..group_size {
-                    if let Ok(v) = self.simulate(game, action, &mut thread_rng) {
-                        out.push(v);
+            //
+            // 该候选已计划 offset 次，本组取 seeds[offset..offset+group_size]。
+            // 两个候选因而在 0..min(n_a, n_b) 上完全配对，多出的部分为 unpaired，
+            // 这是 CRN 在不等样本数下的标准做法。
+            let offset = planned[best_action_idx];
+            let run_one = |k: usize| -> Option<(f64, f64)> {
+                let mut rng = StdRng::seed_from_u64(seeds.seed_at(offset + k));
+                match self.simulate(game, action, &mut rng) {
+                    Ok(v) => Some(v),
+                    Err(e) => {
+                        debug!("[搜索][UCB] rollout {} 失败: {e}", offset + k);
+                        None
                     }
                 }
-                out
             };
+            let scores: Vec<_> = if use_parallel {
+                (0..group_size).into_par_iter().filter_map(run_one).collect()
+            } else {
+                (0..group_size).filter_map(run_one).collect()
+            };
+            if scores.len() < group_size {
+                warn!(
+                    "[搜索][UCB] {} 次 rollout 失败，样本数少于计划值",
+                    group_size - scores.len()
+                );
+            }
 
             for score in scores {
                 action_results[best_action_idx].0.add(score.0);
                 action_results[best_action_idx].1.add(score.1);
             }
 
+            planned[best_action_idx] += group_size;
             total_n += group_size as f64;
         }
 
@@ -509,10 +530,14 @@ impl FlatSearch {
         }
     }
 
+    /// 对同一候选连续跑 `n` 次 rollout
+    ///
+    /// 第 k 次取 `seeds.seed_at(offset + k)` 播种，`offset` 为该候选**已计划**的次数。
+    /// 返回失败次数（不中断搜索，由调用方汇总告警）。
     fn simulate_many(
-        &self, game: &OnsenGame, action: &OnsenAction, n: usize, rng: &mut StdRng, result: &mut ActionResult,
-        result_pt: &mut ActionResult
-    ) -> Result<()> {
+        &self, game: &OnsenGame, action: &OnsenAction, n: usize, seeds: &RolloutSeeds, offset: usize,
+        result: &mut ActionResult, result_pt: &mut ActionResult
+    ) -> Result<usize> {
         // 仅 nn leaf + max_depth>0 才走微批；否则保持旧行为（handwritten 默认循环）
         // onnx feature 关闭时直接走默认循环，避免对 leaf_nn 的引用。
         #[cfg(feature = "onnx")]
@@ -521,8 +546,18 @@ impl FlatSearch {
             let mut pending_features: Vec<f32> = Vec::with_capacity(self.rollout_batch_size * 1121);
             let mut pending_pt_bias: Vec<f64> = Vec::with_capacity(self.rollout_batch_size);
 
-            for _ in 0..n {
-                match self.simulate_until_terminal_or_leaf(game, action, rng)? {
+            let mut failed = 0usize;
+            for k in 0..n {
+                let mut rng = StdRng::seed_from_u64(seeds.seed_at(offset + k));
+                let outcome = match self.simulate_until_terminal_or_leaf(game, action, &mut rng) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        debug!("[搜索][nn leaf] rollout {} 失败: {e}", offset + k);
+                        failed += 1;
+                        continue;
+                    }
+                };
+                match outcome {
                     SimOutcome::Terminal { score, score_pt } => {
                         result.add(score);
                         result_pt.add(score_pt);
@@ -556,16 +591,24 @@ impl FlatSearch {
                 pending_features.clear();
                 pending_pt_bias.clear();
             }
-            return Ok(());
+            return Ok(failed);
         }
         // 默认循环：handwritten 评估（onnx 关闭时也走这条）
-        for _ in 0..n {
-            if let Ok(score) = self.simulate(game, action, rng) {
-                result.add(score.0);
-                result_pt.add(score.1);
+        let mut failed = 0usize;
+        for k in 0..n {
+            let mut rng = StdRng::seed_from_u64(seeds.seed_at(offset + k));
+            match self.simulate(game, action, &mut rng) {
+                Ok(score) => {
+                    result.add(score.0);
+                    result_pt.add(score.1);
+                }
+                Err(e) => {
+                    debug!("[搜索] rollout {} 失败: {e}", offset + k);
+                    failed += 1;
+                }
             }
         }
-        Ok(())
+        Ok(failed)
     }
 
     #[cfg(feature = "onnx")]
@@ -732,3 +775,171 @@ impl<'a> crate::game::Trainer<OnsenGame> for SimulationTrainer<'a> {
 }
 
 // 说明：E6 的“rollout 动作走 NN”已回退；rollout 全程固定使用 SimulationTrainer(HandwrittenEvaluator)。
+
+#[cfg(test)]
+mod tests {
+    use std::cell::RefCell;
+
+    use rand::SeedableRng;
+
+    use super::*;
+    use crate::{
+        game::{InheritInfo, Trainer},
+        gamedata::init_global,
+        utils::{get_workspace_root, init_test_logger}
+    };
+
+    /// 单个候选的统计摘要（回归比对的最小单元）
+    ///
+    /// 只取样本数与均值：直方图整体比对过于笨重，而这两项已足以暴露
+    /// 随机流错位——种子一变，均值必然漂移。
+    #[derive(Debug, Clone, PartialEq)]
+    struct ActionDigest {
+        /// 成功样本数
+        n: u32,
+        /// 分数均值
+        mean: f64
+    }
+
+    /// 在首个多候选决策点捕获搜索结果，然后固定选 0 号动作
+    ///
+    /// 直接从外部构造搜索根局面会得到不合法状态（`next()` 空推进会跳过阶段初始化），
+    /// 故通过真实的 `run_stage` → `Trainer::select_action` 路径取根节点。
+    struct CapturingTrainer {
+        /// 被测搜索器
+        search: FlatSearch,
+        /// 搜索入口种子
+        seed: u64,
+        /// 捕获到的各候选统计（`None` 表示尚未捕获）
+        captured: RefCell<Option<Vec<ActionDigest>>>,
+        /// 是否反转候选顺序后再搜索（用于顺序无关性回归）
+        reverse: bool
+    }
+
+    impl CapturingTrainer {
+        /// 构造捕获用 trainer
+        fn new(config: SearchConfig, seed: u64, reverse: bool) -> Self {
+            Self {
+                search: FlatSearch::new(config),
+                seed,
+                captured: RefCell::new(None),
+                reverse
+            }
+        }
+
+        /// 取出捕获结果
+        fn take(&self) -> Result<Vec<ActionDigest>> {
+            self.captured
+                .borrow_mut()
+                .take()
+                .ok_or_else(|| anyhow::anyhow!("整局结束仍未遇到多候选决策点"))
+        }
+    }
+
+    impl Trainer<OnsenGame> for CapturingTrainer {
+        fn select_action(&self, game: &OnsenGame, actions: &[OnsenAction], _rng: &mut StdRng) -> Result<usize> {
+            if self.captured.borrow().is_none() && actions.len() >= 2 {
+                let mut owned = actions.to_vec();
+                if self.reverse {
+                    owned.reverse();
+                }
+                let mut rng = StdRng::seed_from_u64(self.seed);
+                let out = self.search.search(game, &owned, &mut rng)?;
+                let mut digest: Vec<ActionDigest> = out
+                    .action_results
+                    .iter()
+                    .map(|r| ActionDigest {
+                        n: r.0.count(),
+                        mean: r.0.mean()
+                    })
+                    .collect();
+                // 统一回正序，使正/逆序两次运行的结果可直接逐项比对
+                if self.reverse {
+                    digest.reverse();
+                }
+                *self.captured.borrow_mut() = Some(digest);
+            }
+            Ok(0)
+        }
+
+        fn select_choice(&self, _game: &OnsenGame, _choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// 回归基准专用配置
+    ///
+    /// 强制 `use_ucb=false`：UCB 的样本分配依赖分数，代码一改样本数就变，
+    /// 无法作为「改动前后输出一致」的尺子。均匀分配下每个候选固定 `search_n` 次。
+    fn regression_config() -> SearchConfig {
+        SearchConfig::default().with_search_n(16).with_ucb(false)
+    }
+
+    /// 跑一局到首个多候选决策点，返回该点的搜索统计
+    fn capture(seed: u64, reverse: bool) -> Result<Vec<ActionDigest>> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let inherit = InheritInfo {
+            blue_count: [12, 0, 0, 0, 6],
+            extra_count: [10, 0, 0, 20, 20, 40]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let mut game = OnsenGame::newgame(102601, &deck, inherit)?;
+
+        let trainer = CapturingTrainer::new(regression_config(), seed, reverse);
+        // 局面推进本身用固定种子，保证根局面在各次运行间一致
+        let mut rng = StdRng::seed_from_u64(20260822);
+        while game.next() {
+            game.run_stage(&trainer, &mut rng)?;
+            if trainer.captured.borrow().is_some() {
+                break;
+            }
+        }
+        trainer.take()
+    }
+
+    /// 回归 1：同一 seed 两次搜索必须完全一致
+    ///
+    /// 这是泛型化改造的护栏——没有它，`FlatSearch<G>` 改坏了也无从发现。
+    /// 注：仓库测试规范一般要求用 `println` 而非 `assert`，回归基准是刻意的例外：
+    /// 只打印不断言，回归就形同虚设。
+    #[test]
+    fn test_search_reproducible_same_seed() -> Result<()> {
+        let a = capture(42, false)?;
+        let b = capture(42, false)?;
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            println!("动作 {i}: n={} mean={:.6} | n={} mean={:.6}", x.n, x.mean, y.n, y.mean);
+        }
+        assert_eq!(a, b, "同一 seed 两次搜索结果必须完全一致");
+        Ok(())
+    }
+
+    /// 回归 2：不同 seed 必须给出不同结果（否则种子根本没接进 rollout）
+    #[test]
+    fn test_search_seed_actually_used() -> Result<()> {
+        let a = capture(42, false)?;
+        let b = capture(4242, false)?;
+        println!("seed=42   : {a:?}");
+        println!("seed=4242 : {b:?}");
+        assert_ne!(a, b, "换 seed 必须改变搜索结果，否则种子未接入 rollout");
+        Ok(())
+    }
+
+    /// 回归 3：候选顺序重排后，各动作统计量按动作对齐后不变
+    ///
+    /// 专抓「候选索引混进种子派生」——一旦 `seed_at` 吃了候选下标，
+    /// 重排 actions 就会让同一动作拿到不同随机流，本测试立刻失败。
+    #[test]
+    fn test_search_invariant_to_action_order() -> Result<()> {
+        let normal = capture(42, false)?;
+        let reversed = capture(42, true)?;
+        for (i, (a, b)) in normal.iter().zip(reversed.iter()).enumerate() {
+            println!("动作 {i}: 正序 n={} mean={:.6} | 逆序 n={} mean={:.6}", a.n, a.mean, b.n, b.mean);
+        }
+        assert_eq!(normal, reversed, "各动作统计量不应随候选顺序变化");
+        Ok(())
+    }
+}

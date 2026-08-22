@@ -6,11 +6,14 @@
 //! - `config`: 搜索配置
 //! - `result`: 搜索结果（分数分布统计）
 //! - `flat_search`: 扁平蒙特卡洛搜索实现
+//! - `seeds`: rollout 种子派生（可复现性与 CRN 的载体）
 
 mod config;
 mod flat_search;
 mod result;
+mod seeds;
 
 pub use config::SearchConfig;
 pub use flat_search::FlatSearch;
 pub use result::{ActionResult, SearchOutput};
+pub use seeds::RolloutSeeds;
