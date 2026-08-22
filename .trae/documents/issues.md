@@ -133,3 +133,24 @@
   4. `game_config.toml`：顶层 `mcts_selected_onsen`（原在遗留段，同样静默失效）移入 `[config_override]` 段；注释更新可选覆盖语义
   5. 测试 +4：merge 全 None 不覆盖 / 部分覆盖生效 / deny_unknown_fields 报错 / 用户配置路径定位 + 真实文件合并集成验证（`uma=100901` 生效）
 - **备注**：`ramen_region_strategy` / `ramen_region_fixed`（game_config.toml 注释中的「顶层覆盖」）同样不在 `OverrideGameConfig` 结构内，目前无法通过 game_config.toml 覆盖（未启用，暂缓处理）；`OverrideGameConfig` 顶层未知字段（如遗留的顶层 `mcts_selected_onsen` 写法）仍静默忽略，如需可后续加 deny
+
+---
+
+## 第三年地区选择无 build 自适应（score_region 对第三年地区无区分度）
+
+- **日期**：2026-08-22
+- **状态**：待解决（方案已定，以后再改）
+- **问题描述**：bench 已支持不同卡组（build）跑批，但第 3 年地区选择仍是固定值 `[[11, 14, 15]]`（default_config.toml `ramen_region_fixed`），所有 build 共用同一组合；即使恢复 120 组合全枚举，当前 `score_region` 打分对第 3 年地区**没有 build 区分度**——速度向与智力向卡组都会选中同一组合
+- **排查过程**：
+  - 临时测试 `test_region_build_sensitivity`（policy.rs）实测：速度向卡组（3速）与智力向卡组（3智）在第 3 年 120 组合打分下均选中 `[10, 11, 12]`，score 相同（4500）
+  - 根因一（fixed 绕过策略）：`ramen_region_strategy="fixed"` 时第 3 年直接 apply `ramen_region_fixed[0]`，不经过 `decide_region` 打分，build 差异无从体现
+  - 根因二（打分失效）：`score_region` 的 build 自适应依赖 `region.xunlian × 卡组 bias`，但第 3 年地区（id 10-19）`xunlian` 全为 0 → bias 项恒零；而 `pt_bonus` 全部相同（50）、`hint` 全 0 → 所有组合分数相同，argmax 取第一个
+  - 第 3 年地区的真实差异在 `youqing`（40-60）与 `at_trains` 覆盖（单属性 vs 多属性），当前打分完全未纳入
+- **解决方案**（已定，待实施）：
+  1. 增强 `score_region`：新增 `youqing × at_trains × 卡组 bias` 项（如 `Σ_{t∈at_trains} youqing × bias[t]`），使第 3 年打分随 build 训练倾向变化；权重沿用/扩展 `RamenPolicyConfig`
+  2. `default_config.toml` 恢复 `ramen_region_strategy = "all"`（120 组合枚举，O(360) 打分已标注便宜）
+  3. 验收：不同 build 选出不同第 3 年地区组合（更新 `test_region_build_sensitivity` 断言方向）
+- **备注**：
+  - 备选方案 B：按卡组主属性预筛候选范围（120 → 20~30 个）再打分——打分增强后不稳定时再启用，避免裁剪丢最优解
+  - `test_region_build_sensitivity` 临时验证测试已留在 policy.rs（当前打印"两者选择是否不同: false"，实施后应翻转为 true）
+  - 与既有 issue「第三年地区选择组合过多」（已解决：Fixed）相关联：Fixed 是性能临时方案，本 issue 是在 build 维度上的功能补齐

@@ -782,6 +782,64 @@ mod tests {
 
     // ========== 手写策略核心测试 ==========
 
+    /// 临时验证：score_region 的卡组 bias 是否让不同 build 选出不同的第三年地区
+    ///
+    /// 速度向卡组（3速） vs 智力向卡组（3智），第 3 年 120 组合全枚举打分，
+    /// 观察选中组合是否随卡组变化（验证 build 自适应，为"恢复 all 选项"决策提供依据）。
+    #[test]
+    fn test_region_build_sensitivity() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+
+        let combos = crate::game::ramen::rules::get_region_combinations(2)?;
+        let actions: Vec<RamenAction> = combos
+            .iter()
+            .map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c)))
+            .collect();
+        let policy = RamenPolicy::default();
+
+        // 速度向卡组（现有测试卡组：3速1智1耐1友）
+        let game_speed = make_game()?;
+        let (idx_s, outs_s) = policy.decide_region(&game_speed, 2, &actions)?;
+        println!(
+            "速度向卡组 → 第3年选中: {:?} score={:.0}",
+            combos[idx_s], outs_s[idx_s].score
+        );
+
+        // 智力向卡组：从卡表取 3 张智卡 + 2 张速卡 + 新友人卡（拉面杯要求 30305 系列）
+        use crate::gamedata::GAMEDATA;
+        let gd = global!(GAMEDATA);
+        let pick = |card_type: i32, n: usize| -> Vec<u32> {
+            gd.card
+                .values()
+                .filter(|c| c.card_type == card_type)
+                .map(|c| c.card_id * 10 + c.rarity)
+                .take(n)
+                .collect()
+        };
+        let mut deck_w: Vec<u32> = pick(4, 3);
+        deck_w.extend(pick(0, 2));
+        deck_w.push(303054); // 新友人卡
+        while deck_w.len() < 6 {
+            deck_w.push(302424);
+        }
+        let deck_w: [u32; 6] = deck_w.try_into().expect("卡组长度 6");
+        let game_wise = RamenGame::newgame(102601, &deck_w, crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        })?;
+        let (idx_w, outs_w) = policy.decide_region(&game_wise, 2, &actions)?;
+        println!(
+            "智力向卡组 {:?} → 第3年选中: {:?} score={:.0}",
+            deck_w, combos[idx_w], outs_w[idx_w].score
+        );
+
+        println!("两者选择是否不同: {}", combos[idx_s] != combos[idx_w]);
+        Ok(())
+    }
+
     /// 构造一个可用的 RamenGame（默认卡组 102601，train 阶段可打分）
     fn make_game() -> anyhow::Result<RamenGame> {
         use crate::game::ramen::RamenGame;
