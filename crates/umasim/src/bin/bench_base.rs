@@ -35,7 +35,10 @@ use umasim::{
     gamedata::{GAMEDATA, init_global_with_config},
     global,
     output::decision_log::DecisionLogRow,
-    trainer::{LoggingTrainer, RamenHandwrittenTrainer, RandomTrainer},
+    search::SearchConfig,
+    trainer::{
+        LoggingTrainer, RamenHandwrittenTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection, RandomTrainer
+    },
     utils::{get_workspace_root, load_game_config}
 };
 
@@ -58,8 +61,60 @@ struct BenchConfig {
     out_dir: String,
     /// 是否落盘决策日志
     decision_log: bool,
-    /// 训练员: "random"（基线）| "handwritten"（手写策略）
-    trainer: String
+    /// 训练员: "random"（基线）| "handwritten"（手写策略）| "mcts"（手写 + 扁平搜索）
+    trainer: String,
+    /// mcts 专用：**每个候选**的 rollout 次数
+    ///
+    /// 不是每个决策点的总预算：均匀分配下一个决策点的实际 rollout 数是
+    /// `候选数 × search_n`（`search_uniform` 对每个 action 各调一次
+    /// `simulate_many(.., search_n, ..)`）。第 3 年地区选择有 C(10,3)=120 个
+    /// 候选，`search_n=64` 在那一个点就是 7680 次 rollout。
+    #[serde(default = "default_search_n")]
+    search_n: usize,
+    /// mcts 专用：搜哪些阶段（逗号分隔，见 `RamenSearchStages::parse`）
+    #[serde(default = "default_search_stages")]
+    search_stages: String,
+    /// mcts 专用：是否用 UCB 分配预算（false 为均匀分配）
+    #[serde(default = "default_search_ucb")]
+    search_ucb: bool,
+    /// mcts 专用：取分口径 "score" | "pt"
+    #[serde(default = "default_search_selection")]
+    search_selection: String,
+    /// mcts 专用：激进度上限
+    ///
+    /// 缺省 **0.0**（取普通均值）而非 `SearchConfig::default()` 的 50.0：
+    /// 非零时 `best_action_idx` 按 `weighted_mean(radical_factor)` 排序，偏向好运尾部，
+    /// 那样测出来的就不是「搜索能否提高**均分**」。要复现 C++ 风格行为再手动调高。
+    #[serde(default)]
+    radical_factor_max: f64
+}
+
+/// `search_n` 缺省值：小预算档，够跑通又不至于把跑批时间拖爆
+fn default_search_n() -> usize {
+    64
+}
+
+/// `search_stages` 缺省值：只搜训练阶段（决策点最多、单点信息量最大）
+fn default_search_stages() -> String {
+    "train".to_string()
+}
+
+/// `search_ucb` 缺省值：均匀分配
+///
+/// 与 `SearchConfig::default()`（UCB 开）相反。原因不是「UCB 更差」，而是
+/// **小预算下 UCB 路径根本不按 `search_n` 记账**：`search_ucb` 第一阶段先给
+/// 每个候选各跑满一组 `search_group_size`（默认 256），随后的终止判据是
+/// `max_planned >= search_n`，`search_n < search_group_size` 时立刻退出。
+/// 于是 `search_n=64` 实际跑成「每候选 256 次的均匀搜索」——超预算 4 倍，
+/// 且自适应分配一次都没发生。要用 UCB 必须同时把 `search_group_size` 调到
+/// 远小于 `search_n`。
+fn default_search_ucb() -> bool {
+    false
+}
+
+/// `search_selection` 缺省值
+fn default_search_selection() -> String {
+    "score".to_string()
 }
 
 /// 内置默认值（与 bench_config.toml 保持一致；文件缺失时使用）
@@ -74,7 +129,12 @@ impl Default for BenchConfig {
             seed: 42,
             out_dir: "logs".to_string(),
             decision_log: false,
-            trainer: "random".to_string()
+            trainer: "random".to_string(),
+            search_n: default_search_n(),
+            search_stages: default_search_stages(),
+            search_ucb: default_search_ucb(),
+            search_selection: default_search_selection(),
+            radical_factor_max: 0.0
         }
     }
 }
@@ -108,9 +168,21 @@ fn apply_cli(mut cfg: BenchConfig) -> Result<BenchConfig> {
             Arg::Long("log") => cfg.decision_log = true,
             Arg::Long("out") => cfg.out_dir = bench::parse_value(&mut parser, "out")?,
             Arg::Long("trainer") => cfg.trainer = bench::parse_value(&mut parser, "trainer")?,
+            Arg::Long("search-n") => cfg.search_n = bench::parse_value(&mut parser, "search-n")?,
+            Arg::Long("search-stages") => cfg.search_stages = bench::parse_value(&mut parser, "search-stages")?,
+            Arg::Long("search-ucb") => cfg.search_ucb = bench::parse_value(&mut parser, "search-ucb")?,
+            Arg::Long("search-selection") => {
+                cfg.search_selection = bench::parse_value(&mut parser, "search-selection")?
+            }
+            Arg::Long("radical-factor") => {
+                cfg.radical_factor_max = bench::parse_value(&mut parser, "radical-factor")?
+            }
             Arg::Long("help") | Arg::Short('h') => {
                 println!(
-                    "用法: bench_base [--runs N] [--seed S] [--log] [--out DIR] [--trainer random|handwritten]\n\
+                    "用法: bench_base [--runs N] [--seed S] [--log] [--out DIR]
+\n                     	[--trainer random|handwritten|mcts]
+\n                     	mcts 专用: [--search-n N] [--search-stages train,ramen,...] [--search-ucb]
+\n                     	           [--search-selection score|pt] [--radical-factor F] [--search-ucb true|false]\n\
                      缺省参数读取 workspace 根 bench_config.toml"
                 );
                 std::process::exit(0);
@@ -216,6 +288,25 @@ fn main() -> Result<()> {
         builds.len()
     );
 
+    // mcts 参数提前解析：跑批循环里再报错等于跑了一半才发现参数拼错
+    let search_stages = RamenSearchStages::parse(&cfg.search_stages)?;
+    let search_selection = match cfg.search_selection.as_str() {
+        "score" => RamenSelection::Score,
+        "pt" => RamenSelection::Pt,
+        other => anyhow::bail!("未知 search_selection: {other}（可选 score / pt）")
+    };
+    let search_config = SearchConfig::default()
+        .with_search_n(cfg.search_n)
+        .with_max_depth(0) // 拉面无 leaf 估值器，只能跑到终局
+        .with_ucb(cfg.search_ucb)
+        .with_radical_factor_max(cfg.radical_factor_max);
+    if cfg.trainer == "mcts" {
+        println!(
+            "  mcts 参数: search_n={}/候选 stages={} ucb={} selection={} radical_factor_max={}",
+            cfg.search_n, cfg.search_stages, cfg.search_ucb, cfg.search_selection, cfg.radical_factor_max
+        );
+    }
+
     let pick = CardPickOpts::default();
     let mut all_results: Vec<BuildResults> = Vec::with_capacity(builds.len());
     let mut all_rows: Vec<DecisionLogRow> = Vec::new();
@@ -250,7 +341,15 @@ fn main() -> Result<()> {
                     let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())
                 }
-                other => anyhow::bail!("未知 trainer: {other}（可选 random / handwritten）")
+                "mcts" => {
+                    let mcts = RamenMctsTrainer::new(search_config.clone())
+                        .with_stages(search_stages)
+                        .with_selection(search_selection);
+                    let trainer = LoggingTrainer::new(mcts, log_seed);
+                    let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
+                    (outcome, trainer.take_records())
+                }
+                other => anyhow::bail!("未知 trainer: {other}（可选 random / handwritten / mcts）")
             };
             println!(
                 "  [#{:02}] seed={} score={} ({}) PT={} RMJ={}/3 自选比赛={} 耗时={:.3}ms",

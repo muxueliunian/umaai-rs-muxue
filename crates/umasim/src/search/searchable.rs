@@ -62,6 +62,18 @@ where
     /// 注：拉面规则层已由无状态流接管，不再调用本方法（保留实现仅为满足 trait）。
     fn crn_stage_key(&self) -> u64;
 
+    /// 按剧本的**真实对局路径**执行 rollout 的根动作
+    ///
+    /// 必须与 `run_stage` 内执行动作的方式逐字一致。拉面的
+    /// `run_train` / `run_ramen_select` / `run_special_select` / `run_region_select`
+    /// 走的是 `apply_action_with_strategy`（优先用局面内的策略流），而不是
+    /// `Game::apply_action`；rollout 若直接调后者，被评估的那一个动作会用上
+    /// 另一条随机流，且策略流的 counter 不前进，后续回合的策略随机整体偏移——
+    /// 搜索排序会被系统性污染，且不报任何错。
+    ///
+    /// 无默认实现：漏实现要编译失败，而不是静默退化。
+    fn apply_root_action(&mut self, action: &Self::Action, rng: &mut StdRng) -> Result<()>;
+
     /// 为一次 rollout 建立分支，并初始化剧本内部随机流
     ///
     /// 通用搜索**只能**经由本方法建分支，不得直接 `clone()`——把「克隆」与
@@ -98,6 +110,11 @@ impl FlatSearchGame for OnsenGame {
         }
     }
 
+    /// 温泉的 `run_stage` 直接调 `Game::apply_action`，无策略流分支
+    fn apply_root_action(&mut self, action: &Self::Action, rng: &mut StdRng) -> Result<()> {
+        self.apply_action(action, rng)
+    }
+
     /// 温泉没有规则层内部 RNG（`game/onsen/` 下无 `internal_rng`），
     /// 全部随机性走传入的 `&mut StdRng`，故只需克隆。
     fn fork_for_rollout(&self, _rollout_seed: u64) -> Self {
@@ -111,8 +128,9 @@ impl FlatSearchGame for RamenGame {
     /// 拉面暂无 leaf 估值器，Phase 1 只允许跑到终局
     const SUPPORTS_TRUNCATED_LEAF: bool = false;
 
+    /// rollout 专用实例：关闭分解文本采集，避免 24 线程争一把 `Mutex`
     fn default_rollout_trainer() -> Self::RolloutTrainer {
-        crate::trainer::RamenHandwrittenTrainer::new()
+        crate::trainer::RamenHandwrittenTrainer::for_rollout()
     }
 
     /// 拉面 stage key（保留实现仅为满足 trait；规则层接管后不再被调用）
@@ -129,6 +147,12 @@ impl FlatSearchGame for RamenGame {
             RamenStage::SuperRamenSelect => 8,
             RamenStage::Settlement => 9
         }
+    }
+
+    /// 与 `run_train` / `run_ramen_select` / `run_special_select` / `run_region_select`
+    /// 保持一致：走策略流而非传入的决策 rng
+    fn apply_root_action(&mut self, action: &Self::Action, rng: &mut StdRng) -> Result<()> {
+        self.apply_action_with_strategy(action, rng)
     }
 
     /// 拉面规则层为无状态流（RNG Refactor Plan v2 §5.2）

@@ -135,6 +135,12 @@ pub struct MctsConfig {
     /// Policy softmax 温度（分数每降低多少，概率变成 1/e 倍）
     #[serde(default = "default_mcts_policy_delta")]
     pub policy_delta: f64,
+    /// 拉面杯：哪些阶段走搜索（逗号分隔，见 `RamenSearchStages::parse`）
+    ///
+    /// 只对 `scenario = "ramen"` + `trainer = "mcts"` 生效。缺省只搜 `train`：
+    /// 拉面一局约 173 个决策点，全搜代价过高。
+    #[serde(default = "default_mcts_ramen_search_stages")]
+    pub ramen_search_stages: String,
 
     // ========== UCB 搜索分配参数 ==========
     /// 是否启用 UCB 搜索分配
@@ -165,6 +171,7 @@ impl Default for MctsConfig {
             rollout_evaluator: default_mcts_rollout_evaluator(),
             rollout_batch_size: default_mcts_rollout_batch_size(),
             policy_delta: default_mcts_policy_delta(),
+            ramen_search_stages: default_mcts_ramen_search_stages(),
             use_ucb: default_mcts_use_ucb(),
             search_group_size: default_mcts_search_group_size(),
             search_cpuct: default_mcts_search_cpuct(),
@@ -192,6 +199,11 @@ fn default_mcts_rollout_evaluator() -> String {
 
 fn default_mcts_rollout_batch_size() -> usize {
     32
+}
+
+/// `ramen_search_stages` 缺省值：只搜训练阶段
+fn default_mcts_ramen_search_stages() -> String {
+    "train".to_string()
 }
 
 fn default_mcts_policy_delta() -> f64 {

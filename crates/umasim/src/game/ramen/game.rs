@@ -1294,7 +1294,7 @@ impl RamenGame {
     /// 用策略流执行动作（策略交互随机，v2 §4.3）
     ///
     /// 未注入 rule_master 时回退旧行为：用传入的决策 rng 执行。
-    fn apply_action_with_strategy(&mut self, action: &RamenAction, rng: &mut StdRng) -> Result<()> {
+    pub(crate) fn apply_action_with_strategy(&mut self, action: &RamenAction, rng: &mut StdRng) -> Result<()> {
         let mut strat = self.strategy.take();
         let result = match strat.as_mut() {
             Some(s) => self.apply_action(action, s),

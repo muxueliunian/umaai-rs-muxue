@@ -418,9 +418,24 @@ async fn main() -> Result<()> {
                     trainer.search = trainer.search.with_rollout_batch_size(game_config.mcts.rollout_batch_size);
                     match game_config.scenario.as_str() {
                         "ramen" => {
-                            println!("警告: MCTS 训练员未接入拉面杯剧本（FlatSearch<RamenGame> 已就绪），使用 random 训练员");
-                            let trainer = RandomTrainer;
-                            run_ramen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
+                            // 拉面走独立的 RamenMctsTrainer（温泉的 MctsTrainer 与 OnsenGame 强耦合）：
+                            // 门控内的阶段走 FlatSearch<RamenGame>，其余转发手写策略
+                            let stages = RamenSearchStages::parse(&game_config.mcts.ramen_search_stages)?;
+                            println!(
+                                "拉面杯 MCTS: search_n={}/候选 stages={} radical_factor_max={}",
+                                game_config.mcts.search_n,
+                                game_config.mcts.ramen_search_stages,
+                                game_config.mcts.radical_factor_max
+                            );
+                            let ramen_trainer =
+                                RamenMctsTrainer::new(SearchConfig::new_game_config(&game_config)).with_stages(stages);
+                            run_ramen_once(
+                                &ramen_trainer,
+                                game_config.uma,
+                                &game_config.cards,
+                                inherit.clone(),
+                                &mut rng
+                            )
                         }
                         "onsen" => {
                             let r = run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)?;

@@ -20,10 +20,26 @@ use crate::{
     game::{
         Game,
         Trainer,
-        ramen::{RamenGame, RamenStage, policy::RamenPolicy, policy::RamenPolicyOutput}
+        ramen::{Operation, RamenAction, RamenGame, RamenStage, policy::RamenPolicy, policy::RamenPolicyOutput}
     },
     gamedata::{EventChoice, EventData}
 };
+
+/// 决策所属的**有效阶段**（按动作类型纠正 `game.stage`）
+///
+/// 第 1 年地区选择由 `run_begin` 在 turn 2 内联调用 `run_region_select`，
+/// 此时 `game.stage` 仍是 [`RamenStage::Begin`]。只按 `game.stage` 分派的训练员
+/// 会把它落到默认分支、恒选候选 0——第 1 年的地区**从未经过策略打分**。
+/// 因此一律按动作携带的 [`Operation`] 判定，`game.stage` 只作为回退。
+///
+/// 判定用 `any` 而非 `all`：地区选择的候选集是同构的，命中一个即可；
+/// 用 `all` 会在候选集混入其他动作时静默退回默认分支。
+pub fn ramen_effective_stage(game: &RamenGame, actions: &[RamenAction]) -> RamenStage {
+    if actions.iter().any(|a| matches!(a.operation, Operation::RegionSelect(_))) {
+        return RamenStage::RegionSelect;
+    }
+    game.stage.clone()
+}
 
 /// 拉面杯手写策略训练员
 pub struct RamenHandwrittenTrainer {
@@ -31,6 +47,13 @@ pub struct RamenHandwrittenTrainer {
     pub policy: RamenPolicy,
     /// 是否输出每步决策日志（整局跑批时建议关闭）
     pub verbose: bool,
+    /// 是否采集评分分解文本（供 `LoggingTrainer` 取用）
+    ///
+    /// 作为**搜索的 rollout 基策**时必须关掉：`stash_breakdown` 每次决策都无条件
+    /// `format!` 出全候选分解并锁同一把 `Mutex`，而所有 rayon 线程共享同一个
+    /// rollout trainer。单次 rollout 约 170 次决策 × 24 线程 = 高频锁争用，
+    /// 而 rollout 内部的分解文本没有任何消费者。不影响分数，只影响吞吐。
+    pub collect_breakdown: bool,
     /// 最近一次决策的评分分解文本（供 LoggingTrainer 提取进决策日志）
     ///
     /// 用 `Mutex` 而非 `RefCell`：搜索层要求 `Trainer: Sync`（rayon 跨线程共享同一个
@@ -45,7 +68,16 @@ impl RamenHandwrittenTrainer {
         Self {
             policy: RamenPolicy::default(),
             verbose: false,
+            collect_breakdown: true,
             last_breakdown: Mutex::new(None)
+        }
+    }
+
+    /// 创建 rollout 专用实例（关闭分解采集，见 [`collect_breakdown`](Self::collect_breakdown)）
+    pub fn for_rollout() -> Self {
+        Self {
+            collect_breakdown: false,
+            ..Self::new()
         }
     }
 
@@ -54,6 +86,7 @@ impl RamenHandwrittenTrainer {
         Self {
             policy,
             verbose: false,
+            collect_breakdown: true,
             last_breakdown: Mutex::new(None)
         }
     }
@@ -71,6 +104,9 @@ impl RamenHandwrittenTrainer {
 
     /// 缓存本次决策的评分分解（各候选 `score + reason` 摘要）
     fn stash_breakdown(&self, outputs: &[RamenPolicyOutput]) {
+        if !self.collect_breakdown {
+            return;
+        }
         let text = outputs
             .iter()
             .enumerate()
@@ -96,16 +132,19 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     ) -> Result<usize> {
         // 单个候选直接返回（无选择空间）
         if actions.len() <= 1 {
-            if let Ok(mut slot) = self.last_breakdown.lock() {
-                *slot = Some(format!("仅1候选: {}", actions[0]));
+            if self.collect_breakdown {
+                if let Ok(mut slot) = self.last_breakdown.lock() {
+                    *slot = Some(format!("仅1候选: {}", actions[0]));
+                }
             }
             return Ok(0);
         }
-        let (idx, outputs) = match game.stage {
+        let (idx, outputs) = match ramen_effective_stage(game, actions) {
             RamenStage::RamenSelect => self.policy.decide_ramen(game, actions)?,
             RamenStage::SpecialSelect => self.policy.decide_special(game, actions)?,
             RamenStage::Train => self.policy.decide_train(game, actions)?,
             // 地区选择：第 1/2/3 年分别在 turn 2/23/47 触发（第 3 年 fixed 策略不走 trainer）
+            // 第 1 年的 `game.stage` 是 Begin，靠 `ramen_effective_stage` 纠正到这里
             RamenStage::RegionSelect => {
                 let year_idx = match game.turn() {
                     2 => 0,
