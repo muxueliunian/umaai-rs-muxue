@@ -68,7 +68,7 @@ pub struct SupportCardData {
     pub full_name: String,
     /// 稀有度，123
     pub rarity: u32,
-    /// 卡类型 0速1耐2力3根4智5团队6友人
+    /// 卡类型 0速1耐2力3根4智5友人6团队（对照 cardDB.json 实测：30305[友]=5，团队卡=6）
     pub card_type: i32,
     /// 数值
     pub card_value: Vec<CardValue>,

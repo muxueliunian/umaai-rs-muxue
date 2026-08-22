@@ -3,6 +3,7 @@
 本文件用于简要记录每次任务的修改内容。
 
 ## 2026-08-22
+- **支援卡类型注释订正**：`SupportCardData::card_type` 原注释写作「5团队6友人」，与 `cardDB.json` 实测相反（30305[友]=5，团队卡=6）
 
 - **搜索层泛型化（NN 管线 Phase 1.4，Phase 1 完成）**：新增 `search/searchable.rs` 的 `FlatSearchGame` trait（关联 rollout 训练员、CRN 阶段编号、`fork_for_rollout` 强制「克隆+重置内部 RNG」不可分割）；`FlatSearch<G>` 与 `SearchOutput<A>` 泛型化并保留默认类型参数，活跃入口零改动；采用「公共内核 + rollout 闭包」而非 trait 钩子，规避泛型 impl 方法解析导致温泉特判静默失效的陷阱；拉面根节点搜索跑通且 1/8/24 线程逐位可复现；拉面 CRN 重测 1.24x→3.73x（略优于温泉 3.65x）
 - **搜索层两处缺陷修复**：① NN leaf 微批路径（`simulate_until_terminal_or_leaf`）此前未按阶段重播种，导致 `rollout_batch_size > 1` 时 CRN 开关实际不生效，改为与 `simulate` 一致接收 rollout 种子；② UCB 终止判据由成功样本数改为已计划次数——rollout 稳定失败时成功数永远达不到 `search_n`，会死循环且触及不到「零样本」检查；③ 补 UCB 路径回归（可复现性）与候选顺序敏感性诊断（实测该根局面顺序无关）
