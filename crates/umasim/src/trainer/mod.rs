@@ -14,6 +14,7 @@ use crate::{
 // 导出手写逻辑训练员、数据收集训练员、神经网络训练员和 MCTS 训练员
 //pub mod collector_trainer;
 pub mod handwritten_trainer;
+pub mod local_ramen_trainer;
 pub mod logging_trainer;
 pub mod mcts_trainer;
 pub mod ramen_handwritten_trainer;
@@ -22,6 +23,7 @@ pub mod ramen_handwritten_trainer;
 
 //pub use collector_trainer::CollectorTrainer;
 pub use handwritten_trainer::HandwrittenTrainer;
+pub use local_ramen_trainer::LocalRamenTrainer;
 pub use logging_trainer::LoggingTrainer;
 pub use mcts_trainer::MctsTrainer;
 pub use ramen_handwritten_trainer::RamenHandwrittenTrainer;
