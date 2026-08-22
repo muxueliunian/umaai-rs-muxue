@@ -3,6 +3,8 @@
 本文件用于简要记录每次任务的修改内容。
 
 ## 2026-08-23
+- **拉面局面特征编码器（NN 管线 Phase 2 下半）**：新增 `game/ramen/features.rs`，把 `RamenGame` 编码为定长 `f32` 向量（global / cards / persons 三段，人头段按最大 13 个定长 + 已登场掩码）。相比温泉版补上了成长率与上限（多马娘教师数据的核心区分变量，温泉版一次都没编码）并开启人头分支；分块记账（每块声明宽度、写完即校验、末尾断言总维度）、归一化尺度全部注明取值依据、查表失败一律报错不填 0；只喂原始状态与纯计数派生量，不喂任何带权重的估值。经三方评审修掉五处编码缺陷：卡与人头改按 `card_id` 双向反查（规则层下标错位，见 issues）、训练位改 multi-hot 以正确表达分身、地区块加 `regions_ready` 掩码避免把默认值当真数据、Train 阶段只编 `current_ramen` 不重复编 `pending_ramen`。配套把 `policy::remaining_race_slots` 提升为 `pub(crate)`
+- **两条上游遗留问题的实证与订正**：新增两个只读诊断测试（规则层未改一行）——`test_person_deck_index_mismatch_full_game` 跑 3 局完整育成，证实 `deck[5].friendship` 恒等于理事长的羁绊而非友人卡本人的；`test_training_buff_index_mismatch` 证实理事长会顶着友人卡的完整训练加成进训练、而友人卡本人的加成为零。据此订正 issues 记录：原「友人卡固有永不解锁」应为「按理事长的羁绊解锁」，原「`deyilv` 拿错得意率」不成立（理事长的 `train_type = -1` 转 `usize` 后进不了该分支），并补上此前漏记的核心后果（`traits.rs` 的 `default_calc_training_buff` 同样按 `< 6` 取卡，直接改变训练数值）；确认 base / onsen 的 `init_persons` 按序推入 6 张卡，该问题是拉面独有的回归。另订正：`current_effect` 的 14 维死特征块实际并未从编码器移除
 - **地区选择 build 自适应**：`score_region` 新增 `youqing × at_trains × 卡组 bias` 项，并把 `xunlian` 与 `youqing` 统一按 `bias_sum` 缩放。原实现只算 `xunlian`，而第 2/3 年地区的 `xunlian` 恒为 0、`pt_bonus` 与 `hint_count` 同年恒定，导致同年所有候选同分、argmax 恒取第一个，卡组构成完全不参与决策（原 issue 只记录了第 3 年，实测第 2 年同样失效）；`default_config.toml` 的 `ramen_region_strategy` 由 `fixed` 恢复 `all`，`test_region_build_sensitivity` 由临时验证转为断言测试。实测手写策略基线聚合 +1754 分，其中含「根」的 build 增幅最大（固定值 `[11,14,15]` 的训练位并集恰好漏掉根）
 
 ## 2026-08-22

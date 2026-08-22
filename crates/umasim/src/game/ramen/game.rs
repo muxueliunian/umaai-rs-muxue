@@ -3541,4 +3541,127 @@ mod tests {
         println!("回合 0/1/72-77 短路规则全部通过 ✓");
         Ok(())
     }
+
+    /// 上游遗留问题排查：人头下标与卡组槽位错位的实测
+    ///
+    /// 拉面的 `init_persons` 过滤掉友人卡，导致 `persons[5]` = 理事长、`persons[6]` = 友人卡，
+    /// 而 `deck[5]` 是友人卡。`add_friendship` 的 `person_index < 6` 守卫会把**理事长**的羁绊
+    /// 写进 `deck[5].friendship`（友人卡那份拷贝），后者又被 `SupportCard::calc_training_effect`
+    /// 用于固有解锁判定。本测试跑完整一局，打印三份羁绊的终值供对照。
+    #[test]
+    fn test_person_deck_index_mismatch_full_game() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("warn");
+        let _ = init_global();
+
+        // 开局快照
+        let fresh = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        let friend_card = &fresh.deck[5];
+        println!(
+            "deck[5] = {} 初始羁绊={} unique_type={} unique_param={:?}",
+            friend_card.data.short_name(),
+            friend_card.friendship,
+            friend_card.data.unique_effect_type,
+            friend_card.data.unique_effect_param
+        );
+        println!("开局 persons 布局:");
+        for (i, p) in fresh.persons.iter().enumerate() {
+            println!(
+                "  persons[{i}] = {} type={:?} card_id={:?}",
+                p.short_name(),
+                p.person_type,
+                p.card_id
+            );
+        }
+
+        // 跑完整一局
+        for run_idx in 0..3u64 {
+            let (mut decision_rng, rule_master) = crate::bench::seeded_rngs(20260823, run_idx);
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.set_rule_master(rule_master);
+            let trainer = crate::trainer::LoggingTrainer::new(
+                crate::trainer::RamenHandwrittenTrainer::new(),
+                rule_master
+            );
+            game.run_full_game(&trainer, &mut decision_rng)?;
+
+            println!("--- run {run_idx} (seed={rule_master}) ---");
+            println!("  persons[5] 理事长 羁绊 = {}", game.persons[5].friendship);
+            println!(
+                "  persons[6] {} 羁绊 = {}",
+                game.persons[6].short_name(),
+                game.persons[6].friendship
+            );
+            println!(
+                "  deck[5] {} 羁绊 = {} (is_locked={})",
+                game.deck[5].data.short_name(),
+                game.deck[5].friendship,
+                game.deck[5].is_locked
+            );
+            println!(
+                "  一致性: deck[5]==persons[5]? {} / deck[5]==persons[6]? {}",
+                game.deck[5].friendship == game.persons[5].friendship,
+                game.deck[5].friendship == game.persons[6].friendship
+            );
+            for i in 0..5 {
+                println!(
+                    "  对照 idx{i}: deck={} persons={}",
+                    game.deck[i].friendship, game.persons[i].friendship
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// 上游遗留问题排查：`default_calc_training_buff` 的 `index < 6` 把理事长当成 `deck[5]`
+    ///
+    /// `traits.rs:349` 用 `index < 6` 把人头下标当卡组下标。拉面里 `persons[5]` 是理事长、
+    /// `persons[6]` 是友人卡，于是理事长会顶着友人卡的训练加成进训练，而友人卡本人被整个跳过。
+    #[test]
+    fn test_training_buff_index_mismatch() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("warn");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.add_friend_and_npcs()?;
+        println!(
+            "persons[5]={} persons[6]={}",
+            game.persons[5].short_name(),
+            game.persons[6].short_name()
+        );
+
+        // 只放理事长（人头 5）
+        game.distribution = vec![vec![]; 5];
+        game.distribution[0] = vec![5];
+        let buff_yayoi = game.calc_training_buff(0)?;
+        println!("只放理事长(人头5) 的训练 buff: {:?}", buff_yayoi);
+
+        // 只放友人卡（人头 6）
+        game.distribution[0] = vec![6];
+        let buff_friend = game.calc_training_buff(0)?;
+        println!("只放友人卡(人头6) 的训练 buff: {:?}", buff_friend);
+
+        // 对照：只放 1 号训练卡
+        game.distribution[0] = vec![1];
+        let buff_card = game.calc_training_buff(0)?;
+        println!("只放 [智]青春(人头1) 的训练 buff: {:?}", buff_card);
+
+        println!(
+            "理事长 buff 是否等于 deck[5]([友]骏川) 的卡效果? xunlian={:?} vs deck[5].effect.xunlian={:?}",
+            buff_yayoi.xunlian, game.deck[5].effect.xunlian
+        );
+
+        // 固有阈值判定读的是 deck[5].friendship，而它由理事长的羁绊回写
+        game.deck[5].friendship = 60;
+        game.distribution[0] = vec![5];
+        let buff_unlocked = game.calc_training_buff(0)?;
+        println!("把 deck[5].friendship 抬到 60 后，理事长(人头5) 的训练 buff: {:?}", buff_unlocked);
+        game.deck[5].friendship = 59;
+        let buff_locked = game.calc_training_buff(0)?;
+        println!("deck[5].friendship = 59 时: {:?}", buff_locked);
+        Ok(())
+    }
 }

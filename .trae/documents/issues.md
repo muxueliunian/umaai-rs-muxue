@@ -16,6 +16,92 @@
 
 ---
 
+## 人头下标与卡组槽位的对应关系在拉面剧本被打破（`person_index < 6` 守卫全线失效）
+
+- **日期**：2026-08-23
+- **状态**：待解决（**上游遗留，需与上游确认**）
+- **问题描述**：base / onsen 的代码用 `person_index < 6` 作为「这个人头是卡组里的支援卡」的判据，隐含假设 `persons[0..6)` 与 `deck[0..6)` 一一对应。拉面剧本的 `init_persons` 打破了这个假设，但所有 `< 6` 守卫都原样保留，导致理事长被当成卡组第 6 张卡、友人卡被当成「不是卡」。
+- **排查过程**：
+  - 实际人头布局（`game/ramen/game.rs:48-61`、`game/ramen/state.rs:269-282`）：
+    | 下标 | 是谁 | 何时加入 |
+    |---|---|---|
+    | 0-4 | `card_type < 5` 的 5 张训练卡 | 开局 `init_persons` |
+    | **5** | **理事长** | 开局 `init_persons` 末尾 |
+    | **6** | **友人卡**（`card_type >= 5`） | 回合 2 `add_friend_and_npcs` |
+    | 7-11 | 5 个 NPC | 回合 2 |
+    | 12 | 记者 | 回合 12 |
+  - 而卡组 `deck[5]` 正是友人卡（`sampler.rs` 与 `bench_config.toml` 的 build 均把友人放末位）
+  - 原设计意图的证据：`BasePerson::yayoi()`（`game/base/person.rs:55-65`）把 `person_index` 硬编码成 **6**。这个值随后被 `add_person`（`state.rs:304`）覆盖成实际下标，但它表明原布局是「0-5 六张卡 + 6 理事长」——正是 `< 6` 守卫成立的前提。拉面把友人卡延迟到回合 2 才加，5 张训练卡只占 0-4，理事长顺位落到 5。
+  - 受影响的 `< 6` 守卫：
+    - `game/ramen/state.rs:314-316` `add_friendship`：羁绊只在 `person_index < 6` 时回写 `deck`
+    - `game/ramen/game.rs:469-480` `deyilv`：`person_index < 6` 时读 `deck[person_index]`，否则返回 0.0
+    - `game/ramen/action.rs:560-562`：`pidx < 6` 时用 `deck[pidx]` 重算卡效果
+  - **实测确认（2026-08-23，`game/ramen/game.rs` 新增两个只读诊断测试）**：
+    - `test_person_deck_index_mismatch_full_game`：跑 3 局完整拉面杯，局末 `deck[5].friendship` 恒等于 `persons[5]`（理事长）的羁绊（64 / 100 / 96），与 `persons[6]`（友人卡本人，恒为 100）分叉。开局 `deck[5].friendship = 30`（`initialJiBan`）会被理事长从 0 起算的计数覆盖掉。前 5 张训练卡的两份羁绊始终一致，作为对照。
+    - `test_training_buff_index_mismatch`：只把理事长（人头 5）放进训练，`calc_training_buff` 返回的是 **`deck[5]`（友人卡）的完整卡效果**（xunlian=20、saihou=5、fail_rate_drop=15、vital_cost_drop=30、event_effect_up=30、event_recovery_amount_up=60）；只把友人卡（人头 6）放进训练，返回**全零**。
+- **后果一（修正：不是「永不解锁」，而是「按理事长的羁绊解锁」）**：`SupportCard::calc_training_effect`（`game/support_card.rs:270-282`）判定固有用的是 `self.friendship`，即卡组那份拷贝，而这份拷贝被理事长的羁绊回写。实测把 `deck[5].friendship` 设为 60 时，理事长所在训练位的 buff 多出 `bonus[1] += 1`、`bonus[5] += 1`（即 `30305 [友]骏川手纲` 的 `uniqueEffectParam = [101, 60, 4, 1, 30, 1]`）；设为 59 时不触发。也就是说友人卡的固有**确实会生效，但阈值读的是理事长的羁绊，且加成落在理事长的人头上**。
+- **后果二（核心，此前未列出）**：`traits.rs:335-360` 的 `default_calc_training_buff` 用 `*index >= 0 && *index < 6` 把**人头下标当卡组下标**，拉面未重写该方法（全仓库只有 `traits.rs:335` 一处 `fn calc_training_buff`）。于是：
+  - 理事长出现在训练里时，会顶着**友人卡的全部训练加成**参与计算（含 youqing / 失败率下降 / 体力消耗下降）
+  - 友人卡本人（人头 6）参与训练时，**训练加成完全为零**
+  - 这条直接改变模拟数值，影响面远大于羁绊串位本身
+- **后果三（原「后果二」的一半，已排除）**：理事长**不会**走进 `deyilv()`。`traits.rs:206` 是 `let train_type = person.train_type() as usize;`，`train_type()` 返回 `i32`（`base/person.rs:87`），理事长的 `-1` 转 `usize` 后是 `usize::MAX`，`traits.rs:219` 的 `train_type <= 4` 不成立。故「`deyilv(5)` 拿友人卡得意率当理事长的」不成立。
+- **影响范围确认**：base（`base/basic.rs:235-247`）与 onsen（`onsen/game.rs:1329-1351`）的 `init_persons` 都把 `deck` 的 6 张卡**按序全部**推入 `persons`，再追加理事长，`< 6` 判据在这两个剧本成立。**本问题是拉面独有的回归，不是三剧本通病。**
+- **既有测试把错误行为固化了**：`game/ramen/game.rs:2427` 断言 `deyilv(6) == 0.0` 并注释「person_index >= 6 返回 0」，但下标 6 正是友人卡。需上游确认这是有意还是当初未意识到 6 号是谁。
+- **次要影响**：`action.rs:720/734/753` 的 hint 路径同样按 `< 6` 取卡——友人卡（人头 6）拿不到 `hint_count_bonus`，且在 `push_hint_event` 里被当作非支援卡处理（hint_level 固定 1、不出技能提示）。理事长 `is_hint = false`，不进 hint 路径，故这一侧无串位。
+- **解决方案**：待与上游确认后决定。可选方向：
+  1. 把 `< 6` 判据换成 `person_type` 或 `card_id` 反查（治本，但要改 base / onsen / ramen 三处）
+  2. 让 `init_persons` 给友人卡预留下标 5（占位），理事长回到 6（改动小，但要处理回合 2 之前的空位语义）
+  3. `add_friendship` / `deyilv` / `action.rs` 改为按 `card_id` 在 `deck` 里 `position()` 查找
+- **备注**：
+  - `game/base/basic.rs:218` 与 `game/onsen/game.rs:161` 有同样的 `< 6` 回写模式，但这两个剧本的 `persons[0..6)` 与 `deck` 确实同序，不受影响（见上「影响范围确认」）。
+  - 本条由 NN 特征编码器（`game/ramen/features.rs`）的评审发现——编码器原本也照抄了「人头下标与卡组同序」的假设。编码器侧已按 `card_id` 反查修正，但**规则层的 bug 未动**。
+  - 排查只新增了两个只读诊断测试，规则层一行未改。
+
+---
+
+## `RamenGame::current_effect` 是从未被写入的死字段
+
+- **日期**：2026-08-23
+- **状态**：待解决（**上游遗留，需与上游确认**）
+- **问题描述**：`RamenGame.current_effect: RamenEffect`（`game/ramen/state.rs:159-160`）的文档写「当前生效的拉面效果（每回合重新计算）」，但全仓库对它的写入只有 `newgame` 里的一次 `RamenEffect::default()`（`state.rs:237`）。它在整局中恒为全零。
+- **排查过程**：
+  - `grep -rn "current_effect" crates/umasim/src/` 的结果只有两行：`state.rs:160`（字段声明）与 `state.rs:237`（初始化为 `default()`）。没有任何赋值点。
+  - 真正的拉面效果由 `game/ramen/effects.rs` 的 `calc_ramen_training_effect` 按**训练位**现场计算，算完直接用，从不写回 `current_effect`。
+  - 之所以从来没暴露：没有任何读取方依赖它，所以恒零不影响模拟结果。
+  - 触发发现的场景：NN 特征编码器照着字段名和文档，为它保留了 14 维特征，结果这 14 维在所有样本里恒为 0。
+  - 设计上也确实**装不下**：`youqing` 只在友情训练时非零，`xunlian` 随训练位不同，不存在一份能代表所有训练位的单一「当前效果」。
+- **解决方案**：待与上游确认。两个方向：
+  1. 删除该字段（推荐）——没有读取方，删掉零风险，同时消除误导
+  2. 若确实想要缓存，需改成「每训练位一份」并在 `run_distribute` 后填充；但这等于把派生量塞进状态，与「状态只存原始量」相悖
+- **备注**：**订正——编码器侧并未移除该特征块**。`game/ramen/features.rs:377-380` 仍有 `w.block("effect", G_EFFECT, ..)` 读取 `game.current_effect`，`G_EFFECT = 14`（`features.rs:69`）也仍计入 `TOTAL`（`features.rs:79`）。这 14 维在所有样本里恒为 0，接教师数据前必须先删。字段本身保留原样，等上游决定。
+
+---
+
+## NN 特征编码器首版的五处编码缺陷（自查 + 三方评审）
+
+- **日期**：2026-08-23
+- **状态**：已解决（2026-08-23）
+- **问题描述**：`game/ramen/features.rs` 首版存在五处会污染教师数据的编码缺陷。教师数据一旦落盘，编码错误无法回溯修正，故在接入 Phase 3 之前全部修掉。
+- **排查过程**：派 Grok / Codex / Gemini 三方并行评审首版实现（Gemini 三次均因 agy 打开不存在的路径而硬失败，未产出）。Grok 与 Codex 的发现互补，逐条经本地 grep 复核后确认成立：
+  1. **友人卡与人头错配**（Grok 提出）：编码器假设「人头下标 0..5 与卡组槽位同序」，实际下标 5 是理事长、友人卡在 6。卡槽 5 会读到理事长的训练位，人头 6 的卡链接丢失。根因是上游的布局问题，见本文件「人头下标与卡组槽位的对应关系在拉面剧本被打破」一条。
+  2. **分身被后写覆盖**（Grok 提出）：分身不新建人头，而是把同一 `person_idx` 再 `push` 进另一个训练位（`game/ramen/game.rs:947`、`:960`），人头会同时出现在 `distribution` 的多行。`person_train_slots` 用 `slots[idx] = Some(t)` 后写覆盖，只保留编号最大的训练位——彩圈分身在特征里直接消失。
+  3. **`current_effect` 14 维恒为 0**（Grok 与 Codex 独立提出）：见本文件对应条目。
+  4. **`selected_regions` 默认值被当真数据**（Grok 与 Codex 独立提出）：默认 `[0,0,0]`，第 1 年地区选择（回合 2 的 `run_begin` 内联）之前会把地区 0（札幌-速）的效果编三遍。**注意：这不是游戏 bug**——`game/ramen/game.rs:118` 用 `turn < 2` 跳过 `RamenSelect`、`:262` 用 `turn >= 2` 门控候选面，游戏逻辑在回合 2 之前从不读该字段，只有编码器会读。
+  5. **Train 阶段 `pending_ramen` 与 `current_ramen` 重复编码**（Codex 提出）：`ground_ramen_effects`（`game.rs:775-778`）设置 `current_ramen` 后不清 `pending_ramen`，`clear_pending()` 要到下一回合 `run_begin`（`game.rs:1109`）才调用。对游戏无害，但编码器把同一个选择编了两遍，其中 pending 已是语义上的残留。
+- **解决方案**：
+  1. 卡与人头的对应改为按 `card_id` 双向 `position()` 反查，不再依赖下标相等
+  2. 训练位编码由 one-hot 改 multi-hot（维度不变），正确表达分身
+  3. 移除 `current_effect` 的 14 维块
+  4. 新增 `regions_ready` 掩码位，未就绪时地区块整体写 0，不查 id 0
+  5. Train 阶段只编 `current_ramen`
+  6. 另按评审意见调整：归一化尺度改用真实上限（`scenario_pt` 1000→5000、`five_status` 1200→2800 等）；`onehot` 拆成 `onehot_optional`（合法缺席填 0）与 `onehot_checked`（非法下标 `bail!`），与模块文档的约束一致；补上地区的诀窍配方 `region_feeling`
+- **备注**：
+  - Codex 另给出了 Phase 3 接线的具体障碍清单（`training_sample.rs:17-38` 的 1121/587/89 常量与 `assert_eq!` 校验、`sample_collector.rs` 的 `OnsenAction` 映射、`search/result.rs:278` 只为 `SearchOutput<OnsenAction>` 实现、`collector.rs` 的 `ShardWriter` 未泛型化）。结论：拉面必须单开 schema，不能原地改温泉常量。留作 Phase 3 输入。
+  - Codex 建议把 `remaining_race_slots` 从 `game/ramen/policy.rs` 挪到 `Uma` / `BaseGame` 层——它只处理 `FreeRaceData::mask` 与通用自选比赛回合范围，与拉面策略权重无关，现在让编码器反向依赖了策略模块。认同，待办。
+  - `sampler.rs:38-40` 的模块注释仍写 `default_config.toml` 是 `fixed`，提交 `875f61c` 已改回 `all`，注释与事实相反，待订正。
+
+---
+
 ## distribute_person 中"不出现"判定受得意率影响
 
 - **日期**：2026-08-19

@@ -683,7 +683,7 @@ fn race_turn_qualified(turn: i32, free: &FreeRaceData) -> bool {
 /// `FreeRaceData::mask` 已按区间与等级要求预置（bit *b* 对应回合 *b+11*）。
 /// 这里再叠加 `BaseGame::can_self_race` 的通用限制（回合 13-71 才可自选比赛），
 /// 即去掉 bit 0-1（回合 11-12）与 bit ≥ 61（回合 ≥ 72）。
-fn remaining_race_slots(turn: i32, free: &FreeRaceData) -> u32 {
+pub(crate) fn remaining_race_slots(turn: i32, free: &FreeRaceData) -> u32 {
     /// 回合 13 起才可自选比赛（bit 2）
     const LOW_CUT: u64 = !0b11;
     /// 回合 72 起进入 URA，不可自选比赛（bit 61 及以上）
