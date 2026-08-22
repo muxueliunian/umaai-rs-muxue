@@ -22,3 +22,31 @@ out_dir = "logs"
 decision_log = false
 # 训练员: "random"（基线）| "handwritten"（手写策略）
 trainer = "random"
+
+# 玩家 build 预置（玩家主流卡组构成，5 张普通卡 + 1 张友人卡）
+# 由 bench::load_player_builds 读取；缺失/未配置时回退代码内置默认。
+# 约束：name 非空唯一、counts 合计 = 5、单类型 ≤ 3。
+# 说明：普通卡类型顺序 = [速, 耐, 力, 根, 智]。
+[[player_builds]]
+name = "speed"
+counts = [3, 1, 0, 0, 1]
+
+[[player_builds]]
+name = "stamina"
+counts = [2, 2, 0, 0, 1]
+
+[[player_builds]]
+name = "power_wisdom"
+counts = [0, 0, 2, 0, 3]
+
+[[player_builds]]
+name = "speed_wisdom"
+counts = [2, 1, 0, 0, 2]
+
+[[player_builds]]
+name = "wisdom"
+counts = [1, 1, 0, 0, 3]
+
+[[player_builds]]
+name = "average"
+counts = [1, 0, 1, 1, 2]

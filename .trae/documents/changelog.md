@@ -10,6 +10,7 @@
 - **issues 更新**：constants.json 排名数据 issue 标记已解决（rank_scores / rank_names 补齐至 LS24、five_status_final_score 核对，提交 aa756d9，数据经用户确认）；rustfmt 问题解决方案补充钩子自动化（cargo-husky pre-commit）与全库格式化（含 nightly 滚动版本漂移说明）
 - **bench 通用卡组构成设施**：bench.rs 新增 `DeckComposition`（5 张普通卡数量分布 + 预设短名，`kind_count`/`name`/`name_zh`/`build_deck`/`make_deck` 一步自动选代表卡生成卡组）+ `PLAYER_BUILDS`（7 种主流玩家 build：speed 3,1,0,0,1 / stamina 2,2,0,0,1 / power_wisdom 0,0,2,0,3 / speed_wisdom 2,1,0,0,2 / wisdom 1,1,0,0,3 / average 1,0,1,1,2 / guts_wisdom 0,0,0,3,2，数据来自玩家经验）；bench_compositions 迁移复用（删本地 Composition/build_deck，101 枚举改用 DeckComposition）；测试 +2（build 形状 / 真实 cardDB 下 7 build 一步生成卡组）
 - **guts_wisdom 删除（用户决策）**：按玩家讨论暂时删除 guts_wisdom build（原为 7 种中的对照项，仅 2 种普通卡、不满足拉面杯「支援卡种类≥4」门槛）；PLAYER_BUILDS 变 6 种，注释保留恢复说明
+- **PLAYER_BUILDS 外置到 bench_config.toml（用户决策）**：`DeckComposition.name` 改为 `String`（支持 serde 解析）；`PLAYER_BUILDS` const 改为 `default_player_builds()`（内置兜底）+ `load_player_builds()`（读取 bench_config.toml 的 `[[player_builds]]` 段，文件缺失/未配置/为空时回退默认，校验名称非空唯一、合计 5 张、单类型 ≤3）；bench_config.toml 新增 6 个 build 段（用户可直接手动调整）；bench.rs 测试重构：默认形状 / 校验拒绝 / 真实配置读取 / 真实 cardDB 生成卡组（4 个）
 
 ## 2026-08-21
 

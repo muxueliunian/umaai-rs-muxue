@@ -162,7 +162,7 @@ fn enumerate_compositions() -> Vec<DeckComposition> {
                     for wisdom in 0..=3 {
                         let counts = [speed, stamina, power, guts, wisdom];
                         if counts.iter().sum::<usize>() == 5 {
-                            result.push(DeckComposition { counts, name: "" });
+                            result.push(DeckComposition { counts, name: String::new() });
                         }
                     }
                 }
@@ -221,7 +221,7 @@ fn load_manual_cards(path: &str, pick: usize) -> Result<bench::RepresentativeSet
 
 /// 使用指定训练员执行一种构成（每局构造 `LoggingTrainer`，与 bench_base 一致）。
 fn run_composition<T: Trainer<RamenGame>>(
-    cfg: &Config, composition: DeckComposition, deck: [u32; 6], make_trainer: &dyn Fn(u64) -> LoggingTrainer<T>
+    cfg: &Config, composition: &DeckComposition, deck: [u32; 6], make_trainer: &dyn Fn(u64) -> LoggingTrainer<T>
 ) -> Summary {
     let mut scores = Vec::with_capacity(cfg.runs);
     let mut status_sum = [0_i64; 5];
@@ -256,7 +256,7 @@ fn run_composition<T: Trainer<RamenGame>>(
     sorted.sort_by(f64::total_cmp);
     let stats = bench::summarize(&sorted);
     Summary {
-        composition,
+        composition: composition.clone(),
         deck,
         completed,
         failed,
@@ -302,7 +302,7 @@ fn run_all(
     let random = |seed: u64| LoggingTrainer::new(RandomTrainer, seed);
     let handwritten = |seed: u64| LoggingTrainer::new(RamenHandwrittenTrainer::new(), seed);
     let mut summaries = Vec::with_capacity(compositions.len());
-    for (idx, composition) in compositions.iter().copied().enumerate() {
+    for (idx, composition) in compositions.iter().enumerate() {
         let deck = composition.build_deck(representatives, cfg.friend)?;
         eprintln!(
             "[{}/{}] {} {:?}",
