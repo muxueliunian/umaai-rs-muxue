@@ -16,7 +16,7 @@ use log::info;
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 use umasim::{
-    game::{Game, InheritInfo, Trainer, basic::BasicGame, onsen::game::OnsenGame},
+    game::{Game, InheritInfo, Trainer, basic::BasicGame, onsen::game::OnsenGame, ramen::RamenGame},
     gamedata::{GAMECONSTANTS, init_global_with_config},
     global,
     trainer::*,
@@ -36,6 +36,25 @@ fn run_onsen_once<T: Trainer<OnsenGame>>(
 ) -> Result<SimulationResult> {
     let mut game = OnsenGame::newgame(uma, cards, inherit)?;
     // println!("{game:#?}");
+    game.run_full_game(trainer, rng)?;
+    info!("育成结束！");
+
+    let score = game.uma.calc_score();
+    let pt = game.uma.total_pt();
+    let explain = game.explain()?;
+
+    Ok(SimulationResult { score, pt, explain })
+}
+
+/// 运行 RamenGame（单次），返回模拟结果
+///
+/// 拉面杯为当前主线剧本（default_config.toml `scenario = "ramen"`）。
+/// RNG 受控重构后未注入 rule_master 时规则层回退旧行为（用传入的决策 rng），
+/// 与主二进制的随机模拟（`StdRng::from_os_rng()`）语义一致。
+fn run_ramen_once<T: Trainer<RamenGame>>(
+    trainer: &T, uma: u32, cards: &[u32; 6], inherit: InheritInfo, rng: &mut StdRng
+) -> Result<SimulationResult> {
+    let mut game = RamenGame::newgame(uma, cards, inherit)?;
     game.run_full_game(trainer, rng)?;
     info!("育成结束！");
 
@@ -270,6 +289,9 @@ async fn main() -> Result<()> {
                 "random" => {
                     let trainer = RandomTrainer;
                     match game_config.scenario.as_str() {
+                        "ramen" => {
+                            run_ramen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
+                        }
                         "onsen" => {
                             run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
                         }
@@ -277,13 +299,18 @@ async fn main() -> Result<()> {
                     }
                 }
                 "handwritten" => {
-                    let trainer = HandwrittenTrainer::new().verbose(simulation_count == 1);
                     match game_config.scenario.as_str() {
+                        "ramen" => {
+                            // 拉面杯手写策略（当前主线剧本的默认策略）
+                            let trainer = RamenHandwrittenTrainer::new();
+                            run_ramen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
+                        }
                         "onsen" => {
+                            let trainer = HandwrittenTrainer::new().verbose(simulation_count == 1);
                             run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
                         }
                         _ => {
-                            println!("警告: 手写策略训练员仅支持 onsen 剧本，使用 random 训练员");
+                            println!("警告: 手写策略训练员仅支持 onsen / ramen 剧本，使用 random 训练员");
                             let trainer = RandomTrainer;
                             run_basic_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
                         }
@@ -390,6 +417,11 @@ async fn main() -> Result<()> {
                     // E4：leaf eval 微批大小（batch=1 等价于逐样本推理；batch>1 才会启用 infer_batch）
                     trainer.search = trainer.search.with_rollout_batch_size(game_config.mcts.rollout_batch_size);
                     match game_config.scenario.as_str() {
+                        "ramen" => {
+                            println!("警告: MCTS 训练员未接入拉面杯剧本（FlatSearch<RamenGame> 已就绪），使用 random 训练员");
+                            let trainer = RandomTrainer;
+                            run_ramen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
+                        }
                         "onsen" => {
                             let r = run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)?;
                             if game_config.mcts.rollout_evaluator == "nn" && game_config.mcts.max_depth > 0 {
@@ -421,6 +453,9 @@ async fn main() -> Result<()> {
                     }
                     let trainer = ManualTrainer::new();
                     let result = match game_config.scenario.as_str() {
+                        "ramen" => {
+                            run_ramen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
+                        }
                         "onsen" => {
                             run_onsen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
                         }

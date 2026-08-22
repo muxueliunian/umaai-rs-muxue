@@ -496,7 +496,7 @@ fn default_collector_progress_interval() -> usize {
 /// 运行配置（临时）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GameConfig {
-    /// 剧本类型: "basic" | "onsen"
+    /// 剧本类型: "basic" | "onsen" | "ramen"（ramen 为当前主线）
     #[serde(default = "default_scenario")]
     pub scenario: String,
     /// 日志级别: "debug" (完整显示) | "off" (全部关闭)
