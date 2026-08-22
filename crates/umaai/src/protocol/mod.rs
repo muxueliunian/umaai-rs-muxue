@@ -1,7 +1,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use colored::Colorize;
 use log::warn;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use umasim::{

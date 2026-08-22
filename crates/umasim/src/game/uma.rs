@@ -151,19 +151,27 @@ impl Uma {
 
     pub fn explain(&self) -> Result<String> {
         let data = self.get_data()?;
-        let ret = format!(
-            "{} 体力 {}/{} {} {} {}PT{} Hint{} 赛后{}",
-            data.short_name(),
-            self.vital,
-            self.max_vital,
-            Explain::motivation(self.motivation),
-            self.flags.explain(),
-            Explain::five_status_cutted(&self.five_status),
-            self.skill_pt,
-            self.total_hints,
-            self.race_bonus
-        );
-        Ok(format!("{}", ret.bright_green()))
+        // 体力文字按档位着色：<35 红、<50 黄、其余亮绿（与整行风格一致）。
+        // 各段独立上色而非整行包裹：内层 SGR 的 reset 码不会终止外层颜色。
+        let vital_text = format!("{}/{}", self.vital, self.max_vital);
+        let vital_colored = if self.vital < 35 {
+            vital_text.red()
+        } else if self.vital < 50 {
+            vital_text.yellow()
+        } else {
+            vital_text.bright_green()
+        };
+        Ok(format!(
+            "{} 体力 {} {} {} {}PT{} Hint{} 赛后{}",
+            data.short_name().bright_green(),
+            vital_colored,
+            Explain::motivation(self.motivation).bright_green(),
+            self.flags.explain().bright_green(),
+            Explain::five_status_cutted(&self.five_status).bright_green(),
+            self.skill_pt.to_string().bright_green(),
+            self.total_hints.to_string().bright_green(),
+            self.race_bonus.to_string().bright_green()
+        ))
     }
 
     pub fn new(id: u32) -> Result<Self> {

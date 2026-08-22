@@ -126,8 +126,12 @@ impl RamenAction {
     }
 }
 
-impl Display for RamenAction {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl RamenAction {
+    /// 吃面决策的可读文本（`"不吃面"` / `"吃面/中山-全"` / `"吃面/中山-全(替换Bx1)"`）
+    ///
+    /// 选择阶段（RamenSelect / SpecialSelect / 合并决策中间步骤）动作的呈现主体，
+    /// 只表达"吃不吃面、怎么替换"，不携带基础操作。
+    fn ramen_decision_text(&self) -> String {
         // 隐藏风味替换说明（如有）
         let targets_text = match self.special_targets {
             Some(t) if t.iter().any(|&x| x > 0) => {
@@ -141,18 +145,22 @@ impl Display for RamenAction {
             }
             _ => String::new()
         };
-        let ramen_text = match self.ramen {
+        match self.ramen {
             Some(idx) => {
                 let name = RAMENDATA
                     .get()
                     .and_then(|d| d.ramen_region_effect.get(idx))
                     .map(|r| r.name.as_str())
                     .unwrap_or("???");
-                format!("吃面/{name}{targets_text} + ")
+                format!("吃面/{name}{targets_text}")
             }
             None => "不吃面".to_string()
-        };
-        let op_text = match self.operation {
+        }
+    }
+
+    /// 基础操作的可读文本；选择阶段动作返回空串（此时只有吃面决策，无操作）
+    fn operation_text(&self) -> String {
+        match self.operation {
             Operation::Train(train) => {
                 let names = &global!(GAMECONSTANTS).train_names;
                 format!("{}训练", names[train as usize])
@@ -174,12 +182,25 @@ impl Display for RamenAction {
                     .collect();
                 format!("地区[{}]", names.join(","))
             }
-            Operation::StageOnly => "<下一步>".to_string()
-        };
-        if self.operation != Operation::StageOnly {
-            write!(f, "{op_text}")
+            Operation::StageOnly => String::new()
+        }
+    }
+}
+
+impl Display for RamenAction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let ramen_text = self.ramen_decision_text();
+        let op_text = self.operation_text();
+        if op_text.is_empty() {
+            // 选择阶段动作（RamenSelect / SpecialSelect / 合并决策中间步骤）：
+            // 只呈现吃面决策，无 `<下一步>` 之类的机器痕迹
+            write!(f, "{ramen_text}")
+        } else if self.ramen.is_some() {
+            // 合并决策路径的 `with_ramen` 动作：吃面 + 基础操作
+            write!(f, "{ramen_text} + {op_text}")
         } else {
-            write!(f, "{ramen_text}{op_text}")
+            // Train 阶段动作：只呈现基础操作
+            write!(f, "{op_text}")
         }
     }
 }
@@ -515,7 +536,9 @@ impl RamenAction {
             .min(100.0)
             .max(0.0);
 
-        // ========== 详细日志：训练参数逐项分解 ==========
+        // ========== 训练效果分解（暂时屏蔽，需要时删除下方 /* */ 块注释恢复）==========
+        /*
+        // 详细日志：训练参数逐项分解
         let train_name = global!(GAMECONSTANTS).train_names[train].clone();
         let shining_count = game.shining_count(train);
         diag!(
@@ -585,6 +608,7 @@ impl RamenAction {
             base_failure_rate,
             failure_rate,
         );
+        */
 
         Ok(TrainParams {
             buffs,
@@ -1415,7 +1439,7 @@ mod tests {
             FeelingType::B
         ]);
         game.stage = RamenStage::Train;
-        let mut rng = StdRng::seed_from_u64(42);
+        let _rng = StdRng::seed_from_u64(42);
         let action = RamenAction::new(Operation::Train(TrainingType::Speed));
         let base_dist = calc_gauge_base_distribution(&game.ramen.selected_regions);
         let gauge_limit = crate::game::ramen::rules::GAUGE_LIMIT;

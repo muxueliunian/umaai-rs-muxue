@@ -36,6 +36,48 @@ pub struct RamenTrainingEffect {
     pub clone_count: i32
 }
 
+/// 把训练效果格式化为词条列表（非 0 才显示），如 `["训+23", "失败率-50", "上限+20"]`
+///
+/// 供吃面候选预览（`RamenGame::ramen_candidate_preview`）与吃面后效果展示
+/// （`explain_ramen_info`）复用，保证两处口径一致。
+pub fn format_ramen_effect_parts(eff: &RamenTrainingEffect) -> Vec<String> {
+    let mut parts = vec![];
+    if eff.xunlian != 0 {
+        parts.push(format!("训+{}", eff.xunlian));
+    }
+    if eff.youqing != 0 {
+        parts.push(format!("友情+{}", eff.youqing));
+    }
+    if eff.deyilv != 0 {
+        parts.push(format!("得意+{}", eff.deyilv));
+    }
+    if eff.fail_rate_drop != 0 {
+        parts.push(format!("失败率-{}", eff.fail_rate_drop));
+    }
+    if eff.friendship != 0 {
+        parts.push(format!("羁绊+{}", eff.friendship));
+    }
+    if eff.status_limit != 0 {
+        parts.push(format!("上限+{}", eff.status_limit));
+    }
+    if eff.pt_bonus != 0 {
+        parts.push(format!("PT+{}", eff.pt_bonus));
+    }
+    if eff.pt_limit != 0 {
+        parts.push(format!("PT上限+{}", eff.pt_limit));
+    }
+    if eff.hint != 0 {
+        parts.push(format!("hint+{}", eff.hint));
+    }
+    if eff.clone_count != 0 {
+        parts.push(format!("分身+{}", eff.clone_count));
+    }
+    if eff.hint_special {
+        parts.push("hint全卡".to_string());
+    }
+    parts
+}
+
 /// 根据当前剧本PT查找对应的 `ramen_pt_effect` 档位
 ///
 /// 从高到低查找第一个 `pt_min <= scenario_pt` 的档位。

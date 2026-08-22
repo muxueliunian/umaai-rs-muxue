@@ -79,7 +79,11 @@ impl<G: Game> Trainer<G> for RandomTrainer {
 
     fn select_choice(&self, _game: &G, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
         let ret = rng.random_range(0..choices.len());
-        info!("当前选项: {:?}, 随机选择选项 {}", choices, ret + 1);
+        let explain: Vec<String> = choices
+            .iter()
+            .map(|x| x.iter().map(|y| y.explain()).collect::<Vec<_>>().join(" | "))
+            .collect();
+        info!("当前选项: {}, 随机选择选项 {}", explain.join(" / "), ret + 1);
         Ok(ret)
     }
 }
