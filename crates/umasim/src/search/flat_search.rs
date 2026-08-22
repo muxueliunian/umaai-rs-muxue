@@ -13,6 +13,7 @@ use rayon::prelude::*;
 use super::{
     config::{SearchConfig, TOTAL_TURN},
     result::{ActionResult, SearchOutput},
+    searchable::{FlatSearchGame, SearchScore},
     seeds::RolloutSeeds
 };
 #[cfg(feature = "onnx")]
@@ -20,7 +21,8 @@ use crate::neural::{ThreadLocalNeuralNetLeafEvaluator, ThreadLocalNeuralNetLeafS
 use crate::{
     game::{
         Game,
-        onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame}
+        onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame},
+        ramen::{RamenAction, RamenGame}
     },
     gamedata::EventChoice,
     neural::{Evaluator, HandwrittenEvaluator, ValueOutput}
@@ -55,12 +57,22 @@ impl LeafEvaluator {
 ///
 /// 使用手写逻辑进行模拟，统计各动作的分数分布。
 #[derive(Clone)]
-pub struct FlatSearch {
-    /// 手写评估器（用于模拟）
+pub struct FlatSearch<G: FlatSearchGame = OnsenGame>
+where
+    G::Action: Send + Sync + Clone
+{
+    /// 手写评估器（温泉 rollout 与 leaf 估值用）
+    ///
+    /// 仅温泉路径使用：`HandwrittenEvaluator` 只 impl 了 `Evaluator<OnsenGame>`。
+    /// 拉面走 `G::RolloutTrainer`，该字段闲置。Phase 1.4 保留此不对称以免掀开
+    /// `umaai` 的 `with_leaf_evaluator_handwritten()` 调用签名。
     rollout_evaluator: HandwrittenEvaluator,
 
-    /// leaf eval 评估器（用于 max_depth>0 截断估值）
+    /// leaf eval 评估器（用于 max_depth>0 截断估值；温泉专用）
     leaf_evaluator: LeafEvaluator,
+
+    /// rollout 决策器（由剧本指定）
+    rollout_trainer: G::RolloutTrainer,
 
     /// 搜索配置
     config: SearchConfig,
@@ -69,12 +81,16 @@ pub struct FlatSearch {
     rollout_batch_size: usize
 }
 
-impl FlatSearch {
+impl<G: FlatSearchGame> FlatSearch<G>
+where
+    G::Action: Send + Sync + Clone
+{
     /// 创建搜索器
     pub fn new(config: SearchConfig) -> Self {
         Self {
             rollout_evaluator: HandwrittenEvaluator::new(),
             leaf_evaluator: LeafEvaluator::Handwritten,
+            rollout_trainer: G::default_rollout_trainer(),
             config,
             rollout_batch_size: 1
         }
@@ -133,46 +149,53 @@ impl FlatSearch {
         }
     }
 
-    /// 执行搜索
+    /// 通用搜索内核
     ///
-    /// 根据配置选择搜索策略：
-    /// - use_ucb = true: UCB 动态分配
-    /// - use_ucb = false: 均匀分配（并行化）
+    /// 负责候选分配（均匀 / UCB）、CRN 种子、统计与并行调度；
+    /// 「一次 rollout 怎么跑」由调用方以闭包注入，使剧本特判（如温泉
+    /// `Dig`/`Upgrade`）留在各自的具体 impl 里，不进公共 trait。
     ///
-    /// # 参数
-    /// - `game`: 当前游戏状态
-    /// - `rng`: 随机数生成器
+    /// # 为什么用闭包而非 trait 钩子
     ///
-    /// # 返回
-    /// 搜索输出，包含各动作的分数分布和最优动作
-    pub fn search(&self, game: &OnsenGame, actions: &[OnsenAction], rng: &mut StdRng) -> Result<SearchOutput> {
+    /// 泛型 `impl<G> FlatSearch<G>` 内部调用 `self.simulate()` 时，方法解析只会
+    /// 找到泛型版本，**永远不会**落到更具体的 `impl FlatSearch<OnsenGame>`。
+    /// 若把特判留作具体 impl 的同名方法，它会静默变成死代码、温泉 `Dig`/`Upgrade`
+    /// 改走通用路径——编译通过但行为改变。闭包注入从根上避免这个陷阱。
+    pub fn search_with<F>(
+        &self, game: &G, actions: &[G::Action], rng: &mut StdRng, rollout: F
+    ) -> Result<SearchOutput<G::Action>>
+    where
+        F: Fn(&G, &G::Action, u64) -> Result<SearchScore> + Sync
+    {
         if actions.is_empty() {
             anyhow::bail!("没有可用动作");
         }
+        anyhow::ensure!(
+            G::SUPPORTS_TRUNCATED_LEAF || self.config.max_depth == 0,
+            "本剧本没有 leaf 估值器，max_depth 必须为 0（当前 {}）",
+            self.config.max_depth
+        );
 
         // 计算激进度因子（C++ 风格，无随机性）
-        let radical_factor = self.compute_radical_factor(game.turn as usize);
-
-        debug!(
-            "[回合 {}] 开始搜索: {} 个动作, search_n={}, max_depth={}, leaf_eval={}, radical_factor={:.1}, ucb={}",
-            game.turn,
-            actions.len(),
-            self.config.search_n,
-            self.config.max_depth,
-            self.leaf_evaluator.name(),
-            radical_factor,
-            self.config.use_ucb
-        );
+        let radical_factor = self.compute_radical_factor(game.turn() as usize);
 
         // 本次搜索的 rollout 种子表：所有候选共享，由传入 rng 派生（可复现性入口）
         let seeds = RolloutSeeds::from_rng(rng);
-        debug!("[回合 {}] 搜索根种子 = {:#018x}", game.turn, seeds.root());
+        debug!(
+            "[回合 {}] 开始搜索: {} 个动作, search_n={}, max_depth={}, radical_factor={:.1}, ucb={}, 根种子={:#018x}",
+            game.turn(),
+            actions.len(),
+            self.config.search_n,
+            self.config.max_depth,
+            radical_factor,
+            self.config.use_ucb,
+            seeds.root()
+        );
 
-        // 根据配置选择搜索策略
         let action_results = if self.config.use_ucb {
-            self.search_ucb(game, &actions, radical_factor, &seeds)?
+            self.search_ucb(game, actions, radical_factor, &seeds, &rollout)?
         } else {
-            self.search_uniform(game, &actions, &seeds)?
+            self.search_uniform(game, actions, &seeds, &rollout)?
         };
 
         // 某候选一次都没跑成功时其统计全是空的，继续用下去等于拿垃圾数据排序
@@ -189,7 +212,6 @@ impl FlatSearch {
     ///
     /// 使用 C++ UmaAi 的固定公式，不使用随机性：
     /// radical_factor = (剩余回合 / 总回合)^0.5 * 最大激进度
-
     fn compute_radical_factor(&self, turn: usize) -> f64 {
         let remain_turns = (TOTAL_TURN.saturating_sub(turn)) as f64;
         let factor = (remain_turns / TOTAL_TURN as f64).powf(0.5);
@@ -200,36 +222,54 @@ impl FlatSearch {
     ///
     /// 仅在 [`SearchConfig::crn_stage_reseed`] 开启时生效；关闭时保持顺序流，
     /// 各候选只共享起始种子。
-    ///
-    /// 注：`Dig`/`Upgrade` 两条特判 rollout 路径不经过此处（它们不按阶段推进），
-    /// 故这两类候选目前不参与阶段级对齐。
-    fn reseed_for_stage(&self, rng: &mut StdRng, rollout_seed: u64, game: &OnsenGame) {
+    pub fn reseed_for_stage(&self, rng: &mut StdRng, rollout_seed: u64, game: &G) {
         if !self.config.crn_stage_reseed {
             return;
         }
-        *rng = StdRng::seed_from_u64(RolloutSeeds::stage_seed(rollout_seed, game.turn, stage_id(&game.stage)));
+        *rng = StdRng::seed_from_u64(RolloutSeeds::stage_seed(rollout_seed, game.turn(), game.crn_stage_key()));
+    }
+
+    /// rollout 决策器
+    pub fn rollout_trainer(&self) -> &G::RolloutTrainer {
+        &self.rollout_trainer
+    }
+
+    /// 通用单次 rollout：执行动作后跑到终局
+    ///
+    /// 只处理 `max_depth == 0`；截断估值需要 leaf 估值器，属剧本专属能力。
+    /// 分支一律经 [`FlatSearchGame::fork_for_rollout`] 建立，不得直接 `clone()`
+    /// ——那会漏掉剧本内部随机流的重置。
+    pub fn simulate_common(&self, game: &G, action: &G::Action, seed: u64) -> Result<SearchScore> {
+        let rng = &mut StdRng::seed_from_u64(seed);
+        let mut sim_game = game.fork_for_rollout(seed);
+        sim_game.apply_action(action, rng)?;
+        while sim_game.next() {
+            self.reseed_for_stage(rng, seed, &sim_game);
+            sim_game.run_stage(&self.rollout_trainer, rng)?;
+        }
+        sim_game.on_simulation_end(&self.rollout_trainer, rng)?;
+        Ok(sim_game.search_score())
     }
 
     /// 均匀分配搜索（并行化）
     ///
-    /// 每个动作平均分配 `search_n` 次搜索，使用 Rayon 并行化。
+    /// 每个动作平均分配 `search_n` 次搜索。所有候选的第 j 次 rollout 共用
+    /// `seeds.seed_at(j)`（CRN 载体），故并行粒度不影响结果。
     ///
-    /// 所有候选的第 j 次 rollout 共用 `seeds.seed_at(j)`（CRN 载体，见
-    /// [`RolloutSeeds`]），故并行粒度不影响结果：每次 rollout 的随机流由
-    /// 工作项序号唯一决定，与线程调度无关。
-    ///
-    /// 注：此处按候选并行，并行度上限即候选数（≤10）。改为按
-    /// `(候选, rollout)` 扁平并行可提升吞吐且结果位级不变，
-    /// 但现有粒度可能另有原因，留作后续性能对照实验。
-    fn search_uniform(
-        &self, game: &OnsenGame, actions: &[OnsenAction], seeds: &RolloutSeeds
-    ) -> Result<Vec<(ActionResult, ActionResult)>> {
+    /// 注：此处按候选并行，并行度上限即候选数（≤10）。改为按 `(候选, rollout)`
+    /// 扁平并行可提升吞吐且结果位级不变，留作后续性能对照实验。
+    fn search_uniform<F>(
+        &self, game: &G, actions: &[G::Action], seeds: &RolloutSeeds, rollout: &F
+    ) -> Result<Vec<(ActionResult, ActionResult)>>
+    where
+        F: Fn(&G, &G::Action, u64) -> Result<SearchScore> + Sync
+    {
         let n = self.config.search_n;
-        let run = |action: &OnsenAction| -> Result<(ActionResult, ActionResult, usize)> {
+        let run = |action: &G::Action| -> Result<(ActionResult, ActionResult, usize)> {
             let mut result = ActionResult::new();
             let mut result_pt = ActionResult::new();
             // offset=0：均匀分配下每个候选都从 rollout 0 开始，天然完全配对
-            let failed = self.simulate_many(game, action, n, seeds, 0, &mut result, &mut result_pt)?;
+            let failed = self.simulate_many(game, action, n, seeds, 0, &mut result, &mut result_pt, rollout)?;
             Ok((result, result_pt, failed))
         };
 
@@ -257,6 +297,34 @@ impl FlatSearch {
         collected.into_iter().map(|(r, r_pt, _)| (r, r_pt)).collect()
     }
 
+    /// 对同一候选连续跑 `n` 次 rollout
+    ///
+    /// 第 k 次取 `seeds.seed_at(offset + k)` 播种，`offset` 为该候选**已计划**的次数。
+    /// 返回失败次数（不中断搜索，由调用方汇总告警）。
+    #[allow(clippy::too_many_arguments)]
+    fn simulate_many<F>(
+        &self, game: &G, action: &G::Action, n: usize, seeds: &RolloutSeeds, offset: usize,
+        result: &mut ActionResult, result_pt: &mut ActionResult, rollout: &F
+    ) -> Result<usize>
+    where
+        F: Fn(&G, &G::Action, u64) -> Result<SearchScore> + Sync
+    {
+        let mut failed = 0usize;
+        for k in 0..n {
+            match rollout(game, action, seeds.seed_at(offset + k)) {
+                Ok(v) => {
+                    result.add(v.score);
+                    result_pt.add(v.score_pt);
+                }
+                Err(e) => {
+                    debug!("[搜索] rollout {} 失败: {e}", offset + k);
+                    failed += 1;
+                }
+            }
+        }
+        Ok(failed)
+    }
+
     /// UCB 动态分配搜索
     ///
     /// 使用 UCB 公式动态分配搜索资源，好的动作获得更多搜索次数。
@@ -264,9 +332,12 @@ impl FlatSearch {
     ///
     /// # UCB 公式
     /// search_value = value + cpuct * expected_stdev * sqrt(total_n) / n
-    fn search_ucb(
-        &self, game: &OnsenGame, actions: &[OnsenAction], radical_factor: f64, seeds: &RolloutSeeds
-    ) -> Result<Vec<(ActionResult, ActionResult)>> {
+    fn search_ucb<F>(
+        &self, game: &G, actions: &[G::Action], radical_factor: f64, seeds: &RolloutSeeds, rollout: &F
+    ) -> Result<Vec<(ActionResult, ActionResult)>>
+    where
+        F: Fn(&G, &G::Action, u64) -> Result<SearchScore> + Sync
+    {
         let num_actions = actions.len();
         let mut action_results: Vec<(ActionResult, ActionResult)> = vec![Default::default(); num_actions];
         let group_size = self.config.search_group_size;
@@ -280,10 +351,11 @@ impl FlatSearch {
         let mut planned = vec![0usize; num_actions];
 
         // 第一阶段：每个动作先搜一组（并行）
-        let run_initial = |action: &OnsenAction| -> Result<(ActionResult, ActionResult, usize)> {
+        let run_initial = |action: &G::Action| -> Result<(ActionResult, ActionResult, usize)> {
             let mut result = ActionResult::new();
             let mut result_pt = ActionResult::new();
-            let failed = self.simulate_many(game, action, group_size, seeds, 0, &mut result, &mut result_pt)?;
+            let failed =
+                self.simulate_many(game, action, group_size, seeds, 0, &mut result, &mut result_pt, rollout)?;
             Ok((result, result_pt, failed))
         };
         let initial: Vec<(ActionResult, ActionResult, usize)> = if use_parallel {
@@ -305,8 +377,8 @@ impl FlatSearch {
             // 终止判据用**已计划**次数，不能用 ActionResult::count()（成功次数）
             //
             // 用成功次数会在 rollout 稳定失败时死循环：失败只增加 planned、不增加 count，
-            // 于是 count 永远达不到 search_n，而 search() 末尾的「零样本」检查在本函数
-            // 返回之后才执行，根本到不了。拉面接入初期规则报错概率更高，必须堵住。
+            // 于是 count 永远达不到 search_n，而末尾的「零样本」检查在本函数返回之后
+            // 才执行，根本到不了。
             let max_planned = planned.iter().copied().max().unwrap_or(0);
             if max_planned >= self.config.search_n {
                 break;
@@ -314,91 +386,14 @@ impl FlatSearch {
 
             // 使用 UCB 公式选择下一个要搜索的动作
             let best_action_idx = self.select_ucb_action(&action_results, radical_factor, total_n);
-
-            // 对选中的动作搜索一组（并行）
             let action = &actions[best_action_idx];
-            // E4：nn leaf 时，rollout 收集 leaf features -> infer_batch -> 写入结果
-            // 仅 onnx feature 下启用 nn leaf 微批；core-only 构建走 handwritten 默认路径
-            #[cfg(feature = "onnx")]
-            if self.config.max_depth > 0 && self.leaf_nn().is_some() && self.rollout_batch_size > 1 {
-                let nn = self.leaf_nn().expect("nn");
 
-                // 每次 rollout 由工作项序号自行播种：结果与线程调度无关
-                let offset = planned[best_action_idx];
-                let run_leaf = |k: usize| -> Option<SimOutcome> {
-                    match self.simulate_until_terminal_or_leaf(game, action, seeds.seed_at(offset + k)) {
-                        Ok(v) => Some(v),
-                        Err(e) => {
-                            debug!("[搜索][UCB nn leaf] rollout {} 失败: {e}", offset + k);
-                            None
-                        }
-                    }
-                };
-                let outcomes: Vec<_> = if use_parallel {
-                    (0..group_size).into_par_iter().filter_map(run_leaf).collect()
-                } else {
-                    (0..group_size).filter_map(run_leaf).collect()
-                };
-                if outcomes.len() < group_size {
-                    warn!(
-                        "[搜索][UCB nn leaf] {} 次 rollout 失败，样本数少于计划值",
-                        group_size - outcomes.len()
-                    );
-                }
-
-                let mut leaf_features: Vec<f32> = Vec::new();
-                let mut leaf_pt_bias: Vec<f64> = Vec::new();
-
-                for o in outcomes {
-                    match o {
-                        SimOutcome::Terminal { score, score_pt } => {
-                            action_results[best_action_idx].0.add(score);
-                            action_results[best_action_idx].1.add(score_pt);
-                        }
-                        SimOutcome::Leaf { features, pt_bias } => {
-                            leaf_features.extend_from_slice(&features);
-                            leaf_pt_bias.push(pt_bias);
-                        }
-                    }
-                }
-
-                if !leaf_pt_bias.is_empty() {
-                    let leaf_n = leaf_pt_bias.len();
-                    match nn.evaluate_features_batch(&leaf_features, leaf_n) {
-                        Ok(values) => {
-                            for (i, v) in values.into_iter().enumerate() {
-                                let score_mean = v.score_mean;
-                                action_results[best_action_idx].0.add(score_mean);
-                                action_results[best_action_idx].1.add(score_mean + leaf_pt_bias[i]);
-                            }
-                        }
-                        Err(e) => {
-                            log::warn!("[NN][leaf] infer_batch 失败，回退逐样本（性能受限）: {e}");
-                            for i in 0..leaf_n {
-                                let start = i * 1121;
-                                let end = start + 1121;
-                                if let Ok(v) = nn.evaluate_features_batch(&leaf_features[start..end], 1) {
-                                    let score_mean = v[0].score_mean;
-                                    action_results[best_action_idx].0.add(score_mean);
-                                    action_results[best_action_idx].1.add(score_mean + leaf_pt_bias[i]);
-                                }
-                            }
-                        }
-                    }
-                }
-                // nn leaf 微批路径已完成本组搜索，跳过默认循环
-                planned[best_action_idx] += group_size;
-                total_n += group_size as f64;
-                continue;
-            }
-            // 默认循环：handwritten 评估（onnx 关闭时也走这条）
-            //
             // 该候选已计划 offset 次，本组取 seeds[offset..offset+group_size]。
             // 两个候选因而在 0..min(n_a, n_b) 上完全配对，多出的部分为 unpaired，
             // 这是 CRN 在不等样本数下的标准做法。
             let offset = planned[best_action_idx];
-            let run_one = |k: usize| -> Option<(f64, f64)> {
-                match self.simulate(game, action, seeds.seed_at(offset + k)) {
+            let run_one = |k: usize| -> Option<SearchScore> {
+                match rollout(game, action, seeds.seed_at(offset + k)) {
                     Ok(v) => Some(v),
                     Err(e) => {
                         debug!("[搜索][UCB] rollout {} 失败: {e}", offset + k);
@@ -406,7 +401,7 @@ impl FlatSearch {
                     }
                 }
             };
-            let scores: Vec<_> = if use_parallel {
+            let scores: Vec<SearchScore> = if use_parallel {
                 (0..group_size).into_par_iter().filter_map(run_one).collect()
             } else {
                 (0..group_size).filter_map(run_one).collect()
@@ -418,9 +413,9 @@ impl FlatSearch {
                 );
             }
 
-            for score in scores {
-                action_results[best_action_idx].0.add(score.0);
-                action_results[best_action_idx].1.add(score.1);
+            for v in scores {
+                action_results[best_action_idx].0.add(v.score);
+                action_results[best_action_idx].1.add(v.score_pt);
             }
 
             planned[best_action_idx] += group_size;
@@ -464,6 +459,26 @@ impl FlatSearch {
         // println!("--------------------");
         best_idx
     }
+
+}
+
+impl FlatSearch<OnsenGame> {
+    /// 温泉根节点搜索
+    ///
+    /// 走通用内核 [`FlatSearch::search_with`]，但注入温泉专属的 rollout 分发：
+    /// `Dig`/`Upgrade` 不是回合阶段，而是嵌套的 `pending_selection` 选择，
+    /// 必须走各自的特判路径，不能落到 `apply_action -> while next` 的通用流程。
+    ///
+    /// 保持既有对外签名不变，`MctsTrainer` 与 `umaai` 通道层无需改动。
+    pub fn search(
+        &self, game: &OnsenGame, actions: &[OnsenAction], rng: &mut StdRng
+    ) -> Result<SearchOutput<OnsenAction>> {
+        self.search_with(game, actions, rng, |game, action, seed| {
+            let (score, score_pt) = self.simulate(game, action, seed)?;
+            Ok(SearchScore { score, score_pt })
+        })
+    }
+
 
     /// 模拟单个动作到终局
     ///
@@ -554,84 +569,6 @@ impl FlatSearch {
         }
     }
 
-    /// 对同一候选连续跑 `n` 次 rollout
-    ///
-    /// 第 k 次取 `seeds.seed_at(offset + k)` 播种，`offset` 为该候选**已计划**的次数。
-    /// 返回失败次数（不中断搜索，由调用方汇总告警）。
-    fn simulate_many(
-        &self, game: &OnsenGame, action: &OnsenAction, n: usize, seeds: &RolloutSeeds, offset: usize,
-        result: &mut ActionResult, result_pt: &mut ActionResult
-    ) -> Result<usize> {
-        // 仅 nn leaf + max_depth>0 才走微批；否则保持旧行为（handwritten 默认循环）
-        // onnx feature 关闭时直接走默认循环，避免对 leaf_nn 的引用。
-        #[cfg(feature = "onnx")]
-        if self.config.max_depth > 0 && self.leaf_nn().is_some() && self.rollout_batch_size > 1 {
-            let nn = self.leaf_nn().expect("nn");
-            let mut pending_features: Vec<f32> = Vec::with_capacity(self.rollout_batch_size * 1121);
-            let mut pending_pt_bias: Vec<f64> = Vec::with_capacity(self.rollout_batch_size);
-
-            let mut failed = 0usize;
-            for k in 0..n {
-                let outcome = match self.simulate_until_terminal_or_leaf(game, action, seeds.seed_at(offset + k)) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        debug!("[搜索][nn leaf] rollout {} 失败: {e}", offset + k);
-                        failed += 1;
-                        continue;
-                    }
-                };
-                match outcome {
-                    SimOutcome::Terminal { score, score_pt } => {
-                        result.add(score);
-                        result_pt.add(score_pt);
-                    }
-                    SimOutcome::Leaf { features, pt_bias } => {
-                        pending_features.extend_from_slice(&features);
-                        pending_pt_bias.push(pt_bias);
-                        if pending_pt_bias.len() >= self.rollout_batch_size {
-                            let leaf_n = pending_pt_bias.len();
-                            let values = nn.evaluate_features_batch(&pending_features, leaf_n)?;
-                            for (i, v) in values.into_iter().enumerate() {
-                                let score_mean = v.score_mean;
-                                result.add(score_mean);
-                                result_pt.add(score_mean + pending_pt_bias[i]);
-                            }
-                            pending_features.clear();
-                            pending_pt_bias.clear();
-                        }
-                    }
-                }
-            }
-
-            if !pending_pt_bias.is_empty() {
-                let leaf_n = pending_pt_bias.len();
-                let values = nn.evaluate_features_batch(&pending_features, leaf_n)?;
-                for (i, v) in values.into_iter().enumerate() {
-                    let score_mean = v.score_mean;
-                    result.add(score_mean);
-                    result_pt.add(score_mean + pending_pt_bias[i]);
-                }
-                pending_features.clear();
-                pending_pt_bias.clear();
-            }
-            return Ok(failed);
-        }
-        // 默认循环：handwritten 评估（onnx 关闭时也走这条）
-        let mut failed = 0usize;
-        for k in 0..n {
-            match self.simulate(game, action, seeds.seed_at(offset + k)) {
-                Ok(score) => {
-                    result.add(score.0);
-                    result_pt.add(score.1);
-                }
-                Err(e) => {
-                    debug!("[搜索] rollout {} 失败: {e}", offset + k);
-                    failed += 1;
-                }
-            }
-        }
-        Ok(failed)
-    }
 
     #[cfg(feature = "onnx")]
     /// 单次 rollout，跑到终局或 `max_depth` 截断处（NN leaf 微批路径用）
@@ -742,6 +679,27 @@ impl FlatSearch {
     }
 }
 
+impl FlatSearch<RamenGame> {
+    /// 拉面根节点搜索
+    ///
+    /// 全部候选走通用 rollout：拉面的 `RamenSelect` / `SpecialSelect` / `Train`
+    /// 已是正规回合阶段（`run_stage` -> `list_actions` -> `select_action`），
+    /// 不像温泉 `Dig`/`Upgrade` 那样需要特判。
+    ///
+    /// # Phase 1 范围限制
+    ///
+    /// 只接受 [`Game::list_actions`] 产出的**标准分阶段动作**。
+    /// `list_combined_ramen_select_actions()` 的合并动作**不可**传入：
+    /// 通用 `apply_action` 在 `RamenSelect` 只写 `pending_ramen`、清零
+    /// `special_targets`，**不设 `combined_decision`**，会静默丢掉隐藏风味。
+    /// 合并动作需走 `apply_combined_ramen_decision`，留待 Phase 2。
+    pub fn search(
+        &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
+    ) -> Result<SearchOutput<RamenAction>> {
+        self.search_with(game, actions, rng, |game, action, seed| self.simulate_common(game, action, seed))
+    }
+}
+
 /// 回合阶段编号（种子派生用）
 ///
 /// 显式 match 而非依赖枚举判别值：`OnsenTurnStage` 的变体顺序若调整，
@@ -825,7 +783,10 @@ mod tests {
 
     use super::*;
     use crate::{
-        game::{InheritInfo, Trainer},
+        game::{
+            InheritInfo, Trainer,
+            ramen::{RamenAction, RamenGame}
+        },
         gamedata::init_global,
         utils::{get_workspace_root, init_test_logger}
     };
@@ -1107,6 +1068,171 @@ mod tests {
             );
         }
         println!("UCB 下候选重排导致 {diff}/{} 个动作统计不同", normal.len());
+        Ok(())
+    }
+
+    // ========== 拉面根节点冒烟（Phase 1.4 验收） ==========
+
+    /// 捕获拉面首个多候选决策点的局面与候选表
+    struct RamenRootCapture {
+        /// 捕获到的 (根局面, 候选表)
+        got: RefCell<Option<(RamenGame, Vec<RamenAction>)>>
+    }
+
+    impl Trainer<RamenGame> for RamenRootCapture {
+        fn select_action(&self, game: &RamenGame, actions: &[RamenAction], _rng: &mut StdRng) -> Result<usize> {
+            // 避开第 3 年地区选择：该阶段最多 120 个候选，冒烟不必付这个代价
+            let skip = matches!(game.stage, crate::game::ramen::RamenStage::RegionSelect);
+            if self.got.borrow().is_none() && actions.len() >= 2 && !skip {
+                *self.got.borrow_mut() = Some((game.clone(), actions.to_vec()));
+            }
+            Ok(0)
+        }
+
+        fn select_choice(&self, _game: &RamenGame, _choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// 取拉面首个多候选决策点
+    fn ramen_root() -> Result<(RamenGame, Vec<RamenAction>)> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let inherit = InheritInfo {
+            blue_count: [12, 0, 0, 0, 6],
+            extra_count: [10, 0, 0, 20, 20, 40]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let mut game = RamenGame::newgame(102601, &deck, inherit)?;
+        let cap = RamenRootCapture { got: RefCell::new(None) };
+        let mut rng = StdRng::seed_from_u64(20260822);
+        while game.next() {
+            game.run_stage(&cap, &mut rng)?;
+            if cap.got.borrow().is_some() {
+                break;
+            }
+        }
+        cap.got
+            .borrow_mut()
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("整局结束仍未遇到多候选决策点"))
+    }
+
+    /// 跑一次拉面根节点搜索，返回各候选统计
+    fn ramen_search(seed: u64) -> Result<Vec<ActionDigest>> {
+        let (game, actions) = ramen_root()?;
+        let search: FlatSearch<RamenGame> = FlatSearch::new(regression_config());
+        let mut rng = StdRng::seed_from_u64(seed);
+        let out = search.search(&game, &actions, &mut rng)?;
+        Ok(out
+            .action_results
+            .iter()
+            .map(|r| ActionDigest {
+                n: r.0.count(),
+                mean: r.0.mean()
+            })
+            .collect())
+    }
+
+    /// Phase 1.4 验收 1：拉面能跑通根节点搜索，且固定种子可复现
+    #[test]
+    fn test_ramen_root_search_reproducible() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        println!("拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个", game.turn(), game.stage, actions.len());
+
+        let a = ramen_search(42)?;
+        let b = ramen_search(42)?;
+        for (i, (x, y)) in a.iter().zip(b.iter()).enumerate() {
+            println!("动作 {i}: n={} mean={:.6} | n={} mean={:.6}", x.n, x.mean, y.n, y.mean);
+        }
+        assert_eq!(a, b, "拉面根节点搜索必须可复现");
+        Ok(())
+    }
+
+    /// Phase 1.4 验收 2：换种子必须改变结果
+    ///
+    /// 拉面的关键在于规则层第二条随机流 `internal_rng`——若 `fork_for_rollout`
+    /// 没有注入它，`take_internal_rng()` 会回退 `from_os_rng()`，
+    /// 届时验收 1 会失败（同种子两次不一致）。两条测试合起来才能证明两条流都受控。
+    #[test]
+    fn test_ramen_root_search_seed_used() -> Result<()> {
+        let a = ramen_search(42)?;
+        let b = ramen_search(4242)?;
+        println!("seed=42   : {a:?}");
+        println!("seed=4242 : {b:?}");
+        assert_ne!(a, b, "换 seed 必须改变拉面搜索结果");
+        Ok(())
+    }
+
+    /// CRN 收益实测（拉面 / 目标剧本）
+    ///
+    /// onsen 上测得 1.31x → 3.65x，但拉面三阶段决策使状态分叉更剧烈，
+    /// 相关性预计更弱。计划中明确要求「在目标剧本上重测后才可据此下调 search_n」，
+    /// 本测试即该重测。
+    ///
+    /// `cargo test --release -p umasim --lib test_crn_pairing_gain_ramen -- --ignored --nocapture`
+    #[test]
+    #[ignore = "CRN 收益测量，耗时较长，按需手动运行"]
+    fn test_crn_pairing_gain_ramen() -> Result<()> {
+        /// 每候选 rollout 次数
+        const ROLLOUTS: usize = 200;
+
+        let (game, actions) = ramen_root()?;
+        println!("拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个
+", game.turn(), game.stage, actions.len());
+
+        for reseed in [false, true] {
+            let cfg = SearchConfig::default().with_crn_stage_reseed(reseed);
+            let search: FlatSearch<RamenGame> = FlatSearch::new(cfg);
+            let seeds = RolloutSeeds::from_root(20260822);
+
+            let mut scores: Vec<Vec<f64>> = Vec::with_capacity(actions.len());
+            let mut failed_total = 0usize;
+            for action in &actions {
+                let col: Vec<Option<f64>> = (0..ROLLOUTS)
+                    .into_par_iter()
+                    .map(|j| search.simulate_common(&game, action, seeds.seed_at(j)).ok().map(|v| v.score))
+                    .collect();
+                failed_total += col.iter().filter(|x| x.is_none()).count();
+                scores.push(col.into_iter().flatten().collect());
+            }
+            if failed_total > 0 {
+                println!("  ⚠ 共 {failed_total} 次 rollout 失败，配对可能错位");
+            }
+
+            let label = if reseed { "开启按阶段重播种" } else { "仅共享起始种子" };
+            let mut corrs = Vec::new();
+            let mut gains = Vec::new();
+            for a in 0..scores.len() {
+                for b in (a + 1)..scores.len() {
+                    let (xa, xb) = (&scores[a], &scores[b]);
+                    let n = xa.len().min(xb.len());
+                    if n < 2 {
+                        continue;
+                    }
+                    let diff: Vec<f64> = (0..n).map(|j| xa[j] - xb[j]).collect();
+                    let indep = var_of(&xa[..n]) + var_of(&xb[..n]);
+                    let paired = var_of(&diff);
+                    if paired > 0.0 {
+                        gains.push(indep / paired);
+                    }
+                    corrs.push(corr_of(&xa[..n], &xb[..n]));
+                }
+            }
+            println!(
+                "===== {label} =====
+候选对数 {} | 平均 corr = {:.4} | 平均等效倍率 = {:.2}x | 区间 [{:.2}, {:.2}]
+",
+                corrs.len(),
+                mean_of(&corrs),
+                mean_of(&gains),
+                gains.iter().cloned().fold(f64::INFINITY, f64::min),
+                gains.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
+            );
+        }
         Ok(())
     }
 

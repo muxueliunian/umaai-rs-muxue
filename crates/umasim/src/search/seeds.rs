@@ -90,6 +90,28 @@ impl RolloutSeeds {
     }
 }
 
+/// 规则层内部随机流的种子（与搜索主 RNG 分频道）
+///
+/// 必须与 rollout 主种子**不同值**：两个 `StdRng::seed_from_u64(同一值)` 是同一条流，
+/// 直接复用会让规则层与决策层抽到相同序列。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InternalSeed(u64);
+
+impl InternalSeed {
+    /// 由 rollout 种子派生规则层种子
+    pub fn derive(rollout_seed: u64) -> Self {
+        Self(splitmix64(rollout_seed ^ INTERNAL_STREAM_TAG))
+    }
+
+    /// 取出种子值
+    pub fn get(&self) -> u64 {
+        self.0
+    }
+}
+
+/// 规则层随机流的频道标记（任取的固定常数，只需与主流区分开）
+const INTERNAL_STREAM_TAG: u64 = 0x5265_616C_5F52_4E47;
+
 /// SplitMix64 finalizer
 fn splitmix64(seed: u64) -> u64 {
     let mut z = seed;
@@ -173,6 +195,28 @@ mod tests {
         uniq.dedup();
         println!("512 个 rollout 在 (回合 20, 阶段 3) 上产出 {} 个不同种子", uniq.len());
         assert_eq!(uniq.len(), got.len(), "不同 rollout 在同一阶段不得共用随机流");
+    }
+
+    /// 规则层种子必须与 rollout 主种子不同值，且随 rollout 变化
+    #[test]
+    fn test_internal_seed_separated_from_main() {
+        let seeds = RolloutSeeds::from_root(42);
+        let mut collisions = 0;
+        let mut got = Vec::new();
+        for j in 0..256 {
+            let main = seeds.seed_at(j);
+            let internal = InternalSeed::derive(main);
+            if internal.get() == main {
+                collisions += 1;
+            }
+            got.push(internal.get());
+        }
+        println!("规则层种子与主种子相同的次数: {collisions}");
+        assert_eq!(collisions, 0, "规则层种子不得与主种子同值（同值即同一条流）");
+
+        got.sort_unstable();
+        got.dedup();
+        assert_eq!(got.len(), 256, "不同 rollout 的规则层种子不得碰撞");
     }
 
     /// `from_rng` 由入口 RNG 决定，故入口种子固定时根种子也固定
