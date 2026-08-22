@@ -258,6 +258,117 @@ pub fn select_representatives(opts: &CardPickOpts) -> Result<RepresentativeSet> 
     Ok(RepresentativeSet { picked, skipped })
 }
 
+/// 玩家卡组构成：5 张普通卡的数量分布 [速, 耐, 力, 根, 智]。
+///
+/// 卡组 = 各类型代表卡前 `counts[i]` 张 + 1 张固定友人卡，共 6 张。
+/// 来源：[`PLAYER_BUILDS`]（主流玩家 build 预设）或全枚举（101 种构成，
+/// 见 `bench_compositions` 的枚举逻辑）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DeckComposition {
+    /// 速/耐/力/根/智各类型普通卡数量。
+    pub counts: [usize; 5],
+    /// 预设短名（如 "speed"）；非预设（枚举构成）为空串，展示时回退为数量描述。
+    pub name: &'static str
+}
+
+/// 主流玩家 build 预置：玩家常用卡组构成（5 张普通卡 + 1 张友人卡）。
+///
+/// 数量分布来自玩家经验整理（2026-08-22），数组下标即序号：
+/// 1. `speed` 3速1耐1智；2. `stamina` 2耐2速1智；3. `power_wisdom` 2力3智；
+/// 4. `speed_wisdom` 2速1耐2智；5. `wisdom` 1速1耐3智；6. `average` 1速1力1根2智；
+/// 7. `guts_wisdom` 3根2智——**仅 2 种普通卡，不满足拉面杯「支援卡种类 ≥ 4」
+/// 的门槛**（`deck_can_split` 为 false，hint_special 等额外加成不生效），
+/// 作为对照 build 保留，仍可正常模拟。
+pub const PLAYER_BUILDS: [DeckComposition; 7] = [
+    DeckComposition {
+        counts: [3, 1, 0, 0, 1],
+        name: "speed"
+    },
+    DeckComposition {
+        counts: [2, 2, 0, 0, 1],
+        name: "stamina"
+    },
+    DeckComposition {
+        counts: [0, 0, 2, 0, 3],
+        name: "power_wisdom"
+    },
+    DeckComposition {
+        counts: [2, 1, 0, 0, 2],
+        name: "speed_wisdom"
+    },
+    DeckComposition {
+        counts: [1, 1, 0, 0, 3],
+        name: "wisdom"
+    },
+    DeckComposition {
+        counts: [1, 0, 1, 1, 2],
+        name: "average"
+    },
+    DeckComposition {
+        counts: [0, 0, 0, 3, 2],
+        name: "guts_wisdom"
+    }
+];
+
+impl DeckComposition {
+    /// 普通卡种类数（数量 > 0 的类型数）。
+    ///
+    /// 拉面杯 `deck_can_split` 要求 ≥ 4；低于 4 不阻止运行，但 hint_special 等额外加成不生效。
+    pub fn kind_count(&self) -> usize {
+        self.counts.iter().filter(|&&count| count > 0).count()
+    }
+
+    /// 展示名（英文，机器可读）：预设用短名，非预设回退为数量描述（如 `3speed+1stamina+1wisdom`）。
+    pub fn name(&self) -> String {
+        if !self.name.is_empty() {
+            return self.name.to_string();
+        }
+        self.counts
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count > 0)
+            .map(|(idx, count)| format!("{count}{}", TYPE_NAMES[idx]))
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    /// 展示名（中文，终端用）：预设用短名，非预设回退为数量描述（如 `3速+1耐+1智`）。
+    pub fn name_zh(&self) -> String {
+        if !self.name.is_empty() {
+            return self.name.to_string();
+        }
+        self.counts
+            .iter()
+            .enumerate()
+            .filter(|(_, count)| **count > 0)
+            .map(|(idx, count)| format!("{count}{}", type_name_zh(idx)))
+            .collect::<Vec<_>>()
+            .join("+")
+    }
+
+    /// 构建卡组：各类型取代表卡前 `counts[i]` 张，末尾追加固定友人卡，共 6 张。
+    pub fn build_deck(&self, representatives: &[Vec<CardRep>; 5], friend: u32) -> Result<[u32; 6]> {
+        let mut deck = Vec::with_capacity(6);
+        for (card_type, count) in self.counts.iter().copied().enumerate() {
+            ensure!(
+                representatives[card_type].len() >= count,
+                "{} 类型代表卡不足 {count} 张",
+                type_name_zh(card_type)
+            );
+            deck.extend(representatives[card_type].iter().take(count).map(|card| card.idrank));
+        }
+        deck.push(friend);
+        deck.try_into()
+            .map_err(|_| anyhow::anyhow!("卡组必须恰好包含五张普通卡和一张友人卡"))
+    }
+
+    /// 一步生成卡组：自动选取各类型代表卡（[`select_representatives`]）后构建。
+    pub fn make_deck(&self, opts: &CardPickOpts, friend: u32) -> Result<[u32; 6]> {
+        let set = select_representatives(opts)?;
+        self.build_deck(&set.picked, friend)
+    }
+}
+
 /// 从 lexopt 解析器中读取当前键值参数的值（支持 `--key value` 与 `--key=value`）。
 pub fn parse_value<T: std::str::FromStr>(parser: &mut lexopt::Parser, key: &str) -> Result<T> {
     let value = parser.value().with_context(|| format!("参数 {key} 缺少值"))?;
@@ -339,6 +450,48 @@ mod tests {
         }
         let total_skipped: usize = set.skipped.iter().map(Vec::len).sum();
         println!("跳过的弱卡总数: {total_skipped}");
+        Ok(())
+    }
+
+    /// PLAYER_BUILDS：7 种 build 均为 5 张普通卡、种类数符合预期（guts_wisdom 仅 2 种）。
+    #[test]
+    fn test_player_builds_shape() -> Result<()> {
+        ensure!(PLAYER_BUILDS.len() == 7, "主流 build 应为 7 种");
+        for build in &PLAYER_BUILDS {
+            ensure!(
+                build.counts.iter().sum::<usize>() == 5,
+                "build {} 普通卡总数应为 5，实际 {:?}",
+                build.name,
+                build.counts
+            );
+        }
+        let kinds: Vec<usize> = PLAYER_BUILDS.iter().map(DeckComposition::kind_count).collect();
+        println!("各 build 普通卡种类数: {kinds:?}");
+        ensure!(kinds[0] == 3, "speed 应为 3 种");
+        ensure!(kinds[6] == 2, "guts_wisdom 应为 2 种（不满足 4 种卡门槛）");
+        ensure!(
+            kinds.iter().enumerate().all(|(idx, &k)| { k >= 2 || idx == 6 }),
+            "除 guts_wisdom 外其余 build 至少 2 种卡"
+        );
+        Ok(())
+    }
+
+    /// 集成验证：真实 cardDB 上 7 种 build 均能一步生成 6 张卡（5 普通 + 1 友人）。
+    #[test]
+    fn test_player_builds_make_deck_live_data() -> Result<()> {
+        use crate::{
+            gamedata::{GameConfig, init_global_with_config},
+            utils::get_workspace_root
+        };
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(&workspace_root)?;
+        init_global_with_config(&GameConfig::default_for_init())?;
+        for build in &PLAYER_BUILDS {
+            let deck = build.make_deck(&CardPickOpts::default(), 303054)?;
+            ensure!(deck.len() == 6, "{} 卡组应为 6 张", build.name());
+            ensure!(deck[5] == 303054, "{} 最后一张应为固定友人卡", build.name());
+            println!("build {}: {:?}", build.name(), deck);
+        }
         Ok(())
     }
 }

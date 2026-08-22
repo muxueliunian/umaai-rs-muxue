@@ -20,7 +20,7 @@ use anyhow::{Context, Result, ensure};
 use lexopt::Arg;
 use serde::Deserialize;
 use umasim::{
-    bench::{self, CardPickOpts, CardRep, TYPE_NAMES},
+    bench::{self, CardPickOpts, CardRep, DeckComposition},
     game::{InheritInfo, Trainer, ramen::RamenGame},
     gamedata::{GAMEDATA, init_global_with_config},
     global,
@@ -71,42 +71,11 @@ impl Default for Config {
     }
 }
 
-/// 一种普通卡类型数量构成。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Composition {
-    /// 速、耐、力、根、智的卡片数量。
-    counts: [usize; 5]
-}
-
-impl Composition {
-    /// 返回 CSV 用的构成名称（英文，机器可读）。
-    fn name(&self) -> String {
-        self.counts
-            .iter()
-            .enumerate()
-            .filter(|(_, count)| **count > 0)
-            .map(|(idx, count)| format!("{count}{}", TYPE_NAMES[idx]))
-            .collect::<Vec<_>>()
-            .join("+")
-    }
-
-    /// 返回终端展示用的构成名称（中文，取自 `GAMECONSTANTS.train_names`）。
-    fn name_zh(&self) -> String {
-        self.counts
-            .iter()
-            .enumerate()
-            .filter(|(_, count)| **count > 0)
-            .map(|(idx, count)| format!("{count}{}", bench::type_name_zh(idx)))
-            .collect::<Vec<_>>()
-            .join("+")
-    }
-}
-
 /// 一种构成的聚合结果。
 #[derive(Debug)]
 struct Summary {
     /// 构成。
-    composition: Composition,
+    composition: DeckComposition,
     /// 六张卡。
     deck: [u32; 6],
     /// 成功局数。
@@ -183,8 +152,8 @@ fn parse_args() -> Result<Config> {
     Ok(cfg)
 }
 
-/// 枚举全部 101 种合法普通卡类型构成。
-fn enumerate_compositions() -> Vec<Composition> {
+/// 枚举全部 101 种合法普通卡类型构成（复用 [`DeckComposition`]，无预设名）。
+fn enumerate_compositions() -> Vec<DeckComposition> {
     let mut result = Vec::new();
     for speed in 0..=3 {
         for stamina in 0..=3 {
@@ -193,7 +162,7 @@ fn enumerate_compositions() -> Vec<Composition> {
                     for wisdom in 0..=3 {
                         let counts = [speed, stamina, power, guts, wisdom];
                         if counts.iter().sum::<usize>() == 5 {
-                            result.push(Composition { counts });
+                            result.push(DeckComposition { counts, name: "" });
                         }
                     }
                 }
@@ -250,25 +219,9 @@ fn load_manual_cards(path: &str, pick: usize) -> Result<bench::RepresentativeSet
     })
 }
 
-/// 根据构成与固定友人生成六张卡组。
-fn build_deck(composition: Composition, representatives: &[Vec<CardRep>; 5], friend: u32) -> Result<[u32; 6]> {
-    let mut deck = Vec::with_capacity(6);
-    for (card_type, count) in composition.counts.iter().copied().enumerate() {
-        ensure!(
-            representatives[card_type].len() >= count,
-            "{} 类型代表卡不足 {count} 张",
-            bench::type_name_zh(card_type)
-        );
-        deck.extend(representatives[card_type].iter().take(count).map(|card| card.idrank));
-    }
-    deck.push(friend);
-    deck.try_into()
-        .map_err(|_| anyhow::anyhow!("卡组必须恰好包含五张普通卡和一张友人卡"))
-}
-
 /// 使用指定训练员执行一种构成（每局构造 `LoggingTrainer`，与 bench_base 一致）。
 fn run_composition<T: Trainer<RamenGame>>(
-    cfg: &Config, composition: Composition, deck: [u32; 6], make_trainer: &dyn Fn(u64) -> LoggingTrainer<T>
+    cfg: &Config, composition: DeckComposition, deck: [u32; 6], make_trainer: &dyn Fn(u64) -> LoggingTrainer<T>
 ) -> Summary {
     let mut scores = Vec::with_capacity(cfg.runs);
     let mut status_sum = [0_i64; 5];
@@ -343,12 +296,14 @@ fn print_representatives(set: &bench::RepresentativeSet, opts: &CardPickOpts) {
 }
 
 /// 执行全部构成并返回汇总。
-fn run_all(cfg: &Config, compositions: &[Composition], representatives: &[Vec<CardRep>; 5]) -> Result<Vec<Summary>> {
+fn run_all(
+    cfg: &Config, compositions: &[DeckComposition], representatives: &[Vec<CardRep>; 5]
+) -> Result<Vec<Summary>> {
     let random = |seed: u64| LoggingTrainer::new(RandomTrainer, seed);
     let handwritten = |seed: u64| LoggingTrainer::new(RamenHandwrittenTrainer::new(), seed);
     let mut summaries = Vec::with_capacity(compositions.len());
     for (idx, composition) in compositions.iter().copied().enumerate() {
-        let deck = build_deck(composition, representatives, cfg.friend)?;
+        let deck = composition.build_deck(representatives, cfg.friend)?;
         eprintln!(
             "[{}/{}] {} {:?}",
             idx + 1,
@@ -464,7 +419,7 @@ mod tests {
                 .collect()
         });
         for composition in enumerate_compositions() {
-            let deck = build_deck(composition, &representatives, DEFAULT_FRIEND)?;
+            let deck = composition.build_deck(&representatives, DEFAULT_FRIEND)?;
             ensure!(deck[5] == DEFAULT_FRIEND, "最后一张不是固定友人");
             ensure!(deck[..5].iter().all(|id| *id != DEFAULT_FRIEND), "普通卡槽混入固定友人");
         }
