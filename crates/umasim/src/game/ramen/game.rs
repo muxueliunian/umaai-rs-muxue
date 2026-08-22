@@ -9,6 +9,7 @@
 use anyhow::{Result, anyhow};
 #[cfg(feature = "cli")]
 use comfy_table::{ColumnConstraint, Table, Width};
+use colored::Colorize;
 use rand::{Rng, SeedableRng, prelude::IndexedRandom, rngs::StdRng};
 use rand_distr::{Distribution, weighted::WeightedIndex};
 
@@ -554,10 +555,18 @@ impl Game for RamenGame {
                         row.push("".to_string());
                         continue;
                     }
-                    let mut text = self.persons[*id as usize].explain();
-                    if self.is_shining_at(*id as usize, train) {
-                        text = format!("+{text}+");
-                    }
+                    let p = &self.persons[*id as usize];
+                    let shining = self.is_shining_at(*id as usize, train);
+                    let text = if colored::control::SHOULD_COLORIZE.should_colorize() {
+                        Self::format_person_colored(p, shining)
+                    } else {
+                        // 无色环境（no-color / 非 tty）保留原标记：彩圈 +X+、hint !
+                        let mut t = p.explain();
+                        if shining {
+                            t = format!("+{t}+");
+                        }
+                        t
+                    };
                     row.push(text);
                 } else {
                     row.push("".to_string());
@@ -573,8 +582,9 @@ impl Game for RamenGame {
             for col in table.column_iter_mut() {
                 col.set_constraint(ColumnConstraint::Absolute(Width::Percentage(20)));
             }
-            let mut lines = vec![table.to_string()];
-            self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
+            let lines = vec![table.to_string()];
+            // 训练数值计算明细（速 速17 力2 9pt 体力-22 诀窍槽...）暂时屏蔽，
+            // 需要时恢复：self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
             Ok(lines.join("\n"))
         }
         #[cfg(not(feature = "cli"))]
@@ -583,7 +593,8 @@ impl Game for RamenGame {
             for (i, row) in rows.iter().enumerate() {
                 lines.push(format!("[{}] {}", i, row.join(" ")));
             }
-            self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
+            // 训练数值计算明细暂时屏蔽，需要时恢复：
+            // self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
             Ok(lines.join("\n"))
         }
     }
@@ -682,6 +693,32 @@ impl Game for RamenGame {
 }
 
 impl RamenGame {
+    /// 分布表单元格的彩色呈现（仅在允许颜色时调用）
+    ///
+    /// 颜色规则：
+    /// - 彩圈人物：名字亮绿色，去掉 `+` 标记
+    /// - hint 人物：感叹号亮黄色，名字颜色不变
+    /// - 友人卡（ScenarioCard）：名字绿色
+    ///
+    /// 优先级：彩圈（亮绿）> 友人（绿）；hint 感叹号独立叠加。
+    fn format_person_colored(p: &BasePerson, shining: bool) -> String {
+        let raw = p.explain();
+        // 拆分 hint 感叹号与名字（explain() 中 `!` 为前缀）
+        let (mark, name) = if p.is_hint {
+            ("!".bright_yellow().to_string(), raw.trim_start_matches('!').to_string())
+        } else {
+            (String::new(), raw)
+        };
+        let name = if shining {
+            name.bright_green().to_string()
+        } else if p.person_type == PersonType::ScenarioCard {
+            name.green().to_string()
+        } else {
+            name
+        };
+        format!("{mark}{name}")
+    }
+
     /// 落地所有"吃面后立即生效"的效果
     ///
     /// 这是从原 `RamenAction::apply_ramen` + `apply_ramen_friendship` 抽出的统一入口，
@@ -1049,14 +1086,10 @@ impl RamenGame {
         self.manage_persons_on_turn_start()?;
 
         // 诀窍值初始化/重置（回合2/24/48），同时处理隐藏风味
+        // （init_feeling_stocks 内部已输出初始化结果，不重复打印回合信息）
         let initialized = matches!(self.base.turn, 2 | 24 | 48);
         if initialized {
             self.init_feeling_stocks();
-            // 重新打印回合信息
-            let ramen_info = self.explain_ramen_info();
-            if !ramen_info.is_empty() {
-                diag!("{}", ramen_info);
-            }
         }
 
         // 第1年地区选择（回合2开始时）
@@ -1065,16 +1098,12 @@ impl RamenGame {
         }
 
         // 固定回合分配隐藏风味（初始化回合已由 init_feeling_stocks 处理，跳过）
+        // （已输出"隐藏风味 +N"增量，不重复打印回合信息）
         if !initialized {
             let special = get_turn_special_feeling(self.base.turn);
             if special > 0 {
                 self.ramen.special_feeling = (self.ramen.special_feeling + special).min(4);
                 diag!("隐藏风味 +{} (={})", special, self.ramen.special_feeling);
-                // 重新打印回合信息
-                let ramen_info = self.explain_ramen_info();
-                if !ramen_info.is_empty() {
-                    diag!("{}", ramen_info);
-                }
             }
         }
 
@@ -1362,6 +1391,7 @@ impl RamenGame {
             ),
             self.base.friend.explain()
         ));
+        // 体力警示已由 Uma::explain 的体力文字着色承担（<35 红、<50 黄）
         lines.push(self.base.uma.explain()?);
         Ok(lines.join("\n"))
     }
@@ -1480,21 +1510,23 @@ impl RamenGame {
             pt_parts.push(format!("hint+{}", pt_effect.hint));
         }
 
-        // 基础诀窍槽加成
+        // 基础诀窍槽加成（并入"地区"栏显示）
         let base_dist = super::rules::calc_gauge_base_distribution(&self.ramen.selected_regions);
 
+        // 诀窍 / 隐藏诀窍栏使用 cyan 突出显示
+        let feeling_text = format!(
+            "A{}/{} B{}/{} C{}/{}",
+            stock[0], slot[0], stock[1], slot[1], stock[2], slot[2]
+        );
+        let special_text = self.ramen.special_feeling.to_string();
+
         format!(
-            "拉面: {} | 地区: {} | 诀窍 A{}/{} B{}/{} C{}/{} | 槽基础 {:?} | 隐藏诀窍 {} | PT{} [{}]",
+            "拉面: {} | 地区: {} 槽{:?} | 诀窍 {} | 隐藏诀窍 {} | PT{} [{}]",
             ramen_str,
             regions_str.join(","),
-            stock[0],
-            slot[0],
-            stock[1],
-            slot[1],
-            stock[2],
-            slot[2],
             base_dist,
-            self.ramen.special_feeling,
+            feeling_text.cyan(),
+            special_text.cyan(),
             self.ramen.scenario_pt,
             if pt_parts.is_empty() {
                 "无加成".to_string()
@@ -1549,97 +1581,139 @@ impl RamenGame {
     /// 被 `explain_distribution` 在 cli / core 两种模式下复用，避免重复实现。
     /// 作为 inherent 方法（不属于 `Game` trait），保证 `Game::explain_distribution` 内
     /// 通过 `self.collect_train_lines(...)` 调用时优先匹配 inherent 实现。
+    ///
+    /// 暂时屏蔽（训练数值计算明细）：调用点已注释，需要时恢复调用并删除本 allow。
+    #[allow(dead_code)]
     fn collect_train_lines(
         &self, lines: &mut Vec<String>, headers: &[String], dist: &[Vec<i32>], show_ramen: bool
     ) -> Result<()> {
         for train in 0..5 {
-            let buffs = self.calc_training_buff(train)?;
-            let fail_rate = self.calc_training_failure_rate(&buffs, train);
-            let base_value = self.calc_training_value(&buffs, train)?;
-            let is_shining = self.shining_count(train) > 0;
-            let header = &headers[train];
-
-            if !show_ramen {
-                // 剧本机制未开启 或 URA回合：只显示基础训练数值和失败率
-                if fail_rate > 0.0 {
-                    lines.push(format!("{} {} 失败率: {}%", header, base_value.explain(), fail_rate));
-                } else {
-                    lines.push(format!("{} {}", header, base_value.explain()));
-                }
-            } else {
-                // 普通回合：显示训练数值（包含拉面效果）+ 失败率 + 诀窍槽明细
-                let ramen_effect = calc_ramen_training_effect(self, train, is_shining);
-                let effective_fail = (fail_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0)
-                    .min(100.0)
-                    .max(0.0);
-
-                let value = ActionValue {
-                    status_pt: base_value.status_pt,
-                    vital: base_value.vital,
-                    motivation: base_value.motivation,
-                    ..Default::default()
-                };
-
-                let support_count = dist[train]
-                    .iter()
-                    .filter(|&&p| {
-                        p >= 0
-                            && (p as usize) < self.persons.len()
-                            && self.persons[p as usize].person_type == crate::game::PersonType::Card
-                    })
-                    .count();
-                // NPC 数量 = 本训练位置实际分配的 Npc 人数（`ramen_memo_cn.md` 算例：
-                // NPC数量=3 时加成 floor(3/2)，非固定 5；与生效层 `fill_feeling_gauge` 一致）
-                let npc_count = dist[train]
-                    .iter()
-                    .filter(|&&p| {
-                        p >= 0
-                            && (p as usize) < self.persons.len()
-                            && self.persons[p as usize].person_type == crate::game::PersonType::Npc
-                    })
-                    .count();
-                let train_feeling_bonus = super::rules::calc_train_feeling_bonus(support_count, npc_count);
-                let base_dist = super::rules::calc_gauge_base_distribution(&self.ramen.selected_regions);
-                let feeling_type = self.ramen.train_feeling_type.map(|types| types[train]);
-
-                let gauge_a = base_dist[0]
-                    + if feeling_type == Some(super::FeelingType::A) {
-                        train_feeling_bonus
-                    } else {
-                        0
-                    }
-                    + if is_shining { 2 } else { 0 };
-                let gauge_b = base_dist[1]
-                    + if feeling_type == Some(super::FeelingType::B) {
-                        train_feeling_bonus
-                    } else {
-                        0
-                    }
-                    + if is_shining { 2 } else { 0 };
-                let gauge_c = base_dist[2]
-                    + if feeling_type == Some(super::FeelingType::C) {
-                        train_feeling_bonus
-                    } else {
-                        0
-                    }
-                    + if is_shining { 2 } else { 0 };
-
-                let gauge_detail = format!("诀窍槽 A+{} B+{} C+{}", gauge_a, gauge_b, gauge_c);
-
-                if effective_fail > 0.0 {
-                    lines.push(format!(
-                        "{} {} 失败率: {}% {}",
-                        header,
-                        value.explain(),
-                        effective_fail,
-                        gauge_detail
-                    ));
-                } else {
-                    lines.push(format!("{} {} {}", header, value.explain(), gauge_detail));
-                }
-            }
+            lines.push(self.train_value_line(&headers[train], train, show_ramen)?);
         }
         Ok(())
+    }
+
+    /// 单个训练位置的行级数值文本（`label + 数值 + 失败率 + 诀窍槽`）
+    ///
+    /// 计算逻辑与训练效果一致（buffs → 失败率 → 两阶段数值 → 诀窍槽明细），
+    /// 供两处复用：分布表明细（label = 表头，如 `速C`）与 Train 候选预览
+    /// （label = 训练名，如 `速训练`，见 [`Self::train_candidate_preview`]）。
+    fn train_value_line(&self, label: &str, train: usize, show_ramen: bool) -> Result<String> {
+        let buffs = self.calc_training_buff(train)?;
+        let fail_rate = self.calc_training_failure_rate(&buffs, train);
+        let base_value = self.calc_training_value(&buffs, train)?;
+        let is_shining = self.shining_count(train) > 0;
+
+        if !show_ramen {
+            // 剧本机制未开启 或 URA回合：只显示基础训练数值和失败率
+            return if fail_rate > 0.0 {
+                Ok(format!("{label} {} 失败率: {}%", base_value.explain(), fail_rate))
+            } else {
+                Ok(format!("{label} {}", base_value.explain()))
+            };
+        }
+
+        // 普通回合：训练数值（含拉面效果）+ 失败率 + 诀窍槽明细
+        let ramen_effect = calc_ramen_training_effect(self, train, is_shining);
+        let effective_fail = (fail_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0)
+            .min(100.0)
+            .max(0.0);
+
+        let value = ActionValue {
+            status_pt: base_value.status_pt,
+            vital: base_value.vital,
+            motivation: base_value.motivation,
+            ..Default::default()
+        };
+
+        let dist = &self.base.distribution;
+        let support_count = dist[train]
+            .iter()
+            .filter(|&&p| {
+                p >= 0
+                    && (p as usize) < self.persons.len()
+                    && self.persons[p as usize].person_type == crate::game::PersonType::Card
+            })
+            .count();
+        // NPC 数量 = 本训练位置实际分配的 Npc 人数（`ramen_memo_cn.md` 算例：
+        // NPC数量=3 时加成 floor(3/2)，非固定 5；与生效层 `fill_feeling_gauge` 一致）
+        let npc_count = dist[train]
+            .iter()
+            .filter(|&&p| {
+                p >= 0
+                    && (p as usize) < self.persons.len()
+                    && self.persons[p as usize].person_type == crate::game::PersonType::Npc
+            })
+            .count();
+        let train_feeling_bonus = super::rules::calc_train_feeling_bonus(support_count, npc_count);
+        let base_dist = super::rules::calc_gauge_base_distribution(&self.ramen.selected_regions);
+        let feeling_type = self.ramen.train_feeling_type.map(|types| types[train]);
+
+        let gauge_a = base_dist[0]
+            + if feeling_type == Some(super::FeelingType::A) {
+                train_feeling_bonus
+            } else {
+                0
+            }
+            + if is_shining { 2 } else { 0 };
+        let gauge_b = base_dist[1]
+            + if feeling_type == Some(super::FeelingType::B) {
+                train_feeling_bonus
+            } else {
+                0
+            }
+            + if is_shining { 2 } else { 0 };
+        let gauge_c = base_dist[2]
+            + if feeling_type == Some(super::FeelingType::C) {
+                train_feeling_bonus
+            } else {
+                0
+            }
+            + if is_shining { 2 } else { 0 };
+
+        let gauge_detail = format!("诀窍槽 A+{} B+{} C+{}", gauge_a, gauge_b, gauge_c);
+        if effective_fail > 0.0 {
+            Ok(format!("{label} {} 失败率: {}% {}", value.explain(), effective_fail, gauge_detail))
+        } else {
+            Ok(format!("{label} {} {}", value.explain(), gauge_detail))
+        }
+    }
+
+    /// Train 阶段候选的内联预览文本（训练数值 + 失败率 + 诀窍槽）
+    ///
+    /// label 用训练名（`速训练`），供 RecordingTrainer / ramen_manual 把数值
+    /// 内联到候选列表（如 `速训练 速17 力2 9pt 体力-22 诀窍槽 A+4 B+3 C+5`）。
+    pub fn train_candidate_preview(&self, train: usize) -> Result<String> {
+        let train_name = format!("{}训练", global!(GAMECONSTANTS).train_names[train]);
+        let show_ramen = self.base.turn >= 2 && !self.is_super_ramen_turn();
+        self.train_value_line(&train_name, train, show_ramen)
+    }
+
+    /// RamenSelect 阶段候选的内联预览文本（吃面后的完整效果）
+    ///
+    /// 效果口径与吃面落地后 `explain_ramen_info` 一致：克隆状态临时设置
+    /// `current_ramen`，在地区 `at_trains` 首个位置计算 `calc_ramen_training_effect`
+    /// （含 PT 常驻 + RMJ 常驻 + 基础效果 + 地区加成），输出如
+    /// `吃面/中山-全 (训+20,友情+45,得意+140,失败率-50,上限+20,PT+5,hint+70)`。
+    /// 基础效果与地区加成均包含在内；`is_shining=true` 保证地区/基础的友情
+    /// 加成不被非友情训练归零（友情加成是吃面效果的一部分，玩家在选择时可见）。
+    pub fn ramen_candidate_preview(&self, region_idx: usize) -> Result<String> {
+        let ramen_data = global!(RAMENDATA);
+        let region = ramen_data
+            .ramen_region_effect
+            .get(region_idx)
+            .ok_or_else(|| anyhow::anyhow!("面索引 {region_idx} 不存在"))?;
+        let mut preview = self.clone();
+        preview.ramen.current_ramen = Some(region_idx);
+        let train = region.at_trains.first().copied().unwrap_or(0) as usize;
+        let eff = super::effects::calc_ramen_training_effect(&preview, train, true);
+        let parts = super::effects::format_ramen_effect_parts(&eff);
+        let name = region.name.clone();
+        if parts.is_empty() {
+            Ok(format!("吃面/{name}"))
+        } else {
+            Ok(format!("吃面/{name} ({})", parts.join(",")))
+        }
     }
 }
 

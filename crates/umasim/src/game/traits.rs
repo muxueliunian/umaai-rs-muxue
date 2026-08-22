@@ -108,10 +108,11 @@ pub trait Game: Clone {
     /// 以保证带 player_select=true 的事件无论选项数都交给 Trainer 决策，
     /// 而单选项的 RMJ/抽签等随机事件仍走 `apply_event` 内的 prob 加权逻辑。
     fn run_event<T: Trainer<Self>>(&mut self, event: &EventData, trainer: &T, rng: &mut StdRng) -> Result<()> {
-        diag!("+ 事件: #{} {}", event.id, event.name);
+        // 事件输出三段式：信息（事件名）→ 决策（选项 + 选择）→ 效果（apply 内部输出）
+        diag!("【事件】#{} {}", event.id, event.name);
         if event.player_select && event.choices.len() > 1 {
             for (index, choice) in event.choices.iter().enumerate() {
-                diag!("选项 {}: {}", index + 1, Explain::event_choice(choice));
+                diag!("  选项 {}: {}", index + 1, Explain::event_choice(choice));
             }
 
             // 统一调用 select_event_choice（默认实现内部区分 chance/决策）
@@ -125,6 +126,7 @@ pub trait Game: Clone {
                     event.name
                 ));
             }
+            diag!("  → 选择 选项 {}", selection + 1);
             self.apply_event(&event, selection, rng)
         } else {
             self.apply_event(&event, 0, rng)
