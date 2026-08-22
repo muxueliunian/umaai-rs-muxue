@@ -12,7 +12,7 @@
   - [`effects.rs`](#effectsrs训练数值与得意率) — 15
   - [`action.rs`](#actionrs动作枚举与列表) — 14
   - [`events.rs`](#eventsrs友人事件与剧本事件) — 5
-  - [`policy.rs`](#policyrs固定策略与手写策略核心) — 13
+  - [`policy.rs`](#policyrs固定策略与手写策略核心) — 15
   - [`logging_trainer.rs`](#logging_trainerrs决策日志包装) — 2
   - [`ramen_handwritten_trainer.rs`](#ramen_handwritten_trainerrs手写策略测试壳) — 2
 - [配置 / 数据加载](#配置--数据加载) — 10
@@ -197,6 +197,9 @@
 - `test_free_race_gate` — 硬守门四场景（宽裕不干预 / 紧张强制比赛 / 已达标 / 无要求马娘）
 - `test_breakdown_sums_to_score` — 打分 breakdown 各项之和等于 score（决策日志自洽）
 - `test_status_rate_is_linear` — `status_rate` 线性生效（防止重复相乘成平方）
+- `test_free_race_gate_oguri_two_intervals` — 小栗帽 100603 专项：两段区间从 DB 正确读出、
+  限 G1 使第二段可比赛回合 12→7、两段守门均按缺口提前触发并返回「比赛」
+- `test_free_race_gate_without_race_candidate` — 候选表不含「比赛」时返回 None 而非越界 panic
 
 ### `logging_trainer.rs`（决策日志包装）
 

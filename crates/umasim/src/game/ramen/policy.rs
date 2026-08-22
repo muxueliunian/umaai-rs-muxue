@@ -917,6 +917,112 @@ mod tests {
         Ok(())
     }
 
+    /// 构造小栗帽 100603 的 RamenGame（两段自选比赛要求：12-23 需 1 场；48-59 需 2 场限 G1）
+    fn make_oguri_game() -> anyhow::Result<RamenGame> {
+        let inherit = crate::game::InheritInfo {
+            blue_count: [12, 0, 0, 0, 6],
+            extra_count: [10, 0, 0, 20, 20, 40],
+        };
+        let deck = [302984, 302924, 303024, 303044, 302894, 303054];
+        Ok(RamenGame::newgame(100603, &deck, inherit)?)
+    }
+
+    /// 小栗帽 100603 专项：两段区间 + 限 G1 的守门行为
+    ///
+    /// 该马娘是采样空间里最硬的用例——第二段要求回合 48-59 内打满 2 场 G1，
+    /// 可比赛回合数远少于区间长度。逐回合扫描而非硬编码回合号，
+    /// 使测试不随 `race_grades` 常量表调整而失效。
+    #[test]
+    fn test_free_race_gate_oguri_two_intervals() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let policy = RamenPolicy::default();
+        let actions = train_actions_with_race();
+        let mut game = make_oguri_game()?;
+
+        // 两段区间必须从 DB 正确读出
+        let intervals: Vec<(u32, u32, u32, Option<u32>)> = game
+            .uma
+            .get_data()?
+            .free_races
+            .iter()
+            .map(|f| (f.start_turn, f.end_turn, f.count, f.grade))
+            .collect();
+        println!("100603 自选比赛区间: {intervals:?}");
+        assert_eq!(intervals.len(), 2);
+        assert_eq!((intervals[0].0, intervals[0].1, intervals[0].2), (12, 23, 1));
+        assert_eq!((intervals[1].0, intervals[1].1, intervals[1].2), (48, 59, 2));
+        assert!(intervals[1].3.is_some(), "第二段应带等级限制");
+
+        // 限 G1 使第二段的可比赛回合数显著少于区间长度（12 回合）
+        let free2 = game
+            .uma
+            .find_free_race(48)
+            .ok_or_else(|| anyhow::anyhow!("回合 48 应落在第二段区间内"))?;
+        let slots2 = remaining_race_slots(48, free2);
+        println!("第二段（48-59，限 G1）可比赛回合数: {slots2}");
+        assert!(slots2 >= 2, "可比赛回合数不足以打满 2 场，规则或掩码有误");
+        assert!(slots2 < 12, "限 G1 未生效：可比赛回合数不应等于区间长度");
+
+        // 逐回合扫描第一段：找到守门首次触发的回合
+        let first_gate = (12..=23).find(|&turn| {
+            game.base.turn = turn;
+            policy.free_race_gate(&game, &actions).is_some()
+        });
+        let first_gate = first_gate.ok_or_else(|| anyhow::anyhow!("第一段守门从未触发"))?;
+        println!("第一段守门首次触发回合: {first_gate}");
+        game.base.turn = first_gate;
+        let idx = policy
+            .free_race_gate(&game, &actions)
+            .ok_or_else(|| anyhow::anyhow!("守门应返回候选下标"))?;
+        assert_eq!(actions[idx].operation, Operation::Race);
+
+        // 打满第一段后，第一段区间内不再干预
+        game.uma.set_race(first_gate);
+        game.base.turn = 23;
+        println!("第一段达标后回合 23 守门: {:?}", policy.free_race_gate(&game, &actions));
+        assert_eq!(policy.free_race_gate(&game, &actions), None);
+
+        // 第二段缺 2 场：扫描触发回合，并确认返回比赛
+        let second_gate = (48..=59).find(|&turn| {
+            game.base.turn = turn;
+            policy.free_race_gate(&game, &actions).is_some()
+        });
+        let second_gate = second_gate.ok_or_else(|| anyhow::anyhow!("第二段守门从未触发"))?;
+        println!("第二段（缺 2 场）守门首次触发回合: {second_gate}");
+        game.base.turn = second_gate;
+        let idx = policy
+            .free_race_gate(&game, &actions)
+            .ok_or_else(|| anyhow::anyhow!("第二段守门应返回候选下标"))?;
+        assert_eq!(actions[idx].operation, Operation::Race);
+        Ok(())
+    }
+
+    /// 守门在候选表不含「比赛」时必须返回 None，不得 panic
+    ///
+    /// 生病 / 体力不足等情形下 `Operation::Race` 可能不在候选中，
+    /// 此时守门只能放弃干预，交由规则层判定育成失败，而不是越界取下标。
+    #[test]
+    fn test_free_race_gate_without_race_candidate() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let policy = RamenPolicy::default();
+        let actions = train_actions(); // 不含 Operation::Race
+        let mut game = make_oguri_game()?;
+        // 推到第一段最后一个回合，缺口最紧张
+        game.base.turn = 23;
+        let got = policy.free_race_gate(&game, &actions);
+        println!("无比赛候选时守门结果: {got:?}");
+        assert_eq!(got, None);
+        Ok(())
+    }
+
     /// 打分自洽性：训练动作的 breakdown 各项之和 == score（调参日志不能撒谎）
     #[test]
     fn test_breakdown_sums_to_score() -> anyhow::Result<()> {
