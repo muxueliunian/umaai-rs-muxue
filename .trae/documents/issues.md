@@ -136,21 +136,24 @@
 
 ---
 
-## 第三年地区选择无 build 自适应（score_region 对第三年地区无区分度）
+## 第2/3年地区选择无 build 自适应（score_region 对无 xunlian 的地区无区分度）
 
 - **日期**：2026-08-22
-- **状态**：待解决（方案已定，以后再改）
+- **状态**：已解决（2026-08-23）
 - **问题描述**：bench 已支持不同卡组（build）跑批，但第 3 年地区选择仍是固定值 `[[11, 14, 15]]`（default_config.toml `ramen_region_fixed`），所有 build 共用同一组合；即使恢复 120 组合全枚举，当前 `score_region` 打分对第 3 年地区**没有 build 区分度**——速度向与智力向卡组都会选中同一组合
 - **排查过程**：
   - 临时测试 `test_region_build_sensitivity`（policy.rs）实测：速度向卡组（3速）与智力向卡组（3智）在第 3 年 120 组合打分下均选中 `[10, 11, 12]`，score 相同（4500）
   - 根因一（fixed 绕过策略）：`ramen_region_strategy="fixed"` 时第 3 年直接 apply `ramen_region_fixed[0]`，不经过 `decide_region` 打分，build 差异无从体现
   - 根因二（打分失效）：`score_region` 的 build 自适应依赖 `region.xunlian × 卡组 bias`，但第 3 年地区（id 10-19）`xunlian` 全为 0 → bias 项恒零；而 `pt_bonus` 全部相同（50）、`hint` 全 0 → 所有组合分数相同，argmax 取第一个
   - 第 3 年地区的真实差异在 `youqing`（40-60）与 `at_trains` 覆盖（单属性 vs 多属性），当前打分完全未纳入
+  - **实施时补充发现：第 2 年（id 5-9）同样失效**。这批地区的 `xunlian` 也全为 0，`hint_count` 恒为 2，故 10 个组合（C(5,3)）一直同分取第一个。第 2 年不受 `ramen_region_strategy` 影响（`fixed` 只作用于第 3 年），所以这条一直存在、与固定值配置无关。本 issue 范围因此扩大到第 2/3 年
 - **解决方案**（已定，待实施）：
   1. 增强 `score_region`：新增 `youqing × at_trains × 卡组 bias` 项（如 `Σ_{t∈at_trains} youqing × bias[t]`），使第 3 年打分随 build 训练倾向变化；权重沿用/扩展 `RamenPolicyConfig`
   2. `default_config.toml` 恢复 `ramen_region_strategy = "all"`（120 组合枚举，O(360) 打分已标注便宜）
   3. 验收：不同 build 选出不同第 3 年地区组合（更新 `test_region_build_sensitivity` 断言方向）
+- **实施结果**（2026-08-23）：`xunlian` 与 `youqing` 统一按 `bias_sum` 缩放（新增 `region_youqing_weight`）。因同一年内 `pt_bonus` / `hint_count` 恒定、且 `xunlian` 与 `youqing` 不会同时非零，该权重的绝对值不影响 argmax，只影响打印的分数量级。验收通过：速度向选 `[15,17,18]`、智力向选 `[15,17,19]`。手写策略基线（8 马娘 × 7 build）聚合 49586 → 51340（+1754），其中唯一含「根」的 build `sta0_wis2` 增幅最大（+3572）——固定值 `[11,14,15]` 的训练位并集是 `{速,耐,力,智}`，恰好漏掉根
 - **备注**：
   - 备选方案 B：按卡组主属性预筛候选范围（120 → 20~30 个）再打分——打分增强后不稳定时再启用，避免裁剪丢最优解
-  - `test_region_build_sensitivity` 临时验证测试已留在 policy.rs（当前打印"两者选择是否不同: false"，实施后应翻转为 true）
-  - 与既有 issue「第三年地区选择组合过多」（已解决：Fixed）相关联：Fixed 是性能临时方案，本 issue 是在 build 维度上的功能补齐
+  - `test_region_build_sensitivity` 已由临时验证转为断言测试（`assert_ne!` 两 build 选中组合不同）
+  - 与既有 issue「第三年地区选择组合过多」（已解决：Fixed）相关联：Fixed 是性能临时方案，本 issue 是在 build 维度上的功能补齐。恢复 `all` 后实测整局耗时 2.9ms 不变，120 组合枚举无可测代价
+  - **影响采样器复现基座**：`sampler.rs` 的 `run_region_select` 读 `GAMECONFIG.ramen_region_strategy`，本次由 `fixed` 改 `all` 后同一条 `SampleSpec` 的轨迹已不同（结构性指标不变：74/78 回合覆盖、卡组分层 min==max）。Phase 3 落盘的配置签名须用改后这套

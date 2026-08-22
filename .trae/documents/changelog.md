@@ -2,6 +2,9 @@
 
 本文件用于简要记录每次任务的修改内容。
 
+## 2026-08-23
+- **地区选择 build 自适应**：`score_region` 新增 `youqing × at_trains × 卡组 bias` 项，并把 `xunlian` 与 `youqing` 统一按 `bias_sum` 缩放。原实现只算 `xunlian`，而第 2/3 年地区的 `xunlian` 恒为 0、`pt_bonus` 与 `hint_count` 同年恒定，导致同年所有候选同分、argmax 恒取第一个，卡组构成完全不参与决策（原 issue 只记录了第 3 年，实测第 2 年同样失效）；`default_config.toml` 的 `ramen_region_strategy` 由 `fixed` 恢复 `all`，`test_region_build_sensitivity` 由临时验证转为断言测试。实测手写策略基线聚合 +1754 分，其中含「根」的 build 增幅最大（固定值 `[11,14,15]` 的训练位并集恰好漏掉根）
+
 ## 2026-08-22
 - **基准新增自选比赛达标维度**：`Uma::all_free_races_done` 在任意时点重新比对各区间完成场数（`BaseGame::check_free_race` 只在区间结束回合的下一回合判定，且不达标即终止育成，拿不到全局达标情况）；`bench::GameOutcome` 加 `free_race_ok`，`bench_base` CSV 加同名列并在每局 / 分组 / 总览三处打印达标率。不达标会大量早停拉垮分数分布，基线对比时应先看这一项
 - **手写策略自选比赛守门补测试**：补两个用例（不改策略逻辑）——小栗帽 100603 两段区间且第二段限 G1（实测可比赛回合数 7 < 区间长度 12），逐回合扫描触发点而非硬编码回合号，避免随 `race_grades` 常量表调整失效；候选表不含 `Operation::Race` 时（生病 / 体力不足）须返回 `None` 而非越界取下标
