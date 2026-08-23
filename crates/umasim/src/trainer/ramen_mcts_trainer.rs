@@ -352,7 +352,7 @@ mod tests {
     use crate::{
         gamedata::{GAMECONSTANTS, init_global},
         global,
-        utils::{get_workspace_root, init_test_logger}
+        utils::{Checks, get_workspace_root, init_test_logger}
     };
 
     const TEST_UMA_ID: u32 = 102601;
@@ -361,37 +361,6 @@ mod tests {
         blue_count: [15, 3, 0, 0, 0],
         extra_count: [0, 30, 0, 0, 30, 30]
     };
-
-    /// 观测结果收集器
-    ///
-    /// AGENTS.md 要求测试用 `println` 而非 `assert`——中途 panic 会丢掉后续诊断信息。
-    /// 但只打印不失败的话，回归时 cargo 仍报 ok，等于没有防线。折中：全程只打印，
-    /// **末尾**用 [`Checks::finish`] 汇总，有 NG 才返回 `Err`。
-    struct Checks {
-        failed: Vec<String>
-    }
-
-    impl Checks {
-        fn new() -> Self {
-            Self { failed: Vec::new() }
-        }
-
-        /// 记录一条观测并打印 `OK` / `NG`
-        fn check(&mut self, ok: bool, what: &str) {
-            println!("  [{}] {what}", if ok { "OK" } else { "NG" });
-            if !ok {
-                self.failed.push(what.to_string());
-            }
-        }
-
-        /// 汇总：有 NG 则返回 `Err`（列出全部失败项）
-        fn finish(self) -> Result<()> {
-            if self.failed.is_empty() {
-                return Ok(());
-            }
-            anyhow::bail!("{} 项观测未通过: {}", self.failed.len(), self.failed.join(" / "))
-        }
-    }
 
     /// 准备一局固定种子的拉面局面
     fn setup(seed: u64) -> Result<(RamenGame, StdRng)> {

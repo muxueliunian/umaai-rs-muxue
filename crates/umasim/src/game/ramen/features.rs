@@ -615,15 +615,8 @@ mod tests {
     use crate::{
         gamedata::init_global,
         sampler::{SamplerConfig, SamplingSpace, sample_position},
-        utils::{get_workspace_root, init_test_logger}
+        utils::{Checks, get_workspace_root, init_test_logger}
     };
-
-    /// 校验结果标记：`OK` / `NG`
-    ///
-    /// 项目约定测试用 `println` 输出而非 `assert`，故把判定结果打成可扫读的前缀。
-    fn check(ok: bool) -> &'static str {
-        if ok { "OK" } else { "NG" }
-    }
 
     /// 造一个开局局面（默认卡组 102601）
     fn make_game() -> Result<RamenGame> {
@@ -646,6 +639,7 @@ mod tests {
         let _ = init_test_logger("error");
         let _ = init_global();
 
+        let mut c = Checks::new();
         let mut game = make_game()?;
         game.add_friend_and_npcs()?;
 
@@ -657,10 +651,7 @@ mod tests {
         let friend_deck =
             Game::deck_index_of(&game, friend_person).ok_or_else(|| anyhow!("友人卡应能反查到卡组槽位"))?;
         println!("友人卡: 人头 {friend_person} -> 卡组 {friend_deck}");
-        println!(
-            "[{}] 本用例的前提是两个下标不相等",
-            check(friend_person != friend_deck)
-        );
+        c.check(friend_person != friend_deck, "本用例的前提是两个下标不相等");
 
         // 把友人卡放进 2 号训练位（力），理事长放进 0 号
         let yayoi_person = game
@@ -682,8 +673,8 @@ mod tests {
             "卡槽 {friend_deck} 的训练位 onehot = {:?}, 在训练标志 = {card_in_train}",
             &v[card_slot_onehot..card_slot_onehot + TRAIN_NUM]
         );
-        println!("[{}] 友人卡所在的卡槽应标记为「在训练中」", check(card_in_train == 1.0));
-        println!("[{}] 友人卡的卡槽应指向 2 号训练位", check(v[card_slot_onehot + 2] == 1.0));
+        c.check(card_in_train == 1.0, "友人卡所在的卡槽应标记为「在训练中」");
+        c.check(v[card_slot_onehot + 2] == 1.0, "友人卡的卡槽应指向 2 号训练位");
 
         // person 块尾部布局：onehot(card_slot, CARD_NUM) + flag(card_slot.is_some())
         let person_base = GLOBAL_DIM + CARD_NUM * CARD_DIM + friend_person * PERSON_DIM;
@@ -692,20 +683,20 @@ mod tests {
             "人头 {friend_person} 的卡槽 onehot = {:?}",
             &v[card_slot_onehot..card_slot_onehot + CARD_NUM]
         );
-        println!("[{}] 友人卡人头应有卡链接", check(v[person_base + PERSON_DIM - 1] == 1.0));
-        println!(
-            "[{}] 友人卡人头应链接到卡组槽位 {friend_deck}",
-            check(v[card_slot_onehot + friend_deck] == 1.0)
+        c.check(v[person_base + PERSON_DIM - 1] == 1.0, "友人卡人头应有卡链接");
+        c.check(
+            v[card_slot_onehot + friend_deck] == 1.0,
+            &format!("友人卡人头应链接到卡组槽位 {friend_deck}")
         );
 
         // 理事长是无卡人头：不应有任何卡链接
         let yayoi_base = GLOBAL_DIM + CARD_NUM * CARD_DIM + yayoi_person * PERSON_DIM;
-        println!(
-            "[{}] 理事长(人头 {yayoi_person}) 不应有卡链接",
-            check(v[yayoi_base + PERSON_DIM - 1] == 0.0)
+        c.check(
+            v[yayoi_base + PERSON_DIM - 1] == 0.0,
+            &format!("理事长(人头 {yayoi_person}) 不应有卡链接")
         );
 
-        Ok(())
+        c.finish()
     }
 
     /// 回归：分身占据的多个训练位必须全部编进特征（multi-hot，不是最后写入的那一个）
@@ -734,13 +725,11 @@ mod tests {
         let card_base = GLOBAL_DIM + deck_idx * CARD_DIM;
         let card_mask = &v[card_base + CARD_DIM - 1 - TRAIN_NUM..card_base + CARD_DIM - 1];
         println!("卡槽 {deck_idx} 的训练位掩码 = {card_mask:?}");
-        println!(
-            "[{}] 分身应同时占 1 号与 3 号训练位",
-            check(card_mask[1] == 1.0 && card_mask[3] == 1.0)
-        );
-        println!(
-            "[{}] 未占用的训练位应为 0",
-            check(card_mask[0] == 0.0 && card_mask[2] == 0.0 && card_mask[4] == 0.0)
+        let mut c = Checks::new();
+        c.check(card_mask[1] == 1.0 && card_mask[3] == 1.0, "分身应同时占 1 号与 3 号训练位");
+        c.check(
+            card_mask[0] == 0.0 && card_mask[2] == 0.0 && card_mask[4] == 0.0,
+            "未占用的训练位应为 0"
         );
 
         // person 块的训练位掩码位于「已登场」之后
@@ -748,17 +737,14 @@ mod tests {
         let person_mask_start = person_base + PERSON_TYPE_NUM + TRAIN_TYPE_NUM + 3;
         let person_mask = &v[person_mask_start..person_mask_start + TRAIN_NUM];
         println!("人头 0 的训练位掩码 = {person_mask:?}");
-        println!(
-            "[{}] persons 段同样应是 multi-hot",
-            check(person_mask[1] == 1.0 && person_mask[3] == 1.0)
-        );
+        c.check(person_mask[1] == 1.0 && person_mask[3] == 1.0, "persons 段同样应是 multi-hot");
 
-        Ok(())
+        c.finish()
     }
 
     /// 各分块宽度之和必须等于声明的总维度（纯常量校验，不跑局面）
     #[test]
-    fn test_dim_constants_consistent() {
+    fn test_dim_constants_consistent() -> Result<()> {
         let global_parts = [
             ("turn", G_TURN),
             ("uma", G_UMA),
@@ -779,8 +765,13 @@ mod tests {
         println!("cards   {CARD_NUM} x {CARD_DIM} = {}", CARD_NUM * CARD_DIM);
         println!("persons {PERSON_NUM} x {PERSON_DIM} = {}", PERSON_NUM * PERSON_DIM);
         println!("总维度 INPUT_DIM = {INPUT_DIM}");
-        assert_eq!(sum, GLOBAL_DIM, "global 分块之和必须等于 GLOBAL_DIM");
-        assert_eq!(INPUT_DIM, GLOBAL_DIM + CARD_NUM * CARD_DIM + PERSON_NUM * PERSON_DIM);
+        let mut c = Checks::new();
+        c.check(sum == GLOBAL_DIM, "global 分块之和必须等于 GLOBAL_DIM");
+        c.check(
+            INPUT_DIM == GLOBAL_DIM + CARD_NUM * CARD_DIM + PERSON_NUM * PERSON_DIM,
+            "INPUT_DIM 必须等于 global + cards + persons 三段之和"
+        );
+        c.finish()
     }
 
     /// 开局局面能编码，长度恒为 INPUT_DIM，且不含 NaN / Inf
@@ -796,9 +787,10 @@ mod tests {
         let bad = v.iter().filter(|x| !x.is_finite()).count();
         let nonzero = v.iter().filter(|x| **x != 0.0).count();
         println!("非有限值 {bad} 个, 非零 {nonzero} 个 ({:.1}%)", nonzero as f64 * 100.0 / v.len() as f64);
-        assert_eq!(v.len(), INPUT_DIM);
-        assert_eq!(bad, 0, "特征不得含 NaN / Inf");
-        Ok(())
+        let mut c = Checks::new();
+        c.check(v.len() == INPUT_DIM, "开局编码长度等于 INPUT_DIM");
+        c.check(bad == 0, "特征不得含 NaN / Inf");
+        c.finish()
     }
 
     /// 采样器产出的各阶段根局面都能编码，且维度恒定
@@ -818,12 +810,17 @@ mod tests {
         let mut stages: std::collections::BTreeMap<String, usize> = Default::default();
         let mut nonzero_min = usize::MAX;
         let mut nonzero_max = 0usize;
+        let mut c = Checks::new();
         for index in 0..300u64 {
             match sample_position(&space, &config, index)? {
                 crate::sampler::SampleOutcome::Captured(pos) => {
                     let v = encode(&pos.game)?;
-                    assert_eq!(v.len(), INPUT_DIM, "index={index} 维度不符");
-                    assert!(v.iter().all(|x| x.is_finite()), "index={index} 含 NaN / Inf");
+                    if v.len() != INPUT_DIM {
+                        c.check(false, &format!("index={index} 维度不符（得到 {}）", v.len()));
+                    }
+                    if !v.iter().all(|x| x.is_finite()) {
+                        c.check(false, &format!("index={index} 含 NaN / Inf"));
+                    }
                     let nz = v.iter().filter(|x| **x != 0.0).count();
                     nonzero_min = nonzero_min.min(nz);
                     nonzero_max = nonzero_max.max(nz);
@@ -836,8 +833,8 @@ mod tests {
         println!("300 次采样：编码成功 {ok}，Exhausted {skipped}");
         println!("阶段分布: {stages:?}");
         println!("非零特征数区间 [{nonzero_min}, {nonzero_max}] / {INPUT_DIM}");
-        assert!(ok > 0, "应至少编码成功一个局面");
-        Ok(())
+        c.check(ok > 0, "应至少编码成功一个局面");
+        c.finish()
     }
 
     /// 同一局面编码两次必须逐位相同（编码器不得含随机性或读取可变全局态）
@@ -852,8 +849,9 @@ mod tests {
         let b = encode(&game)?;
         let diff = a.iter().zip(b.iter()).filter(|(x, y)| x != y).count();
         println!("两次编码不同位数: {diff}");
-        assert_eq!(diff, 0);
-        Ok(())
+        let mut c = Checks::new();
+        c.check(diff == 0, "同一局面编码两次必须逐位相同");
+        c.finish()
     }
 
     /// 成长率必须真的进特征：改 `five_status_bonus` 后编码必须变化
@@ -879,14 +877,15 @@ mod tests {
             .map(|(i, _)| i)
             .collect();
         println!("改动 five_status_bonus[0] 后变化的特征下标: {diff:?}");
-        assert_eq!(diff.len(), 1, "应恰好只有成长率那一位变化");
+        let mut c = Checks::new();
+        c.check(diff.len() == 1, "改成长率应恰好只有一位特征变化");
 
         let mut limited = game.clone();
         limited.base.uma.five_status_limit[3] += 100;
         let after2 = encode(&limited)?;
         let diff2 = base.iter().zip(after2.iter()).filter(|(x, y)| x != y).count();
         println!("改动 five_status_limit[3] 后变化位数: {diff2}");
-        assert_eq!(diff2, 1, "属性上限也必须进特征");
-        Ok(())
+        c.check(diff2 == 1, "属性上限也必须进特征");
+        c.finish()
     }
 }
