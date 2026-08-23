@@ -1934,7 +1934,7 @@ mod tests {
         game::{CardTrainingEffect, PersonType, ramen::events::assign_train_feeling_type},
         gamedata::{ActionValue, EventChoice, init_global},
         trainer::{ManualTrainer, RandomTrainer},
-        utils::{get_workspace_root, init_test_logger}
+        utils::{Checks, get_workspace_root, init_test_logger}
     };
 
     /// 校验结果标记：`OK` / `NG`
@@ -3739,5 +3739,134 @@ mod tests {
             check(buff_unlocked == CardTrainingEffect::default())
         );
         Ok(())
+    }
+
+    /// 回归：训练人数加成按 `PersonType` 计数，不再硬编码人头下标 6/7
+    ///
+    /// 旧实现 `filter(|p| **p != 6 && **p != 7)` 是温泉布局（卡 0-5、理事长 6、
+    /// 记者 7）的下标常量。拉面的理事长在 5、友人卡在 6、NPC 从 7 起、记者在 12，
+    /// 四项全部判反：理事长与记者被计入，友人卡与第一个 NPC 被排除。
+    ///
+    /// 本用例直接测 `count_training_persons`，不经过训练值公式——训练基础值
+    /// 只有 11~15，`floor(x × 1.05)` 会把「差一个人」的效果整个吃掉，
+    /// 拿 `ActionValue` 当判据测不出单人差异。
+    #[test]
+    fn test_count_training_persons_by_type() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.add_friend_and_npcs()?;
+        game.add_reporter();
+
+        // 按类型定位，不写死下标——下标只作为本卡组的前提打印出来
+        let find = |ty: PersonType| -> Result<i32> {
+            game.persons
+                .iter()
+                .position(|p| p.person_type == ty)
+                .map(|i| i as i32)
+                .ok_or_else(|| anyhow!("找不到人头类型 {ty:?}"))
+        };
+        let card = find(PersonType::Card)?;
+        let friend = find(PersonType::ScenarioCard)?;
+        let npc = find(PersonType::Npc)?;
+        let yayoi = find(PersonType::Yayoi)?;
+        let reporter = find(PersonType::Reporter)?;
+        println!("人头布局: 卡={card} 友人={friend} NPC={npc} 理事长={yayoi} 记者={reporter}");
+
+        // 旧实现的判据，仅用于对照打印
+        let legacy = |dist: &[i32]| dist.iter().filter(|p| **p != 6 && **p != 7).count();
+
+        // (分布, 期望人数, 说明)
+        let cases: Vec<(Vec<i32>, usize, &str)> = vec![
+            (vec![], 0, "空分布"),
+            (vec![-1, -1], 0, "「不出现」哨兵不计数"),
+            (vec![yayoi], 0, "理事长不吃人数加成"),
+            (vec![reporter], 0, "记者不吃人数加成"),
+            (vec![friend], 1, "友人卡计入（旧实现漏计）"),
+            (vec![npc], 1, "第一个 NPC 计入（旧实现漏计）"),
+            (vec![card, card], 2, "分身按占位重复计数，不去重"),
+            (vec![friend, friend], 2, "友人卡分身同样重复计数"),
+            (vec![card, yayoi, friend, npc, reporter], 3, "混合：只有卡/友人/NPC 计入"),
+            (vec![999], 0, "越界下标不计数也不 panic"),
+        ];
+
+        let mut c = Checks::new();
+        for (dist, want, what) in cases {
+            game.base.distribution = vec![dist.clone(), vec![], vec![], vec![], vec![]];
+            let got = game.count_training_persons(0);
+            println!("  {dist:?} -> 新={got} 期望={want} 旧={}", legacy(&dist));
+            c.check(got == want, what);
+        }
+        c.finish()
+    }
+
+    /// 回归：人数计数改按类型判定后，温泉与 base 的结果逐位不变
+    ///
+    /// 这是本次改动能安全落到共享 `Game` trait 的前提：温泉人头恒为
+    /// 卡 0-5、理事长 6、记者 7，`BasicGame` 更是只有卡 0-5 + 理事长 6
+    /// （没有记者，旧实现里的 `!= 7` 对它一直是空操作）。
+    /// 于是「排除下标 6/7」与「排除理事长/记者」在两者上是同一个集合。
+    #[test]
+    fn test_count_training_persons_onsen_unchanged() -> Result<()> {
+        use crate::game::onsen::game::OnsenGame;
+
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = OnsenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        let mut c = Checks::new();
+
+        // 前提：下标 6/7 当且仅当是理事长/记者
+        println!("温泉人头数 = {}", game.persons.len());
+        c.check(game.persons.len() == 8, "温泉应为 6 张卡 + 理事长 + 记者");
+        for (i, p) in game.persons.iter().enumerate() {
+            let is_excluded_type = matches!(p.person_type, PersonType::Yayoi | PersonType::Reporter);
+            println!("  人头 {i}: {:?}", p.person_type);
+            c.check(is_excluded_type == (i == 6 || i == 7), "下标 6/7 当且仅当理事长/记者");
+        }
+
+        // 逐位比对新旧两种判据（不含负数：生产路径从不把 -1 写进 distribution）
+        let samples: Vec<Vec<i32>> = vec![
+            vec![],
+            vec![0],
+            vec![5],
+            vec![6],
+            vec![7],
+            vec![0, 6],
+            vec![0, 7],
+            vec![6, 7],
+            vec![0, 0],
+            vec![0, 1, 2, 3, 4, 5],
+            vec![0, 6, 7],
+        ];
+        for dist in &samples {
+            let legacy = dist.iter().filter(|p| **p != 6 && **p != 7).count();
+            game.distribution = vec![dist.clone(), vec![], vec![], vec![], vec![]];
+            let got = game.count_training_persons(0);
+            println!("  {dist:?} -> 新={got} 旧={legacy}");
+            c.check(got == legacy, "温泉上新旧计数必须相同");
+        }
+
+        // base：只有 6 张卡 + 理事长(6)，没有记者，旧判据里的 `!= 7` 一直是空操作
+        let mut basic = crate::game::base::basic::BasicGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        println!("base 人头数 = {}", basic.persons.len());
+        c.check(basic.persons.len() == 7, "base 应为 6 张卡 + 理事长，且没有记者");
+        c.check(
+            basic.persons.iter().all(|p| p.person_type != PersonType::Reporter),
+            "base 不存在记者人头"
+        );
+        for dist in &samples {
+            // base 只有 0..=6，下标 7 取不到，样本里含 7 的部分等价于被跳过
+            let dist: Vec<i32> = dist.iter().copied().filter(|&p| p < 7).collect();
+            let legacy = dist.iter().filter(|p| **p != 6 && **p != 7).count();
+            basic.distribution = vec![dist.clone(), vec![], vec![], vec![], vec![]];
+            let got = basic.count_training_persons(0);
+            println!("  base {dist:?} -> 新={got} 旧={legacy}");
+            c.check(got == legacy, "base 上新旧计数必须相同");
+        }
+        c.finish()
     }
 }

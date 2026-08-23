@@ -358,6 +358,30 @@ pub trait Game: Clone {
         let cid = self.persons().get(person_index)?.card_id()?;
         self.deck().iter().position(|card| card.card_id == cid)
     }
+    /// provided: 统计一个训练位上吃人数加成的人头数
+    ///
+    /// 训练值公式里的 `1 + 0.05 × 人数` 乘区。支援卡 / 剧本友人卡 / NPC /
+    /// 其他友人 / 团队卡都计入，按 [`PersonType`] 排除理事长与记者。
+    ///
+    /// 分身不新建人头，而是把本体的 `person_index` 再放进另一个训练位，
+    /// 因此这里**按占位逐个计数，不去重**——去重会让分身的加成凭空消失。
+    ///
+    /// 原实现写作 `p != 6 && p != 7`，那是温泉布局（卡 0-5、理事长 6、记者 7）
+    /// 的下标常量。拉面的理事长在 5、友人卡在 6、记者在 12，硬编码下标全错。
+    /// 温泉与 base 改判类型后结果逐位不变，详见 `deck_index_of` 的同类说明。
+    ///
+    /// 负数（`distribute_person` 的「不出现」哨兵）与越界下标一律不计。
+    fn count_training_persons(&self, train: usize) -> usize {
+        let Some(dist) = self.distribution().get(train) else {
+            return 0;
+        };
+        let persons = self.persons();
+        dist.iter()
+            .filter(|&&p| p >= 0)
+            .filter_map(|&p| persons.get(p as usize))
+            .filter(|p| !matches!(p.person_type(), PersonType::Yayoi | PersonType::Reporter))
+            .count()
+    }
     /// provided: 计算来自支援卡的训练buff
     fn calc_training_buff(&self, train: usize) -> Result<CardTrainingEffect> {
         self.default_calc_training_buff(train)
@@ -406,12 +430,8 @@ pub trait Game: Clone {
             return Err(anyhow!("训练类型错误: {train}"));
         }
         // 人数, 包括NPC和分身, 排除掉理事长和记者
-        // 防御：distribution 未初始化时返回 0 人数
-        let person_count = self
-            .distribution()
-            .get(train)
-            .map(|d| d.iter().filter(|p| **p != 6 && **p != 7).count())
-            .unwrap_or(0);
+        // 按 PersonType 判定，不再硬编码人头下标（拉面布局与温泉不同）
+        let person_count = self.count_training_persons(train);
         // 基础值
         let basic_value = &self.training_basic_value()[train][train_level];
         let basic_motivation = ((self.uma().motivation - 3) * 10) as f32;
