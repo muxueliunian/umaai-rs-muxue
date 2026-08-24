@@ -11,7 +11,7 @@
 
 use std::{path::Path, time::Instant};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use indexmap::IndexMap;
 use rand::{SeedableRng, rngs::StdRng};
 use serde::Deserialize;
@@ -64,12 +64,14 @@ pub struct GameOutcome {
     pub five_status: [i32; 5],
     /// 技能点。
     pub skill_pt: i32,
-    /// 剧本 PT。
-    pub scenario_pt: i32,
+    /// 逐年剧本 PT（下标 0/1/2 = 第 1/2/3 年）。RMJ 清零前归档，不是局末 live 值。
+    pub yearly_scenario_pt: [i32; 3],
     /// RMJ 成功年数（0-3）。
     pub rmj_ok: usize,
-    /// 当年吃面次数。
-    pub eat_count: i32,
+    /// 逐年吃面次数（下标 0/1/2 = 第 1/2/3 年）。
+    pub yearly_eat_count: [i32; 3],
+    /// 逐年地区选择（每格三个地区 id）。CSV 编码见 [`encode_region_cell`]。
+    pub yearly_selected_regions: [[usize; 3]; 3],
     /// 五次友人出行是否全部完成。
     pub friend_all: bool,
     /// 自选比赛是否全部达标（不达标即育成失败）。
@@ -95,13 +97,94 @@ pub fn run_seeded<T: Trainer<RamenGame>>(
         rank: global!(GAMECONSTANTS).get_rank_name(score),
         five_status: game.uma.five_status,
         skill_pt: game.uma.skill_pt,
-        scenario_pt: game.ramen.scenario_pt,
+        yearly_scenario_pt: game.ramen.yearly_scenario_pt,
         rmj_ok: game.ramen.rmj_results.iter().filter(|&&ok| ok).count(),
-        eat_count: game.ramen.eat_count,
+        yearly_eat_count: game.ramen.yearly_eat_count,
+        yearly_selected_regions: game.ramen.yearly_selected_regions,
         friend_all: game.friend.out_used.iter().all(|used| *used),
         free_race_ok: game.uma.all_free_races_done()?,
         elapsed_ms
     })
+}
+
+/// 逐年地区选择的 CSV 单元格编码。
+///
+/// 三个地区 id 用 `/` 连接，例如第 1 年札幌/函馆/新潟 → `"0/1/2"`。
+/// 斜杠不与 CSV 逗号冲突，解析时按 `/` split 再 parse usize 即可。
+pub fn encode_region_cell(regions: &[usize; 3]) -> String {
+    format!("{}/{}/{}", regions[0], regions[1], regions[2])
+}
+
+/// 解析 [`encode_region_cell`] 产出的单元格。
+pub fn parse_region_cell(cell: &str) -> Result<[usize; 3]> {
+    let mut parts = cell.split('/');
+    let mut ids = [0usize; 3];
+    for (i, slot) in ids.iter_mut().enumerate() {
+        let p = parts
+            .next()
+            .ok_or_else(|| anyhow!("地区单元格缺少第 {} 个 id: {cell}", i + 1))?;
+        *slot = p
+            .parse()
+            .map_err(|_| anyhow!("地区单元格 id 不是整数: {p} (cell={cell})"))?;
+    }
+    if parts.next().is_some() {
+        bail!("地区单元格多于 3 个 id: {cell}");
+    }
+    Ok(ids)
+}
+
+/// results.csv 表头。只留逐年列，不留三年合计；合计由使用方自己加。
+pub const RESULTS_HEADER: [&str; 22] = [
+    "build",
+    "seed",
+    "score",
+    "rank",
+    "speed",
+    "stamina",
+    "power",
+    "guts",
+    "wisdom",
+    "skill_pt",
+    "scenario_pt_y1",
+    "scenario_pt_y2",
+    "scenario_pt_y3",
+    "rmj_ok",
+    "free_race_ok",
+    "eat_count_y1",
+    "eat_count_y2",
+    "eat_count_y3",
+    "region_y1",
+    "region_y2",
+    "region_y3",
+    "elapsed_ms"
+];
+
+/// 单局结果转 CSV 行（不含表头）。
+pub fn outcome_to_row(build: &str, outcome: &GameOutcome) -> Vec<String> {
+    vec![
+        build.to_string(),
+        outcome.seed.to_string(),
+        outcome.score.to_string(),
+        outcome.rank.clone(),
+        outcome.five_status[0].to_string(),
+        outcome.five_status[1].to_string(),
+        outcome.five_status[2].to_string(),
+        outcome.five_status[3].to_string(),
+        outcome.five_status[4].to_string(),
+        outcome.skill_pt.to_string(),
+        outcome.yearly_scenario_pt[0].to_string(),
+        outcome.yearly_scenario_pt[1].to_string(),
+        outcome.yearly_scenario_pt[2].to_string(),
+        outcome.rmj_ok.to_string(),
+        u8::from(outcome.free_race_ok).to_string(),
+        outcome.yearly_eat_count[0].to_string(),
+        outcome.yearly_eat_count[1].to_string(),
+        outcome.yearly_eat_count[2].to_string(),
+        encode_region_cell(&outcome.yearly_selected_regions[0]),
+        encode_region_cell(&outcome.yearly_selected_regions[1]),
+        encode_region_cell(&outcome.yearly_selected_regions[2]),
+        format!("{:.3}", outcome.elapsed_ms),
+    ]
 }
 
 /// 一组数值的基本统计。
@@ -388,7 +471,7 @@ impl DeckComposition {
         }
         deck.push(friend);
         deck.try_into()
-            .map_err(|_| anyhow::anyhow!("卡组必须恰好包含五张普通卡和一张友人卡"))
+            .map_err(|_| anyhow!("卡组必须恰好包含五张普通卡和一张友人卡"))
     }
 
     /// 一步生成卡组：自动选取各类型代表卡（[`select_representatives`]）后构建。
@@ -403,13 +486,18 @@ pub fn parse_value<T: std::str::FromStr>(parser: &mut lexopt::Parser, key: &str)
     let value = parser.value().with_context(|| format!("参数 {key} 缺少值"))?;
     let text = value
         .to_str()
-        .ok_or_else(|| anyhow::anyhow!("参数 {key} 的值不是合法 UTF-8: {value:?}"))?;
-    text.parse().map_err(|_| anyhow::anyhow!("参数 {key} 的值无效: {text}"))
+        .ok_or_else(|| anyhow!("参数 {key} 的值不是合法 UTF-8: {value:?}"))?;
+    text.parse().map_err(|_| anyhow!("参数 {key} 的值无效: {text}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        gamedata::{ramen::RAMENDATA, init_global},
+        trainer::{LoggingTrainer, RamenHandwrittenTrainer},
+        utils::{Checks, init_test_logger}
+    };
 
     /// 验证同 (base, idx) 派生一致、不同局号派生不同（可复现性根基）。
     #[test]
@@ -556,5 +644,167 @@ average = [1, 0, 1, 1, 2]
             println!("build {}: {:?}", build.name(), deck);
         }
         Ok(())
+    }
+
+    const TEST_UMA_ID: u32 = 102601;
+    const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+    const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
+        blue_count: [15, 3, 0, 0, 0],
+        extra_count: [0, 30, 0, 0, 30, 30]
+    };
+    /// 改动前 `test_stages_none_matches_handwritten`（seed=42, run_idx=0, 本卡组）抓到的分数与五维。
+    const BASELINE_SCORE: i32 = 51731;
+    const BASELINE_FIVE: [i32; 5] = [2958, 1623, 2200, 824, 841];
+
+    /// 把三个地区 id 格式化成与决策日志 `action_desc` 相同的 `地区[a,b,c]`。
+    fn region_desc(regions: [usize; 3]) -> String {
+        let ramen_data = global!(RAMENDATA);
+        let names: Vec<&str> = regions
+            .iter()
+            .filter_map(|&idx| ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str()))
+            .collect();
+        format!("地区[{}]", names.join(","))
+    }
+
+    /// 整局观测出口：逐年 PT/吃面非零、三年地区全部有值且对上年界、CSV 与 GameOutcome 一致、分数不变。
+    #[test]
+    fn test_yearly_observability_full_game_and_csv() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(&workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let trainer = LoggingTrainer::new(RamenHandwrittenTrainer::new(), 0);
+        let outcome = run_seeded(TEST_UMA_ID, &TEST_DECK, &TEST_INHERIT, 42, 0, &trainer)?;
+        let log = trainer.take_records();
+        let mut c = Checks::new();
+
+        println!(
+            "score={} five={:?} yearly_pt={:?} yearly_eat={:?} yearly_region={:?} live 不在 outcome 里",
+            outcome.score,
+            outcome.five_status,
+            outcome.yearly_scenario_pt,
+            outcome.yearly_eat_count,
+            outcome.yearly_selected_regions
+        );
+        c.check(outcome.score == BASELINE_SCORE, "同种子分数与改动前逐位相同");
+        c.check(outcome.five_status == BASELINE_FIVE, "同种子五维与改动前逐位相同");
+
+        let eat_sum: i32 = outcome.yearly_eat_count.iter().sum();
+        println!("sum(yearly_eat_count)={eat_sum}");
+        c.check(eat_sum > 0, "三年吃面次数合计 > 0");
+        c.check(
+            outcome.yearly_eat_count.iter().any(|&n| n > 0),
+            "三年数组至少有一年吃面次数非零"
+        );
+        c.check(
+            outcome.yearly_scenario_pt.iter().any(|&n| n > 0),
+            "三年数组至少有一年 PT 非零"
+        );
+
+        let ranges = [(0usize, 4usize), (5, 9), (10, 19)];
+        for (year, &(lo, hi)) in ranges.iter().enumerate() {
+            let regs = outcome.yearly_selected_regions[year];
+            let in_range = regs.iter().all(|&id| id >= lo && id <= hi);
+            let nonempty = regs != [0, 0, 0];
+            println!("year{year} regions={regs:?} range={lo}..={hi} in_range={in_range}");
+            c.check(nonempty, &format!("第 {} 年地区必须有值（不是默认 0/0/0）", year + 1));
+            c.check(in_range, &format!("第 {} 年地区 id 落在 {lo}..={hi}", year + 1));
+        }
+
+        let region_rows: Vec<_> = log.rows.iter().filter(|row| row.stage == "RegionSelect").collect();
+        println!(
+            "RegionSelect 决策: {:?}",
+            region_rows
+                .iter()
+                .map(|row| (row.turn, row.action_desc.as_str()))
+                .collect::<Vec<_>>()
+        );
+        c.check(region_rows.len() == 3, "决策日志里三年地区选择各一次");
+        let want_turns = [2, 23, 47];
+        for (year, &want_turn) in want_turns.iter().enumerate() {
+            let row = region_rows.iter().find(|r| r.turn == want_turn);
+            let Some(row) = row else {
+                c.check(false, &format!("决策日志缺少 turn {want_turn} 的 RegionSelect"));
+                continue;
+            };
+            let desc = region_desc(outcome.yearly_selected_regions[year]);
+            println!("year{} log={} archive={}", year + 1, row.action_desc, desc);
+            c.check(
+                row.action_desc == desc,
+                &format!("第 {} 年归档地区与决策日志一致", year + 1)
+            );
+        }
+        // 专门打 turn 23 那条：若 year_idx 误用 current_year()-1，第 1 年格子会被写成第 2 年地区。
+        if let Some(row23) = region_rows.iter().find(|r| r.turn == 23) {
+            let y1_desc = region_desc(outcome.yearly_selected_regions[0]);
+            c.check(
+                row23.action_desc != y1_desc,
+                "turn 23 选的不是第 1 年那一格（current_year() 陷阱）"
+            );
+            c.check(
+                row23.action_desc == region_desc(outcome.yearly_selected_regions[1]),
+                "turn 23 的选择必须落在第 2 年格子"
+            );
+        }
+
+        // CSV：新列全部存在，且值与 GameOutcome 完全一致
+        let row = outcome_to_row("speed", &outcome);
+        println!("CSV header={:?}\nCSV row={:?}", RESULTS_HEADER, row);
+        c.check(row.len() == RESULTS_HEADER.len(), "CSV 行列数与表头一致");
+        let needed = [
+            "scenario_pt_y1",
+            "scenario_pt_y2",
+            "scenario_pt_y3",
+            "eat_count_y1",
+            "eat_count_y2",
+            "eat_count_y3",
+            "region_y1",
+            "region_y2",
+            "region_y3"
+        ];
+        for name in needed {
+            c.check(RESULTS_HEADER.contains(&name), &format!("表头含 {name}"));
+        }
+        c.check(!RESULTS_HEADER.contains(&"scenario_pt"), "不再保留合计列 scenario_pt");
+        c.check(!RESULTS_HEADER.contains(&"eat_count"), "不再保留合计列 eat_count");
+
+        let path = std::env::temp_dir().join(format!("umasim_bug1_csv_{}.csv", std::process::id()));
+        write_csv(&path, &RESULTS_HEADER, std::slice::from_ref(&row))?;
+        let mut rdr = csv::Reader::from_path(&path)?;
+        let headers: Vec<String> = rdr.headers()?.iter().map(|s| s.to_string()).collect();
+        let record = rdr
+            .records()
+            .next()
+            .ok_or_else(|| anyhow!("CSV 没有数据行"))??;
+        let mut cells = std::collections::HashMap::new();
+        for (name, value) in headers.iter().zip(record.iter()) {
+            cells.insert(name.as_str(), value.to_string());
+        }
+        for year in 0..3 {
+            let pt_key = ["scenario_pt_y1", "scenario_pt_y2", "scenario_pt_y3"][year];
+            let eat_key = ["eat_count_y1", "eat_count_y2", "eat_count_y3"][year];
+            let reg_key = ["region_y1", "region_y2", "region_y3"][year];
+            let pt_cell = cells.get(pt_key).map(String::as_str).unwrap_or("");
+            let eat_cell = cells.get(eat_key).map(String::as_str).unwrap_or("");
+            let reg_cell = cells.get(reg_key).map(String::as_str).unwrap_or("");
+            c.check(
+                pt_cell == outcome.yearly_scenario_pt[year].to_string(),
+                &format!("{pt_key} 与 GameOutcome 一致")
+            );
+            c.check(
+                eat_cell == outcome.yearly_eat_count[year].to_string(),
+                &format!("{eat_key} 与 GameOutcome 一致")
+            );
+            match parse_region_cell(reg_cell) {
+                Ok(ids) => c.check(
+                    ids == outcome.yearly_selected_regions[year],
+                    &format!("{reg_key} 与 GameOutcome 一致")
+                ),
+                Err(e) => c.check(false, &format!("{reg_key} 解析失败: {e}"))
+            }
+        }
+        let _ = std::fs::remove_file(&path);
+        c.finish()
     }
 }

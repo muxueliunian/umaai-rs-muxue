@@ -5,9 +5,9 @@ use std::{cmp::Ordering, fs};
 use anyhow::{Result, ensure};
 use umasim::{
     bench::{self, GameOutcome},
-    game::{InheritInfo, ramen::rules::calc_ramen_pt_gain},
+    game::InheritInfo,
     gamedata::init_global_with_config,
-    output::decision_log::{DecisionLog, DecisionLogRow},
+    output::decision_log::DecisionLog,
     trainer::{LocalRamenTrainer, LoggingTrainer, RamenHandwrittenTrainer},
     utils::{get_workspace_root, load_game_config}
 };
@@ -20,32 +20,6 @@ const INHERIT: InheritInfo = InheritInfo {
     blue_count: [15, 0, 0, 0, 3],
     extra_count: [10, 10, 20, 20, 20, 40]
 };
-
-fn fill_ramen_metrics(outcome: &mut GameOutcome, rows: &[DecisionLogRow]) -> Result<()> {
-    let mut yearly_eat_count = [0_i32; 3];
-    let mut scenario_pt = 0;
-
-    for row in rows {
-        if row.stage != "RamenSelect" || !row.action_desc.starts_with("吃面/") {
-            continue;
-        }
-        let year = if row.turn < 24 {
-            0
-        } else if row.turn < 48 {
-            1
-        } else {
-            2
-        };
-        scenario_pt += calc_ramen_pt_gain(year, yearly_eat_count[year])?;
-        yearly_eat_count[year] += 1;
-    }
-
-    let eat_count = yearly_eat_count.iter().sum();
-    ensure!(eat_count > 0, "seed={} 无吃面", outcome.seed);
-    outcome.scenario_pt = scenario_pt;
-    outcome.eat_count = eat_count;
-    Ok(())
-}
 
 fn compare_scores(a: i32, b: i32) -> String {
     match a.cmp(&b) {
@@ -92,13 +66,21 @@ fn main() -> Result<()> {
         let trainer_a = LoggingTrainer::new(RamenHandwrittenTrainer::new(), run_idx);
         let trainer_b = LoggingTrainer::new(LocalRamenTrainer::new(), run_idx);
 
-        let mut outcome_a = bench::run_seeded(UMA, &DECK, &INHERIT, BASE_SEED, run_idx, &trainer_a)?;
-        let mut outcome_b = bench::run_seeded(UMA, &DECK, &INHERIT, BASE_SEED, run_idx, &trainer_b)?;
+        let outcome_a = bench::run_seeded(UMA, &DECK, &INHERIT, BASE_SEED, run_idx, &trainer_a)?;
+        let outcome_b = bench::run_seeded(UMA, &DECK, &INHERIT, BASE_SEED, run_idx, &trainer_b)?;
         let log_a = trainer_a.take_records();
         let log_b = trainer_b.take_records();
 
-        fill_ramen_metrics(&mut outcome_a, &log_a.rows)?;
-        fill_ramen_metrics(&mut outcome_b, &log_b.rows)?;
+        ensure!(
+            outcome_a.yearly_eat_count.iter().copied().sum::<i32>() > 0,
+            "seed={} 无吃面",
+            outcome_a.seed
+        );
+        ensure!(
+            outcome_b.yearly_eat_count.iter().copied().sum::<i32>() > 0,
+            "seed={} 无吃面",
+            outcome_b.seed
+        );
         let comparison = compare_scores(outcome_a.score, outcome_b.score);
 
         if let Some((row_a, row_b)) = log_a.rows.iter().zip(&log_b.rows).find(|(row_a, row_b)| {

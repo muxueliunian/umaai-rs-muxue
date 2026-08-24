@@ -273,8 +273,7 @@ impl ActionEnum for RamenAction {
                         self.fill_gauge_non_train(game, is_xiahesu)?;
                     }
                     Operation::RegionSelect(regions) => {
-                        game.ramen.selected_regions = regions;
-                        diag!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
+                        apply_region_selection(game, regions)?;
                     }
                     Operation::StageOnly => {
                         // Train 阶段不应收到 StageOnly 操作；若出现则忽略
@@ -318,8 +317,7 @@ impl ActionEnum for RamenAction {
                 let is_xiahesu = game.is_xiahesu();
                 match self.operation {
                     Operation::RegionSelect(regions) => {
-                        game.ramen.selected_regions = regions;
-                        diag!("地区选择: {:?} (第 {} 年)", regions, game.current_year());
+                        apply_region_selection(game, regions)?;
                     }
                     Operation::StageOnly => {}
                     Operation::Rest => {
@@ -1019,6 +1017,18 @@ pub fn list_all_actions(
         }
     }
     actions
+}
+
+/// 写入 live `selected_regions` 并按显式年份归档。
+///
+/// 归档下标见 [`super::RamenState::region_archive_year_idx`]：必须按回合硬编码，
+/// **不能**用 `current_year()`。turn 23 仍属第一年，但选的是第二年地区。
+fn apply_region_selection(game: &mut super::RamenGame, regions: [usize; 3]) -> Result<()> {
+    game.ramen.selected_regions = regions;
+    let year_idx = super::RamenState::region_archive_year_idx(game.base.turn)?;
+    game.ramen.archive_selected_regions(year_idx, regions)?;
+    diag!("地区选择: {:?} (第 {} 年)", regions, year_idx + 1);
+    Ok(())
 }
 
 // ========== 三阶段决策候选生成 ==========
@@ -2003,6 +2013,92 @@ mod tests {
         c.check(
             !RamenAction::can_place_clone(&game, game.persons.len() as i32, 0),
             "越界人头下标不可放置"
+        );
+
+        c.finish()
+    }
+
+    /// 地区选择必须按显式 `year_idx` 归档，不能用 `current_year()-1`。
+    ///
+    /// 正向断言：turn 23 写入第 2 年格子，且第 1 年格子不被覆盖。
+    #[test]
+    fn test_region_select_archives_explicit_year_idx() -> anyhow::Result<()> {
+        use crate::game::{
+            ActionEnum,
+            ramen::{RamenGame, RamenStage}
+        };
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+
+        let inherit = crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let mut game = RamenGame::newgame(102601, &deck, inherit.clone())?;
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut c = Checks::new();
+
+        // 第 1 年：turn 2 / Begin（真正的年度选择路径，走 apply 的 `_` 分支）
+        game.base.turn = 2;
+        game.stage = RamenStage::Begin;
+        let y1 = [0usize, 1, 2];
+        RamenAction::no_ramen(Operation::RegionSelect(y1)).apply(&mut game, &mut rng)?;
+        println!("turn2 yearly={:?} live={:?}", game.ramen.yearly_selected_regions, game.ramen.selected_regions);
+        c.check(game.ramen.yearly_selected_regions[0] == y1, "turn 2 归档到第 1 年");
+        c.check(game.ramen.selected_regions == y1, "turn 2 live selected_regions");
+        c.check(
+            (game.current_year() - 1) as usize == 0,
+            "turn 2 的 current_year()-1 碰巧也是 0"
+        );
+
+        // 第 2 年：turn 23 / RegionSelect。current_year() 仍是 1。
+        game.base.turn = 23;
+        game.stage = RamenStage::RegionSelect;
+        let y2 = [5usize, 6, 7];
+        RamenAction::no_ramen(Operation::RegionSelect(y2)).apply(&mut game, &mut rng)?;
+        println!(
+            "turn23 current_year()={} yearly={:?}",
+            game.current_year(),
+            game.ramen.yearly_selected_regions
+        );
+        c.check(game.current_year() == 1, "陷阱：turn 23 的 current_year() 仍是 1");
+        c.check(
+            RamenState::region_archive_year_idx(23)? == 1,
+            "turn 23 显式 year_idx = 1"
+        );
+        c.check(game.ramen.yearly_selected_regions[1] == y2, "turn 23 归档到第 2 年");
+        c.check(
+            game.ramen.yearly_selected_regions[0] == y1,
+            "turn 23 不得覆盖第 1 年（current_year()-1 会写到下标 0）"
+        );
+
+        // 第 3 年：turn 47
+        game.base.turn = 47;
+        game.stage = RamenStage::RegionSelect;
+        let y3 = [10usize, 11, 12];
+        RamenAction::no_ramen(Operation::RegionSelect(y3)).apply(&mut game, &mut rng)?;
+        println!("turn47 current_year()={} yearly={:?}", game.current_year(), game.ramen.yearly_selected_regions);
+        c.check(game.current_year() == 2, "陷阱：turn 47 的 current_year() 仍是 2");
+        c.check(game.ramen.yearly_selected_regions[2] == y3, "turn 47 归档到第 3 年");
+        c.check(game.ramen.yearly_selected_regions[1] == y2, "turn 47 不得覆盖第 2 年");
+
+        // Train 阶段同一 helper 也必须按显式 year_idx 写（防某一处漏接）
+        let mut game_train = RamenGame::newgame(102601, &deck, inherit)?;
+        game_train.base.turn = 23;
+        game_train.stage = RamenStage::Train;
+        RamenAction::no_ramen(Operation::RegionSelect(y2)).apply(&mut game_train, &mut rng)?;
+        c.check(
+            game_train.ramen.yearly_selected_regions[1] == y2,
+            "Train 阶段 turn 23 同样归档到第 2 年"
+        );
+        c.check(
+            game_train.ramen.yearly_selected_regions[0] == [0, 0, 0],
+            "Train 阶段 turn 23 不得写入第 1 年"
         );
 
         c.finish()

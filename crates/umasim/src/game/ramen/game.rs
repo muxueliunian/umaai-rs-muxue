@@ -140,6 +140,19 @@ impl Game for RamenGame {
             // RMJ 结算回合检查
             if self.is_rmj_turn() {
                 let year_idx = (self.current_year() - 1) as usize;
+                // 观测归档：必须在 live 计数器清零之前写入当年 PT / 吃面次数。
+                // 年份用 RMJ 回合硬编码（23→0, 47→1, 71→2），不用 current_year() 再推一次。
+                // 注意：同一 turn 23 地区选择归档的是第 2 年，与此处「结算第 1 年」不是同一下标。
+                match super::RamenState::rmj_archive_year_idx(self.base.turn) {
+                    Ok(idx) => {
+                        if let Err(e) = self.ramen.archive_year_counters(idx) {
+                            crate::diag!("逐年 PT/吃面归档失败: {e}");
+                        }
+                    }
+                    Err(e) => {
+                        crate::diag!("逐年 PT/吃面归档失败: {e}");
+                    }
+                }
                 let result = rules::check_rmj(&mut self.ramen, year_idx);
                 if result.is_success() {
                     self.ramen.train_level_bonus += 1;
@@ -229,12 +242,8 @@ impl Game for RamenGame {
             RamenStage::NextTurn => {} // 回合推进逻辑在 next() 中处理
             RamenStage::RegionSelect => {
                 // 回合2→第1年(year_idx=0)，回合23→第2年(year_idx=1)，回合47→第3年(year_idx=2)
-                let year_idx = match self.base.turn {
-                    2 => 0,
-                    23 => 1,
-                    47 => 2,
-                    _ => unreachable!("unexpected turn for RegionSelect: {}", self.base.turn)
-                };
+                // 与逐年归档共用同一份映射，避免两处真值来源漂移
+                let year_idx = super::RamenState::region_archive_year_idx(self.base.turn)?;
                 self.run_region_select(trainer, rng, year_idx)?;
             }
             RamenStage::SuperRamenSelect => self.run_super_ramen_select()?,
@@ -2940,6 +2949,60 @@ mod tests {
         println!("RMJ 结算后 scenario_pt = {}（归零成功）", game.ramen.scenario_pt);
 
         Ok(())
+    }
+
+    /// RMJ 清零前必须把当年 PT / 吃面次数写入 `yearly_*`。
+    ///
+    /// 正向断言：归档值等于清零前的 live 值，且 live 字段确实归零。
+    /// 三个年界都跑一遍，避免「永远只写 year 0」的假绿。
+    #[test]
+    fn test_rmj_archives_yearly_counters_before_reset() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+
+        let mut c = Checks::new();
+        for (turn, year_idx) in [(23, 0usize), (47, 1), (71, 2)] {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.base.turn = turn;
+            game.stage = RamenStage::NextTurn;
+            game.ramen.scenario_pt = 1234;
+            game.ramen.eat_count = 7;
+            println!("turn={turn} 归档前 live PT={} eat={}", game.ramen.scenario_pt, game.ramen.eat_count);
+            game.next();
+            println!(
+                "turn={turn} 归档后 yearly_pt={:?} yearly_eat={:?} live PT={} eat={}",
+                game.ramen.yearly_scenario_pt,
+                game.ramen.yearly_eat_count,
+                game.ramen.scenario_pt,
+                game.ramen.eat_count
+            );
+            c.check(
+                game.ramen.yearly_scenario_pt[year_idx] == 1234,
+                &format!("turn {turn} yearly_scenario_pt[{year_idx}] == 1234")
+            );
+            c.check(
+                game.ramen.yearly_eat_count[year_idx] == 7,
+                &format!("turn {turn} yearly_eat_count[{year_idx}] == 7")
+            );
+            c.check(game.ramen.scenario_pt == 0, &format!("turn {turn} live scenario_pt 归零"));
+            c.check(game.ramen.eat_count == 0, &format!("turn {turn} live eat_count 归零"));
+            for other in 0..3 {
+                if other == year_idx {
+                    continue;
+                }
+                c.check(
+                    game.ramen.yearly_scenario_pt[other] == 0,
+                    &format!("turn {turn} 其它年 {other} 的 PT 仍为 0")
+                );
+                c.check(
+                    game.ramen.yearly_eat_count[other] == 0,
+                    &format!("turn {turn} 其它年 {other} 的 eat_count 仍为 0")
+                );
+            }
+        }
+        c.finish()
     }
 
     /// 验证 generate_events 在 turn=0 时返回 400000400 马娘登场事件
