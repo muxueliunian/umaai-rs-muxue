@@ -5,7 +5,7 @@
 //! - 均匀分配：每个动作平均分配搜索次数（并行化）
 //! - UCB 分配：根据 UCB 公式动态分配搜索资源（C++ UmaAi 风格）
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use log::{debug, warn};
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
@@ -812,6 +812,7 @@ impl<'a> crate::game::Trainer<OnsenGame> for SimulationTrainer<'a> {
 mod tests {
     use std::cell::RefCell;
 
+    use anyhow::anyhow;
     use rand::SeedableRng;
 
     use super::*;

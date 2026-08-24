@@ -1329,8 +1329,10 @@ mod tests {
             println!("region {idx} 全富余 targets = {n}");
         }
 
+        let mut c = crate::utils::Checks::new();
         let mut peak = 0usize;
         let mut peak_at = ([0usize; 3], 0usize);
+        let mut identity_ok = true;
         for year in 0..3 {
             let combos = get_region_combinations(year)?;
             println!("年 {} 组合数 {}", year + 1, combos.len());
@@ -1338,6 +1340,17 @@ mod tests {
             let mut year_peak_combo = [0usize; 3];
             for combo in combos {
                 let n = list_combined_ramen_select_actions(&state, &combo).len();
+                // 结构恒等式：候选数 = 1（不吃面）+ 三个地区各自的 targets 数。
+                // 这条与 gamedata 数值无关，比「峰值等于某个常数」结实：
+                // 漏掉「不吃面」或漏掉某个地区都会当场破等式，而上限断言抓不到。
+                let expect: usize =
+                    1 + combo.iter().try_fold(0usize, |acc, &r| {
+                        Ok::<_, anyhow::Error>(acc + list_special_targets_for(&state, r)?.len())
+                    })?;
+                if n != expect {
+                    identity_ok = false;
+                    println!("  恒等式破：regions {combo:?} 实得 {n} 期望 {expect}");
+                }
                 if n > year_peak {
                     year_peak = n;
                     year_peak_combo = combo;
@@ -1348,15 +1361,20 @@ mod tests {
                 }
             }
             println!("年 {} 峰值 {} @ regions {:?}", year + 1, year_peak, year_peak_combo);
-            assert!(year_peak <= 28, "年 {} 峰值 {year_peak} 必须 ≤ 28", year + 1);
+            c.check(year_peak <= 28, &format!("年 {} 峰值 {year_peak} ≤ 28", year + 1));
         }
         println!(
             "合并候选全局峰值 {peak} @ year {} regions {:?}",
             peak_at.1 + 1,
             peak_at.0
         );
-        assert!(peak <= 28, "合并候选峰值 {peak} 必须 ≤ 28");
-        Ok(())
+        c.check(identity_ok, "候选数 == 1 + 三地区 targets 数之和（全部组合）");
+        // 上界守 policy 头维度；下界守动作空间不被静默削掉一块。
+        // 28 是当前 gamedata 的事实而非永久契约：上游改配方导致它变动时，
+        // 先确认 policy 头维度仍够用，再更新这两个数。
+        c.check(peak <= 28, &format!("合并候选峰值 {peak} ≤ 28（policy 头上界）"));
+        c.check(peak == 28, &format!("合并候选峰值 {peak} == 28（下界，防动作空间静默收缩）"));
+        c.finish()
     }
 
     // ========== 夏合宿 + 训练 / 非训练 填充测试 ==========

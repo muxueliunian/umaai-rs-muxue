@@ -966,7 +966,7 @@ mod tests {
     use fs_err::read_to_string;
 
     use super::*;
-    use crate::utils::Checks;
+    use crate::{trainer::RamenSearchStages, utils::Checks};
 
     /// 构造全 None 的覆盖配置（= 不覆盖任何字段）。
     fn empty_override() -> OverrideConfig {
@@ -1268,6 +1268,35 @@ ramen_search_stages = "train,region"
             merged.mcts.expected_search_stdev == base.mcts.expected_search_stdev,
             "未写的 expected_search_stdev 保留 toml"
         );
+        c.finish()
+    }
+
+    /// 生产缺省必须搜 `ramen` 阶段——这条守的是一个已测量的分数，不是风格偏好。
+    ///
+    /// 三臂对照（每臂 42 局，同 build 同种子配对）实测：`train,ramen` 比只搜
+    /// `train` 高 **+2306 分**（t=7.94，39/42 胜），而把同一笔算力加到 `train`
+    /// 的 `search_n` 上只值 +39 分（t=0.14）。即拉面那 61 个决策点是真金，
+    /// 漏掉 `ramen` 等于白白丢掉这 2306 分且**分数上看不出是配置的锅**。
+    ///
+    /// 两个真值源都要钉：serde 缺省函数（代码路径，用户无配置文件时走它）
+    /// 与 `default_config.toml`（正常路径）。只钉一个，改另一个照样静默退化。
+    #[test]
+    fn test_production_default_searches_ramen_stage() -> Result<()> {
+        let base = load_real_default()?;
+        let serde_default = MctsConfig::default();
+        println!("toml       ramen_search_stages = {:?}", base.mcts.ramen_search_stages);
+        println!("serde 缺省 ramen_search_stages = {:?}", serde_default.ramen_search_stages);
+
+        // 解析成结构体再判，避免把 "train,ramen" 写死成字符串比较：
+        // 上游哪天改成 "ramen,train" 或加空格，语义没变就不该红。
+        let from_toml = RamenSearchStages::parse(&base.mcts.ramen_search_stages)?;
+        let from_serde = RamenSearchStages::parse(&serde_default.ramen_search_stages)?;
+
+        let mut c = Checks::new();
+        c.check(from_toml.train, "toml 缺省搜 train");
+        c.check(from_toml.ramen_select, "toml 缺省搜 ramen（值 +2306 分）");
+        c.check(from_serde.train, "serde 缺省搜 train");
+        c.check(from_serde.ramen_select, "serde 缺省搜 ramen（值 +2306 分）");
         c.finish()
     }
 }

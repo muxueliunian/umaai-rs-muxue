@@ -418,6 +418,11 @@ mod tests {
             expected.total()
         );
         assert_eq!(parts, expected, "{label}: 七个分量必须与公式逐位相等");
+        // ⚠ 转发契约，**不是**公式 oracle：`calc_score()` 当前的实现就是
+        // `score_parts().total()`，所以这一行在今天等价于 `x == x`。
+        // 它唯一的作用是：将来有人把 `calc_score` 拆开重写时会红。
+        // 真正校验公式的是上面对 `expected_score_parts()` 的断言——
+        // 那是独立重写的一份原公式，改坏 `score_parts` 会被它抓住。
         assert_eq!(total, calc, "{label}: score_parts().total() 必须等于 calc_score()");
     }
 
