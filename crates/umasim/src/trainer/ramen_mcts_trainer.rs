@@ -21,13 +21,24 @@
 //!
 //! [`Trainer::select_choice`] / [`Trainer::select_event_choice`] 的候选不来自
 //! [`Game::list_actions`]，通用 rollout 入口 `apply_action` 吃不下，一律转发手写策略。
+//!
+//! # 合并动作搜索（`use_combined_ramen_select`）
+//!
+//! 打开时 `RamenSelect` 用 `list_combined_ramen_select_actions` 一次搜
+//! `(ramen, targets)`，再把最优 `ramen` 映射回三阶段候选下标；紧随其后的
+//! `SpecialSelect` 直接返回缓存的 targets，不再搜索。
+//!
+//! 这会改变对外层 rng 的消耗：`FlatSearch::search` 每次恰好消耗一次
+//! `next_u64`。三阶段路径在 RamenSelect + SpecialSelect 各搜一次（2 次），
+//! 合并路径只在 RamenSelect 搜一次（1 次）。随机序列整体位移，拉面基线作废。
+//! 这是预期行为，不是 bug。关闭本开关即退回改动前的三阶段分别搜。
 
 use std::sync::{
     Mutex,
     atomic::{AtomicUsize, Ordering}
 };
 
-use anyhow::Result;
+use anyhow::{Result, anyhow, bail};
 use log::info;
 use rand::prelude::StdRng;
 
@@ -194,6 +205,15 @@ pub struct RamenMctsTrainer {
     pub selection: RamenSelection,
     /// 是否输出每步决策日志
     pub verbose: bool,
+    /// `RamenSelect` 是否用合并动作（ramen + targets 一次决策）搜索
+    ///
+    /// 打开时 `SpecialSelect` 不再是独立决策点：`RamenSelect` 的搜索结果里
+    /// 已经含 targets，`SpecialSelect` 直接返回缓存值。
+    /// 关闭时退回三阶段分别搜（改动前行为）。
+    ///
+    /// **RNG 消耗会变**：`FlatSearch::search` 对外层 rng 恰好消耗一次 `next_u64`。
+    /// 打开后 SpecialSelect 零消耗，随机序列整体位移，拉面基线作废。这是预期的。
+    pub use_combined_ramen_select: bool,
     /// 最近一次搜索决策的候选统计文本（供 `LoggingTrainer` 写入决策日志）
     ///
     /// 用 `Mutex` 而非 `RefCell`：`Trainer` 在搜索/并行场景要求 `Sync`。
@@ -202,11 +222,23 @@ pub struct RamenMctsTrainer {
     ///
     /// `Trainer::select_action` 只有 `&self`，故用原子量。用途是让「门控是否生效」
     /// 可观测：只看分数无法区分「搜索没提分」与「门控写错、根本没搜」。
-    searched: AtomicUsize
+    searched: AtomicUsize,
+    /// `SpecialSelect` 直接命中合并搜索缓存的次数
+    ///
+    /// 与 [`Self::searched`] 同理，用原子量是因为 `select_action` 只有 `&self`。
+    /// 用途是钉住「缓存检查必须在门控早退之前」：若它被挪到早退之后，
+    /// `special_select` 门控关闭时合并搜索选出的 targets 会被**静默丢弃**、
+    /// 改由手写策略另选，而分数上看不出来——本计数器归零才看得见。
+    combined_cache_hits: AtomicUsize,
+    /// `RamenSelect` 合并搜索选出的 targets，供紧随其后的 `SpecialSelect` 复用
+    ///
+    /// 用 `Mutex` 而非 `RefCell`：`Trainer` 在搜索/并行场景要求 `Sync`
+    /// （与既有 `last_breakdown` 同理）。
+    pending_combined_targets: Mutex<Option<[i32; 3]>>
 }
 
 impl RamenMctsTrainer {
-    /// 用指定搜索配置创建（默认搜全部阶段、按 `score` 口径取最优）
+    /// 用指定搜索配置创建（默认搜全部阶段、按 `score` 口径取最优、打开合并动作搜索）
     pub fn new(config: SearchConfig) -> Self {
         Self {
             search: FlatSearch::<RamenGame>::new(config),
@@ -214,8 +246,11 @@ impl RamenMctsTrainer {
             stages: RamenSearchStages::all(),
             selection: RamenSelection::Score,
             verbose: false,
+            use_combined_ramen_select: true,
             last_breakdown: Mutex::new(None),
-            searched: AtomicUsize::new(0)
+            searched: AtomicUsize::new(0),
+            combined_cache_hits: AtomicUsize::new(0),
+            pending_combined_targets: Mutex::new(None)
         }
     }
 
@@ -239,6 +274,17 @@ impl RamenMctsTrainer {
     /// 设置是否输出每步决策日志
     pub fn verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
+        self
+    }
+
+    /// `SpecialSelect` 直接命中合并搜索缓存的次数
+    pub fn combined_cache_hits(&self) -> usize {
+        self.combined_cache_hits.load(Ordering::Relaxed)
+    }
+
+    /// 设置 `RamenSelect` 是否走合并动作搜索
+    pub fn with_combined_ramen_select(mut self, on: bool) -> Self {
+        self.use_combined_ramen_select = on;
         self
     }
 
@@ -276,6 +322,23 @@ impl RamenMctsTrainer {
             *slot = None;
         }
     }
+
+    /// 取出并清空合并搜索缓存的 targets
+    fn take_pending_combined_targets(&self) -> Option<[i32; 3]> {
+        match self.pending_combined_targets.lock() {
+            Ok(mut slot) => slot.take(),
+            Err(poisoned) => poisoned.into_inner().take()
+        }
+    }
+
+    /// 写入合并搜索缓存的 targets（`None` 表示不吃面或不缓存）
+    fn store_pending_combined_targets(&self, targets: Option<[i32; 3]>) {
+        let mut slot = match self.pending_combined_targets.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner()
+        };
+        *slot = targets;
+    }
 }
 
 impl Default for RamenMctsTrainer {
@@ -288,6 +351,36 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
     fn select_action(
         &self, game: &RamenGame, actions: &[<RamenGame as Game>::Action], rng: &mut StdRng
     ) -> Result<usize> {
+        // (A) SpecialSelect 命中缓存 —— 必须放在早退判断之前。
+        // 候选可能只有 1 个，或 stages.special_select 关着，这两种情况都要消费缓存，
+        // 否则会污染下一回合的 SpecialSelect。
+        if game.stage == RamenStage::SpecialSelect {
+            if let Some(t) = self.take_pending_combined_targets() {
+                match actions.iter().position(|a| a.special_targets == Some(t)) {
+                    Some(idx) => {
+                        self.combined_cache_hits.fetch_add(1, Ordering::Relaxed);
+                        self.clear_breakdown();
+                        return Ok(idx);
+                    }
+                    None => {
+                        bail!(
+                            "SpecialSelect 缓存未命中: 缓存 targets={t:?}，实际候选=[{}]",
+                            actions
+                                .iter()
+                                .map(|a| format!("{:?}", a.special_targets))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
+            }
+        }
+
+        // (C) RamenSelect 每次做决策时先无条件清一次，防止上一回合遗留
+        if game.stage == RamenStage::RamenSelect {
+            self.store_pending_combined_targets(None);
+        }
+
         // 单候选无选择空间，跑搜索纯属浪费预算
         // 门控**必须**用未经纠正的 `game.stage`
         //
@@ -300,6 +393,57 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
         if actions.len() <= 1 || !self.stages.contains(&game.stage) {
             self.clear_breakdown();
             return self.fallback.select_action(game, actions, rng);
+        }
+
+        // (B) RamenSelect 走合并搜索（排除 race_turn：那边 list_actions 是比赛动作）
+        if self.use_combined_ramen_select && game.stage == RamenStage::RamenSelect && !game.is_race_turn()
+        {
+            let combined = game.list_combined_ramen_select_actions();
+            if combined.len() > 1 {
+                self.searched.fetch_add(1, Ordering::Relaxed);
+                let output = self.search.search(game, &combined, rng)?;
+                let idx = match self.selection {
+                    RamenSelection::Score => output.best_action_idx,
+                    RamenSelection::Pt => output.best_action_pt_idx()
+                };
+                let best = combined
+                    .get(idx)
+                    .ok_or_else(|| anyhow!("合并搜索最优下标 {idx} 超出候选数 {}", combined.len()))?;
+                // 不吃面时 next() 会直接推到 Train，不会有 SpecialSelect；留缓存会污染下一回合
+                if best.ramen.is_none() {
+                    self.store_pending_combined_targets(None);
+                } else {
+                    self.store_pending_combined_targets(best.special_targets);
+                }
+                self.stash_search_breakdown(&output);
+                if self.verbose {
+                    let (res, _) = &output.action_results[idx];
+                    info!(
+                        "[MCTS][回合 {}] 阶段 {:?} 合并 {} 候选 -> combined#{idx} {} (mean={:.0} n={})",
+                        game.turn(),
+                        game.stage,
+                        combined.len(),
+                        best,
+                        res.mean(),
+                        res.count()
+                    );
+                }
+                match actions.iter().position(|a| a.ramen == best.ramen) {
+                    Some(three_idx) => return Ok(three_idx),
+                    None => {
+                        bail!(
+                            "RamenSelect 合并搜索结果在三阶段候选中找不到: best.ramen={:?}，实际候选=[{}]",
+                            best.ramen,
+                            actions
+                                .iter()
+                                .map(|a| format!("{:?}", a.ramen))
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                    }
+                }
+            }
+            // combined.len() <= 1：不走合并，落回原逻辑
         }
 
         self.searched.fetch_add(1, Ordering::Relaxed);
@@ -566,6 +710,321 @@ mod tests {
         let mut c = Checks::new();
         println!("两次评分: {scores:?}");
         c.check(scores[0] == scores[1], "可复现");
+        c.finish()
+    }
+
+    /// 吃面 + 隐藏风味两阶段都搜（P1.2 / P1.3 对照与测量用）
+    fn ramen_and_special_stages() -> RamenSearchStages {
+        RamenSearchStages {
+            ramen_select: true,
+            special_select: true,
+            ..RamenSearchStages::none()
+        }
+    }
+
+    /// 硬性验收 1 的对照尺子：`use_combined_ramen_select = false` 必须与改动前逐位相同
+    ///
+    /// 改动前（字段尚不存在、等价于三阶段分别搜）实测：
+    /// 评分=55153 五维=[2958, 1742, 2200, 866, 1112] skill_pt=7390 scenario_pt=0 searched_count=46
+    #[test]
+    fn test_combined_gate_off_full_game() -> Result<()> {
+        let seed = 42;
+        let (mut game, mut rng) = setup(seed)?;
+        let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(4).with_ucb(false))
+            .with_stages(ramen_and_special_stages())
+            .with_combined_ramen_select(false);
+        let start = std::time::Instant::now();
+        game.run_full_game(&trainer, &mut rng)?;
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        let score = game.uma.calc_score();
+        let searched = trainer.searched_count();
+        println!(
+            "gate-off 整局: 回合={} 评分={} 五维={:?} skill_pt={} scenario_pt={} searched_count={} 耗时={elapsed:.0}ms",
+            game.turn(),
+            score,
+            game.uma.five_status,
+            game.uma.skill_pt,
+            game.ramen.scenario_pt,
+            searched
+        );
+        let mut c = Checks::new();
+        c.check(game.turn() == 77, "跑满 77 回合");
+        c.check(score == 55153, "评分与改动前逐位相同");
+        c.check(
+            game.uma.five_status == [2958, 1742, 2200, 866, 1112],
+            "五维与改动前逐位相同"
+        );
+        c.check(game.uma.skill_pt == 7390, "技能点与改动前逐位相同");
+        c.check(game.ramen.scenario_pt == 0, "剧本 PT 与改动前逐位相同");
+        c.check(searched == 46, "searched_count 与改动前逐位相同");
+        c.finish()
+    }
+
+    /// 默认打开合并搜索；链式 setter 能关掉
+    #[test]
+    fn test_combined_default_on() -> Result<()> {
+        // `RamenMctsTrainer::default()` 会构造 `HandwrittenEvaluator`，后者
+        // `load_onsen_order().expect(..)` 依赖工作目录与全局数据；不初始化则本测试
+        // 只在别的测试先跑过时才碰巧通过（顺序依赖）。
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let t = RamenMctsTrainer::default();
+        println!("default use_combined_ramen_select = {}", t.use_combined_ramen_select);
+        let mut c = Checks::new();
+        c.check(t.use_combined_ramen_select, "new()/default 默认打开");
+        let t2 = t.with_combined_ramen_select(false);
+        println!(
+            "after with_combined_ramen_select(false) = {}",
+            t2.use_combined_ramen_select
+        );
+        c.check(!t2.use_combined_ramen_select, "setter 关闭");
+        c.finish()
+    }
+
+    /// 只统计不干预的包装训练员：记录各阶段调用次数，以及其中真正走过搜索的次数
+    struct CountingTrainer {
+        /// 被包装的 MCTS 训练员
+        inner: RamenMctsTrainer,
+        /// `RamenSelect` 的 `select_action` 调用次数
+        ramen_select_calls: AtomicUsize,
+        /// `SpecialSelect` 的 `select_action` 调用次数
+        special_select_calls: AtomicUsize,
+        /// `RamenSelect` 中真正走过搜索的次数
+        ramen_select_searches: AtomicUsize,
+        /// `SpecialSelect` 中真正走过搜索的次数
+        special_select_searches: AtomicUsize
+    }
+
+    impl CountingTrainer {
+        /// 包装一个已构造好的 `RamenMctsTrainer`
+        fn wrap(inner: RamenMctsTrainer) -> Self {
+            Self {
+                inner,
+                ramen_select_calls: AtomicUsize::new(0),
+                special_select_calls: AtomicUsize::new(0),
+                ramen_select_searches: AtomicUsize::new(0),
+                special_select_searches: AtomicUsize::new(0)
+            }
+        }
+    }
+
+    impl Trainer<RamenGame> for CountingTrainer {
+        fn select_action(
+            &self, game: &RamenGame, actions: &[<RamenGame as Game>::Action], rng: &mut StdRng
+        ) -> Result<usize> {
+            let before = self.inner.searched_count();
+            let idx = self.inner.select_action(game, actions, rng)?;
+            let did_search = self.inner.searched_count() > before;
+            match game.stage {
+                RamenStage::RamenSelect => {
+                    self.ramen_select_calls.fetch_add(1, Ordering::Relaxed);
+                    if did_search {
+                        self.ramen_select_searches.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                RamenStage::SpecialSelect => {
+                    self.special_select_calls.fetch_add(1, Ordering::Relaxed);
+                    if did_search {
+                        self.special_select_searches.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+                _ => {}
+            }
+            Ok(idx)
+        }
+
+        fn select_choice(
+            &self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng
+        ) -> Result<usize> {
+            self.inner.select_choice(game, choices, rng)
+        }
+
+        fn select_event_choice(
+            &self, game: &RamenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
+        ) -> Result<usize> {
+            self.inner.select_event_choice(game, event, choices, rng)
+        }
+
+        fn last_breakdown(&self) -> Option<String> {
+            self.inner.last_breakdown()
+        }
+    }
+
+    /// 硬性验收 2：合并开启时 SpecialSelect 全程不再被搜
+    #[test]
+    fn test_combined_on_skips_special_search() -> Result<()> {
+        let seed = 42;
+        let (mut game, mut rng) = setup(seed)?;
+        let inner = RamenMctsTrainer::new(SearchConfig::default().with_search_n(4).with_ucb(false))
+            .with_stages(ramen_and_special_stages())
+            .with_combined_ramen_select(true);
+        let trainer = CountingTrainer::wrap(inner);
+        let start = std::time::Instant::now();
+        game.run_full_game(&trainer, &mut rng)?;
+        let elapsed = start.elapsed().as_secs_f64() * 1000.0;
+        let score = game.uma.calc_score();
+        let ramen_calls = trainer.ramen_select_calls.load(Ordering::Relaxed);
+        let special_calls = trainer.special_select_calls.load(Ordering::Relaxed);
+        let ramen_searches = trainer.ramen_select_searches.load(Ordering::Relaxed);
+        let special_searches = trainer.special_select_searches.load(Ordering::Relaxed);
+        let searched = trainer.inner.searched_count();
+        println!(
+            "gate-on 整局: 回合={} 评分={} searched_count={} 耗时={elapsed:.0}ms",
+            game.turn(),
+            score,
+            searched
+        );
+        println!(
+            "  RamenSelect 调用={ramen_calls} 搜索={ramen_searches} / SpecialSelect 调用={special_calls} 搜索={special_searches}"
+        );
+        let mut c = Checks::new();
+        c.check(game.turn() == 77, "跑满 77 回合");
+        c.check(score > 0, "评分为正");
+        c.check(ramen_calls > 0, "RamenSelect 被调用过");
+        c.check(ramen_searches > 0, "RamenSelect 走过搜索");
+        c.check(special_calls > 0, "SpecialSelect 被调用过（缓存命中路径）");
+        c.check(special_searches == 0, "SpecialSelect 从未触发搜索");
+        c.check(searched == ramen_searches, "整局 searched_count 全部来自 RamenSelect");
+        c.finish()
+    }
+
+    /// 只搜 `ramen`、不搜 `special` 时，合并搜索选出的 targets 仍必须被采用
+    ///
+    /// 钉住「缓存检查必须在门控早退之前」这条结构约定。若把 (A) 挪到早退之后，
+    /// `special_select` 门控关闭时 `SpecialSelect` 会直接早退给手写策略，
+    /// 合并搜索选出的 targets 被**静默丢弃**——分数上看不出来，
+    /// 只有 `combined_cache_hits()` 归零才暴露。
+    #[test]
+    fn test_combined_cache_used_when_special_gate_off() -> Result<()> {
+        let seed = 42;
+        let (mut game, mut rng) = setup(seed)?;
+        let stages = RamenSearchStages {
+            ramen_select: true,
+            ..RamenSearchStages::none()
+        };
+        let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(4).with_ucb(false))
+            .with_stages(stages)
+            .with_combined_ramen_select(true);
+        game.run_full_game(&trainer, &mut rng)?;
+        let hits = trainer.combined_cache_hits();
+        println!(
+            "special 门控关: 回合={} 评分={} searched_count={} combined_cache_hits={hits}",
+            game.turn(),
+            game.uma.calc_score(),
+            trainer.searched_count()
+        );
+        let mut c = Checks::new();
+        c.check(game.turn() == 77, "跑满 77 回合");
+        c.check(trainer.searched_count() > 0, "RamenSelect 走过合并搜索");
+        c.check(hits > 0, "SpecialSelect 必须命中合并缓存（门控关也要用）");
+        c.finish()
+    }
+
+    /// 样本均值
+    fn mean_of(xs: &[f64]) -> f64 {
+        xs.iter().sum::<f64>() / xs.len().max(1) as f64
+    }
+
+    /// 样本标准差（无偏）
+    fn stdev_of(xs: &[f64]) -> f64 {
+        if xs.len() < 2 {
+            return 0.0;
+        }
+        let m = mean_of(xs);
+        let var = xs.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (xs.len() - 1) as f64;
+        var.max(0.0).sqrt()
+    }
+
+    /// 标准误
+    fn se_of(xs: &[f64]) -> f64 {
+        stdev_of(xs) / (xs.len().max(1) as f64).sqrt()
+    }
+
+    /// Pearson 相关系数
+    fn corr_of(a: &[f64], b: &[f64]) -> f64 {
+        let n = a.len().min(b.len());
+        if n < 2 {
+            return 0.0;
+        }
+        let (aa, bb) = (&a[..n], &b[..n]);
+        let (ma, mb) = (mean_of(aa), mean_of(bb));
+        let cov: f64 = aa.iter().zip(bb).map(|(x, y)| (x - ma) * (y - mb)).sum();
+        let da: f64 = aa.iter().map(|x| (x - ma).powi(2)).sum::<f64>().sqrt();
+        let db: f64 = bb.iter().map(|y| (y - mb).powi(2)).sum::<f64>().sqrt();
+        if da <= 0.0 || db <= 0.0 { 0.0 } else { cov / (da * db) }
+    }
+
+    /// 合并决策 vs 三阶段分别搜的 CRN 配对测量
+    ///
+    /// A 组打开 `use_combined_ramen_select`，B 组关闭；同一批种子各跑一局。
+    /// 只测量、不断言方向。手动运行：
+    /// `cargo test --release -p umasim --lib test_combined_vs_threestage_pairing -- --ignored --nocapture`
+    #[test]
+    #[ignore = "合并 vs 三阶段配对测量，耗时较长，按需手动运行"]
+    fn test_combined_vs_threestage_pairing() -> Result<()> {
+        const N_GAMES: usize = 30;
+        let cfg = SearchConfig::default().with_search_n(4).with_ucb(false);
+        let stages = ramen_and_special_stages();
+        let start = std::time::Instant::now();
+
+        let mut scores_a = Vec::with_capacity(N_GAMES);
+        let mut scores_b = Vec::with_capacity(N_GAMES);
+        let mut searched_a = 0usize;
+        let mut searched_b = 0usize;
+
+        for i in 0..N_GAMES {
+            let seed = 1000 + i as u64;
+
+            let (mut game_a, mut rng_a) = setup(seed)?;
+            let trainer_a = RamenMctsTrainer::new(cfg.clone())
+                .with_stages(stages)
+                .with_combined_ramen_select(true);
+            game_a.run_full_game(&trainer_a, &mut rng_a)?;
+            scores_a.push(game_a.uma.calc_score() as f64);
+            searched_a += trainer_a.searched_count();
+
+            let (mut game_b, mut rng_b) = setup(seed)?;
+            let trainer_b = RamenMctsTrainer::new(cfg.clone())
+                .with_stages(stages)
+                .with_combined_ramen_select(false);
+            game_b.run_full_game(&trainer_b, &mut rng_b)?;
+            scores_b.push(game_b.uma.calc_score() as f64);
+            searched_b += trainer_b.searched_count();
+        }
+
+        let elapsed = start.elapsed().as_secs_f64();
+        let deltas: Vec<f64> = scores_a.iter().zip(&scores_b).map(|(a, b)| a - b).collect();
+
+        println!("A (combined=true)  scores = {scores_a:?}");
+        println!("B (combined=false) scores = {scores_b:?}");
+        println!("delta = A - B              = {deltas:?}");
+        println!(
+            "A: mean={:.1} stdev={:.1}  B: mean={:.1} stdev={:.1}",
+            mean_of(&scores_a),
+            stdev_of(&scores_a),
+            mean_of(&scores_b),
+            stdev_of(&scores_b)
+        );
+        println!(
+            "配对差 delta: mean={:.1} stdev={:.1} se={:.1}  corr={:.4}",
+            mean_of(&deltas),
+            stdev_of(&deltas),
+            se_of(&deltas),
+            corr_of(&scores_a, &scores_b)
+        );
+        println!(
+            "searched_count 合计: A(combined)={searched_a}  B(threestage)={searched_b}"
+        );
+        println!("局数={N_GAMES} 耗时={elapsed:.1}s");
+
+        let mut c = Checks::new();
+        c.check(scores_a.len() == N_GAMES, "A 组局数一致");
+        c.check(scores_b.len() == N_GAMES, "B 组局数一致");
+        c.check(searched_a > 0, "A 组走过搜索");
+        c.check(searched_b > 0, "B 组走过搜索");
         c.finish()
     }
 }
