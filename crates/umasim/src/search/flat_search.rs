@@ -717,13 +717,15 @@ impl FlatSearch<RamenGame> {
     /// 已是正规回合阶段（`run_stage` -> `list_actions` -> `select_action`），
     /// 不像温泉 `Dig`/`Upgrade` 那样需要特判。
     ///
-    /// # Phase 1 范围限制
+    /// # 动作空间
     ///
-    /// 只接受 [`Game::list_actions`] 产出的**标准分阶段动作**。
-    /// `list_combined_ramen_select_actions()` 的合并动作**不可**传入：
-    /// 通用 `apply_action` 在 `RamenSelect` 只写 `pending_ramen`、清零
-    /// `special_targets`，**不设 `combined_decision`**，会静默丢掉隐藏风味。
-    /// 合并动作需走 `apply_combined_ramen_decision`，留待 Phase 2。
+    /// 同时接受三阶段动作与合并动作。判别式：
+    /// `RamenSelect` 阶段 + `StageOnly` + `special_targets.is_some()` → 合并动作，
+    /// 由 [`FlatSearchGame::apply_root_action`] 转交 `apply_combined_ramen_decision`。
+    /// 其余动作仍走 `apply_action_with_strategy`。
+    ///
+    /// **不要在同一次搜索的候选表里混用两种动作**：混用会让搜索在语义不一致的
+    /// 动作空间上比较，虽然技术上不会崩。
     pub fn search(
         &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
     ) -> Result<SearchOutput<RamenAction>> {
@@ -816,7 +818,7 @@ mod tests {
     use crate::{
         game::{
             InheritInfo, Trainer,
-            ramen::{RamenAction, RamenGame}
+            ramen::{RamenAction, RamenGame, RamenStage}
         },
         gamedata::init_global,
         rng::derive_seed,
@@ -1196,6 +1198,222 @@ mod tests {
         println!("seed=42   : {a:?}");
         println!("seed=4242 : {b:?}");
         assert_ne!(a, b, "换 seed 必须改变拉面搜索结果");
+        Ok(())
+    }
+
+    /// 构造处于 `RamenSelect`、库存富余、三面可选的局面（P1.1 单测用）
+    fn ramen_select_ready() -> Result<RamenGame> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let inherit = InheritInfo {
+            blue_count: [12, 0, 0, 0, 6],
+            extra_count: [10, 0, 0, 20, 20, 40]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let mut game = RamenGame::newgame(102601, &deck, inherit)?;
+        game.base.turn = 2;
+        game.ramen.feeling_stock = [5, 5, 5];
+        game.ramen.special_feeling = 2;
+        game.ramen.selected_regions = [0, 1, 2];
+        game.stage = RamenStage::RamenSelect;
+        Ok(game)
+    }
+
+    /// P1.1 测试 1：合并动作经 `apply_root_action` 真正写入 targets，不会被清零
+    #[test]
+    fn test_ramen_combined_action_preserves_targets() -> Result<()> {
+        let mut combined_game = ramen_select_ready()?;
+        let mut three_game = combined_game.clone();
+        let mut rng = StdRng::seed_from_u64(0);
+
+        let actions = combined_game.list_combined_ramen_select_actions();
+        let action = actions
+            .iter()
+            .copied()
+            .find(|a| a.ramen.is_some() && matches!(a.special_targets, Some(t) if t != [0, 0, 0]))
+            .ok_or_else(|| anyhow!("库存富余下应存在非全零 targets 的合并动作"))?;
+        println!(
+            "选用合并动作: ramen={:?} special_targets={:?}",
+            action.ramen, action.special_targets
+        );
+
+        combined_game.apply_root_action(&action, &mut rng)?;
+        println!(
+            "合并路径: pending_ramen={:?} pending_special_targets={:?} combined_decision={}",
+            combined_game.ramen.pending_ramen,
+            combined_game.ramen.pending_special_targets,
+            combined_game.ramen.combined_decision
+        );
+        assert_eq!(combined_game.ramen.pending_ramen, action.ramen);
+        assert_eq!(
+            combined_game.ramen.pending_special_targets,
+            action.special_targets.unwrap_or([0, 0, 0])
+        );
+        assert_ne!(
+            combined_game.ramen.pending_special_targets,
+            [0, 0, 0],
+            "合并路径 targets 必须非全零"
+        );
+        assert!(
+            combined_game.ramen.combined_decision,
+            "合并路径应设 combined_decision"
+        );
+
+        let three_action = RamenAction::ramen_select(action.ramen);
+        three_game.apply_root_action(&three_action, &mut rng)?;
+        println!(
+            "三阶段路径: pending_ramen={:?} pending_special_targets={:?} combined_decision={}",
+            three_game.ramen.pending_ramen,
+            three_game.ramen.pending_special_targets,
+            three_game.ramen.combined_decision
+        );
+        assert_eq!(three_game.ramen.pending_ramen, action.ramen);
+        assert_eq!(three_game.ramen.pending_special_targets, [0, 0, 0]);
+        assert!(
+            !three_game.ramen.combined_decision,
+            "三阶段路径 combined_decision 应为 false"
+        );
+        Ok(())
+    }
+
+    /// P1.1 测试 2：三阶段动作的根搜索统计与改动前逐位一致
+    #[test]
+    fn test_ramen_three_stage_action_unchanged() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        println!(
+            "拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个",
+            game.turn(),
+            game.stage,
+            actions.len()
+        );
+
+        let a = ramen_search(42)?;
+        let b = ramen_search(42)?;
+        let expected: [(u32, f64); 7] = [
+            (16, 52113.875000),
+            (16, 52731.812500),
+            (16, 52566.250000),
+            (16, 52384.187500),
+            (16, 53056.250000),
+            (16, 52021.687500),
+            (16, 51898.625000)
+        ];
+        for (i, ((x, y), (en, em))) in a.iter().zip(b.iter()).zip(expected).enumerate() {
+            println!(
+                "动作 {i}: n={} mean={:.6} | n={} mean={:.6} | 改动前 n={} mean={:.6}",
+                x.n, x.mean, y.n, y.mean, en, em
+            );
+        }
+        assert_eq!(a, b, "固定种子下拉面根节点搜索必须可复现");
+        assert_eq!(a.len(), expected.len(), "候选数应与改动前一致");
+        for (i, (got, (en, em))) in a.iter().zip(expected).enumerate() {
+            assert_eq!(got.n, en, "动作 {i} 的 n 必须与改动前逐位相同");
+            assert_eq!(got.mean, em, "动作 {i} 的 mean 必须与改动前逐位相同");
+        }
+        Ok(())
+    }
+
+    /// P1.1 测试 3：合并动作整局冒烟，全程跳过 SpecialSelect
+    #[test]
+    fn test_ramen_combined_action_full_game_smoke() -> Result<()> {
+        use crate::trainer::RamenHandwrittenTrainer;
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let inherit = InheritInfo {
+            blue_count: [12, 0, 0, 0, 6],
+            extra_count: [10, 0, 0, 20, 20, 40]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let (mut rng, rule_master) = crate::bench::seeded_rngs(42, 0);
+        let mut game = RamenGame::newgame(102601, &deck, inherit)?;
+        game.set_rule_master(rule_master);
+
+        let trainer = RamenHandwrittenTrainer::new();
+        let mut ramen_select_n = 0usize;
+        let mut special_select_n = 0usize;
+        let mut combined_n = 0usize;
+
+        {
+            let mut step = |game: &mut RamenGame, rng: &mut StdRng| -> Result<()> {
+                match game.stage {
+                    RamenStage::RamenSelect if !game.is_race_turn() => {
+                        ramen_select_n += 1;
+                        let actions = game.list_combined_ramen_select_actions();
+                        let action = actions
+                            .iter()
+                            .copied()
+                            .find(|a| {
+                                a.ramen.is_some()
+                                    && matches!(a.special_targets, Some(t) if t != [0, 0, 0])
+                            })
+                            .or_else(|| actions.iter().copied().find(|a| a.ramen.is_some()))
+                            .or_else(|| actions.first().copied())
+                            .ok_or_else(|| anyhow!("合并候选为空"))?;
+                        game.apply_root_action(&action, rng)?;
+                        combined_n += 1;
+                        Ok(())
+                    }
+                    RamenStage::RamenSelect => {
+                        ramen_select_n += 1;
+                        game.run_stage(&trainer, rng)
+                    }
+                    RamenStage::SpecialSelect => {
+                        special_select_n += 1;
+                        game.run_stage(&trainer, rng)
+                    }
+                    _ => game.run_stage(&trainer, rng)
+                }
+            };
+
+            step(&mut game, &mut rng)?;
+            while game.next() {
+                step(&mut game, &mut rng)?;
+            }
+        }
+        game.on_simulation_end(&trainer, &mut rng)?;
+
+        let score = game.uma().calc_score();
+        println!(
+            "合并动作整局: 回合={} 评分={} RamenSelect={} SpecialSelect={} 合并apply={}",
+            game.turn(),
+            score,
+            ramen_select_n,
+            special_select_n,
+            combined_n
+        );
+        assert!(score > 0, "终局评分应 > 0");
+        assert!((score as f64).is_finite(), "终局评分应为有限值");
+        assert_eq!(special_select_n, 0, "合并路径不应进入 SpecialSelect");
+        assert!(combined_n > 0, "至少应用过一次合并动作");
+        Ok(())
+    }
+
+    /// P1.1 测试 4：非法 targets 的合并动作必须被 `apply_root_action` 拒绝
+    #[test]
+    fn test_ramen_combined_action_rejects_illegal_targets() -> Result<()> {
+        use crate::game::ramen::rules::list_special_targets_for;
+
+        let mut game = ramen_select_ready()?;
+        let mut rng = StdRng::seed_from_u64(0);
+        let legal = list_special_targets_for(&game.ramen, 0)?;
+        println!("面 0 合法 targets: {legal:?}");
+
+        let illegal = [3, 0, 0];
+        assert!(
+            !legal.contains(&illegal),
+            "对照用的 {illegal:?} 不应出现在合法列表里"
+        );
+        let action = RamenAction::combined_select(Some(0), illegal);
+        let result = game.apply_root_action(&action, &mut rng);
+        println!("非法 targets 错误: {result:?}");
+        assert!(result.is_err(), "非法 targets 必须返回 Err，不能静默接受");
         Ok(())
     }
 

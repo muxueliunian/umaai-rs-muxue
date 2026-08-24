@@ -4,6 +4,7 @@
 
 ## 2026-08-25
 - **拉面动作空间不变量 + 终局分分解（MCTS 完成计划 P0 安全网）**：钉死 `special_targets` 之和 ≤ 2 与合并候选峰值上限、新增 `Uma::score_parts()` 使 `calc_score` 对其求和、补温泉 CRN 阶段重播种的双向契约测试；顺带删 `MctsTrainer` 死字段 `last_game`、`rollout_batch_size` 标注为未接线空转、阶段 one-hot 预留两个空槽以免将来加阶段改掉输入维度。**输入维度变化（教师数据需重生成），模拟数值逐位不变**
+- **搜索层接受拉面合并动作（P1.1）**：`apply_root_action` 新增合并分支转交 `apply_combined_ramen_decision`，此前合并动作会被通用 `apply_action` 静默清零隐藏风味、连非法组合都照常返回成功；判别式为「`RamenSelect` + `StageOnly` + 携带 targets」，补整局冒烟（该落地入口此前从未在完整育成中跑过）。**三阶段动作逐位不变**
 
 ## 2026-08-24
 - **配置层三处接线修复**：用户 toml 的 `[mcts]` 改为全 Option 覆盖层 + `deny_unknown_fields`（原为完整结构、merge 只拷两项，其余静默失效，而那个残缺 merge 反倒在护着生产参数）；主二进制 onsen 分支改调既有的 `SearchConfig::new_game_config`，不再手抄字段漏掉 `crn_stage_reseed`；补注 `expected_search_stdev` 是 UCB 探索项的缩放标尺而非实测统计量，两处默认值服务不同场景、无需对齐

@@ -10,13 +10,13 @@
 //! [`FlatSearchGame::fork_for_rollout`] 若被漏掉，拉面会每次 rollout 各摸一次
 //! OS 随机数，可复现性与 CRN 一起失效，且**不会有任何报错**。
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use rand::rngs::StdRng;
 
 use crate::game::{
     Game, Trainer,
     onsen::{OnsenTurnStage, game::OnsenGame},
-    ramen::{RamenStage, RamenGame}
+    ramen::{Operation, RamenGame, RamenStage}
 };
 
 /// 一次 rollout 的两种终局评分口径
@@ -150,8 +150,22 @@ impl FlatSearchGame for RamenGame {
     }
 
     /// 与 `run_train` / `run_ramen_select` / `run_special_select` / `run_region_select`
-    /// 保持一致：走策略流而非传入的决策 rng
+    /// 保持一致：走策略流而非传入的决策 rng。
+    ///
+    /// 例外：`RamenSelect` + `StageOnly` + `special_targets.is_some()` 视为合并动作，
+    /// 走 [`RamenGame::apply_combined_ramen_decision`]（`apply_action` 会丢掉 targets）。
+    /// race_turn 一体化动作（`operation` 非 `StageOnly`）仍走策略流。
     fn apply_root_action(&mut self, action: &Self::Action, rng: &mut StdRng) -> Result<()> {
+        // 合并动作判别：RamenSelect 阶段 + StageOnly + 携带 special_targets
+        if self.stage == RamenStage::RamenSelect
+            && matches!(action.operation, Operation::StageOnly)
+            && action.special_targets.is_some()
+        {
+            let targets = action
+                .special_targets
+                .ok_or_else(|| anyhow!("合并动作应携带 special_targets，但为 None"))?;
+            return self.apply_combined_ramen_decision(action.ramen, targets);
+        }
         self.apply_action_with_strategy(action, rng)
     }
 
