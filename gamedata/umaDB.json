@@ -1757,7 +1757,7 @@
       }
     ],
     "gameId": 102003,
-    "name": "[水岸随想甜橙]青云天空",
+    "name": "[海滨的随性甜橙]青云天空",
     "preferRaces": [],
     "preferReds": [],
     "races": [
@@ -6337,7 +6337,7 @@
     ],
     "freeRaces": [],
     "gameId": 107403,
-    "name": "[海边优雅雪纺]目白光明",
+    "name": "[海滨的优雅雪纺]目白光明",
     "preferRaces": [],
     "preferReds": [],
     "races": [
@@ -8763,6 +8763,40 @@
     ],
     "star": 5
   },
+  "111302": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      0,
+      14,
+      8,
+      8
+    ],
+    "fiveStatusInitial": [
+      101,
+      118,
+      116,
+      94,
+      121
+    ],
+    "freeRaces": [],
+    "gameId": 111302,
+    "name": "[掠夺芳心♡]房一潘多拉",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      22,
+      30,
+      33,
+      43,
+      44,
+      56,
+      63,
+      68
+    ],
+    "star": 5
+  },
   "111401": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -9613,6 +9647,41 @@
       43,
       59,
       66,
+      67,
+      69,
+      71
+    ],
+    "star": 5
+  },
+  "114101": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      10,
+      10,
+      0,
+      10
+    ],
+    "fiveStatusInitial": [
+      112,
+      110,
+      115,
+      114,
+      99
+    ],
+    "freeRaces": [],
+    "gameId": 114101,
+    "name": "[命运天选之星]神威启示",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      23,
+      30,
+      33,
+      43,
+      53,
+      59,
       67,
       69,
       71
