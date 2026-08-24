@@ -141,14 +141,10 @@ pub struct Uma {
 
 /// `calc_score()` 的可归因分量分解
 ///
-/// 七个分量之和逐位等于 [`Uma::calc_score`]。用于搜索层的终局归因统计。
+/// 七个分量之和逐位等于 [`Uma::calc_score`]，用于搜索层的终局归因统计。
 ///
-/// 只在 3 项（`skill` / `pt` / `five_status` 之和）或 7 项粒度上保证逐位相等。
-/// PT 项记录的是已经截断成 `i32` 之后的值
-/// `(total_pt() as f32 * pt_score_rate) as i32`，**不可**再拆成 skill_pt 与 hint
-/// 的独立贡献：`total_pt()` 内部有一次 `floor()`，外面又有一次 `as i32` 截断，
-/// 两层截断使其在数学上不可再分。五维记的是查表后的分数
-/// （`five_status_final_score[status]`），不是属性值本身。
+/// PT 项**不可**再拆成 skill_pt 与 hint 的独立贡献：`total_pt()` 内有一次 `floor()`、
+/// 外面又有一次 `as i32`，两层截断使其数学上不可分。五维记的是查表后的分数。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScoreParts {
     /// 技能分（`skill_score` 原值）

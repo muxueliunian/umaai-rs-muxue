@@ -893,10 +893,8 @@ mod tests {
 
     /// 只搜 `ramen`、不搜 `special` 时，合并搜索选出的 targets 仍必须被采用
     ///
-    /// 钉住「缓存检查必须在门控早退之前」这条结构约定。若把 (A) 挪到早退之后，
-    /// `special_select` 门控关闭时 `SpecialSelect` 会直接早退给手写策略，
-    /// 合并搜索选出的 targets 被**静默丢弃**——分数上看不出来，
-    /// 只有 `combined_cache_hits()` 归零才暴露。
+    /// 钉「缓存检查必须在门控早退之前」：挪到早退之后，targets 会被静默丢弃、
+    /// 改由手写策略另选，分数上看不出来，只有 `combined_cache_hits()` 归零才暴露。
     #[test]
     fn test_combined_cache_used_when_special_gate_off() -> Result<()> {
         let seed = 42;

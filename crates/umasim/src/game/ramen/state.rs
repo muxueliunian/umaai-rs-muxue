@@ -238,13 +238,9 @@ impl RamenState {
 
     /// 年度地区选择对应的归档下标（0-based）。
     ///
-    /// **禁止**用 `current_year() - 1` 代替本函数。两者在 turn 23/47 上不一致：
-    /// - turn 2：`current_year()=1`，减 1 得到 0，与本函数相同（第 1 年）
-    /// - turn 23：`current_year()=1`，减 1 得到 0，但选的是第 2 年，本函数返回 1
-    /// - turn 47：`current_year()=2`，减 1 得到 1，但选的是第 3 年，本函数返回 2
-    ///
-    /// 原因：地区选择发生在当年 RMJ 结算之后、`advance_turn` 之前，回合号仍停在年界，
-    /// `current_year()` 还没跨年，但选的已经是下一年的地区。
+    /// **禁止**用 `current_year() - 1` 代替：地区选择发生在当年 RMJ 结算之后、
+    /// `advance_turn` 之前，回合号仍停在年界，`current_year()` 还没跨年但选的已是
+    /// 下一年的地区，故 turn 23/47 上两者差 1。
     pub fn region_archive_year_idx(turn: i32) -> Result<usize> {
         match turn {
             2 => Ok(0),

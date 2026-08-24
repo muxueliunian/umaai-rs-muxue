@@ -72,10 +72,8 @@ pub fn derive_seed(base: u64, parts: &[u64]) -> u64 {
 /// 本函数用的是父流在派生点的**当前取值**，因此局部流内容依赖父流此前消耗了几次：
 /// 它只隔离下游（子算法内部怎么改都不影响父流后续），**隔离不了上游**。
 ///
-/// 超级拉面分身在回合起始附近（父流 counter 稳定）；地区拉面分身在吃面落地时执行，
-/// 父流 counter 取决于此前的动作与事件——此前任何一个策略随机点多消耗一次，
-/// 地区分身的选卡就会整体换掉。要彻底解耦需改成按 `(rule_master, turn, TAG)` 派生，
-/// 那样父流消耗还能降到 0，但需要把 turn 与 rule_master 传进分配函数。
+/// 分身分配已改走 `RamenState::clone_stream` 的 `(rule_master, turn, tag)` 派生绕开
+/// 这条限制（父流消耗降到 0）；本函数留给未注入 rule_master 的回退路径。
 pub fn fork_local_stream(parent: &mut impl RngCore, tag: u64) -> SplitmixRng {
     SplitmixRng::new(derive_seed(parent.next_u64(), &[tag]))
 }
