@@ -101,13 +101,12 @@ fn default_search_stages() -> String {
 
 /// `search_ucb` 缺省值：均匀分配
 ///
-/// 与 `SearchConfig::default()`（UCB 开）相反。原因不是「UCB 更差」，而是
-/// **小预算下 UCB 路径根本不按 `search_n` 记账**：`search_ucb` 第一阶段先给
-/// 每个候选各跑满一组 `search_group_size`（默认 256），随后的终止判据是
-/// `max_planned >= search_n`，`search_n < search_group_size` 时立刻退出。
-/// 于是 `search_n=64` 实际跑成「每候选 256 次的均匀搜索」——超预算 4 倍，
-/// 且自适应分配一次都没发生。要用 UCB 必须同时把 `search_group_size` 调到
-/// 远小于 `search_n`。
+/// 与 `SearchConfig::default()`（UCB 开）相反，原因不是「UCB 更差」，而是
+/// bench 常用的小预算下 UCB 退化成均匀搜索、白付一层调度开销：
+/// `search_ucb` 第一阶段给每个候选各跑一组，终止判据是 `max_planned >= search_n`，
+/// 故 `search_group_size >= search_n` 时首组一结束就退出，自适应分配一次都不发生。
+/// （首组本身已被 clamp 进 `search_n`，不再像早期那样超预算，见 `search_ucb`。）
+/// 要让 UCB 真正起作用，必须把 `search_group_size` 调到远小于 `search_n`。
 fn default_search_ucb() -> bool {
     false
 }
