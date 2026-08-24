@@ -129,6 +129,7 @@ pub struct MctsConfig {
     pub rollout_evaluator: String,
     /// E4：leaf eval 微批大小（仅在 max_depth>0 && rollout_evaluator="nn" 时生效）
     ///
+    /// **当前未接线**：本字段只被写入、从未被搜索逻辑读取。
     /// 经验值：32（与默认 search_group_size 对齐），后续可按模型/CPU 调整。
     #[serde(default = "default_mcts_rollout_batch_size")]
     pub rollout_batch_size: usize,
@@ -137,8 +138,11 @@ pub struct MctsConfig {
     pub policy_delta: f64,
     /// 拉面杯：哪些阶段走搜索（逗号分隔，见 `RamenSearchStages::parse`）
     ///
-    /// 只对 `scenario = "ramen"` + `trainer = "mcts"` 生效。缺省只搜 `train`：
-    /// 拉面一局约 173 个决策点，全搜代价过高。
+    /// 只对 `scenario = "ramen"` + `trainer = "mcts"` 生效。拉面一局约 173 个
+    /// 决策点，全搜代价过高，故按阶段挑。缺省 `train,ramen`：实测只搜 `train`
+    /// 时那 61 个 `RamenSelect` 点一次 rollout 都不跑，补上后 42 局配对
+    /// +2306 分（t=7.94）；同一笔算力加到 `train` 的 `search_n` 上只值 +39
+    /// 分（t=0.14），即 `train` 一侧已饱和。
     #[serde(default = "default_mcts_ramen_search_stages")]
     pub ramen_search_stages: String,
 
@@ -146,13 +150,18 @@ pub struct MctsConfig {
     /// 是否启用 UCB 搜索分配
     #[serde(default = "default_mcts_use_ucb")]
     pub use_ucb: bool,
-    /// UCB 每组搜索次数
+    /// UCB 每组搜索次数（UCB 每组步长）。
+    ///
+    /// 首组大小会被 clamp 进 `search_n`，避免 `search_group_size > search_n` 时首组溢出。
     #[serde(default = "default_mcts_search_group_size")]
     pub search_group_size: usize,
     /// UCB 探索常数 (cpuct)
     #[serde(default = "default_mcts_search_cpuct")]
     pub search_cpuct: f64,
-    /// 预期搜索标准差
+    /// UCB 探索项的缩放标尺（量纲与 score 相同），不是实测统计量。
+    ///
+    /// 生产 toml 取 15000 是有意调猛的探索强度；`SearchConfig::default()` 的 2200
+    /// 是 C++ UmaAi 默认值。二者服务不同场景，不需要对齐。
     #[serde(default = "default_mcts_expected_search_stdev")]
     pub expected_search_stdev: f64,
     /// 是否按 `(回合, 阶段)` 重新播种 rollout 随机流（外挂 CRN，仅 onsen 生效）
@@ -201,9 +210,9 @@ fn default_mcts_rollout_batch_size() -> usize {
     32
 }
 
-/// `ramen_search_stages` 缺省值：只搜训练阶段
+/// `ramen_search_stages` 缺省值：训练 + 吃面
 fn default_mcts_ramen_search_stages() -> String {
-    "train".to_string()
+    "train,ramen".to_string()
 }
 
 fn default_mcts_policy_delta() -> f64 {
@@ -775,12 +784,63 @@ fn default_simulation_count() -> usize {
     1
 }
 
-/// 简化的覆盖配置
+/// 用户覆盖配置（对应 `game_config.toml`）。
+///
+/// `[mcts]` 为可选覆盖层：省略整段时全部字段为 `None`，merge 后保留
+/// `default_config.toml` 的生产参数。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverrideGameConfig {
     pub onsen_order: OnsenOrder,
     pub config_override: OverrideConfig,
-    pub mcts: MctsConfig
+    /// MCTS 可选覆盖（`None` 字段不改写 default）
+    #[serde(default)]
+    pub mcts: OverrideMctsConfig
+}
+
+/// MCTS 覆盖配置：每个字段都是可选覆盖（`None` = 不覆盖 `default_config.toml`）。
+///
+/// `Default` 必须是全 `None`。若任何字段缺省成 `Some(MctsConfig 的代码缺省值)`，
+/// 整段省略 `[mcts]` 时会把 10240/2.0/512/2200/32 打到生产配置上。
+/// `deny_unknown_fields` 让 `[mcts]` 里拼错的键显式报错。
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OverrideMctsConfig {
+    /// 每个动作的搜索次数（可选覆盖）
+    #[serde(default)]
+    pub search_n: Option<usize>,
+    /// 激进度因子最大值（可选覆盖）
+    #[serde(default)]
+    pub radical_factor_max: Option<f64>,
+    /// 最大搜索深度（可选覆盖）
+    #[serde(default)]
+    pub max_depth: Option<usize>,
+    /// leaf eval 评估器开关（可选覆盖）
+    #[serde(default)]
+    pub rollout_evaluator: Option<String>,
+    /// leaf eval 微批大小（可选覆盖）
+    #[serde(default)]
+    pub rollout_batch_size: Option<usize>,
+    /// Policy softmax 温度（可选覆盖）
+    #[serde(default)]
+    pub policy_delta: Option<f64>,
+    /// 拉面杯搜索阶段（可选覆盖）
+    #[serde(default)]
+    pub ramen_search_stages: Option<String>,
+    /// 是否启用 UCB 搜索分配（可选覆盖）
+    #[serde(default)]
+    pub use_ucb: Option<bool>,
+    /// UCB 每组搜索次数（可选覆盖）
+    #[serde(default)]
+    pub search_group_size: Option<usize>,
+    /// UCB 探索常数 cpuct（可选覆盖）
+    #[serde(default)]
+    pub search_cpuct: Option<f64>,
+    /// UCB 探索项缩放标尺（可选覆盖）
+    #[serde(default)]
+    pub expected_search_stdev: Option<f64>,
+    /// 是否按阶段重播种 rollout 随机流（可选覆盖）
+    #[serde(default)]
+    pub crn_stage_reseed: Option<bool>
 }
 
 /// 简化的覆盖配置 - GameConfig部分
@@ -859,16 +919,54 @@ impl OverrideGameConfig {
         if let Some(v) = o.race_grades {
             ret.race_grades = v;
         }
-        ret.mcts.search_n = self.mcts.search_n;
-        ret.mcts.radical_factor_max = self.mcts.radical_factor_max;
+        let m = self.mcts;
+        if let Some(v) = m.search_n {
+            ret.mcts.search_n = v;
+        }
+        if let Some(v) = m.radical_factor_max {
+            ret.mcts.radical_factor_max = v;
+        }
+        if let Some(v) = m.max_depth {
+            ret.mcts.max_depth = v;
+        }
+        if let Some(v) = m.rollout_evaluator {
+            ret.mcts.rollout_evaluator = v;
+        }
+        if let Some(v) = m.rollout_batch_size {
+            ret.mcts.rollout_batch_size = v;
+        }
+        if let Some(v) = m.policy_delta {
+            ret.mcts.policy_delta = v;
+        }
+        if let Some(v) = m.ramen_search_stages {
+            ret.mcts.ramen_search_stages = v;
+        }
+        if let Some(v) = m.use_ucb {
+            ret.mcts.use_ucb = v;
+        }
+        if let Some(v) = m.search_group_size {
+            ret.mcts.search_group_size = v;
+        }
+        if let Some(v) = m.search_cpuct {
+            ret.mcts.search_cpuct = v;
+        }
+        if let Some(v) = m.expected_search_stdev {
+            ret.mcts.expected_search_stdev = v;
+        }
+        if let Some(v) = m.crn_stage_reseed {
+            ret.mcts.crn_stage_reseed = v;
+        }
         ret
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use anyhow::ensure;
+    use fs_err::read_to_string;
+
+    use super::*;
+    use crate::{trainer::RamenSearchStages, utils::Checks};
 
     /// 构造全 None 的覆盖配置（= 不覆盖任何字段）。
     fn empty_override() -> OverrideConfig {
@@ -890,8 +988,34 @@ mod tests {
         OverrideGameConfig {
             onsen_order: OnsenOrder::default(),
             config_override: cfg,
-            mcts: MctsConfig::default()
+            mcts: OverrideMctsConfig::default()
         }
+    }
+
+    /// 从 workspace 根目录加载真实的 `gamedata/default_config.toml`。
+    fn load_real_default() -> Result<GameConfig> {
+        let path = crate::utils::get_workspace_root()?.join("gamedata/default_config.toml");
+        let text = read_to_string(&path)?;
+        Ok(toml::from_str(&text)?)
+    }
+
+    /// 打印 12 个 MCTS 字段，便于验收对照。
+    fn dump_mcts(label: &str, m: &MctsConfig) {
+        println!(
+            "{label}: search_n={} radical_factor_max={} max_depth={} rollout_evaluator={} rollout_batch_size={} policy_delta={} ramen_search_stages={} use_ucb={} search_group_size={} search_cpuct={} expected_search_stdev={} crn_stage_reseed={}",
+            m.search_n,
+            m.radical_factor_max,
+            m.max_depth,
+            m.rollout_evaluator,
+            m.rollout_batch_size,
+            m.policy_delta,
+            m.ramen_search_stages,
+            m.use_ucb,
+            m.search_group_size,
+            m.search_cpuct,
+            m.expected_search_stdev,
+            m.crn_stage_reseed
+        );
     }
 
     /// 全 None 不覆盖：merge 后与 default 完全一致。
@@ -943,10 +1067,230 @@ bogus_field = 1
 
 [onsen_order]
 year1 = [1, 2, 3]
+year2 = []
+year3 = []
 "#;
         let result: Result<OverrideGameConfig, _> = toml::from_str(text);
         println!("未知字段解析结果 = {}", result.is_err());
         ensure!(result.is_err(), "未知字段应报错而非静默忽略");
         Ok(())
+    }
+
+    /// 对照：同样的 toml 去掉 `bogus_field`（且无 `[mcts]`）必须解析成功。
+    ///
+    /// 锁住「报错原因是未知字段，不是缺 `[mcts]`」。
+    #[test]
+    fn test_override_config_parses_without_mcts_or_bogus() -> Result<()> {
+        let text = r#"
+[config_override]
+uma = 100901
+
+[onsen_order]
+year1 = [1, 2, 3]
+year2 = []
+year3 = []
+"#;
+        let result: Result<OverrideGameConfig, _> = toml::from_str(text);
+        println!("无 bogus / 无 [mcts] 解析 = {:?}", result.as_ref().map(|_| "ok"));
+        let mut c = Checks::new();
+        c.check(result.is_ok(), "去掉 bogus_field 后应解析成功（[mcts] 可省略）");
+        c.finish()
+    }
+
+    /// 日常路径回归：真实 default_config.toml + 只覆盖 search_n / radical_factor_max。
+    ///
+    /// 若 merge 改成整段赋值，`search_group_size` 会变成 512、`expected_search_stdev`
+    /// 变成 2200，本测试必须红。
+    #[test]
+    fn test_mcts_override_daily_path_keeps_production() -> Result<()> {
+        let base = load_real_default()?;
+        let text = r#"
+[config_override]
+uma = 101901
+
+[onsen_order]
+year1 = [1, 3, 2]
+year2 = [7, 5, 4, 2]
+year3 = [8, 9, 4, 2, 6]
+
+[mcts]
+search_n = 12288
+radical_factor_max = 1.4
+"#;
+        let ov: OverrideGameConfig = toml::from_str(text)?;
+        let merged = ov.merge(&base);
+        dump_mcts("日常路径 merge 后", &merged.mcts);
+        let mut c = Checks::new();
+        c.check(merged.mcts.search_group_size == 2048, "search_group_size == 2048");
+        c.check(
+            merged.mcts.expected_search_stdev == 15000.0,
+            "expected_search_stdev == 15000.0"
+        );
+        c.check(merged.mcts.rollout_batch_size == 64, "rollout_batch_size == 64");
+        c.check(merged.mcts.search_n == 12288, "search_n == 12288");
+        c.check(merged.mcts.radical_factor_max == 1.4, "radical_factor_max == 1.4");
+        c.finish()
+    }
+
+    /// 整段省略 `[mcts]`：解析成功，12 个字段全部保留 default_config.toml。
+    ///
+    /// 若 `OverrideMctsConfig` 某字段 Default 改成 `Some(缺省值)`，本测试必须红。
+    #[test]
+    fn test_mcts_override_omitted_section_keeps_all_twelve() -> Result<()> {
+        let base = load_real_default()?;
+        let text = r#"
+[config_override]
+uma = 101901
+
+[onsen_order]
+year1 = [1, 3, 2]
+year2 = [7, 5, 4, 2]
+year3 = [8, 9, 4, 2, 6]
+"#;
+        let ov: OverrideGameConfig = toml::from_str(text)?;
+        let mut c = Checks::new();
+        // 不与 OverrideMctsConfig::default() 比较：那是同义反复，Default 被改坏也发现不了
+        c.check(
+            ov.mcts.search_n.is_none()
+                && ov.mcts.radical_factor_max.is_none()
+                && ov.mcts.max_depth.is_none()
+                && ov.mcts.rollout_evaluator.is_none()
+                && ov.mcts.rollout_batch_size.is_none()
+                && ov.mcts.policy_delta.is_none()
+                && ov.mcts.ramen_search_stages.is_none()
+                && ov.mcts.use_ucb.is_none()
+                && ov.mcts.search_group_size.is_none()
+                && ov.mcts.search_cpuct.is_none()
+                && ov.mcts.expected_search_stdev.is_none()
+                && ov.mcts.crn_stage_reseed.is_none(),
+            "省略 [mcts] 时 12 个覆盖字段全为 None"
+        );
+        let merged = ov.merge(&base);
+        dump_mcts("省略 [mcts] merge 后", &merged.mcts);
+        dump_mcts("default_config.toml 原文", &base.mcts);
+        c.check(merged.mcts.search_n == base.mcts.search_n, "search_n 保留 toml");
+        c.check(
+            merged.mcts.radical_factor_max == base.mcts.radical_factor_max,
+            "radical_factor_max 保留 toml"
+        );
+        c.check(merged.mcts.max_depth == base.mcts.max_depth, "max_depth 保留 toml");
+        c.check(
+            merged.mcts.rollout_evaluator == base.mcts.rollout_evaluator,
+            "rollout_evaluator 保留 toml"
+        );
+        c.check(
+            merged.mcts.rollout_batch_size == base.mcts.rollout_batch_size,
+            "rollout_batch_size 保留 toml"
+        );
+        c.check(
+            merged.mcts.policy_delta == base.mcts.policy_delta,
+            "policy_delta 保留 toml"
+        );
+        c.check(
+            merged.mcts.ramen_search_stages == base.mcts.ramen_search_stages,
+            "ramen_search_stages 保留 toml"
+        );
+        c.check(merged.mcts.use_ucb == base.mcts.use_ucb, "use_ucb 保留 toml");
+        c.check(
+            merged.mcts.search_group_size == base.mcts.search_group_size,
+            "search_group_size 保留 toml"
+        );
+        c.check(
+            merged.mcts.search_cpuct == base.mcts.search_cpuct,
+            "search_cpuct 保留 toml"
+        );
+        c.check(
+            merged.mcts.expected_search_stdev == base.mcts.expected_search_stdev,
+            "expected_search_stdev 保留 toml"
+        );
+        c.check(
+            merged.mcts.crn_stage_reseed == base.mcts.crn_stage_reseed,
+            "crn_stage_reseed 保留 toml"
+        );
+        c.finish()
+    }
+
+    /// `[mcts]` 里写未知键必须解析报错。
+    #[test]
+    fn test_mcts_override_denies_unknown_fields() -> Result<()> {
+        let text = r#"
+[config_override]
+uma = 101901
+
+[onsen_order]
+year1 = [1]
+year2 = []
+year3 = []
+
+[mcts]
+bogus = 1
+"#;
+        let result: Result<OverrideGameConfig, _> = toml::from_str(text);
+        println!("[mcts] 未知键解析结果 = {}", result.is_err());
+        if let Err(e) = &result {
+            println!("[mcts] 未知键错误: {e}");
+        }
+        let mut c = Checks::new();
+        c.check(result.is_err(), "[mcts] 未知键应报错");
+        c.finish()
+    }
+
+    /// 逐字段覆盖真的生效。
+    #[test]
+    fn test_mcts_override_partial_fields_apply() -> Result<()> {
+        let base = load_real_default()?;
+        let text = r#"
+[config_override]
+uma = 101901
+
+[onsen_order]
+year1 = [1]
+year2 = []
+year3 = []
+
+[mcts]
+search_group_size = 777
+crn_stage_reseed = false
+ramen_search_stages = "train,region"
+"#;
+        let ov: OverrideGameConfig = toml::from_str(text)?;
+        let merged = ov.merge(&base);
+        dump_mcts("逐字段覆盖 merge 后", &merged.mcts);
+        let mut c = Checks::new();
+        c.check(merged.mcts.search_group_size == 777, "search_group_size 覆盖为 777");
+        c.check(!merged.mcts.crn_stage_reseed, "crn_stage_reseed 覆盖为 false");
+        c.check(
+            merged.mcts.ramen_search_stages == "train,region",
+            "ramen_search_stages 覆盖为 train,region"
+        );
+        c.check(merged.mcts.search_n == base.mcts.search_n, "未写的 search_n 保留 toml");
+        c.check(
+            merged.mcts.expected_search_stdev == base.mcts.expected_search_stdev,
+            "未写的 expected_search_stdev 保留 toml"
+        );
+        c.finish()
+    }
+
+    /// 生产缺省必须搜 `ramen`：42 局配对实测 `train,ramen` 比只搜 `train` 高 +2306 分
+    /// （t=7.94），而同算力加到 `train` 的 `search_n` 上只值 +39 分。漏掉它分数上
+    /// 看不出是配置的锅。serde 缺省与 `default_config.toml` 两个真值源都要钉。
+    #[test]
+    fn test_production_default_searches_ramen_stage() -> Result<()> {
+        let base = load_real_default()?;
+        let serde_default = MctsConfig::default();
+        println!("toml       ramen_search_stages = {:?}", base.mcts.ramen_search_stages);
+        println!("serde 缺省 ramen_search_stages = {:?}", serde_default.ramen_search_stages);
+
+        // 解析成结构体再判，避免把 "train,ramen" 写死成字符串比较：
+        // 上游哪天改成 "ramen,train" 或加空格，语义没变就不该红。
+        let from_toml = RamenSearchStages::parse(&base.mcts.ramen_search_stages)?;
+        let from_serde = RamenSearchStages::parse(&serde_default.ramen_search_stages)?;
+
+        let mut c = Checks::new();
+        c.check(from_toml.train, "toml 缺省搜 train");
+        c.check(from_toml.ramen_select, "toml 缺省搜 ramen（值 +2306 分）");
+        c.check(from_serde.train, "serde 缺省搜 train");
+        c.check(from_serde.ramen_select, "serde 缺省搜 ramen（值 +2306 分）");
+        c.finish()
     }
 }

@@ -25,9 +25,9 @@ use crate::{
         GAMECONSTANTS,
         GAMEDATA,
         GameConfig,
-        MctsConfig,
         OverrideConfig,
-        OverrideGameConfig
+        OverrideGameConfig,
+        OverrideMctsConfig
     }
 };
 
@@ -417,6 +417,30 @@ pub fn validate_game_config(config: &GameConfig) -> Result<()> {
     Ok(())
 }
 
+/// 用户配置文件不存在时的覆盖层：所有覆盖字段为 `None`，merge 后完整保留 `default_config.toml`。
+///
+/// 本函数**不走 serde**，因此 `#[serde(default)]` 碰不到这条路径；
+/// `mcts` 必须是 [`OverrideMctsConfig::default`]（全 `None`），
+/// 不能写成带代码缺省值的 `MctsConfig`。
+pub(crate) fn fallback_override_game_config() -> OverrideGameConfig {
+    OverrideGameConfig {
+        onsen_order: OnsenOrder::default(),
+        config_override: OverrideConfig {
+            uma: None,
+            cards: None,
+            blue_count: None,
+            extra_count: None,
+            mcts_selected_onsen: None,
+            log_level: None,
+            num_threads: None,
+            mcts_turn_bonus: None,
+            pt_favor_rate: None,
+            race_grades: None
+        },
+        mcts: OverrideMctsConfig::default()
+    }
+}
+
 /// 载入 gamedata/default_config.toml, 和 game_config.toml 合并
 pub fn load_game_config() -> Result<GameConfig> {
     let def_path = resolve_default_config_path();
@@ -434,22 +458,7 @@ pub fn load_game_config() -> Result<GameConfig> {
             "用户配置不存在（{}），使用默认配置 + OverrideGameConfig 兜底",
             cfg_path.display()
         );
-        OverrideGameConfig {
-            onsen_order: OnsenOrder::default(),
-            config_override: OverrideConfig {
-                uma: None,
-                cards: None,
-                blue_count: None,
-                extra_count: None,
-                mcts_selected_onsen: None,
-                log_level: None,
-                num_threads: None,
-                mcts_turn_bonus: None,
-                pt_favor_rate: None,
-                race_grades: None
-            },
-            mcts: MctsConfig::default()
-        }
+        fallback_override_game_config()
     };
 
     let merged = override_config.merge(&default_config);
@@ -460,6 +469,36 @@ pub fn load_game_config() -> Result<GameConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 缺文件兜底：手写构造路径 merge 后必须是生产值 12288 / 1.4，不是代码缺省 10240 / 2.0。
+    ///
+    /// 若把兜底改回 `MctsConfig::default()` 的等价物（`Some(10240)` / `Some(2.0)`），本测试必须红。
+    #[test]
+    fn test_missing_user_config_keeps_production_mcts() -> Result<()> {
+        let root = get_workspace_root()?;
+        let def_path = root.join("gamedata").join("default_config.toml");
+        let default_config: GameConfig = toml::from_str(&fs_err::read_to_string(&def_path)?)?;
+        let merged = fallback_override_game_config().merge(&default_config);
+        println!(
+            "缺文件兜底 merge: search_n={} radical_factor_max={} search_group_size={} expected_search_stdev={} rollout_batch_size={}",
+            merged.mcts.search_n,
+            merged.mcts.radical_factor_max,
+            merged.mcts.search_group_size,
+            merged.mcts.expected_search_stdev,
+            merged.mcts.rollout_batch_size
+        );
+        let mut c = Checks::new();
+        c.check(merged.mcts.search_n == 12288, "缺文件兜底 search_n == 12288（不是 10240）");
+        c.check(
+            merged.mcts.radical_factor_max == 1.4,
+            "缺文件兜底 radical_factor_max == 1.4（不是 2.0）"
+        );
+        c.check(
+            merged.mcts.search_group_size == default_config.mcts.search_group_size,
+            "缺文件兜底不践踏 search_group_size"
+        );
+        c.finish()
+    }
 
     #[test]
     fn test_validate_game_config_scenario_enum() {

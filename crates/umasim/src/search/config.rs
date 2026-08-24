@@ -22,8 +22,10 @@ pub struct SearchConfig {
 
     /// 激进度因子最大值
     ///
-    /// 每次搜索会随机生成 [0, radical_factor_max] 范围的激进度。
-    /// 激进度越高，越倾向选择高分高风险的动作。
+    /// 每次搜索按回合**确定性衰减**，不是随机生成：
+    /// `radical_factor = (剩余回合 / 总回合)^0.5 * radical_factor_max`。
+    /// 激进度越高，越倾向选择高分高风险的动作
+    /// （`weighted_mean(radical_factor)` 的 rank 加权指数越大越偏向高分尾部）。
     /// C++ UmaAi 默认值: 50.0
     pub radical_factor_max: f64,
 
@@ -163,5 +165,41 @@ impl SearchConfig {
             .with_expected_search_stdev(game_config.mcts.expected_search_stdev)
             .with_crn_stage_reseed(game_config.mcts.crn_stage_reseed);
         search_config
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use anyhow::Result;
+    use fs_err::read_to_string;
+
+    use super::*;
+    use crate::utils::{Checks, get_workspace_root};
+
+    /// 从 workspace 根目录加载真实的 `gamedata/default_config.toml`。
+    fn load_real_default() -> Result<GameConfig> {
+        let path = get_workspace_root()?.join("gamedata/default_config.toml");
+        let text = read_to_string(path)?;
+        Ok(toml::from_str(&text)?)
+    }
+
+    /// `new_game_config` 必须转发 `crn_stage_reseed`。
+    ///
+    /// 删掉 `.with_crn_stage_reseed(...)` 后 `SearchConfig::default()` 会留下 `true`，本测试必须红。
+    #[test]
+    fn test_new_game_config_follows_crn_stage_reseed() -> Result<()> {
+        let mut game = load_real_default()?;
+        game.mcts.crn_stage_reseed = false;
+        let sc = SearchConfig::new_game_config(&game);
+        println!(
+            "new_game_config crn_stage_reseed = {} (GameConfig 侧 = {})",
+            sc.crn_stage_reseed, game.mcts.crn_stage_reseed
+        );
+        let mut c = Checks::new();
+        c.check(
+            !sc.crn_stage_reseed,
+            "crn_stage_reseed 跟随 GameConfig 的 false"
+        );
+        c.finish()
     }
 }

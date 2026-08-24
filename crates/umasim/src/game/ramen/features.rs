@@ -62,8 +62,8 @@ pub const CARD_NUM: usize = 6;
 /// 固定为最大值并用「已登场」掩码位标记，使维度恒定；未登场的整行为 0。
 pub const PERSON_NUM: usize = 13;
 
-/// global 段：回合与阶段
-const G_TURN: usize = 16;
+/// global 段：回合与阶段（2 个 num + [`YEAR_NUM`] + [`STAGE_NUM`]）
+const G_TURN: usize = 18;
 /// global 段：马娘面板
 const G_UMA: usize = 27;
 /// global 段：马娘 buff 状态
@@ -148,8 +148,12 @@ const TRAIN_TYPE_NUM: usize = 6;
 const CARD_TYPE_NUM: usize = 7;
 /// [`PersonType`] 变体数
 const PERSON_TYPE_NUM: usize = 7;
-/// [`RamenStage`] 变体数
-const STAGE_NUM: usize = 10;
+/// [`RamenStage`] 变体数 + **2 个预留空槽**。
+///
+/// 预留是为了将来拆分阶段（如把 `Begin` 拆成两个变体以支持第 1 年地区选择进搜索）时
+/// **只填空槽、不改 [`INPUT_DIM`]**，避免已落盘的教师数据作废。
+/// 新增变体时只需在 [`stage_index`] 里给它分配一个 ≥ 10 的下标，本常量不动。
+const STAGE_NUM: usize = 12;
 /// 年份分档数（年 1 / 年 2 / 年 3 / URA）
 const YEAR_NUM: usize = 4;
 /// 干劲档位数（1-5）
@@ -772,6 +776,28 @@ mod tests {
             "INPUT_DIM 必须等于 global + cards + persons 三段之和"
         );
         c.finish()
+    }
+
+    /// P0.5：`STAGE_NUM` 预留空槽后 `INPUT_DIM == 754`，且大于 `RamenStage` 实际变体数
+    #[test]
+    fn test_stage_num_reserve_slots() -> Result<()> {
+        let n_stage = enum_iterator::cardinality::<RamenStage>();
+        println!("RamenStage 变体数 {n_stage}");
+        println!("STAGE_NUM = {STAGE_NUM}");
+        println!("G_TURN = {G_TURN}");
+        println!("GLOBAL_DIM = {GLOBAL_DIM}");
+        println!("INPUT_DIM = {INPUT_DIM}");
+        assert_eq!(INPUT_DIM, 754, "预留 2 个阶段空槽后 INPUT_DIM 必须为 754");
+        assert!(
+            STAGE_NUM > n_stage,
+            "STAGE_NUM={STAGE_NUM} 必须大于 RamenStage 变体数 {n_stage}"
+        );
+        assert_eq!(
+            G_TURN,
+            2 + YEAR_NUM + STAGE_NUM,
+            "G_TURN 必须等于 2 个 num + YEAR_NUM + STAGE_NUM"
+        );
+        Ok(())
     }
 
     /// 开局局面能编码，长度恒为 INPUT_DIM，且不含 NaN / Inf

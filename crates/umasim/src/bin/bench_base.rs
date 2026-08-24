@@ -20,8 +20,8 @@
 //!
 //! # 产出（默认 `logs/`）
 //!
-//! - `bench_base_results.csv`：每局一行（build、seed、分数、rank、五维、PT、RMJ、自选比赛达标、
-//!   吃面数、耗时）
+//! - `bench_base_results.csv`：每局一行（build、seed、分数、rank、五维、逐年 PT/吃面/地区、
+//!   RMJ、自选比赛达标、耗时）
 //! - `bench_base_decision_<build>_<seed>.csv`：仅 `--log` 时，每局一份决策轨迹
 //! - 汇总打印：各 build 分组分数分布（mean/median/min/max/std）、RMJ 成功年数、自选比赛达标率、
 //!   按阶段分组的决策耗时、吞吐
@@ -30,7 +30,7 @@ use anyhow::{Context, Result};
 use lexopt::Arg;
 use serde::Deserialize;
 use umasim::{
-    bench::{self, CardPickOpts, load_player_builds},
+    bench::{self, CardPickOpts, RESULTS_HEADER, load_player_builds, outcome_to_row},
     game::InheritInfo,
     gamedata::{GAMEDATA, init_global_with_config},
     global,
@@ -96,18 +96,17 @@ fn default_search_n() -> usize {
 
 /// `search_stages` 缺省值：只搜训练阶段（决策点最多、单点信息量最大）
 fn default_search_stages() -> String {
-    "train".to_string()
+    "train,ramen".to_string()
 }
 
 /// `search_ucb` 缺省值：均匀分配
 ///
-/// 与 `SearchConfig::default()`（UCB 开）相反。原因不是「UCB 更差」，而是
-/// **小预算下 UCB 路径根本不按 `search_n` 记账**：`search_ucb` 第一阶段先给
-/// 每个候选各跑满一组 `search_group_size`（默认 256），随后的终止判据是
-/// `max_planned >= search_n`，`search_n < search_group_size` 时立刻退出。
-/// 于是 `search_n=64` 实际跑成「每候选 256 次的均匀搜索」——超预算 4 倍，
-/// 且自适应分配一次都没发生。要用 UCB 必须同时把 `search_group_size` 调到
-/// 远小于 `search_n`。
+/// 与 `SearchConfig::default()`（UCB 开）相反，原因不是「UCB 更差」，而是
+/// bench 常用的小预算下 UCB 退化成均匀搜索、白付一层调度开销：
+/// `search_ucb` 第一阶段给每个候选各跑一组，终止判据是 `max_planned >= search_n`，
+/// 故 `search_group_size >= search_n` 时首组一结束就退出，自适应分配一次都不发生。
+/// （首组本身已被 clamp 进 `search_n`，不再像早期那样超预算，见 `search_ucb`。）
+/// 要让 UCB 真正起作用，必须把 `search_group_size` 调到远小于 `search_n`。
 fn default_search_ucb() -> bool {
     false
 }
@@ -138,25 +137,6 @@ impl Default for BenchConfig {
         }
     }
 }
-
-/// results CSV 表头
-const RESULTS_HEADER: [&str; 15] = [
-    "build",
-    "seed",
-    "score",
-    "rank",
-    "speed",
-    "stamina",
-    "power",
-    "guts",
-    "wisdom",
-    "skill_pt",
-    "scenario_pt",
-    "rmj_ok",
-    "free_race_ok",
-    "eat_count",
-    "elapsed_ms"
-];
 
 /// 解析 CLI 参数（`--key value` 或 `--key=value`），覆盖 bench 配置
 fn apply_cli(mut cfg: BenchConfig) -> Result<BenchConfig> {
@@ -208,27 +188,6 @@ fn load_bench_config(workspace_root: &std::path::Path) -> Result<BenchConfig> {
         println!("提示: 未找到 bench_config.toml，使用内置默认参数");
         Ok(BenchConfig::default())
     }
-}
-
-/// 单局结果转 CSV 行（不含表头）
-fn outcome_to_row(build: &str, outcome: &bench::GameOutcome) -> Vec<String> {
-    vec![
-        build.to_string(),
-        outcome.seed.to_string(),
-        outcome.score.to_string(),
-        outcome.rank.clone(),
-        outcome.five_status[0].to_string(),
-        outcome.five_status[1].to_string(),
-        outcome.five_status[2].to_string(),
-        outcome.five_status[3].to_string(),
-        outcome.five_status[4].to_string(),
-        outcome.skill_pt.to_string(),
-        outcome.scenario_pt.to_string(),
-        outcome.rmj_ok.to_string(),
-        u8::from(outcome.free_race_ok).to_string(),
-        outcome.eat_count.to_string(),
-        format!("{:.3}", outcome.elapsed_ms),
-    ]
 }
 
 /// 按决策阶段分组统计耗时（mean us / max us / 次数），按阶段名排序
@@ -352,12 +311,14 @@ fn main() -> Result<()> {
                 other => anyhow::bail!("未知 trainer: {other}（可选 random / handwritten / mcts）")
             };
             println!(
-                "  [#{:02}] seed={} score={} ({}) PT={} RMJ={}/3 自选比赛={} 耗时={:.3}ms",
+                "  [#{:02}] seed={} score={} ({}) PT={}/{}/{} RMJ={}/3 自选比赛={} 耗时={:.3}ms",
                 i + 1,
                 outcome.seed,
                 outcome.score,
                 outcome.rank,
-                outcome.scenario_pt,
+                outcome.yearly_scenario_pt[0],
+                outcome.yearly_scenario_pt[1],
+                outcome.yearly_scenario_pt[2],
                 outcome.rmj_ok,
                 if outcome.free_race_ok { "达标" } else { "未达标" },
                 outcome.elapsed_ms,

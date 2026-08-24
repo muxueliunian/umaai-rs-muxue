@@ -5,7 +5,7 @@
 //! - 均匀分配：每个动作平均分配搜索次数（并行化）
 //! - UCB 分配：根据 UCB 公式动态分配搜索资源（C++ UmaAi 风格）
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Result, bail, ensure};
 use log::{debug, warn};
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
@@ -78,6 +78,10 @@ where
     config: SearchConfig,
 
     /// E4：leaf eval 微批大小（仅在 max_depth>0 && leaf_eval=nn 时生效）
+    ///
+    /// **当前未接线**：本字段只被写入、从未被搜索逻辑读取。
+    /// 原设计意图是批量推理（NN 评估器批处理），待 rollout 评估器接入后再消费。
+    /// 配置链（`MctsConfig::rollout_batch_size` → `with_rollout_batch_size`）同样是空转。
     rollout_batch_size: usize
 }
 
@@ -236,14 +240,19 @@ where
         &self.rollout_trainer
     }
 
-    /// 通用单次 rollout：执行动作后跑到终局
+    /// 双种子 rollout：决策 RNG 与规则层 `rule_master` 可分开
     ///
-    /// 只处理 `max_depth == 0`；截断估值需要 leaf 估值器，属剧本专属能力。
-    /// 分支一律经 [`FlatSearchGame::fork_for_rollout`] 建立，不得直接 `clone()`
-    /// ——那会漏掉剧本内部随机流的重置。
-    pub fn simulate_common(&self, game: &G, action: &G::Action, seed: u64) -> Result<SearchScore> {
-        let rng = &mut StdRng::seed_from_u64(seed);
-        let mut sim_game = game.fork_for_rollout(seed);
+    /// 生产路径 [`Self::simulate_common`] 传入相同的两个值，保持既有 CRN
+    /// （各候选第 j 次 rollout 共享 `seed_at(j)`）。测量对照把 `rule_master`
+    /// 按候选派生，从而拆开「共享规则层随机未来」与「独立抽样」。
+    ///
+    /// **不改变** [`RolloutSeeds::seed_at`] 与 [`FlatSearchGame::fork_for_rollout`]
+    /// 的生产语义。
+    pub fn simulate_common_with_seeds(
+        &self, game: &G, action: &G::Action, decision_seed: u64, rule_master: u64
+    ) -> Result<SearchScore> {
+        let rng = &mut StdRng::seed_from_u64(decision_seed);
+        let mut sim_game = game.fork_for_rollout(rule_master);
         // 必须走剧本的真实对局路径（拉面 = 策略流），不能用通用 apply_action
         sim_game.apply_root_action(action, rng)?;
         while sim_game.next() {
@@ -251,6 +260,19 @@ where
         }
         sim_game.on_simulation_end(&self.rollout_trainer, rng)?;
         Ok(sim_game.search_score())
+    }
+
+    /// 通用单次 rollout：执行动作后跑到终局
+    ///
+    /// 只处理 `max_depth == 0`；截断估值需要 leaf 估值器，属剧本专属能力。
+    /// 分支一律经 [`FlatSearchGame::fork_for_rollout`] 建立，不得直接 `clone()`
+    /// ——那会漏掉剧本内部随机流的重置。
+    ///
+    /// 决策 RNG 与规则层 `rule_master` 使用同一 `seed`，这是生产 CRN：
+    /// 各候选第 j 次 rollout 共享 `seed_at(j)`。对照实验请走
+    /// [`Self::simulate_common_with_seeds`]。
+    pub fn simulate_common(&self, game: &G, action: &G::Action, seed: u64) -> Result<SearchScore> {
+        self.simulate_common_with_seeds(game, action, seed, seed)
     }
 
     /// 均匀分配搜索（并行化）
@@ -342,8 +364,15 @@ where
     {
         let num_actions = actions.len();
         let mut action_results: Vec<(ActionResult, ActionResult)> = vec![Default::default(); num_actions];
-        let group_size = self.config.search_group_size;
-        ensure!(group_size > 0, "search_group_size 不能为 0（UCB 分配会死循环）");
+        ensure!(
+            self.config.search_group_size > 0,
+            "search_group_size 不能为 0（UCB 分配会死循环）"
+        );
+        // 首组不得越过 search_n：否则 group_size > search_n 时每候选先跑满一组
+        // 已经超预算，且 max_planned >= search_n 立刻成立，自适应零次。
+        // 只收紧本函数的局部步长，不改 SearchConfig 字段——均匀路径不读
+        // group_size，配置对象应保持调用方写入的原值。
+        let group_size = self.config.search_group_size.min(self.config.search_n).max(1);
         let use_parallel = self.use_parallel_simulation();
 
         // 各候选**已计划**的 rollout 次数（≠ 已成功次数）
@@ -688,13 +717,15 @@ impl FlatSearch<RamenGame> {
     /// 已是正规回合阶段（`run_stage` -> `list_actions` -> `select_action`），
     /// 不像温泉 `Dig`/`Upgrade` 那样需要特判。
     ///
-    /// # Phase 1 范围限制
+    /// # 动作空间
     ///
-    /// 只接受 [`Game::list_actions`] 产出的**标准分阶段动作**。
-    /// `list_combined_ramen_select_actions()` 的合并动作**不可**传入：
-    /// 通用 `apply_action` 在 `RamenSelect` 只写 `pending_ramen`、清零
-    /// `special_targets`，**不设 `combined_decision`**，会静默丢掉隐藏风味。
-    /// 合并动作需走 `apply_combined_ramen_decision`，留待 Phase 2。
+    /// 同时接受三阶段动作与合并动作。判别式：
+    /// `RamenSelect` 阶段 + `StageOnly` + `special_targets.is_some()` → 合并动作，
+    /// 由 [`FlatSearchGame::apply_root_action`] 转交 `apply_combined_ramen_decision`。
+    /// 其余动作仍走 `apply_action_with_strategy`。
+    ///
+    /// **不要在同一次搜索的候选表里混用两种动作**：混用会让搜索在语义不一致的
+    /// 动作空间上比较，虽然技术上不会崩。
     pub fn search(
         &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
     ) -> Result<SearchOutput<RamenAction>> {
@@ -781,16 +812,18 @@ impl<'a> crate::game::Trainer<OnsenGame> for SimulationTrainer<'a> {
 mod tests {
     use std::cell::RefCell;
 
+    use anyhow::anyhow;
     use rand::SeedableRng;
 
     use super::*;
     use crate::{
         game::{
             InheritInfo, Trainer,
-            ramen::{RamenAction, RamenGame}
+            ramen::{RamenAction, RamenGame, RamenStage}
         },
         gamedata::init_global,
-        utils::{get_workspace_root, init_test_logger}
+        rng::derive_seed,
+        utils::{Checks, get_workspace_root, init_test_logger}
     };
 
     /// 单个候选的统计摘要（回归比对的最小单元）
@@ -1169,73 +1202,618 @@ mod tests {
         Ok(())
     }
 
-    /// CRN 收益实测（拉面 / 目标剧本）
+    /// 构造处于 `RamenSelect`、库存富余、三面可选的局面（P1.1 单测用）
+    fn ramen_select_ready() -> Result<RamenGame> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let inherit = InheritInfo {
+            blue_count: [12, 0, 0, 0, 6],
+            extra_count: [10, 0, 0, 20, 20, 40]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let mut game = RamenGame::newgame(102601, &deck, inherit)?;
+        game.base.turn = 2;
+        game.ramen.feeling_stock = [5, 5, 5];
+        game.ramen.special_feeling = 2;
+        game.ramen.selected_regions = [0, 1, 2];
+        game.stage = RamenStage::RamenSelect;
+        Ok(game)
+    }
+
+    /// P1.1 测试 1：合并动作经 `apply_root_action` 真正写入 targets，不会被清零
+    #[test]
+    fn test_ramen_combined_action_preserves_targets() -> Result<()> {
+        let mut combined_game = ramen_select_ready()?;
+        let mut three_game = combined_game.clone();
+        let mut rng = StdRng::seed_from_u64(0);
+
+        let actions = combined_game.list_combined_ramen_select_actions();
+        let action = actions
+            .iter()
+            .copied()
+            .find(|a| a.ramen.is_some() && matches!(a.special_targets, Some(t) if t != [0, 0, 0]))
+            .ok_or_else(|| anyhow!("库存富余下应存在非全零 targets 的合并动作"))?;
+        println!(
+            "选用合并动作: ramen={:?} special_targets={:?}",
+            action.ramen, action.special_targets
+        );
+
+        combined_game.apply_root_action(&action, &mut rng)?;
+        println!(
+            "合并路径: pending_ramen={:?} pending_special_targets={:?} combined_decision={}",
+            combined_game.ramen.pending_ramen,
+            combined_game.ramen.pending_special_targets,
+            combined_game.ramen.combined_decision
+        );
+        assert_eq!(combined_game.ramen.pending_ramen, action.ramen);
+        assert_eq!(
+            combined_game.ramen.pending_special_targets,
+            action.special_targets.unwrap_or([0, 0, 0])
+        );
+        assert_ne!(
+            combined_game.ramen.pending_special_targets,
+            [0, 0, 0],
+            "合并路径 targets 必须非全零"
+        );
+        assert!(
+            combined_game.ramen.combined_decision,
+            "合并路径应设 combined_decision"
+        );
+
+        let three_action = RamenAction::ramen_select(action.ramen);
+        three_game.apply_root_action(&three_action, &mut rng)?;
+        println!(
+            "三阶段路径: pending_ramen={:?} pending_special_targets={:?} combined_decision={}",
+            three_game.ramen.pending_ramen,
+            three_game.ramen.pending_special_targets,
+            three_game.ramen.combined_decision
+        );
+        assert_eq!(three_game.ramen.pending_ramen, action.ramen);
+        assert_eq!(three_game.ramen.pending_special_targets, [0, 0, 0]);
+        assert!(
+            !three_game.ramen.combined_decision,
+            "三阶段路径 combined_decision 应为 false"
+        );
+        Ok(())
+    }
+
+    /// P1.1 测试 2：三阶段动作的根搜索统计与改动前逐位一致
+    #[test]
+    fn test_ramen_three_stage_action_unchanged() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        println!(
+            "拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个",
+            game.turn(),
+            game.stage,
+            actions.len()
+        );
+
+        let a = ramen_search(42)?;
+        let b = ramen_search(42)?;
+        let expected: [(u32, f64); 7] = [
+            (16, 52113.875000),
+            (16, 52731.812500),
+            (16, 52566.250000),
+            (16, 52384.187500),
+            (16, 53056.250000),
+            (16, 52021.687500),
+            (16, 51898.625000)
+        ];
+        for (i, ((x, y), (en, em))) in a.iter().zip(b.iter()).zip(expected).enumerate() {
+            println!(
+                "动作 {i}: n={} mean={:.6} | n={} mean={:.6} | 改动前 n={} mean={:.6}",
+                x.n, x.mean, y.n, y.mean, en, em
+            );
+        }
+        assert_eq!(a, b, "固定种子下拉面根节点搜索必须可复现");
+        assert_eq!(a.len(), expected.len(), "候选数应与改动前一致");
+        for (i, (got, (en, em))) in a.iter().zip(expected).enumerate() {
+            assert_eq!(got.n, en, "动作 {i} 的 n 必须与改动前逐位相同");
+            assert_eq!(got.mean, em, "动作 {i} 的 mean 必须与改动前逐位相同");
+        }
+        Ok(())
+    }
+
+    /// P1.1 测试 3：合并动作整局冒烟，全程跳过 SpecialSelect
+    #[test]
+    fn test_ramen_combined_action_full_game_smoke() -> Result<()> {
+        use crate::trainer::RamenHandwrittenTrainer;
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let inherit = InheritInfo {
+            blue_count: [12, 0, 0, 0, 6],
+            extra_count: [10, 0, 0, 20, 20, 40]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let (mut rng, rule_master) = crate::bench::seeded_rngs(42, 0);
+        let mut game = RamenGame::newgame(102601, &deck, inherit)?;
+        game.set_rule_master(rule_master);
+
+        let trainer = RamenHandwrittenTrainer::new();
+        let mut ramen_select_n = 0usize;
+        let mut special_select_n = 0usize;
+        let mut combined_n = 0usize;
+
+        {
+            let mut step = |game: &mut RamenGame, rng: &mut StdRng| -> Result<()> {
+                match game.stage {
+                    RamenStage::RamenSelect if !game.is_race_turn() => {
+                        ramen_select_n += 1;
+                        let actions = game.list_combined_ramen_select_actions();
+                        let action = actions
+                            .iter()
+                            .copied()
+                            .find(|a| {
+                                a.ramen.is_some()
+                                    && matches!(a.special_targets, Some(t) if t != [0, 0, 0])
+                            })
+                            .or_else(|| actions.iter().copied().find(|a| a.ramen.is_some()))
+                            .or_else(|| actions.first().copied())
+                            .ok_or_else(|| anyhow!("合并候选为空"))?;
+                        game.apply_root_action(&action, rng)?;
+                        combined_n += 1;
+                        Ok(())
+                    }
+                    RamenStage::RamenSelect => {
+                        ramen_select_n += 1;
+                        game.run_stage(&trainer, rng)
+                    }
+                    RamenStage::SpecialSelect => {
+                        special_select_n += 1;
+                        game.run_stage(&trainer, rng)
+                    }
+                    _ => game.run_stage(&trainer, rng)
+                }
+            };
+
+            step(&mut game, &mut rng)?;
+            while game.next() {
+                step(&mut game, &mut rng)?;
+            }
+        }
+        game.on_simulation_end(&trainer, &mut rng)?;
+
+        let score = game.uma().calc_score();
+        println!(
+            "合并动作整局: 回合={} 评分={} RamenSelect={} SpecialSelect={} 合并apply={}",
+            game.turn(),
+            score,
+            ramen_select_n,
+            special_select_n,
+            combined_n
+        );
+        assert!(score > 0, "终局评分应 > 0");
+        assert!((score as f64).is_finite(), "终局评分应为有限值");
+        assert_eq!(special_select_n, 0, "合并路径不应进入 SpecialSelect");
+        assert!(combined_n > 0, "至少应用过一次合并动作");
+        Ok(())
+    }
+
+    /// P1.1 测试 4：非法 targets 的合并动作必须被 `apply_root_action` 拒绝
+    #[test]
+    fn test_ramen_combined_action_rejects_illegal_targets() -> Result<()> {
+        use crate::game::ramen::rules::list_special_targets_for;
+
+        let mut game = ramen_select_ready()?;
+        let mut rng = StdRng::seed_from_u64(0);
+        let legal = list_special_targets_for(&game.ramen, 0)?;
+        println!("面 0 合法 targets: {legal:?}");
+
+        let illegal = [3, 0, 0];
+        assert!(
+            !legal.contains(&illegal),
+            "对照用的 {illegal:?} 不应出现在合法列表里"
+        );
+        let action = RamenAction::combined_select(Some(0), illegal);
+        let result = game.apply_root_action(&action, &mut rng);
+        println!("非法 targets 错误: {result:?}");
+        assert!(result.is_err(), "非法 targets 必须返回 Err，不能静默接受");
+        Ok(())
+    }
+
+    /// 拉面 CRN 测量的双种子
     ///
-    /// onsen 上测得 1.31x → 3.65x，但拉面三阶段决策使状态分叉更剧烈，
-    /// 相关性预计更弱。计划中明确要求「在目标剧本上重测后才可据此下调 search_n」，
-    /// 本测试即该重测。
+    /// `shared == true`：决策 RNG 与 `rule_master` 都是 `seed_at(j)`（生产行为）。
+    /// `shared == false`：决策 RNG 仍共享，`rule_master` 带上候选身份。
+    fn ramen_crn_seeds(seeds: &RolloutSeeds, candidate: usize, j: usize, shared: bool) -> (u64, u64) {
+        let decision = seeds.seed_at(j);
+        if shared {
+            (decision, decision)
+        } else {
+            (decision, derive_seed(decision, &[candidate as u64]))
+        }
+    }
+
+    /// 只保留双方在同一原始下标 `j` 都成功的样本
+    ///
+    /// 返回 `(xa, xb, 原始下标)`。先 `flatten` 再按压缩下标配对会把
+    /// 「A 的第 5 个成功样本」配到「B 的第 6 个」，本函数禁止那种做法。
+    fn aligned_pairs(a: &[Option<f64>], b: &[Option<f64>]) -> (Vec<f64>, Vec<f64>, Vec<usize>) {
+        let mut xa = Vec::new();
+        let mut xb = Vec::new();
+        let mut idx = Vec::new();
+        for (j, (oa, ob)) in a.iter().zip(b).enumerate() {
+            if let (Some(va), Some(vb)) = (*oa, *ob) {
+                xa.push(va);
+                xb.push(vb);
+                idx.push(j);
+            }
+        }
+        (xa, xb, idx)
+    }
+
+    /// 一次 CRN 臂的测量摘要
+    struct CrnArmStats {
+        /// 臂标签
+        label: &'static str,
+        /// 候选两两的相关系数
+        corrs: Vec<f64>,
+        /// 候选两两的等效倍率
+        gains: Vec<f64>,
+        /// 失败的 rollout 次数（所有候选合计）
+        failed: usize
+    }
+
+    impl CrnArmStats {
+        /// 平均相关系数
+        fn mean_corr(&self) -> f64 {
+            mean_of(&self.corrs)
+        }
+
+        /// 平均等效倍率
+        fn mean_gain(&self) -> f64 {
+            mean_of(&self.gains)
+        }
+    }
+
+    /// 跑一臂拉面 CRN 测量：共享或独立 `rule_master`
+    fn measure_ramen_crn_arm(shared: bool, rollouts: usize) -> Result<CrnArmStats> {
+        let (game, actions) = ramen_root()?;
+        let search: FlatSearch<RamenGame> = FlatSearch::new(SearchConfig::default());
+        let seeds = RolloutSeeds::from_root(20260822);
+        let mut cols: Vec<Vec<Option<f64>>> = Vec::with_capacity(actions.len());
+        let mut failed = 0usize;
+        for (i, action) in actions.iter().enumerate() {
+            let col: Vec<Option<f64>> = (0..rollouts)
+                .into_par_iter()
+                .map(|j| {
+                    let (decision, rule_master) = ramen_crn_seeds(&seeds, i, j, shared);
+                    search
+                        .simulate_common_with_seeds(&game, action, decision, rule_master)
+                        .ok()
+                        .map(|v| v.score)
+                })
+                .collect();
+            failed += col.iter().filter(|x| x.is_none()).count();
+            cols.push(col);
+        }
+
+        let mut corrs = Vec::new();
+        let mut gains = Vec::new();
+        for a in 0..cols.len() {
+            for b in (a + 1)..cols.len() {
+                let (xa, xb, idx) = aligned_pairs(&cols[a], &cols[b]);
+                if idx.len() < 2 {
+                    continue;
+                }
+                let diff: Vec<f64> = xa.iter().zip(&xb).map(|(x, y)| x - y).collect();
+                let indep = var_of(&xa) + var_of(&xb);
+                let paired = var_of(&diff);
+                if paired > 0.0 {
+                    gains.push(indep / paired);
+                }
+                corrs.push(corr_of(&xa, &xb));
+            }
+        }
+        Ok(CrnArmStats {
+            label: if shared {
+                "共享 rule_master（生产 CRN）"
+            } else {
+                "独立 rule_master"
+            },
+            corrs,
+            gains,
+            failed
+        })
+    }
+
+    /// 打印一臂摘要并返回平均倍率
+    fn print_crn_arm(arm: &CrnArmStats) -> f64 {
+        let gmin = arm.gains.iter().copied().fold(f64::INFINITY, f64::min);
+        let gmax = arm.gains.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let mean_gain = arm.mean_gain();
+        println!(
+            "===== {} =====\n候选对数 {} | 失败 {} | 平均 corr = {:.4} | 平均等效倍率 = {:.2}x | 区间 [{:.2}, {:.2}]",
+            arm.label,
+            arm.corrs.len(),
+            arm.failed,
+            arm.mean_corr(),
+            mean_gain,
+            gmin,
+            gmax
+        );
+        mean_gain
+    }
+
+    /// 共享臂平均增益下限
+    ///
+    /// 2026-08-24 实测（ROLLOUTS=24，21 对）：共享均 7.13x（对内区间 3.17–27.34），
+    /// 独立均 1.08x。下限取 3.0：低于实测下限对、高于独立臂噪声上沿。
+    const RAMEN_SHARED_CRN_GAIN_FLOOR: f64 = 3.0;
+
+    /// 共享 / 独立臂的 `rule_master` 拓扑
+    ///
+    /// 把对应修复回退：独立臂改回 `seed_at(j)` → 「独立臂 A/B 不等」红；
+    /// 共享臂带上候选索引 → 「共享臂 A/B 相等」红。
+    #[test]
+    fn test_ramen_crn_seed_topology() -> Result<()> {
+        let seeds = RolloutSeeds::from_root(20260822);
+        let mut c = Checks::new();
+
+        let (_, rm_a0) = ramen_crn_seeds(&seeds, 0, 0, true);
+        let (_, rm_b0) = ramen_crn_seeds(&seeds, 1, 0, true);
+        println!("共享 j=0: A={rm_a0:#018x} B={rm_b0:#018x}");
+        c.check(rm_a0 == rm_b0, "共享臂：同一 j 上候选 A/B 的 rule_master 相等");
+        c.check(rm_a0 == seeds.seed_at(0), "共享臂 rule_master == seed_at(j)（生产语义）");
+
+        let (_, rm_a0i) = ramen_crn_seeds(&seeds, 0, 0, false);
+        let (_, rm_b0i) = ramen_crn_seeds(&seeds, 1, 0, false);
+        println!("独立 j=0: A={rm_a0i:#018x} B={rm_b0i:#018x}");
+        c.check(rm_a0i != rm_b0i, "独立臂：同一 j 上候选 A/B 的 rule_master 不等");
+
+        let (_, rm_a1) = ramen_crn_seeds(&seeds, 0, 1, true);
+        let (_, rm_a1i) = ramen_crn_seeds(&seeds, 0, 1, false);
+        println!("共享 j=1 A={rm_a1:#018x} / 独立 j=1 A={rm_a1i:#018x}");
+        c.check(rm_a0 != rm_a1, "不同 j 的 seed 必须不等（共享臂）");
+        c.check(rm_a0i != rm_a1i, "不同 j 的 seed 必须不等（独立臂）");
+
+        let (d_a, _) = ramen_crn_seeds(&seeds, 0, 3, false);
+        let (d_b, _) = ramen_crn_seeds(&seeds, 1, 3, false);
+        c.check(d_a == d_b, "独立臂仍共享决策 RNG（只拆 rule_master）");
+        c.check(d_a == seeds.seed_at(3), "决策 RNG 仍是 seed_at(j)");
+        c.finish()
+    }
+
+    /// 配对必须按原始 `j` 取交集，不能先 `flatten`
+    ///
+    /// 把对应修复回退（`aligned_pairs` 改成先 flatten 再 zip）→ 本测试红。
+    #[test]
+    fn test_crn_pair_alignment_keeps_original_j() -> Result<()> {
+        // 候选 A 在 j=1 失败，B 全成功：交集应丢掉 j=1 这一对，其余下标保持
+        let a = [Some(1.0), None, Some(3.0), Some(4.0), Some(5.0)];
+        let b = [Some(10.0), Some(20.0), Some(30.0), Some(40.0), Some(50.0)];
+        let (xa, xb, idx) = aligned_pairs(&a, &b);
+        println!("交集下标={idx:?} xa={xa:?} xb={xb:?}");
+
+        let mut c = Checks::new();
+        c.check(idx.as_slice() == [0, 2, 3, 4], "只丢弃双方未同时成功的 j=1");
+        c.check(xa.as_slice() == [1.0, 3.0, 4.0, 5.0], "A 侧按原始 j 取值");
+        c.check(
+            xb.as_slice() == [10.0, 30.0, 40.0, 50.0],
+            "B 侧按原始 j 取值（不是压缩后的 10,20,30,40）"
+        );
+
+        let flat_a: Vec<f64> = a.iter().copied().flatten().collect();
+        let flat_b: Vec<f64> = b.iter().copied().flatten().collect();
+        let n = flat_a.len().min(flat_b.len());
+        let flatten_b = &flat_b[..n];
+        println!("flatten 后再配对的 B 侧={flatten_b:?}");
+        c.check(xb.as_slice() != flatten_b, "交集配对结果必须不同于 flatten 后再配对");
+        c.finish()
+    }
+
+    /// UCB 首组把 `group_size` 收进 `search_n`
+    ///
+    /// 把对应修复回退（删掉 `min(group_size, search_n)`）→ 「每候选 count==8」红（会变成 32）。
+    #[test]
+    fn test_ucb_first_group_clamps_to_search_n() -> Result<()> {
+        let (game, actions) = root_state()?;
+        // 分数必须拉开：全相等时 UCB 会轮询每个候选，谁都停不住在首组。
+        let best = actions[0].clone();
+        let dummy = |_: &OnsenGame, action: &OnsenAction, _: u64| -> Result<SearchScore> {
+            let score = if action == &best { 80000.0 } else { 10000.0 };
+            Ok(SearchScore {
+                score,
+                score_pt: 0.0
+            })
+        };
+
+        let cfg_over = SearchConfig::default()
+            .with_search_n(8)
+            .with_ucb(true)
+            .with_search_group_size(32);
+        let search = FlatSearch::new(cfg_over);
+        let mut rng = StdRng::seed_from_u64(1);
+        let out = search.search_with(&game, &actions, &mut rng, dummy)?;
+        let over_counts: Vec<u32> = out.action_results.iter().map(|r| r.0.count()).collect();
+        println!("search_n=8 group=32 各候选 count: {over_counts:?}");
+
+        let mut c = Checks::new();
+        c.check(!over_counts.is_empty(), "至少有一个候选");
+        for (i, &n) in over_counts.iter().enumerate() {
+            let msg = format!("候选 {i} count==8（不是 32）");
+            c.check(n == 8, &msg);
+        }
+
+        let cfg_adapt = SearchConfig::default()
+            .with_search_n(32)
+            .with_ucb(true)
+            .with_search_group_size(8);
+        let search = FlatSearch::new(cfg_adapt);
+        let mut rng = StdRng::seed_from_u64(1);
+        let out = search.search_with(&game, &actions, &mut rng, dummy)?;
+        let adapt_counts: Vec<u32> = out.action_results.iter().map(|r| r.0.count()).collect();
+        println!("search_n=32 group=8 各候选 count: {adapt_counts:?}");
+        c.check(adapt_counts.contains(&8), "存在候选 count==8（停在首组）");
+        c.check(adapt_counts.iter().any(|&n| n > 8), "存在候选 count>8（自适应发生）");
+        c.finish()
+    }
+
+    /// 生产 `simulate_common` 与双种子入口传入相同两值必须逐位一致
+    #[test]
+    fn test_simulate_common_matches_dual_seed_wrapper() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let search: FlatSearch<RamenGame> = FlatSearch::new(SearchConfig::default());
+        let seed = RolloutSeeds::from_root(1).seed_at(0);
+        let a = search.simulate_common(&game, &actions[0], seed)?;
+        let b = search.simulate_common_with_seeds(&game, &actions[0], seed, seed)?;
+        println!("common={a:?} dual={b:?}");
+        let mut c = Checks::new();
+        c.check(a == b, "simulate_common 与同种子双入口逐位一致");
+        c.finish()
+    }
+
+    /// P0.1A：温泉 `simulate()` 在 `crn_stage_reseed` 开 / 关时分数向量必须不同
+    ///
+    /// 必须用 [`root_state`]（回合 0 Train），不能用 Dig / Upgrade：
+    /// 那两条路径本来就不调用 `reseed_for_stage`，开关对它们无差别。
+    #[test]
+    fn test_onsen_crn_reseed_changes_result() -> Result<()> {
+        let (game, actions) = root_state()?;
+        println!(
+            "温泉根局面: 回合 {} 阶段 {:?}，候选 {} 个",
+            game.turn, game.stage, actions.len()
+        );
+        ensure!(!actions.is_empty(), "根局面至少要有一个候选");
+        let action = &actions[0];
+        println!("测的候选: {action:?}");
+        ensure!(
+            !matches!(action, OnsenAction::Dig(_) | OnsenAction::Upgrade(_)),
+            "root_state 必须落在 Train 决策点；Dig/Upgrade 不走 reseed，测了会假红"
+        );
+
+        let n = 8;
+        let seeds = RolloutSeeds::from_root(20260822);
+        let search_on = FlatSearch::new(SearchConfig::default().with_crn_stage_reseed(true));
+        let search_off = FlatSearch::new(SearchConfig::default().with_crn_stage_reseed(false));
+
+        let mut vec_on = Vec::with_capacity(n);
+        let mut vec_off = Vec::with_capacity(n);
+        for j in 0..n {
+            let seed = seeds.seed_at(j);
+            let (on, _) = search_on.simulate(&game, action, seed)?;
+            let (off, _) = search_off.simulate(&game, action, seed)?;
+            vec_on.push(on);
+            vec_off.push(off);
+        }
+        println!("crn_stage_reseed=on  : {vec_on:?}");
+        println!("crn_stage_reseed=off : {vec_off:?}");
+        assert_ne!(vec_on, vec_off, "温泉 simulate 开关必须改变分数向量");
+        Ok(())
+    }
+
+    /// P0.1B：拉面走 `simulate_common()`，`crn_stage_reseed` 开 / 关结果必须完全相同
+    ///
+    /// 温泉生产路径走特化 `simulate()`，`simulate_common()` 从不被调用；
+    /// 只有拉面才能验证「泛型路径不受该开关影响」。
+    #[test]
+    fn test_ramen_simulate_common_ignores_reseed() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        println!(
+            "拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个",
+            game.turn(),
+            game.stage,
+            actions.len()
+        );
+        ensure!(!actions.is_empty(), "根局面至少要有一个候选");
+        let action = &actions[0];
+        println!("测的候选: {action:?}");
+
+        let n = 8;
+        let seeds = RolloutSeeds::from_root(20260822);
+        let search_on: FlatSearch<RamenGame> =
+            FlatSearch::new(SearchConfig::default().with_crn_stage_reseed(true));
+        let search_off: FlatSearch<RamenGame> =
+            FlatSearch::new(SearchConfig::default().with_crn_stage_reseed(false));
+
+        let mut vec_on = Vec::with_capacity(n);
+        let mut vec_off = Vec::with_capacity(n);
+        for j in 0..n {
+            let seed = seeds.seed_at(j);
+            let on = search_on.simulate_common(&game, action, seed)?;
+            let off = search_off.simulate_common(&game, action, seed)?;
+            vec_on.push(on.score);
+            vec_off.push(off.score);
+        }
+        println!("crn_stage_reseed=on  : {vec_on:?}");
+        println!("crn_stage_reseed=off : {vec_off:?}");
+        assert_eq!(
+            vec_on, vec_off,
+            "拉面 simulate_common 不得受 crn_stage_reseed 影响"
+        );
+        Ok(())
+    }
+
+    /// 拉面 CRN 收益小样本（常规测试，给增益断言一条非 ignore 防线）
+    ///
+    /// 独立臂增益 ≈ 1 是「尺子没坏」的锚点；共享臂必须严格大于独立臂，
+    /// 且大于事先写入的下限。失败次数必须为 0，否则配对会悄悄丢样本。
+    #[test]
+    fn test_crn_pairing_gain_ramen_small() -> Result<()> {
+        const ROLLOUTS: usize = 24;
+        let indep = measure_ramen_crn_arm(false, ROLLOUTS)?;
+        let shared = measure_ramen_crn_arm(true, ROLLOUTS)?;
+        let g_indep = print_crn_arm(&indep);
+        let g_shared = print_crn_arm(&shared);
+
+        let mut c = Checks::new();
+        c.check(indep.failed == 0, "独立臂失败次数为 0");
+        c.check(shared.failed == 0, "共享臂失败次数为 0");
+        c.check(
+            (0.8..=1.2).contains(&g_indep),
+            "独立臂平均增益 ≈ 1（落在 0.8..=1.2）"
+        );
+        c.check(g_shared > g_indep, "共享臂增益严格大于独立臂");
+        let floor_msg = format!(
+            "共享臂增益 {g_shared:.3} > 下限 {RAMEN_SHARED_CRN_GAIN_FLOOR}"
+        );
+        c.check(g_shared > RAMEN_SHARED_CRN_GAIN_FLOOR, &floor_msg);
+        c.finish()
+    }
+
+    /// CRN 收益实测（拉面 / 目标剧本，大样本）
+    ///
+    /// A/B 轴是「候选间是否共享 `rule_master`」，不是 `crn_stage_reseed`
+    /// （该开关只在温泉 `reseed_for_stage` 路径生效，拉面 `simulate_common` 不读它）。
     ///
     /// `cargo test --release -p umasim --lib test_crn_pairing_gain_ramen -- --ignored --nocapture`
     #[test]
     #[ignore = "CRN 收益测量，耗时较长，按需手动运行"]
     fn test_crn_pairing_gain_ramen() -> Result<()> {
-        /// 每候选 rollout 次数
         const ROLLOUTS: usize = 200;
-
         let (game, actions) = ramen_root()?;
-        println!("拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个
-", game.turn(), game.stage, actions.len());
+        println!(
+            "拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个\n",
+            game.turn(),
+            game.stage,
+            actions.len()
+        );
 
-        for reseed in [false, true] {
-            let cfg = SearchConfig::default().with_crn_stage_reseed(reseed);
-            let search: FlatSearch<RamenGame> = FlatSearch::new(cfg);
-            let seeds = RolloutSeeds::from_root(20260822);
+        let indep = measure_ramen_crn_arm(false, ROLLOUTS)?;
+        let shared = measure_ramen_crn_arm(true, ROLLOUTS)?;
+        let g_indep = print_crn_arm(&indep);
+        let g_shared = print_crn_arm(&shared);
 
-            let mut scores: Vec<Vec<f64>> = Vec::with_capacity(actions.len());
-            let mut failed_total = 0usize;
-            for action in &actions {
-                let col: Vec<Option<f64>> = (0..ROLLOUTS)
-                    .into_par_iter()
-                    .map(|j| search.simulate_common(&game, action, seeds.seed_at(j)).ok().map(|v| v.score))
-                    .collect();
-                failed_total += col.iter().filter(|x| x.is_none()).count();
-                scores.push(col.into_iter().flatten().collect());
-            }
-            if failed_total > 0 {
-                println!("  ⚠ 共 {failed_total} 次 rollout 失败，配对可能错位");
-            }
-
-            let label = if reseed { "开启按阶段重播种" } else { "仅共享起始种子" };
-            let mut corrs = Vec::new();
-            let mut gains = Vec::new();
-            for a in 0..scores.len() {
-                for b in (a + 1)..scores.len() {
-                    let (xa, xb) = (&scores[a], &scores[b]);
-                    let n = xa.len().min(xb.len());
-                    if n < 2 {
-                        continue;
-                    }
-                    let diff: Vec<f64> = (0..n).map(|j| xa[j] - xb[j]).collect();
-                    let indep = var_of(&xa[..n]) + var_of(&xb[..n]);
-                    let paired = var_of(&diff);
-                    if paired > 0.0 {
-                        gains.push(indep / paired);
-                    }
-                    corrs.push(corr_of(&xa[..n], &xb[..n]));
-                }
-            }
-            println!(
-                "===== {label} =====
-候选对数 {} | 平均 corr = {:.4} | 平均等效倍率 = {:.2}x | 区间 [{:.2}, {:.2}]
-",
-                corrs.len(),
-                mean_of(&corrs),
-                mean_of(&gains),
-                gains.iter().cloned().fold(f64::INFINITY, f64::min),
-                gains.iter().cloned().fold(f64::NEG_INFINITY, f64::max)
-            );
-        }
-        Ok(())
+        let mut c = Checks::new();
+        c.check(indep.failed == 0, "独立臂失败次数为 0");
+        c.check(shared.failed == 0, "共享臂失败次数为 0");
+        c.check(
+            (0.8..=1.2).contains(&g_indep),
+            "独立臂平均增益 ≈ 1（落在 0.8..=1.2）"
+        );
+        c.check(g_shared > g_indep, "共享臂增益严格大于独立臂");
+        let floor_msg = format!(
+            "共享臂增益 {g_shared:.3} > 下限 {RAMEN_SHARED_CRN_GAIN_FLOOR}"
+        );
+        c.check(g_shared > RAMEN_SHARED_CRN_GAIN_FLOOR, &floor_msg);
+        c.finish()
     }
 
     /// CRN 收益实测：配对相关系数与等效样本倍率

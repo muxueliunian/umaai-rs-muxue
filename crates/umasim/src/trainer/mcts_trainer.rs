@@ -47,8 +47,6 @@ pub struct MctsTrainer {
     pub mcts_onsen: bool,
     /// 优先输出哪种结果
     pub mcts_selection: String,
-    /// 保存上一回合游戏，用于判断
-    pub last_game: Option<OnsenGame>,
     /// 上一回合最好的选择分数. 使用Atomic以实现内部可变
     pub last_score: (AtomicU64, AtomicU64),
     /// 第一回合分数
@@ -66,7 +64,6 @@ impl MctsTrainer {
             verbose: false,
             mcts_onsen: false,
             mcts_selection: "pt".to_string(),
-            last_game: None,
             last_score: (AtomicU64::new(0), AtomicU64::new(0)),
             initial_score: (AtomicU64::new(0), AtomicU64::new(0)),
             search_output: Arc::new(Mutex::new(SearchOutput::default()))
@@ -91,7 +88,6 @@ impl MctsTrainer {
 
     /// 初始化分数
     pub fn reset(&mut self) {
-        self.last_game = None;
         self.last_score.0.store(0, Ordering::SeqCst);
         self.last_score.1.store(0, Ordering::SeqCst);
         self.initial_score.0.store(0, Ordering::SeqCst);

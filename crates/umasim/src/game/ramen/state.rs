@@ -4,7 +4,7 @@
 
 use std::ops::{Deref, DerefMut};
 
-use anyhow::Result;
+use anyhow::{Result, anyhow};
 use rand::rngs::StdRng;
 use serde::{Deserialize, Serialize};
 
@@ -13,7 +13,7 @@ use crate::{
     game::{BaseGame, BasePerson, InheritInfo, PersonType, traits::Game},
     gamedata::ramen::RAMENDATA,
     global,
-    rng::{EventRng, StrategyRng, StreamTag, TurnFixedRng, derive_seed}
+    rng::{EventRng, SplitmixRng, StrategyRng, StreamTag, TurnFixedRng, derive_seed}
 };
 
 /// 拉面杯专用状态
@@ -54,6 +54,26 @@ pub struct RamenState {
     // ========== 剧本计数器 ==========
     /// 当年吃面次数（每年重置，叠加增量上限 5 次）
     pub eat_count: i32,
+    /// 逐年归档的剧本 PT（下标 0/1/2 = 第 1/2/3 年）。
+    ///
+    /// 在每年 RMJ 结算回合（turn 23/47/71）将 live [`Self::scenario_pt`] **清零之前**写入。
+    /// 局末 live 字段恒为 0（turn 72–77 不再吃面），观测出口必须读本数组。
+    /// 不叫 peak：当前 PT 年内只增不减只是实现巧合，不是契约。
+    #[serde(default)]
+    pub yearly_scenario_pt: [i32; 3],
+    /// 逐年归档的吃面次数（下标 0/1/2 = 第 1/2/3 年）。
+    ///
+    /// 写入时机与 [`Self::yearly_scenario_pt`] 相同。
+    #[serde(default)]
+    pub yearly_eat_count: [i32; 3],
+    /// 逐年归档的地区选择（下标 0/1/2 = 第 1/2/3 年；每格三个地区 id）。
+    ///
+    /// 写入点在 `selected_regions` 赋值处。年份索引必须用
+    /// [`Self::region_archive_year_idx`]（按回合硬编码），**不能**用 `current_year()`：
+    /// turn 23 时 `current_year()` 仍为 1，但那一刻选的是**第 2 年**地区。
+    /// 映射：turn 2 → 0，turn 23 → 1，turn 47 → 2。
+    #[serde(default)]
+    pub yearly_selected_regions: [[usize; 3]; 3],
     /// 诀窍角标分配（回合 2-71 时每个训练随机分配一个诀窍类型）
     pub train_feeling_type: Option<[FeelingType; 5]>,
 
@@ -214,6 +234,57 @@ impl RamenState {
         self.pending_ramen = None;
         self.pending_special_targets = [0, 0, 0];
         self.combined_decision = false;
+    }
+
+    /// 年度地区选择对应的归档下标（0-based）。
+    ///
+    /// **禁止**用 `current_year() - 1` 代替：地区选择发生在当年 RMJ 结算之后、
+    /// `advance_turn` 之前，回合号仍停在年界，`current_year()` 还没跨年但选的已是
+    /// 下一年的地区，故 turn 23/47 上两者差 1。
+    pub fn region_archive_year_idx(turn: i32) -> Result<usize> {
+        match turn {
+            2 => Ok(0),
+            23 => Ok(1),
+            47 => Ok(2),
+            _ => Err(anyhow!("非年度地区选择回合 turn={turn}，无法归档"))
+        }
+    }
+
+    /// RMJ 结算回合对应的当年归档下标（0-based）。
+    ///
+    /// turn 23/47/71 → 0/1/2。与 [`Self::region_archive_year_idx`] 不同：
+    /// 同一 turn 23，RMJ 归档的是第 1 年的 PT/吃面，地区归档的是第 2 年的选择。
+    pub fn rmj_archive_year_idx(turn: i32) -> Result<usize> {
+        match turn {
+            23 => Ok(0),
+            47 => Ok(1),
+            71 => Ok(2),
+            _ => Err(anyhow!("非 RMJ 结算回合 turn={turn}，无法归档"))
+        }
+    }
+
+    /// 将 live `scenario_pt` / `eat_count` 写入对应年份。必须在清零之前调用。
+    pub fn archive_year_counters(&mut self, year_idx: usize) -> Result<()> {
+        *self
+            .yearly_scenario_pt
+            .get_mut(year_idx)
+            .ok_or_else(|| anyhow!("yearly_scenario_pt 下标 {year_idx} 越界"))? = self.scenario_pt;
+        *self
+            .yearly_eat_count
+            .get_mut(year_idx)
+            .ok_or_else(|| anyhow!("yearly_eat_count 下标 {year_idx} 越界"))? = self.eat_count;
+        Ok(())
+    }
+
+    /// 将本次地区选择写入逐年归档。
+    ///
+    /// `year_idx` 必须来自 [`Self::region_archive_year_idx`]，不能用 `current_year()`。
+    pub fn archive_selected_regions(&mut self, year_idx: usize, regions: [usize; 3]) -> Result<()> {
+        *self
+            .yearly_selected_regions
+            .get_mut(year_idx)
+            .ok_or_else(|| anyhow!("yearly_selected_regions 下标 {year_idx} 越界"))? = regions;
+        Ok(())
     }
 }
 
@@ -380,6 +451,22 @@ impl RamenGame {
     /// 策略流 master = `derive_seed(rule_master, [turn, STRATEGY_TAG])`。
     /// 未注入 rule_master 时清空两条流（规则层回退旧行为）。
     /// 调用时机：`run_begin` 回合开始时（每次进入 Begin 阶段）。
+    /// 按 `(rule_master, turn, tag)` 派生一条分身分配用的局部流
+    ///
+    /// 与从父流 fork 的做法（[`crate::rng::fork_local_stream`]）相比有两处好处：
+    ///
+    /// 1. **父流消耗为 0**，分身分配完全不推进策略流；
+    /// 2. 结果与「本回合此前消耗了几次策略随机」**无关**。地区分身在吃面落地时执行，
+    ///    父流 counter 取决于此前的动作与事件；从父流 fork 会让上游任何位移都改掉选卡。
+    ///    对 MCTS 的 CRN 尤其重要：同一回合各候选动作走过不同路径后策略流消耗长度不同，
+    ///    按 `(rule_master, turn)` 派生能让各候选抽到**同一份**分身随机性，配对方差削减更彻底。
+    ///
+    /// 未注入 `rule_master` 时返回 `None`，调用方回退到从父流 fork（保持旧路径可复现性契约）。
+    pub(crate) fn clone_stream(&self, tag: u64) -> Option<SplitmixRng> {
+        self.rule_master
+            .map(|master| SplitmixRng::new(derive_seed(master, &[self.base.turn as u64, tag])))
+    }
+
     pub fn reset_turn_streams(&mut self) {
         match self.rule_master {
             Some(master) => {
@@ -394,5 +481,58 @@ impl RamenGame {
                 self.event = None;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::utils::Checks;
+
+    /// `current_year()` 在 turn 边界上的公式（与 [`RamenGame::current_year`] 保持一致）。
+    fn year_at(turn: i32) -> i32 {
+        if turn < 24 {
+            1
+        } else if turn < 48 {
+            2
+        } else {
+            3
+        }
+    }
+
+    /// 地区归档下标必须按回合硬编码，不能用 `current_year()-1`。
+    #[test]
+    fn test_region_archive_year_idx_not_current_year() -> Result<()> {
+        let mut c = Checks::new();
+        let cases = [(2, 0usize), (23, 1), (47, 2)];
+        for (turn, want) in cases {
+            let got = RamenState::region_archive_year_idx(turn);
+            println!(
+                "turn={turn}: region_idx={got:?} current_year()-1={}",
+                year_at(turn) - 1
+            );
+            c.check(got.as_ref().ok() == Some(&want), &format!("turn {turn} 地区归档下标 = {want}"));
+        }
+        let trap_23 = (year_at(23) - 1) as usize;
+        let trap_47 = (year_at(47) - 1) as usize;
+        c.check(trap_23 == 0, "陷阱前提：turn 23 的 current_year()-1 仍是 0");
+        c.check(trap_47 == 1, "陷阱前提：turn 47 的 current_year()-1 仍是 1");
+        c.check(
+            RamenState::region_archive_year_idx(23).ok() != Some(trap_23),
+            "turn 23 地区归档不得等于 current_year()-1"
+        );
+        c.check(
+            RamenState::region_archive_year_idx(47).ok() != Some(trap_47),
+            "turn 47 地区归档不得等于 current_year()-1"
+        );
+        c.check(RamenState::region_archive_year_idx(0).is_err(), "非选面回合应报错");
+        c.check(RamenState::rmj_archive_year_idx(23).ok() == Some(0), "turn 23 RMJ 归档第 1 年");
+        c.check(RamenState::rmj_archive_year_idx(47).ok() == Some(1), "turn 47 RMJ 归档第 2 年");
+        c.check(RamenState::rmj_archive_year_idx(71).ok() == Some(2), "turn 71 RMJ 归档第 3 年");
+        c.check(
+            RamenState::rmj_archive_year_idx(23).ok() != RamenState::region_archive_year_idx(23).ok(),
+            "同一 turn 23：RMJ 归档年 ≠ 地区归档年"
+        );
+        c.finish()
     }
 }

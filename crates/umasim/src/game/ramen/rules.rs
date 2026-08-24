@@ -1200,6 +1200,183 @@ mod tests {
         Ok(())
     }
 
+    /// 隐藏风味 targets 的固定 10 元集合（`sum ≤ 2` 的非负整数三元组）
+    const LEGAL_SPECIAL_TARGETS: [[i32; 3]; 10] = [
+        [0, 0, 0],
+        [1, 0, 0],
+        [0, 1, 0],
+        [0, 0, 1],
+        [2, 0, 0],
+        [0, 2, 0],
+        [0, 0, 2],
+        [1, 1, 0],
+        [1, 0, 1],
+        [0, 1, 1]
+    ];
+
+    /// P0.2C：任何配方 × special_feeling(0..=4) × 库存档位下，targets 之和恒 ≤ 2
+    ///
+    /// `special_feeling` 实际上限是 4（写入都 `.min(4)`），不变量靠 `2.min(sf)` 封顶，
+    /// 所以 `sf=4` 必须专门覆盖。
+    #[test]
+    fn test_special_targets_sum_invariant() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_global()?;
+        let _ = crate::utils::init_test_logger("info");
+
+        let stocks: [([i32; 3], &str); 3] = [
+            ([0, 0, 0], "全 0 库存"),
+            ([5, 0, 2], "部分富余"),
+            ([5, 5, 5], "全富余")
+        ];
+
+        for recipe_idx in 0..10 {
+            let recipe = get_recipe(recipe_idx)?;
+            for sf in 0..=4 {
+                for &(stock, stock_label) in &stocks {
+                    let state = make_state_for_targets(stock, sf);
+                    let targets = list_special_targets_for(&state, recipe_idx)?;
+                    let max_sum = targets.iter().map(|t| t.iter().sum::<i32>()).max().unwrap_or(0);
+                    println!(
+                        "recipe[{recipe_idx}]={recipe:?} sf={sf} stock={stock:?} ({stock_label}): n={} max_sum={max_sum}",
+                        targets.len()
+                    );
+                    if sf == 4 {
+                        println!("  [sf=4 专项] max_sum={max_sum}（必须 ≤ 2）");
+                    }
+                    let mut prev_sum = i32::MIN;
+                    for t in &targets {
+                        let s: i32 = t.iter().sum();
+                        assert!(s <= 2, "recipe[{recipe_idx}] sf={sf} {t:?} 之和 {s} 必须 ≤ 2");
+                        assert!(
+                            LEGAL_SPECIAL_TARGETS.contains(t),
+                            "recipe[{recipe_idx}] sf={sf} {t:?} 必须落在 10 个固定三元组内"
+                        );
+                        assert!(s >= prev_sum, "recipe[{recipe_idx}] 必须按和升序，见到 {s} < {prev_sum}");
+                        prev_sum = s;
+                        validate_special_targets(recipe, t)?;
+                    }
+                    if sf == 4 {
+                        assert!(max_sum <= 2, "sf=4 时和仍必须 ≤ 2，实际 max_sum={max_sum}");
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// P0.2D：任何输入下返回集合都是那 10 个三元组的子集，且上界是紧的（能到 9 或 10）
+    #[test]
+    fn test_special_targets_enumeration_is_within_ten() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_global()?;
+        let _ = crate::utils::init_test_logger("info");
+
+        let stocks = [[0, 0, 0], [2, 2, 1], [5, 0, 5], [5, 5, 5], [10, 10, 10]];
+        let mut max_n = 0usize;
+        let mut max_desc = String::new();
+        for recipe_idx in 0..10 {
+            for sf in 0..=4 {
+                for stock in stocks {
+                    let state = make_state_for_targets(stock, sf);
+                    let targets = list_special_targets_for(&state, recipe_idx)?;
+                    assert!(
+                        targets.len() <= 10,
+                        "recipe[{recipe_idx}] 返回数 {} 超过 10",
+                        targets.len()
+                    );
+                    for t in &targets {
+                        assert!(
+                            LEGAL_SPECIAL_TARGETS.contains(t),
+                            "recipe[{recipe_idx}] {t:?} 不在 10 元集合内"
+                        );
+                    }
+                    if targets.len() > max_n {
+                        max_n = targets.len();
+                        max_desc = format!(
+                            "recipe[{recipe_idx}] sf={sf} stock={stock:?} n={max_n} {targets:?}"
+                        );
+                    }
+                }
+            }
+        }
+        println!("最大候选数 {max_n} @ {max_desc}");
+        assert!(
+            max_n >= 9,
+            "上界必须是紧的（至少一组输入返回 9 或 10），实际最大 {max_n}"
+        );
+        Ok(())
+    }
+
+    /// P0.2E：任意 `selected_regions` 组合下，合并候选数 ≤ 28
+    ///
+    /// 条件：全富余库存 `[5,5,5]` + `special_feeling = 4`。
+    /// 遍历三年 `REGION_RANGES` 内全部 C(n,3)（年1 10 组、年2 10 组、年3 120 组）。
+    #[test]
+    fn test_combined_ramen_actions_peak() -> anyhow::Result<()> {
+        use crate::game::ramen::list_combined_ramen_select_actions;
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_global()?;
+        let _ = crate::utils::init_test_logger("info");
+
+        let state = make_state_for_targets([5, 5, 5], 4);
+        for idx in 0..10 {
+            let n = list_special_targets_for(&state, idx)?.len();
+            println!("region {idx} 全富余 targets = {n}");
+        }
+
+        let mut c = crate::utils::Checks::new();
+        let mut peak = 0usize;
+        let mut peak_at = ([0usize; 3], 0usize);
+        let mut identity_ok = true;
+        for year in 0..3 {
+            let combos = get_region_combinations(year)?;
+            println!("年 {} 组合数 {}", year + 1, combos.len());
+            let mut year_peak = 0usize;
+            let mut year_peak_combo = [0usize; 3];
+            for combo in combos {
+                let n = list_combined_ramen_select_actions(&state, &combo).len();
+                // 结构恒等式：候选数 = 1（不吃面）+ 三个地区各自的 targets 数。
+                // 这条与 gamedata 数值无关，比「峰值等于某个常数」结实：
+                // 漏掉「不吃面」或漏掉某个地区都会当场破等式，而上限断言抓不到。
+                let expect: usize =
+                    1 + combo.iter().try_fold(0usize, |acc, &r| {
+                        Ok::<_, anyhow::Error>(acc + list_special_targets_for(&state, r)?.len())
+                    })?;
+                if n != expect {
+                    identity_ok = false;
+                    println!("  恒等式破：regions {combo:?} 实得 {n} 期望 {expect}");
+                }
+                if n > year_peak {
+                    year_peak = n;
+                    year_peak_combo = combo;
+                }
+                if n > peak {
+                    peak = n;
+                    peak_at = (combo, year);
+                }
+            }
+            println!("年 {} 峰值 {} @ regions {:?}", year + 1, year_peak, year_peak_combo);
+            c.check(year_peak <= 28, &format!("年 {} 峰值 {year_peak} ≤ 28", year + 1));
+        }
+        println!(
+            "合并候选全局峰值 {peak} @ year {} regions {:?}",
+            peak_at.1 + 1,
+            peak_at.0
+        );
+        c.check(identity_ok, "候选数 == 1 + 三地区 targets 数之和（全部组合）");
+        // 上界守 policy 头维度；下界守动作空间不被静默削掉一块。
+        // 28 是当前 gamedata 的事实而非永久契约：上游改配方导致它变动时，
+        // 先确认 policy 头维度仍够用，再更新这两个数。
+        c.check(peak <= 28, &format!("合并候选峰值 {peak} ≤ 28（policy 头上界）"));
+        c.check(peak == 28, &format!("合并候选峰值 {peak} == 28（下界，防动作空间静默收缩）"));
+        c.finish()
+    }
+
     // ========== 夏合宿 + 训练 / 非训练 填充测试 ==========
 
     /// 夏合宿"全 MAX"：三种槽都补到 GAUGE_LIMIT，溢出自动 +1 诀窍

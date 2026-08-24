@@ -139,6 +139,29 @@ pub struct Uma {
     pub win_races: u64
 }
 
+/// `calc_score()` 的可归因分量分解
+///
+/// 七个分量之和逐位等于 [`Uma::calc_score`]，用于搜索层的终局归因统计。
+///
+/// PT 项**不可**再拆成 skill_pt 与 hint 的独立贡献：`total_pt()` 内有一次 `floor()`、
+/// 外面又有一次 `as i32`，两层截断使其数学上不可分。五维记的是查表后的分数。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScoreParts {
+    /// 技能分（`skill_score` 原值）
+    pub skill: i32,
+    /// PT 折算分：`(total_pt() as f32 * pt_score_rate) as i32`
+    pub pt: i32,
+    /// 五维各自的查表得分（速耐力根智），已按 limit 截断
+    pub five_status: [i32; 5]
+}
+
+impl ScoreParts {
+    /// 七个分量之和，逐位等于 [`Uma::calc_score`]
+    pub fn total(&self) -> i32 {
+        self.skill + self.pt + self.five_status.iter().copied().sum::<i32>()
+    }
+}
+
 impl Uma {
     pub fn get_data(&self) -> Result<&UmaData> {
         global!(GAMEDATA).get_uma(self.uma_id)
@@ -216,16 +239,30 @@ impl Uma {
         (self.skill_pt as f32 + self.total_hints as f32 * global!(GAMECONSTANTS).hint_pt_rate).floor() as i32
     }
 
-    /// 正常计算评分
-    pub fn calc_score(&self) -> i32 {
+    /// 把 [`Self::calc_score`] 分解成可归因分量
+    ///
+    /// 七个分量之和逐位等于 [`Self::calc_score`]。只在 3 项（`skill` / `pt` /
+    /// `five_status` 之和）或 7 项粒度上保证逐位相等；PT 项已含 `total_pt()` 的
+    /// `floor` 与 `as i32` 两层截断，不可再拆。
+    pub fn score_parts(&self) -> ScoreParts {
         let cons = global!(GAMECONSTANTS);
-        // 技能分
-        let mut score = self.skill_score + (self.total_pt() as f32 * cons.pt_score_rate) as i32;
+        let mut five_status = [0i32; 5];
         for i in 0..5 {
             let status = self.five_status[i].min(self.five_status_limit[i]).max(0) as usize;
-            score += cons.five_status_final_score[status];
+            five_status[i] = cons.five_status_final_score[status];
         }
-        score
+        ScoreParts {
+            skill: self.skill_score,
+            pt: (self.total_pt() as f32 * cons.pt_score_rate) as i32,
+            five_status
+        }
+    }
+
+    /// 正常计算评分
+    ///
+    /// 等于 [`Self::score_parts`] 七个分量之和。
+    pub fn calc_score(&self) -> i32 {
+        self.score_parts().total()
     }
 
     pub fn calc_score_with_pt_favor(&self) -> i32 {
@@ -314,7 +351,8 @@ mod tests {
 
     use super::*;
     use crate::{
-        gamedata::init_global,
+        gamedata::{GAMECONSTANTS, init_global},
+        global,
         utils::{get_workspace_root, init_test_logger}
     };
 
@@ -340,6 +378,106 @@ mod tests {
         let mut uma = Uma::new(101901)?;
         uma.win_races = 0b110000_000000_1;
         println!("{:?}", uma.list_races());
+        Ok(())
+    }
+
+    /// 按文档公式独立重算七个分量，用于对照 `score_parts()`
+    fn expected_score_parts(uma: &Uma) -> ScoreParts {
+        let cons = global!(GAMECONSTANTS);
+        let mut five_status = [0i32; 5];
+        for i in 0..5 {
+            let status = uma.five_status[i].min(uma.five_status_limit[i]).max(0) as usize;
+            five_status[i] = cons.five_status_final_score[status];
+        }
+        ScoreParts {
+            skill: uma.skill_score,
+            pt: (uma.total_pt() as f32 * cons.pt_score_rate) as i32,
+            five_status
+        }
+    }
+
+    /// 打印并断言 `score_parts().total() == calc_score()`，七个分量逐位相等
+    fn check_score_parts_case(label: &str, uma: &Uma) {
+        let parts = uma.score_parts();
+        let expected = expected_score_parts(uma);
+        let total = parts.total();
+        let calc = uma.calc_score();
+        println!(
+            "{label}: skill={} pt={} five={:?} total={} calc_score={}",
+            parts.skill, parts.pt, parts.five_status, total, calc
+        );
+        println!(
+            "  expected: skill={} pt={} five={:?} sum={}",
+            expected.skill,
+            expected.pt,
+            expected.five_status,
+            expected.total()
+        );
+        assert_eq!(parts, expected, "{label}: 七个分量必须与公式逐位相等");
+        // ⚠ 转发契约，**不是**公式 oracle：`calc_score()` 当前的实现就是
+        // `score_parts().total()`，所以这一行在今天等价于 `x == x`。
+        // 它唯一的作用是：将来有人把 `calc_score` 拆开重写时会红。
+        // 真正校验公式的是上面对 `expected_score_parts()` 的断言——
+        // 那是独立重写的一份原公式，改坏 `score_parts` 会被它抓住。
+        assert_eq!(total, calc, "{label}: score_parts().total() 必须等于 calc_score()");
+    }
+
+    /// P0.3：`score_parts` 求和逐位等于 `calc_score`
+    #[test]
+    fn test_score_parts_matches_calc_score() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+
+        // 1. 全零
+        let uma = Uma::default();
+        check_score_parts_case("全零", &uma);
+
+        // 2. 五维触顶被 limit 截断
+        let mut uma = Uma::default();
+        uma.five_status = [5000, 4000, 3000, 2000, 1000];
+        uma.five_status_limit = [100, 80, 60, 40, 20];
+        uma.skill_score = 510;
+        check_score_parts_case("五维触顶", &uma);
+
+        // 3. 五维为负（按 0 查表）
+        let mut uma = Uma::default();
+        uma.five_status = [-10, -1, 0, 50, 100];
+        uma.five_status_limit = [1200, 1200, 1200, 1200, 1200];
+        check_score_parts_case("五维为负", &uma);
+
+        // 4. skill_pt 与 total_hints 都非零，total_pt() 发生 floor
+        //    hint_pt_rate=6.5 → 1 + 1*6.5 = 7.5，floor 后 7
+        let mut uma = Uma::default();
+        uma.skill_pt = 1;
+        uma.total_hints = 1;
+        uma.skill_score = 100;
+        uma.five_status = [200, 180, 160, 140, 120];
+        uma.five_status_limit = [1200, 1200, 1200, 1200, 1200];
+        println!(
+            "floor 边界: skill_pt={} total_hints={} total_pt()={}",
+            uma.skill_pt,
+            uma.total_hints,
+            uma.total_pt()
+        );
+        check_score_parts_case("floor 边界", &uma);
+
+        // 5. 另一组非整数：10 + 3*6.5 = 29.5 → floor 29
+        let mut uma = Uma::default();
+        uma.skill_pt = 10;
+        uma.total_hints = 3;
+        uma.skill_score = 2000;
+        uma.five_status = [400, 350, 300, 250, 200];
+        uma.five_status_limit = [1200, 1200, 1200, 1200, 1200];
+        println!(
+            "floor 边界2: skill_pt={} total_hints={} total_pt()={}",
+            uma.skill_pt,
+            uma.total_hints,
+            uma.total_pt()
+        );
+        check_score_parts_case("floor 边界2", &uma);
+
         Ok(())
     }
 }
