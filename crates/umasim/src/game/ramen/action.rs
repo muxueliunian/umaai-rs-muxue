@@ -25,6 +25,7 @@ use crate::{
     game::{ActionEnum, BaseAction, FriendOutState, PersonType, traits::{Game, Person}},
     gamedata::{EventData, GAMECONSTANTS, ramen::RAMENDATA},
     global,
+    rng::{CLONE_SUPER_TAG, fork_local_stream},
     utils::{system_event, system_event_prob}
 };
 
@@ -366,8 +367,11 @@ impl RamenAction {
     /// 触发条件：超级拉面回合且支援卡种类>=4
     /// - 每个支援卡（含友人卡）固定额外出现一次
     /// - 分配算法：出现的训练范围由`training_limit_options`指定
-    /// - 随机选择训练位置，如果分配失败则重新随机
+    /// - 对每张卡先过滤出合法训练位再均匀抽一个；有合法位就一定放下
+    /// - 友人卡**优先**分配（见实现内注释：这是实现选择，非规格）
     /// - 特殊规则：同一训练不能存在相同卡的`Person`和分身
+    /// - 规则上真的放不下时**跳过该卡并告警，不返回 `Err`**：分身放不下在规则上允许，
+    ///   中断育成会让整次搜索 rollout 作废，且只丢弃「无解局面」这一类盘面
     pub fn distribute_super_ramen_clones(game: &mut super::RamenGame, rng: &mut impl Rng) -> Result<()> {
         if !game.is_super_ramen_turn() || !game.deck_can_split {
             return Ok(());
@@ -385,7 +389,7 @@ impl RamenAction {
 
         // 获取所有支援卡索引（含友人卡）
         // 人头下标 ≠ 卡组下标：拉面友人卡在人头 6，写死 0..6 会把它整个漏掉
-        let card_indices: Vec<i32> = (0..game.persons.len() as i32)
+        let mut card_indices: Vec<i32> = (0..game.persons.len() as i32)
             .filter(|&i| {
                 let person = &game.persons[i as usize];
                 person.person_type == PersonType::Card || person.person_type == PersonType::ScenarioCard
@@ -396,111 +400,163 @@ impl RamenAction {
             return Ok(());
         }
 
-        // 对每个支援卡，随机分配到一个训练位置，失败则重试
+        // 友人卡优先分配。
+        //
+        // ⚠ 这是**实现选择，不是规格**——官服的真实分配顺序未知（用户已确认不清楚）。
+        // 它服务的是已确认的行为约束「支援卡必出分身」：友人受「每训练一个友人」约束，
+        // 合法位常常只剩一个；若按人头下标升序排到最后（友人卡人头 6 恒为最大），
+        // 普通卡的分身会先把那唯一一格填满 5 个非 NPC，友人随后无处可放，
+        // 而先放友人则六张都放得下（回归见 `..._friend_priority_beats_greedy_starvation`）。
+        // 将来若拿到回放证据，只需改这一行排序，抽位逻辑不用动。
+        //
+        // 注意这只消除了「友人被普通卡饿死」，**没有**把贪心变成最大匹配：
+        // 普通卡之间理论上仍可能互相抢容量（需三格各满 5 非 NPC 才会发生）。
+        // 稳定排序：普通卡之间保持原有相对顺序。
+        card_indices.sort_by_key(|&i| !game.persons[i as usize].is_friend());
+
+        // 分身分配走局部流，算法内部抽多少次都不位移同回合后续的策略随机
+        // （训练成败 / 休息 / 外出）。注入 rule_master 时按 `(rule_master, turn, TAG)` 派生，
+        // **完全不消耗父流**，且与本回合此前消耗了几次无关；未注入时回退到从父流 fork
+        // （消耗 1 次），保持旧路径的可复现性契约。
+        let mut clone_rng = game
+            .clone_stream(CLONE_SUPER_TAG)
+            .unwrap_or_else(|| fork_local_stream(rng, CLONE_SUPER_TAG));
+
         for &person_idx in &card_indices {
-            let mut success = false;
-            let max_retries = option_trains.len() * 2; // 最多重试次数
+            // 先过滤出合法位再抽，而不是「有放回随便抽、失败重试」：
+            // 后者在只剩一格合法时有 (3/4)^8 ≈ 10% 的概率明明放得下却放弃。
+            let legal: Vec<usize> = option_trains
+                .iter()
+                .filter_map(|&t| usize::try_from(t).ok())
+                .filter(|&t| Self::can_place_clone(game, person_idx, t))
+                .collect();
 
-            for _ in 0..max_retries {
-                // 随机选择一个训练位置
-                let &train = option_trains.choose(rng).unwrap();
-                let train = train as usize;
-
-                match Self::try_add_clone(game, person_idx, train) {
-                    Ok(()) => {
-                        success = true;
-                        break;
-                    }
-                    Err(_) => continue // 分配失败，重试
+            match legal.choose(&mut clone_rng) {
+                Some(&train) => Self::place_clone(game, person_idx, train, "超级拉面")?,
+                None => {
+                    // 规则上真的放不下（候选位各自被同卡 / 友人互斥 / 5 非 NPC 挡住）。
+                    // 不返回 Err：分身放不下在规则上允许，中断育成会让整次 rollout 作废，
+                    // 且只丢掉「无解局面」这一类盘面，给搜索样本引入系统性缺失偏差。
+                    // 用 diag! 而非 log::warn!：规则层热路径的既有惯例是一律 diag!
+                    // （不开 feature 时编译期删除），聚合式统计才走 warn!
+                    // （见 `search/flat_search.rs` 的「本次搜索共 N 次 rollout 失败」）。
+                    // 若将来要盯这件事的频率，应加到 bench 的聚合统计里，而不是逐次打日志。
+                    diag!(
+                        ">> 超级拉面分身无处可放: {} (候选训练位 {:?})",
+                        game.persons[person_idx as usize].short_name(),
+                        option_trains
+                    );
                 }
-            }
-
-            if !success {
-                diag!(
-                    ">> 超级拉面分身失败: {} 无法分配到任何训练位置",
-                    game.persons[person_idx as usize].short_name()
-                );
             }
         }
 
         Ok(())
     }
 
-    /// 尝试在指定训练位置添加分身
+    /// 判定能否在 `train` 为 `person_idx` 放置一个分身
     ///
-    /// 返回错误如果：
-    /// - 该训练已有同一张卡的本体或分身
-    /// - 该训练已有友人（含理事长、记者），而本次要放的也是友人
-    /// - 已有5个非NPC人物
-    /// - 已满5人且无NPC可挤
-    fn try_add_clone(game: &mut super::RamenGame, person_idx: i32, train: usize) -> Result<()> {
+    /// 纯判定：不修改局面、不消耗随机数。两条分身路径（超级拉面 / 地区拉面）共用，
+    /// 避免各写一份满员与挤 NPC 规则后逐渐漂移。
+    ///
+    /// 拒绝理由：
+    /// - 人头下标非法或训练位越界；
+    /// - 该训练已有同一张卡的本体或分身；
+    /// - 该训练已有友人（含理事长、记者），而本次要放的也是友人；
+    /// - 该训练已有 5 个非 NPC 人物；
+    /// - 该训练已满 5 人且无 NPC 可挤。
+    ///
+    /// 注意「已满 5 人但含 NPC」算**可放置**——由 [`Self::place_clone`] 挤掉 NPC。
+    pub(crate) fn can_place_clone(game: &super::RamenGame, person_idx: i32, train: usize) -> bool {
+        let Ok(idx) = usize::try_from(person_idx) else {
+            return false;
+        };
+        let Some(person) = game.persons.get(idx) else {
+            return false;
+        };
         if train >= 5 {
-            return Err(anyhow::anyhow!("训练位置越界: {}", train));
+            return false;
         }
+        let Some(dist) = game.base.distribution.get(train) else {
+            return false;
+        };
 
-        // 检查是否已有该人物的分身
-        if game.base.distribution[train].contains(&person_idx) {
-            return Err(anyhow::anyhow!(
-                "{}训练已有{}的分身",
-                global!(GAMECONSTANTS).train_names[train],
-                game.persons[person_idx as usize].short_name()
-            ));
+        // 该训练已有该人物的本体或分身
+        if dist.contains(&person_idx) {
+            return false;
         }
 
         // 每个训练只能出现一个友人，分身同样受限：
-        // `distribute_person` 对本体维护了这条不变式，分身走的是本函数，必须同样把关。
+        // `distribute_person` 对本体维护了这条不变式，分身走本路径，必须同样把关。
         // `is_friend()` 覆盖剧本友人卡、理事长与记者。
-        if game.persons[person_idx as usize].is_friend()
-            && game.base.distribution[train]
-                .iter()
-                .any(|&id| id >= 0 && game.persons[id as usize].is_friend())
+        if person.is_friend()
+            && dist.iter().any(|&id| id >= 0 && game.persons[id as usize].is_friend())
         {
-            return Err(anyhow::anyhow!(
-                "{}训练已有友人，不能再放{}的分身",
-                global!(GAMECONSTANTS).train_names[train],
-                game.persons[person_idx as usize].short_name()
-            ));
+            return false;
         }
 
-        // 检查当前训练位置的人数
-        let dist = &game.base.distribution[train];
+        // 已有 5 个非 NPC：满员且挤不出空间
+        //
+        // 注意这条与下面的「满 5 人且无 NPC 可挤」在**可达状态下互为冗余**：
+        // `non_npc_count <= dist.len()`，而分布长度的不变式是 <= 5（所有写入点都先查满员），
+        // 故 `non_npc_count >= 5` 必然意味着 len == 5 且五个全非 NPC，下面那条也会返回 false。
+        // 两条都留是防御——一旦长度不变式将来被破坏（例如出现 len == 6 的分布），
+        // 只剩下面那条会错误地允许挤掉 NPC 后放到第 6 个非 NPC。
+        // **代价是这条单独删掉不会有任何测试变红**，别把它当成有守护的分支。
         let non_npc_count = dist
             .iter()
             .filter(|&&id| id >= 0 && game.persons[id as usize].person_type != PersonType::Npc)
             .count();
-
         if non_npc_count >= 5 {
-            return Err(anyhow::anyhow!(
-                "{}训练已满5个非NPC人物",
-                global!(GAMECONSTANTS).train_names[train]
-            ));
+            return false;
         }
 
+        // 已满 5 人时必须有 NPC 可挤
         if dist.len() >= 5 {
-            // 已满5人，尝试挤掉NPC
-            if let Some(npc_pos) = dist
+            return dist
+                .iter()
+                .any(|&id| id >= 0 && game.persons[id as usize].person_type == PersonType::Npc);
+        }
+
+        true
+    }
+
+    /// 在 `train` 放置 `person_idx` 的分身
+    ///
+    /// 满 5 人时挤掉一个 NPC。`source` 仅用于日志区分来源（`"超级拉面"` / `"地区"`）。
+    ///
+    /// # 错误
+    ///
+    /// 仅在 [`Self::can_place_clone`] 为假、或为真却仍无法写入时返回 `Err`——那是不变式
+    /// 被破坏，属编程错误。**不用于**表达「这张卡放不下」，后者由调用方按规则处理。
+    pub(crate) fn place_clone(
+        game: &mut super::RamenGame, person_idx: i32, train: usize, source: &str
+    ) -> Result<()> {
+        if !Self::can_place_clone(game, person_idx, train) {
+            return Err(anyhow!("{source}分身落点非法: 人头 {person_idx} -> 训练位 {train}"));
+        }
+
+        if game.base.distribution[train].len() >= 5 {
+            // 已满 5 人：挤掉 NPC（`can_place_clone` 已保证有 NPC 可挤）
+            let npc_pos = game.base.distribution[train]
                 .iter()
                 .position(|&id| id >= 0 && game.persons[id as usize].person_type == PersonType::Npc)
-            {
-                let removed_id = game.base.distribution[train].remove(npc_pos);
-                game.base.distribution[train].push(person_idx);
-                diag!(
-                    ">> 超级拉面分身挤掉NPC: {} -> {}训练 (挤掉{})",
-                    game.persons[person_idx as usize].short_name(),
-                    global!(GAMECONSTANTS).train_names[train],
-                    game.persons[removed_id as usize].short_name()
-                );
-            } else {
-                return Err(anyhow::anyhow!(
-                    "{}训练已满5人且无NPC可挤",
-                    global!(GAMECONSTANTS).train_names[train]
-                ));
-            }
-        } else {
-            // 未满5人，直接添加
+                .ok_or_else(|| {
+                    anyhow!("{source}分身: {}训练已满5人且无NPC可挤", global!(GAMECONSTANTS).train_names[train])
+                })?;
+            let removed_id = game.base.distribution[train].remove(npc_pos);
             game.base.distribution[train].push(person_idx);
             diag!(
-                ">> 超级拉面分身: {} -> {}训练",
+                ">> {}分身挤掉NPC: {} -> {}训练 (挤掉{})",
+                source,
+                game.persons[person_idx as usize].short_name(),
+                global!(GAMECONSTANTS).train_names[train],
+                game.persons[removed_id as usize].short_name()
+            );
+        } else {
+            game.base.distribution[train].push(person_idx);
+            diag!(
+                ">> {}分身: {} -> {}训练",
+                source,
                 game.persons[person_idx as usize].short_name(),
                 global!(GAMECONSTANTS).train_names[train]
             );
@@ -1543,7 +1599,9 @@ mod tests {
             blue_count: [15, 3, 0, 0, 0],
             extra_count: [0, 30, 0, 0, 30, 30]
         };
-        const SEEDS: u64 = 32;
+        // 假失败率在「只剩一格合法」时是 (3/4)^8 ≈ 10%，32 个种子期望只丢 3 次、
+        // 且旧断言只查「不该有什么」，会整片漏过去。提到 256 让漏放必然现形。
+        const SEEDS: u64 = 256;
 
         let mut game = super::super::RamenGame::newgame(102601, &TEST_DECK, TEST_INHERIT)?;
         game.add_friend_and_npcs()?;
@@ -1621,7 +1679,13 @@ mod tests {
         c.check(b_ok.1, "同一训练不能同时存在本体与分身");
 
         // 场景 C：理事长占住允许范围内的三个训练位，友人分身只能去剩下那个
-        let mut c_ok = (true, true);
+        //
+        // 这是「只剩一格合法」(|L| = 1) 的局面。旧实现有放回抽 8 次，约 10% 的种子
+        // 明明放得下却放弃；而旧断言只查「不得与理事长同格」「0/1/2 不出现友人」——
+        // 友人分身**根本没被放出来**时这两条同样成立，测试照绿。
+        // 下面第三条才是真正的守卫：必须**确实放出来**。
+        let mut c_ok = (true, true, true);
+        let mut c_lost = 0usize;
         for seed in 0..SEEDS {
             game.base.distribution = vec![vec![yayoi], vec![yayoi], vec![yayoi], vec![], vec![]];
             RamenAction::distribute_super_ramen_clones(&mut game, &mut StdRng::seed_from_u64(seed))?;
@@ -1630,9 +1694,16 @@ mod tests {
             }
             c_ok.0 &= friend_ok(&game);
             c_ok.1 &= (0..3).all(|t| !game.base.distribution[t].contains(&friend));
+            let placed = count_of(&game, friend) == 1;
+            if !placed {
+                c_lost += 1;
+            }
+            c_ok.2 &= placed;
         }
+        println!("场景 C: {SEEDS} 个种子中友人分身漏放 {c_lost} 次（修复前期望约 10%）");
         c.check(c_ok.0, "友人卡分身不得与理事长同格");
         c.check(c_ok.1, "理事长占住的训练位不应出现友人卡分身");
+        c.check(c_ok.2, "只剩一格合法时友人卡分身必须放出来（旧实现约 10% 漏放）");
 
         // 场景 D：非超级拉面回合应原样早退
         game.base.turn = 71;
@@ -1645,4 +1716,296 @@ mod tests {
 
         c.finish()
     }
+    /// 回归：友人卡必须优先分配，否则普通卡会抢走它唯一的容量
+    ///
+    /// 「每张卡各自在合法位里随机挑一个」并不等于「六张卡全都放得下」——分配是**在线贪心**，
+    /// 前面的卡会改写后面的卡看到的合法集。友人卡人头下标最大，按升序永远最后处理：
+    ///
+    /// | 训练位 | 内容 |
+    /// |---|---|
+    /// | 0 速 | 友人卡本体（友人互斥 + 同卡，友人分身进不去） |
+    /// | 1 耐 | 理事长（友人互斥） |
+    /// | 2 力 | 记者（友人互斥） |
+    /// | 3 根 | 不在选项二的允许范围内 |
+    /// | 4 智 | 训练卡 0、1 的本体 |
+    ///
+    /// 友人分身只有智可去。若训练卡 2/3/4 的分身先全部落到智，智就凑满 5 个非 NPC，
+    /// 友人无处可放；而先放友人再放训练卡，六张都放得下。因此「洗牌 / 过滤合法位」
+    /// 只能消灭随机重试的假失败，**消灭不了这个顺序问题**，必须靠友人优先。
+    #[test]
+    fn test_super_ramen_clones_friend_priority_beats_greedy_starvation() -> anyhow::Result<()> {
+        use rand::{SeedableRng, rngs::StdRng};
+
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+        const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        };
+        const SEEDS: u64 = 256;
+
+        let mut game = super::super::RamenGame::newgame(102601, &TEST_DECK, TEST_INHERIT)?;
+        game.add_friend_and_npcs()?;
+        game.add_reporter();
+        game.base.turn = 72;
+        game.ramen.super_ramen = Some(1); // 选项二：允许 [0,1,2,4]
+        game.deck_can_split = true;
+
+        let friend = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::ScenarioCard)
+            .map(|i| i as i32)
+            .ok_or_else(|| anyhow!("找不到友人卡"))?;
+        let yayoi = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::Yayoi)
+            .map(|i| i as i32)
+            .ok_or_else(|| anyhow!("找不到理事长"))?;
+        let reporter = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::Reporter)
+            .map(|i| i as i32)
+            .ok_or_else(|| anyhow!("找不到记者"))?;
+        let cards: Vec<i32> = (0..game.persons.len() as i32)
+            .filter(|&i| game.persons[i as usize].person_type == PersonType::Card)
+            .collect();
+        println!("友人卡={friend} 理事长={yayoi} 记者={reporter} 训练卡={cards:?}");
+
+        let mut c = Checks::new();
+        c.check(cards.len() == 5, "测试卡组应有 5 张训练卡");
+
+        // 可解局面：友人优先后六张卡必须全部放下
+        let mut all_placed = true;
+        let mut friend_placed = true;
+        let mut min_clones = usize::MAX;
+        for seed in 0..SEEDS {
+            game.base.distribution =
+                vec![vec![friend], vec![yayoi], vec![reporter], vec![], vec![cards[0], cards[1]]];
+            let before: usize = game.base.distribution.iter().flatten().count();
+            RamenAction::distribute_super_ramen_clones(&mut game, &mut StdRng::seed_from_u64(seed))?;
+            let clones: usize = game.base.distribution.iter().flatten().count() - before;
+            min_clones = min_clones.min(clones);
+            all_placed &= clones == 6;
+            friend_placed &=
+                game.base.distribution.iter().flatten().filter(|&&p| p == friend).count() == 2;
+            if seed == 0 {
+                println!("可解反例（seed 0）: {:?}", game.base.distribution);
+            }
+        }
+        println!("可解反例：{SEEDS} 个种子中最少放下 {min_clones} 个分身（应恒为 6）");
+        c.check(all_placed, "可解局面下六张支援卡必须各放下一个分身");
+        c.check(friend_placed, "友人卡本体 + 分身合计 2 个占位");
+
+        // 真无解局面：智已被 5 张训练卡本体占满，另三个候选位各有一个友人。
+        // 友人分身无处可去——这是约束本身的死局，任何分配算法都救不了，不是回归。
+        // 此时仍必须：不 panic、不返回 Err、5 张训练卡照常拿到分身。
+        let mut dead_ok = (true, true);
+        for seed in 0..SEEDS {
+            game.base.distribution =
+                vec![vec![friend], vec![yayoi], vec![reporter], vec![], cards.clone()];
+            let before: usize = game.base.distribution.iter().flatten().count();
+            let r =
+                RamenAction::distribute_super_ramen_clones(&mut game, &mut StdRng::seed_from_u64(seed));
+            dead_ok.0 &= r.is_ok();
+            let clones: usize = game.base.distribution.iter().flatten().count() - before;
+            dead_ok.1 &= clones == 5;
+            if seed == 0 {
+                println!("真无解（seed 0）: {:?}", game.base.distribution);
+            }
+        }
+        c.check(dead_ok.0, "真无解局面不得返回 Err（分身放不下在规则上允许，不该中断育成）");
+        c.check(dead_ok.1, "真无解局面下 5 张训练卡仍各拿到 1 个分身，只有友人卡落空");
+
+        c.finish()
+    }
+
+    /// 回归：分身分配与父随机流解耦
+    ///
+    /// 注入 `rule_master` 时，局部流按 `(rule_master, turn, TAG)` 派生
+    /// （[`RamenGame::clone_stream`]），因此：
+    ///
+    /// 1. **完全不消耗父流**；
+    /// 2. 结果与「本回合此前消耗了几次策略随机」无关——这条是为 MCTS 的 CRN 服务的：
+    ///    同一回合各候选动作走过不同路径后策略流消耗长度不同，若从父流 fork，各候选的
+    ///    分身随机性会去相关；按 `(rule_master, turn)` 派生则各候选拿到同一份。
+    ///
+    /// 未注入 `rule_master` 的旧路径回退到从父流 fork，消耗恰好 1 次。
+    #[test]
+    fn test_super_ramen_clones_decoupled_from_parent_stream() -> anyhow::Result<()> {
+        use rand::RngCore;
+
+        use crate::rng::StrategyRng;
+
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+        const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        };
+
+        let mut game = super::super::RamenGame::newgame(102601, &TEST_DECK, TEST_INHERIT)?;
+        game.add_friend_and_npcs()?;
+        game.base.turn = 72;
+        game.ramen.super_ramen = Some(1);
+        game.deck_can_split = true;
+
+        let yayoi = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::Yayoi)
+            .map(|i| i as i32)
+            .ok_or_else(|| anyhow!("找不到理事长"))?;
+
+        let mut c = Checks::new();
+
+        // ① 注入 rule_master：父流一次都不消耗，且合法集大小无关
+        game.set_rule_master(0x5EED_1234);
+        game.base.turn = 72; // set_rule_master 会重置回合流，turn 要在之后再确认
+        let boards: [(&str, Vec<Vec<i32>>); 3] = [
+            ("空分布（每张卡 4 个合法位）", vec![vec![]; 5]),
+            (
+                "理事长占三格（友人只剩一格）",
+                vec![vec![yayoi], vec![yayoi], vec![yayoi], vec![], vec![]]
+            ),
+            ("常规盘面", vec![vec![0], vec![1], vec![], vec![], vec![]])
+        ];
+        let mut all_zero = true;
+        for (name, board) in boards {
+            game.base.distribution = board;
+            let mut parent = StrategyRng::new(0xDEAD_BEEF);
+            RamenAction::distribute_super_ramen_clones(&mut game, &mut parent)?;
+            println!("父流消耗（已注入 rule_master）: {name} -> {} 次", parent.counter());
+            all_zero &= parent.counter() == 0;
+        }
+        c.check(all_zero, "注入 rule_master 后分身分配完全不消耗父策略流");
+
+        // ② 关键性质：父流此前消耗了几次，不影响分身结果
+        let mut results = Vec::new();
+        for pre_draws in [0usize, 1, 7, 33] {
+            game.base.distribution = vec![vec![]; 5];
+            let mut parent = StrategyRng::new(0xDEAD_BEEF);
+            for _ in 0..pre_draws {
+                let _ = parent.next_u64();
+            }
+            RamenAction::distribute_super_ramen_clones(&mut game, &mut parent)?;
+            println!("父流预消耗 {pre_draws} 次 -> 分身分布 {:?}", game.base.distribution);
+            results.push(game.base.distribution.clone());
+        }
+        c.check(
+            results.windows(2).all(|w| w[0] == w[1]),
+            "父流此前消耗多少次都不影响分身结果（CRN 对齐的前提）"
+        );
+
+        // ③ 未注入 rule_master 的旧路径：回退到从父流 fork，消耗恰好 1 次
+        let mut legacy = super::super::RamenGame::newgame(102601, &TEST_DECK, TEST_INHERIT)?;
+        legacy.add_friend_and_npcs()?;
+        legacy.base.turn = 72;
+        legacy.ramen.super_ramen = Some(1);
+        legacy.deck_can_split = true;
+        legacy.base.distribution = vec![vec![]; 5];
+        let mut parent = StrategyRng::new(0xDEAD_BEEF);
+        RamenAction::distribute_super_ramen_clones(&mut legacy, &mut parent)?;
+        println!("父流消耗（未注入 rule_master，回退 fork）: {} 次", parent.counter());
+        c.check(parent.counter() == 1, "未注入 rule_master 时回退从父流 fork，消耗恰好 1 次");
+
+        // ④ 早退路径两种情况都不消耗父流
+        game.base.turn = 71;
+        game.base.distribution = vec![vec![]; 5];
+        let mut parent = StrategyRng::new(0xDEAD_BEEF);
+        RamenAction::distribute_super_ramen_clones(&mut game, &mut parent)?;
+        c.check(parent.counter() == 0, "非超级拉面回合早退，不应消耗父流");
+
+        c.finish()
+    }
+
+    /// 回归：`can_place_clone` / `place_clone` 的满员与挤 NPC 分支
+    ///
+    /// 这两条分支是本次改写的核心之一（原先是 `if let Some(npc_pos) { .. } else { Err }`，
+    /// 现在拆成纯判定 + `position(..).ok_or_else(..)?`），而改写前**全部新旧用例里没有任何
+    /// 盘面含 NPC**，这段代码从头到尾没被执行过。
+    ///
+    /// 直接测原语而非经由 `distribute_super_ramen_clones`：后者对满员位的命中是概率性的
+    /// （6 张卡各在 4 个合法位里均匀选，无人选中满员位的概率 (3/4)^6 ≈ 17.8%），
+    /// 拿它测挤 NPC 会得到一个随种子飘的测试。
+    #[test]
+    fn test_clone_placement_full_train_and_npc_eviction() -> anyhow::Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+        const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        };
+
+        let mut game = super::super::RamenGame::newgame(102601, &TEST_DECK, TEST_INHERIT)?;
+        game.add_friend_and_npcs()?;
+
+        let npcs: Vec<i32> = (0..game.persons.len() as i32)
+            .filter(|&i| game.persons[i as usize].person_type == PersonType::Npc)
+            .collect();
+        let cards: Vec<i32> = (0..game.persons.len() as i32)
+            .filter(|&i| game.persons[i as usize].person_type == PersonType::Card)
+            .collect();
+        println!("NPC 人头={npcs:?}，训练卡人头={cards:?}");
+
+        let mut c = Checks::new();
+        c.check(npcs.len() >= 5 && cards.len() == 5, "测试局面应有 5 个 NPC 与 5 张训练卡");
+
+        // ① 满 5 人但全是 NPC：可放置，且放置时挤掉一个 NPC
+        game.base.distribution = vec![npcs[..5].to_vec(), vec![], vec![], vec![], vec![]];
+        c.check(
+            RamenAction::can_place_clone(&game, cards[0], 0),
+            "满 5 人但含 NPC 时可放置（由 place_clone 挤掉 NPC）"
+        );
+        RamenAction::place_clone(&mut game, cards[0], 0, "测试")?;
+        let d = &game.base.distribution[0];
+        let npc_left = d.iter().filter(|&&p| game.persons[p as usize].person_type == PersonType::Npc).count();
+        println!("挤 NPC 后速位: {d:?}（NPC 剩 {npc_left}）");
+        c.check(d.len() == 5, "挤掉一个补一个，人数仍为 5");
+        c.check(npc_left == 4, "恰好挤掉 1 个 NPC");
+        c.check(d.contains(&cards[0]), "分身确实进入了该训练位");
+
+        // ② 满 5 人且全是非 NPC：不可放置
+        game.base.distribution = vec![cards.clone(), vec![], vec![], vec![], vec![]];
+        c.check(
+            !RamenAction::can_place_clone(&game, cards[0], 0),
+            "该训练已有本体时不可放置"
+        );
+        let friend = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::ScenarioCard)
+            .map(|i| i as i32)
+            .ok_or_else(|| anyhow!("找不到友人卡"))?;
+        c.check(
+            !RamenAction::can_place_clone(&game, friend, 0),
+            "满 5 个非 NPC 时不可放置（注意：与「满 5 人且无 NPC 可挤」互为冗余，测不出是哪条生效）"
+        );
+        c.check(
+            RamenAction::place_clone(&mut game, friend, 0, "测试").is_err(),
+            "对非法落点调用 place_clone 必须返回 Err（不变式被破坏，属编程错误）"
+        );
+
+        // ③ 越界与非法人头下标
+        c.check(!RamenAction::can_place_clone(&game, cards[0], 5), "训练位越界不可放置");
+        c.check(!RamenAction::can_place_clone(&game, -1, 0), "负数人头下标不可放置（原实现会 panic）");
+        c.check(
+            !RamenAction::can_place_clone(&game, game.persons.len() as i32, 0),
+            "越界人头下标不可放置"
+        );
+
+        c.finish()
+    }
+
 }

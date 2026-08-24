@@ -35,6 +35,7 @@ use crate::{
     },
     gamedata::{ActionValue, EventData, GAMECONFIG, GAMECONSTANTS, RamenRegionStrategy, TriggerType, ramen::RAMENDATA},
     global,
+    rng::{CLONE_REGION_TAG, fork_local_stream},
     utils::{AttributeArray, global_events, system_event, system_event_prob}
 };
 
@@ -891,89 +892,54 @@ impl RamenGame {
             return Ok(());
         }
 
-        // 获取所有支援卡索引
-        let card_indices: Vec<i32> = (0..6i32)
+        // 获取所有可作为地区分身来源的支援卡（不含友人卡）
+        //
+        // 按 PersonType 扫全体人头，不写死 `0..6`。注意这在当前布局下是**防御性加固而非
+        // bug 修复**：`PersonType::Card` 只来自 card_type 0..=4，恒占最低下标且至多 5 个，
+        // 故 `(0..6).filter(Card)` 与全扫结果相同。写死上界只是等着下次人头布局变动时炸。
+        let card_indices: Vec<i32> = (0..self.persons.len() as i32)
             .filter(|&i| self.persons[i as usize].person_type == PersonType::Card)
             .collect();
         if card_indices.is_empty() {
             return Ok(());
         }
 
+        // 分身分配走局部流，与超级拉面用不同的 tag。
+        //
+        // 这条路径最吃「按 (rule_master, turn) 派生」的好处：地区分身在吃面落地时执行，
+        // 父流 counter 取决于本回合此前的动作与事件，从父流 fork 会让上游任何位移
+        // 都改掉选卡；按 (rule_master, turn, TAG) 派生则与上游完全无关。
+        let mut clone_rng = self
+            .clone_stream(CLONE_REGION_TAG)
+            .unwrap_or_else(|| fork_local_stream(rng, CLONE_REGION_TAG));
+
         // 对于 at_trains 中的每个训练位置，随机选择一个不重复的支援卡分配分身
+        //
+        // 语义是 per-训练位（不是 per-卡）：某个位置放不下就是这个位置不出分身，
+        // **不会**改去别的位置——那是超级拉面的语义。
         for &train in clone_trains {
             let train = train as usize;
             if train >= 5 {
                 continue;
             }
 
-            // 获取当前训练位置已有的人员（包括本体和分身）
-            let existing: std::collections::HashSet<i32> = self.base.distribution[train]
+            // 先过滤合法卡再抽。原实现是「先抽再查满员」，满员时白白消耗一次随机数，
+            // 且看起来像是算法失败，实际是规格内的跳过。
+            let legal: Vec<i32> = card_indices
                 .iter()
-                .filter(|&&id| id >= 0)
                 .copied()
+                .filter(|&idx| RamenAction::can_place_clone(self, idx, train))
                 .collect();
 
-            let available: Vec<i32> = card_indices
-                .iter()
-                .filter(|&&idx| !existing.contains(&idx))
-                .copied()
-                .collect();
-
-            if available.is_empty() {
-                crate::diag!(
-                    ">> 分身失败: {}训练无可用支援卡（所有支援卡已在该位置）",
-                    global!(GAMECONSTANTS).train_names[train]
-                );
-                continue;
-            }
-
-            // 随机选择一个不重复的支援卡
-            let person_idx = *available.choose(rng).unwrap();
-
-            // 检查当前训练位置的人数
-            let dist = &self.base.distribution[train];
-            let non_npc_count = dist
-                .iter()
-                .filter(|&&id| id >= 0 && self.persons[id as usize].person_type != PersonType::Npc)
-                .count();
-
-            if non_npc_count >= 5 {
-                // 已经有5个非NPC人物，不能创建分身
-                crate::diag!(
-                    ">> 分身失败: {}训练已满5个非NPC人物，无法添加分身",
-                    global!(GAMECONSTANTS).train_names[train]
-                );
-                continue;
-            }
-
-            if dist.len() >= 5 {
-                // 已满5人，尝试挤掉NPC
-                if let Some(npc_pos) = dist
-                    .iter()
-                    .position(|&id| id >= 0 && self.persons[id as usize].person_type == PersonType::Npc)
-                {
-                    let removed_id = self.base.distribution[train].remove(npc_pos);
-                    self.base.distribution[train].push(person_idx);
+            match legal.choose(&mut clone_rng) {
+                Some(&person_idx) => RamenAction::place_clone(self, person_idx, train, "地区")?,
+                None => {
+                    // 规格内跳过：该位置满 5 个非 NPC，或全部支援卡都已在该位置。
                     crate::diag!(
-                        ">> 分身挤掉NPC: {} -> {}训练 (挤掉{})",
-                        self.persons[person_idx as usize].short_name(),
-                        global!(GAMECONSTANTS).train_names[train],
-                        self.persons[removed_id as usize].short_name()
-                    );
-                } else {
-                    crate::diag!(
-                        ">> 分身失败: {}训练已满5人且无NPC可挤，无法添加分身",
+                        ">> 地区分身跳过: {}训练无合法支援卡（满员或该位置已有全部支援卡）",
                         global!(GAMECONSTANTS).train_names[train]
                     );
                 }
-            } else {
-                // 未满5人，直接添加
-                self.base.distribution[train].push(person_idx);
-                crate::diag!(
-                    ">> 分身: {} -> {}训练",
-                    self.persons[person_idx as usize].short_name(),
-                    global!(GAMECONSTANTS).train_names[train]
-                );
             }
         }
 
@@ -3869,4 +3835,189 @@ mod tests {
         }
         c.finish()
     }
+    /// 回归：地区拉面分身是 per-训练位语义，且满员是规格内跳过
+    ///
+    /// 与超级拉面（per-卡：每张支援卡各出一次，放不下就换个训练位）不同，地区分身由
+    /// `at_trains` 指定位置，**每个位置抽一张还不在该位置的支援卡**。某个位置放不下就是
+    /// 这个位置不出分身，不会改去别的位置。来源不含友人卡。
+    ///
+    /// 原实现有两处问题：候选卡列表写死 `(0..6)`（人头下标当卡组下标的同族地雷），
+    /// 以及「先抽卡再查满员」——满员时白白消耗一次随机数，且日志看起来像分配失败，
+    /// 实际是规格内的跳过。
+    #[test]
+    fn test_region_clones_per_train_semantics() -> anyhow::Result<()> {
+        use crate::rng::StrategyRng;
+
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+        const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        };
+        const SEEDS: u64 = 256;
+        // 地区 6「中京-力根」：at_trains = [2, 3]，两个训练位各出一个分身
+        const REGION_ID: usize = 6;
+
+        let mut game = RamenGame::newgame(102601, &TEST_DECK, TEST_INHERIT)?;
+        game.add_friend_and_npcs()?;
+        game.add_reporter();
+        game.deck_can_split = true;
+
+        let cards: Vec<i32> = (0..game.persons.len() as i32)
+            .filter(|&i| game.persons[i as usize].person_type == PersonType::Card)
+            .collect();
+        let non_card: Vec<i32> = (0..game.persons.len() as i32)
+            .filter(|&i| game.persons[i as usize].person_type != PersonType::Card)
+            .collect();
+        let reporter = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::Reporter)
+            .map(|i| i as i32)
+            .ok_or_else(|| anyhow!("找不到记者"))?;
+        println!("训练卡人头={cards:?}，非训练卡人头={non_card:?}，记者={reporter}");
+
+        let mut c = Checks::new();
+        c.check(cards.len() == 5, "测试卡组应有 5 张训练卡");
+
+        // 场景 1：两个 at_trains 位各恰好一个分身，来源必须是训练卡
+        let mut s1 = (true, true, true);
+        let mut same_card_both = 0usize;
+        for seed in 0..SEEDS {
+            game.base.distribution = vec![vec![]; 5];
+            game.distribute_region_clones(REGION_ID, &mut StdRng::seed_from_u64(seed))?;
+            if seed == 0 {
+                println!("地区分身（空分布，seed 0）: {:?}", game.base.distribution);
+            }
+            s1.0 &= game.base.distribution[2].len() == 1 && game.base.distribution[3].len() == 1;
+            s1.1 &= [0usize, 1, 4].iter().all(|&t| game.base.distribution[t].is_empty());
+            s1.2 &= game
+                .base
+                .distribution
+                .iter()
+                .flatten()
+                .all(|&p| game.persons[p as usize].person_type == PersonType::Card);
+            if game.base.distribution[2] == game.base.distribution[3] {
+                same_card_both += 1;
+            }
+        }
+        c.check(s1.0, "at_trains 的每个训练位各生成 1 个分身");
+        c.check(s1.1, "非 at_trains 的训练位不得出现分身");
+        c.check(s1.2, "地区分身来源只能是支援卡，绝不含友人卡 / 理事长 / 记者");
+        println!("两个位置抽到同一张卡: {same_card_both}/{SEEDS} 次（规格允许，非缺陷）");
+
+        // 场景 2：力位被 5 个非 NPC 占满 -> 该位跳过、不报错；根位照常出分身
+        //
+        // 占位的 5 个非 NPC 必须**至少留一张候选卡在外面**：若直接把 5 张候选卡全塞进去，
+        // 每张都会先被 `can_place_clone` 的「该位已有本体」挡掉，容量判定一次都跑不到，
+        // 把 `non_npc_count >= 5` 整段删掉这个测试照样绿（假绿）。
+        // 这里放 4 张卡 + 记者，第 5 张卡不在该位、能走到容量判定上被拒。
+        let mut s2 = (true, true, true);
+        let full_board: Vec<i32> = cards[..4].iter().copied().chain(std::iter::once(reporter)).collect();
+        for seed in 0..SEEDS {
+            game.base.distribution = vec![vec![]; 5];
+            game.base.distribution[2] = full_board.clone();
+            let r = game.distribute_region_clones(REGION_ID, &mut StdRng::seed_from_u64(seed));
+            s2.0 &= r.is_ok();
+            s2.1 &= game.base.distribution[2].len() == 5; // 满员位没有被塞进第 6 个
+            s2.2 &= game.base.distribution[3].len() == 1; // 另一位不受影响
+        }
+        c.check(s2.0, "满员位跳过不得返回 Err（规格内跳过，不是失败）");
+        c.check(s2.1, "满 5 个非 NPC 的训练位不得再加分身");
+        c.check(s2.2, "某位跳过不影响 at_trains 的其他训练位");
+
+        // 场景 3：同一张卡的本体已在该位时不得重复，**且必须抽到别的卡**
+        //
+        // 只断言「cards[0] 没变成两个」是假绿：退回「先从 5 张卡抽一次、can_place 失败就
+        // 跳过该位」时，有 1/5 的种子抽中 cards[0] 自己 → 该位干脆不出分身，而
+        // cards[0] 的计数仍是 1，断言照过。地区路径「先过滤再抽」的实际修复正是
+        // 「该位还有合法卡时必须放下」，必须由 s3.1 / s3.2 锁住。
+        let mut s3 = (true, true, true);
+        for seed in 0..SEEDS {
+            game.base.distribution = vec![vec![]; 5];
+            game.base.distribution[2] = vec![cards[0]];
+            game.distribute_region_clones(REGION_ID, &mut StdRng::seed_from_u64(seed))?;
+            let d = &game.base.distribution[2];
+            s3.0 &= d.iter().filter(|&&p| p == cards[0]).count() == 1;
+            s3.1 &= d.len() == 2;
+            s3.2 &= d
+                .iter()
+                .filter(|&&p| p != cards[0])
+                .all(|&p| game.persons[p as usize].person_type == PersonType::Card);
+            if seed == 0 {
+                println!("场景 3（力位已有 cards[0]，seed 0）: {d:?}");
+            }
+        }
+        c.check(s3.0, "同一训练位不得同时存在本体与分身");
+        c.check(s3.1, "该位仍有合法卡时必须放下一个分身（回退「先抽再跳过」会 1/5 空放）");
+        c.check(s3.2, "补上的那个人头必须是支援卡");
+
+        // 场景 4a：注入 rule_master 后完全不消耗父流，且与父流此前消耗次数无关
+        //
+        // 地区分身在吃面落地时执行，父流 counter 取决于本回合此前的动作与事件。
+        // 按 (rule_master, turn, TAG) 派生后这条耦合被切断——这是 MCTS 配对对齐的前提。
+        {
+            use crate::rng::StrategyRng;
+            use rand::RngCore;
+
+            let mut g = RamenGame::newgame(102601, &TEST_DECK, TEST_INHERIT)?;
+            g.add_friend_and_npcs()?;
+            g.deck_can_split = true;
+            g.set_rule_master(0x5EED_9999);
+
+            let mut zero_draw = true;
+            let mut outs = Vec::new();
+            for pre in [0usize, 1, 9] {
+                g.base.distribution = vec![vec![]; 5];
+                let mut parent = StrategyRng::new(0xFEED_0001);
+                for _ in 0..pre {
+                    let _ = parent.next_u64();
+                }
+                let before = parent.counter();
+                g.distribute_region_clones(REGION_ID, &mut parent)?;
+                let used = parent.counter() - before;
+                println!("地区分身（注入 rule_master，父流预消耗 {pre}）: {:?}，本次消耗 {used} 次",
+                    g.base.distribution);
+                zero_draw &= used == 0;
+                outs.push(g.base.distribution.clone());
+            }
+            c.check(zero_draw, "注入 rule_master 后地区分身完全不消耗父策略流");
+            c.check(
+                outs.windows(2).all(|w| w[0] == w[1]),
+                "父流此前消耗多少次都不影响地区分身结果（CRN 对齐的前提）"
+            );
+        }
+
+        // 场景 4b：未注入 rule_master 的旧路径回退从父流 fork，消耗恰好 1 次
+        let mut all_one = true;
+        for (name, board) in [
+            ("空分布", vec![vec![]; 5]),
+            ("力位满员（4 卡 + 记者，第 5 张卡走到容量判定）", {
+                let mut d = vec![vec![]; 5];
+                d[2] = full_board.clone();
+                d
+            })
+        ] {
+            game.base.distribution = board;
+            let mut parent = StrategyRng::new(0xC0FF_EE00);
+            game.distribute_region_clones(REGION_ID, &mut parent)?;
+            println!("地区分身父流消耗: {name} -> {} 次", parent.counter());
+            all_one &= parent.counter() == 1;
+        }
+        c.check(all_one, "未注入 rule_master 时回退从父流 fork，消耗恰好 1 次（含满员跳过的局面）");
+
+        // 场景 5：id < 5 的地区不触发分身
+        game.base.distribution = vec![vec![]; 5];
+        game.distribute_region_clones(4, &mut StdRng::seed_from_u64(7))?;
+        c.check(
+            game.base.distribution.iter().flatten().count() == 0,
+            "地区 id < 5 不应生成任何分身"
+        );
+
+        c.finish()
+    }
+
 }

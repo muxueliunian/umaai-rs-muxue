@@ -29,6 +29,10 @@ pub const STRATEGY_TAG: u64 = 0x5374_7261_0000_0002;
 pub const PROBE_TAG: u64 = 0x5072_6F62_0000_0003;
 /// 事件流派生标记（回合开始事件链，冻结不可改）
 pub const EVENT_TAG: u64 = 0x4576_656E_7400_0004;
+/// 超级拉面分身局部流派生标记（冻结不可改）
+pub const CLONE_SUPER_TAG: u64 = 0x436C_6F6E_0000_0005;
+/// 地区拉面分身局部流派生标记（冻结不可改）
+pub const CLONE_REGION_TAG: u64 = 0x436C_6F6E_0000_0006;
 
 /// SplitMix64 输出混合（finalizer），全仓库唯一权威哈希实现
 //
@@ -50,6 +54,30 @@ pub fn derive_seed(base: u64, parts: &[u64]) -> u64 {
         x ^= p;
     }
     splitmix64(x)
+}
+
+/// 从父流取 1 个随机字，派生一条一次性的局部随机流
+///
+/// 用于把「消耗次数随局面变化」的子算法与父流隔离：父流**恒定消耗 1 次**，
+/// 子算法内部无论抽多少次都只推进局部流，因此改子算法不再位移父流后续的随机点。
+///
+/// 分身分配（[`CLONE_SUPER_TAG`] / [`CLONE_REGION_TAG`]）是首个用例：改分配算法
+/// 不会再让同回合后续的训练成败、休息 / 外出结果整体错位。
+///
+/// `tag` 必须是冻结常量，且不同用途取不同值——同 tag 同父流值会得到同一条局部流。
+///
+/// # 已知耦合（与 v2 §4.2 的派生形式的差别）
+///
+/// v2 的流 master 派生形如 `splitmix64(rule_master ^ turn ^ TAG)`，**不依赖此前消耗次数**。
+/// 本函数用的是父流在派生点的**当前取值**，因此局部流内容依赖父流此前消耗了几次：
+/// 它只隔离下游（子算法内部怎么改都不影响父流后续），**隔离不了上游**。
+///
+/// 超级拉面分身在回合起始附近（父流 counter 稳定）；地区拉面分身在吃面落地时执行，
+/// 父流 counter 取决于此前的动作与事件——此前任何一个策略随机点多消耗一次，
+/// 地区分身的选卡就会整体换掉。要彻底解耦需改成按 `(rule_master, turn, TAG)` 派生，
+/// 那样父流消耗还能降到 0，但需要把 turn 与 rule_master 传进分配函数。
+pub fn fork_local_stream(parent: &mut impl RngCore, tag: u64) -> SplitmixRng {
+    SplitmixRng::new(derive_seed(parent.next_u64(), &[tag]))
 }
 
 /// 流标记：随机流类别（冻结不可改）
@@ -373,4 +401,55 @@ mod tests {
         let f1 = fixed.next_u64();
         println!("固定流 reset(7) 后[0]: {f1:#018x} (counter={})", fixed.counter() - 1);
     }
+    /// 局部流派生：父流恰好推进 1 次，不同 tag 得到互不相同的序列
+    ///
+    /// 层 1 原语自测（plan v2 要求每个 rng 原语有单测）。拉面侧那两个测试测的是
+    /// 「父流消耗 = 1」这个**调用方**性质，测不到局部流本身是否确定、是否按 tag 分离。
+    #[test]
+    fn test_fork_local_stream() {
+        const TAG_A: u64 = CLONE_SUPER_TAG;
+        const TAG_B: u64 = CLONE_REGION_TAG;
+
+        // ① 父流恰好推进 1 次
+        let mut parent = SplitmixRng::new(0x1234_5678);
+        let before = parent.counter();
+        let mut local = fork_local_stream(&mut parent, TAG_A);
+        println!("父流 counter: {before} -> {}", parent.counter());
+        assert_eq!(parent.counter() - before, 1);
+
+        // ② 局部流独立计数，抽多少次都不回流父流
+        for _ in 0..20 {
+            let _ = local.next_u64();
+        }
+        println!("局部流抽 20 次后，父流 counter 仍为 {}", parent.counter());
+        assert_eq!(parent.counter() - before, 1);
+        assert_eq!(local.counter(), 20);
+
+        // ③ 确定性：同一父流状态 + 同一 tag => 同一局部流
+        let mut p1 = SplitmixRng::new(0xABCD);
+        let mut p2 = SplitmixRng::new(0xABCD);
+        let mut l1 = fork_local_stream(&mut p1, TAG_A);
+        let mut l2 = fork_local_stream(&mut p2, TAG_A);
+        let (a, b) = (l1.next_u64(), l2.next_u64());
+        println!("确定性: {a:#018x} vs {b:#018x}");
+        assert_eq!(a, b);
+
+        // ④ tag 分离：同一父流取值配不同 tag => 不同序列
+        let mut p3 = SplitmixRng::new(0xABCD);
+        let mut l3 = fork_local_stream(&mut p3, TAG_B);
+        let d = l3.next_u64();
+        println!("tag 分离: TAG_A={a:#018x} TAG_B={d:#018x}");
+        assert_ne!(a, d);
+
+        // ⑤ 父流位置分离：父流 counter 不同 => 局部流不同
+        //    这也是本原语的已知耦合：局部流依赖父流在派生点的取值，
+        //    因此它只隔离「下游」，隔离不了「上游此前消耗了几次」。
+        let mut p4 = SplitmixRng::new(0xABCD);
+        let _ = p4.next_u64();
+        let mut l4 = fork_local_stream(&mut p4, TAG_A);
+        let e = l4.next_u64();
+        println!("父流位置分离: counter=0 时 {a:#018x}，counter=1 时 {e:#018x}");
+        assert_ne!(a, e);
+    }
+
 }

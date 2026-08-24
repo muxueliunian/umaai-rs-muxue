@@ -13,7 +13,7 @@ use crate::{
     game::{BaseGame, BasePerson, InheritInfo, PersonType, traits::Game},
     gamedata::ramen::RAMENDATA,
     global,
-    rng::{EventRng, StrategyRng, StreamTag, TurnFixedRng, derive_seed}
+    rng::{EventRng, SplitmixRng, StrategyRng, StreamTag, TurnFixedRng, derive_seed}
 };
 
 /// 拉面杯专用状态
@@ -380,6 +380,22 @@ impl RamenGame {
     /// 策略流 master = `derive_seed(rule_master, [turn, STRATEGY_TAG])`。
     /// 未注入 rule_master 时清空两条流（规则层回退旧行为）。
     /// 调用时机：`run_begin` 回合开始时（每次进入 Begin 阶段）。
+    /// 按 `(rule_master, turn, tag)` 派生一条分身分配用的局部流
+    ///
+    /// 与从父流 fork 的做法（[`crate::rng::fork_local_stream`]）相比有两处好处：
+    ///
+    /// 1. **父流消耗为 0**，分身分配完全不推进策略流；
+    /// 2. 结果与「本回合此前消耗了几次策略随机」**无关**。地区分身在吃面落地时执行，
+    ///    父流 counter 取决于此前的动作与事件；从父流 fork 会让上游任何位移都改掉选卡。
+    ///    对 MCTS 的 CRN 尤其重要：同一回合各候选动作走过不同路径后策略流消耗长度不同，
+    ///    按 `(rule_master, turn)` 派生能让各候选抽到**同一份**分身随机性，配对方差削减更彻底。
+    ///
+    /// 未注入 `rule_master` 时返回 `None`，调用方回退到从父流 fork（保持旧路径可复现性契约）。
+    pub(crate) fn clone_stream(&self, tag: u64) -> Option<SplitmixRng> {
+        self.rule_master
+            .map(|master| SplitmixRng::new(derive_seed(master, &[self.base.turn as u64, tag])))
+    }
+
     pub fn reset_turn_streams(&mut self) {
         match self.rule_master {
             Some(master) => {
