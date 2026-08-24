@@ -6,6 +6,7 @@
 - **拉面动作空间不变量 + 终局分分解（MCTS 完成计划 P0 安全网）**：钉死 `special_targets` 之和 ≤ 2 与合并候选峰值上限、新增 `Uma::score_parts()` 使 `calc_score` 对其求和、补温泉 CRN 阶段重播种的双向契约测试；顺带删 `MctsTrainer` 死字段 `last_game`、`rollout_batch_size` 标注为未接线空转、阶段 one-hot 预留两个空槽以免将来加阶段改掉输入维度。**输入维度变化（教师数据需重生成），模拟数值逐位不变**
 - **搜索层接受拉面合并动作（P1.1）**：`apply_root_action` 新增合并分支转交 `apply_combined_ramen_decision`，此前合并动作会被通用 `apply_action` 静默清零隐藏风味、连非法组合都照常返回成功；判别式为「`RamenSelect` + `StageOnly` + 携带 targets」，补整局冒烟（该落地入口此前从未在完整育成中跑过）。**三阶段动作逐位不变**
 - **拉面 `RamenSelect` 改用合并动作搜索（P1.2）**：`(ramen, targets)` 一次搜完并缓存 targets 供 `SpecialSelect` 取用，此前拆成两次独立搜索、前一次看不到后一次的收益；改在训练员内部而非游戏层，以免所有训练员都收到合并候选、连手写基线一起作废；取缓存须早于阶段门控，加命中计数守门。**搜索对外层 rng 消耗由两次降为一次，拉面基线作废**
+- **拉面搜索阶段缺省补上 `ramen`**：原缺省只搜 `train`，且两个 toml 都没写这一项，导致每局 61 个 `RamenSelect` 决策点在生产里一次 rollout 都不跑；实测补上后 42 局配对 +2306 分（七个 build 全为正），而同一笔算力加到 `train` 的 `search_n` 上只值 +39 分，即 `train` 一侧已饱和。`default_config.toml` 同步显式写出该项，bench_base 缺省对齐。**改变 MCTS 生产行为与拉面基线**
 - **[本地实验，PR 前恢复] release 档改速度优先**：仅为缩短本地跑批等待，注释保留上游原值与恢复要求；两档输出逐位相同
 
 ## 2026-08-24

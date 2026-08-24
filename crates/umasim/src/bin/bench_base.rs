@@ -96,7 +96,7 @@ fn default_search_n() -> usize {
 
 /// `search_stages` 缺省值：只搜训练阶段（决策点最多、单点信息量最大）
 fn default_search_stages() -> String {
-    "train".to_string()
+    "train,ramen".to_string()
 }
 
 /// `search_ucb` 缺省值：均匀分配

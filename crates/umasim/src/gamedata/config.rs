@@ -138,8 +138,11 @@ pub struct MctsConfig {
     pub policy_delta: f64,
     /// 拉面杯：哪些阶段走搜索（逗号分隔，见 `RamenSearchStages::parse`）
     ///
-    /// 只对 `scenario = "ramen"` + `trainer = "mcts"` 生效。缺省只搜 `train`：
-    /// 拉面一局约 173 个决策点，全搜代价过高。
+    /// 只对 `scenario = "ramen"` + `trainer = "mcts"` 生效。拉面一局约 173 个
+    /// 决策点，全搜代价过高，故按阶段挑。缺省 `train,ramen`：实测只搜 `train`
+    /// 时那 61 个 `RamenSelect` 点一次 rollout 都不跑，补上后 42 局配对
+    /// +2306 分（t=7.94）；同一笔算力加到 `train` 的 `search_n` 上只值 +39
+    /// 分（t=0.14），即 `train` 一侧已饱和。
     #[serde(default = "default_mcts_ramen_search_stages")]
     pub ramen_search_stages: String,
 
@@ -207,9 +210,9 @@ fn default_mcts_rollout_batch_size() -> usize {
     32
 }
 
-/// `ramen_search_stages` 缺省值：只搜训练阶段
+/// `ramen_search_stages` 缺省值：训练 + 吃面
 fn default_mcts_ramen_search_stages() -> String {
-    "train".to_string()
+    "train,ramen".to_string()
 }
 
 fn default_mcts_policy_delta() -> f64 {

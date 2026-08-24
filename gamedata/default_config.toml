@@ -84,6 +84,10 @@ max_depth = 0
 # policy softmax 温度
 policy_delta = 100.0
 
+# 拉面杯搜哪些阶段（逗号分隔：train / ramen / special / region / event / super）
+# 实测补上 ramen 后 42 局配对 +2306 分；同算力加到 train 的 search_n 上只值 +39 分
+ramen_search_stages = "train,ramen"
+
 # UCB 搜索分配
 use_ucb = true
 search_cpuct = 1.0
