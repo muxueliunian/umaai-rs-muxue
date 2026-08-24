@@ -3,6 +3,9 @@
 本文件用于简要记录每次任务的修改内容。
 
 ## 2026-08-24
+- **`[mcts]` 覆盖层 Option 化**：用户 toml 的 `[mcts]` 原是完整结构且 merge 只拷 `search_n` 与 `radical_factor_max`，其余 10 项静默失效；而 serde 会把未写字段填成代码缺省（512/2200/32）而非 `default_config.toml` 的 2048/15000/64，那个残缺 merge 反而在护着生产参数——改整段赋值会直接打坏搜索。改为 `OverrideMctsConfig` 全 Option + 逐字段覆盖 + `deny_unknown_fields`，整段 `[mcts]` 可省略；缺配置文件的手写兜底同步改为全 None
+- **onsen 搜索配置接线**：主二进制 onsen 分支手抄 8 个字段且漏了 `crn_stage_reseed`，改调既有的 `SearchConfig::new_game_config`（拉面与 umaai 早已在用）
+- **`expected_search_stdev` 语义补注**：它是 UCB 探索项的缩放标尺、不是实测统计量，生产 15000 与 `SearchConfig::default()` 的 2200 服务不同场景，不需要对齐
 - **CRN 收益测量对照轴修正**：原用 `crn_stage_reseed` 分臂，该开关只在温泉路径生效、拉面 rollout 不读它，两臂输入相同等于没有对照；改按「候选间是否共享 `rule_master`」分臂，抽出双种子 rollout 入口拆开决策流与规则主种子，实测独立臂 1.01x / 共享臂 4.86x。生产共享语义与分数逐位不变
 - **CRN 失败样本配对错位**：各候选先压缩掉失败样本再按新下标配对，一侧失败会让此后全部错位一格；改为按原始序号取双方都成功的交集计算
 - **UCB 首组不再越预算**：首组无条件跑满 `search_group_size`，大于 `search_n` 时超预算且第二阶段立即退出、自适应零次；首组步长收进 `search_n`，该 clamp 原本只补在弃用工具的外围
