@@ -2,15 +2,24 @@
 
 本文件用于简要记录每次任务的修改内容。
 
+## 2026-08-24
+- **训练人数加成按人头类型计数**：`1 + 0.05 × 人数` 乘区原按硬编码人头下标排除理事长与记者，那是温泉布局的常量；拉面的理事长、友人卡、NPC、记者位置全不同，四项判反。改为按人头类型判定并抽出 count_training_persons，负数与越界下标一并不计。**改变拉面模拟数值，既有基线作废；温泉与 base 逐位不变，有回归用例守门**
+- **超级拉面分身补上友人卡**：候选收集写死卡组下标范围，取不到回合 2 才加入的友人卡，类型过滤里的友人分支成了死条件，友人卡分身从未生成过；同时给分身补上「每个训练只能出现一个友人」——本体由分配逻辑维护该约束，分身此前不受限，会出现与理事长 / 记者同格这种自然分配产生不出的局面。**改变拉面模拟数值**
+
+## 2026-08-23
+- **拉面杯 MCTS 训练员**：新增按阶段门控的搜索训练员，命中的决策点走扁平搜索、其余转发手写策略，门控全关时与纯手写逐位一致；bench_base 与主二进制接入搜索参数；搜索层新增由剧本指定的 rollout 根动作路径（拉面走策略流），rollout 基策关闭打分分解采集以降开销
+- **拉面局面特征编码器**：新增 features 模块，把局面编码为定长向量（global / cards / persons 三段），较温泉版补齐成长率与属性上限并开启人头分支；分块记账、查表失败报错不填 0，只喂原始状态与纯计数派生量；同时移除恒为全零的 current_effect 特征块（上游字段暂留待确认）
+- **人头下标与卡组槽位解耦**：新增按 card_id 反查卡组槽位，拉面下人头顺序与卡组顺序不一致，原先按 person_index 直接当卡组下标的调用点全部改为反查。**改变拉面模拟数值，既有基线与落盘教师数据作废**
+- **手写策略地区打分覆盖第 1 年**：新增有效阶段判定，使回合开始阶段内联触发的第 1 年地区选择也进入打分；MCTS 门控仍用原始阶段，避免破坏 rollout 的阶段推进契约。**改变手写策略基线数值**
+- **地区选择 build 自适应**：score_region 纳入 youqing 项，xunlian 与 youqing 统一按卡组 bias 缩放；配置恢复枚举全部组合
+- **测试观测收集器**：新增 utils::Checks，测试全程 println 记 OK/NG、末尾汇总有失败才报错，兼顾诊断输出与回归防线；既有的裸断言与重复本地实现一并归拢
+
 ## 2026-08-22
-- **局面采样器（NN 管线 Phase 2 上半）**：新增 `sampler.rs`，为教师数据制造根局面——第一代采样空间（7 马娘 × 11 张卡池 × 3 种构成，角色冲突由 `chara_id` 实测比对排除）、按工作项序号确定性导出采样任务（卡组分层，截断回合与种子 SplitMix64 分频道派生，分片 / 续跑 / 改并行度均不变）、ε 轨迹扰动、走真实 `run_stage → select_action` 路径截断捕获；`SampleSpec` 自包含扰动参数以保证跨机回放一致，`SampleOutcome::Exhausted` 携带停止回合以区分「截断落在 URA 之后」与「扰动致育成提前失败」。根局面限定在 `RamenSelect / SpecialSelect / Train / RegionSelect` 捕获——第 1 年地区选择由 `run_begin` 内联执行、`stage` 仍是 `Begin`，这类不在阶段入口的决策点会破坏搜索的 `apply_action → next()` 契约。模块文档写明两条使用约定：必须按 index 区间分片、复现基座含 `gamedata` 与 `GameConfig`
-- **第三方库引用规范化**：`flat_search.rs` / `sampler.rs` 中 `anyhow::bail!` / `anyhow::ensure!` / `anyhow::anyhow!` 的全名引用改为 `use` 导入后直接调用
-- **支援卡类型注释订正**：`SupportCardData::card_type` 原注释写作「5团队6友人」，与 `cardDB.json` 实测相反（30305[友]=5，团队卡=6）
-- **搜索层泛型化（NN 管线 Phase 1.4，Phase 1 完成）**：新增 `search/searchable.rs` 的 `FlatSearchGame` trait（关联 rollout 训练员、CRN 阶段编号、`fork_for_rollout` 强制「克隆+重置内部 RNG」不可分割）；`FlatSearch<G>` 与 `SearchOutput<A>` 泛型化并保留默认类型参数，活跃入口零改动；采用「公共内核 + rollout 闭包」而非 trait 钩子，规避泛型 impl 方法解析导致温泉特判静默失效的陷阱；拉面根节点搜索跑通且 1/8/24 线程逐位可复现；拉面 CRN 重测 1.24x→3.73x（略优于温泉 3.65x）
-- **搜索层两处缺陷修复**：① NN leaf 微批路径（`simulate_until_terminal_or_leaf`）此前未按阶段重播种，导致 `rollout_batch_size > 1` 时 CRN 开关实际不生效，改为与 `simulate` 一致接收 rollout 种子；② UCB 终止判据由成功样本数改为已计划次数——rollout 稳定失败时成功数永远达不到 `search_n`，会死循环且触及不到「零样本」检查；③ 补 UCB 路径回归（可复现性）与候选顺序敏感性诊断（实测该根局面顺序无关）
-- **搜索层真 CRN（NN 管线 Phase 1.3）**：`RolloutSeeds::stage_seed` 支持按 `(回合, 阶段)` 重新派生随机流，`simulate` 改吃 rollout 种子并在每个阶段边界重播种，由 `SearchConfig::crn_stage_reseed` 开关控制（**默认开启**，可经 `[mcts] crn_stage_reseed` 从 toml 关闭）；新增配对相关实测（onsen 7 候选 × 200 rollout）：仅共享起始种子 corr 0.18 / 等效 1.31x，开启按阶段重播种 corr 0.69 / 等效 3.65x，证实朴素共享种子几乎无收益
-- **搜索层可复现（NN 管线 Phase 1.1/1.2）**：新增 `search/seeds.rs` 的 `RolloutSeeds`（rollout 种子按序号派生，候选索引不参与，为后续 CRN 留位），移除 `flat_search` 全部 8 处 `from_os_rng`，改为按工作项播种；`simulate_many` 改吃种子表 + 偏移并返回失败计数，UCB 按「已计划次数」记账避免失败导致候选间种子错位；rollout 失败由静默丢弃改为计数告警（全失败才报错），补 `search_group_size > 0` 校验；`flat_search` 新增可复现性回归测试（同种子一致 / 换种子生效 / 候选顺序无关），实测 1~24 线程结果逐位相同
-- **`RamenHandwrittenTrainer` 的 breakdown 缓存改 `Mutex`**：上游新增的 `RefCell<Option<String>>` 使其失去 `Sync`，而搜索层 rayon 跨线程共享同一个 rollout 决策器（`FlatSearch<RamenGame>` 因此整体不再 `Sync`，编译失败）；改 `Mutex` 恢复，锁中毒时静默跳过调试文本而非中断育成
+- **基准新增自选比赛达标维度**：新增任意时点重比各区间完成场数的判定（原判定只在区间结束回合的下一回合执行，且不达标即终止育成），bench 结果与 CSV 加达标率并在每局 / 分组 / 总览打印；配套补两个守门测试（不改策略逻辑），逐回合扫描触发点以免随常量表调整失效
+- **搜索层可复现 + 真 CRN + 泛型化（NN 管线 Phase 1，已完成）**：rollout 种子改为按序号确定性派生（候选索引不参与，否则协方差归零），移除全部随机播种，失败由静默丢弃改为计数告警；新增按阶段边界重播种的真 CRN（默认开启，可从 toml 关），实测朴素共享起始种子几乎无收益、按阶段重播种才显著；搜索结构泛型化并保留默认类型参数使活跃入口零改动，采用「公共内核 + rollout 闭包」规避泛型方法解析导致温泉特判静默失效；顺带修 NN leaf 微批路径漏重播种、UCB 终止判据用成功数会死循环两处缺陷，并把 rollout 基策的调试缓存改 Mutex 以满足跨线程共享
+- **局面采样器（NN 管线 Phase 2 上半）**：为教师数据制造根局面——分层的采样空间、按工作项序号确定性导出采样任务（分片 / 续跑 / 改并行度均不变）、轨迹随机扰动、走真实决策路径截断捕获；根局面限定在阶段入口，回合开始阶段内联执行的决策点会破坏搜索的阶段推进契约
+- **第三方库引用规范化**：搜索层与采样器中 anyhow 宏的全名引用改为 use 导入后直接调用
+- **支援卡类型注释订正**：card_type 原注释与卡片数据实测相反（5 是友人、6 是团队）
 
 - **RNG 受控重构（v3 三流，已实施）**：新增顶层 `rng.rs`（splitmix64 唯一实现 / 加法派生无状态流 SplitmixRng / 类型隔离三流 TurnFixedRng+EventRng+StrategyRng）；规则层随机改从 self 流取（run_distribute 独占局面流=角标/人头分布/hint 触发位，回合开始事件链走事件流，训练/分身/比赛走策略流），Trainer 决策流保持 StdRng；bench 局号进种子 `seeded_rngs(base,idx)→(StdRng,rule_master)`；拉面 CRN 由规则层接管（fork_for_rollout 注入 rule_master，simulate_common 退役阶段重播种），onsen 保留外挂 CRN；未注入 rule_master 时回退旧行为。验收：层 2/3 集成测试 `rng_consistency.rs`——跨策略 20 回合角标/分布/固定流消费量逐位一致（0 不一致），事件增量逐位一致；方案文档 `rng_refactor_plan.md` 更新为 v2/v3 并归档 v1，`rng_reply.md`（上游 CRN 评审意见）归档
 - **umasim 主二进制接入拉面杯剧本**：main.rs 此前仅支持 onsen/basic（`scenario="ramen"` 时实际落 basic），新增 `run_ramen_once` 与 ramen 分发分支（random/handwritten/mcts 回退/默认 manual 均支持），handwritten 分支使用 RamenHandwrittenTrainer；`GameConfig::scenario` 注释补 ramen。实测主二进制跑通 77 回合拉面杯（UB2 49442 / PT 7941）

@@ -18,6 +18,7 @@ pub mod local_ramen_trainer;
 pub mod logging_trainer;
 pub mod mcts_trainer;
 pub mod ramen_handwritten_trainer;
+pub mod ramen_mcts_trainer;
 //pub mod mean_filter_collector_trainer;
 //pub mod neural_net_trainer;
 
@@ -27,6 +28,7 @@ pub use local_ramen_trainer::LocalRamenTrainer;
 pub use logging_trainer::LoggingTrainer;
 pub use mcts_trainer::MctsTrainer;
 pub use ramen_handwritten_trainer::RamenHandwrittenTrainer;
+pub use ramen_mcts_trainer::{RamenMctsTrainer, RamenSearchStages, RamenSelection};
 //pub use mean_filter_collector_trainer::MeanFilterCollectorTrainer;
 //pub use neural_net_trainer::NeuralNetTrainer;
 

@@ -244,7 +244,8 @@ where
     pub fn simulate_common(&self, game: &G, action: &G::Action, seed: u64) -> Result<SearchScore> {
         let rng = &mut StdRng::seed_from_u64(seed);
         let mut sim_game = game.fork_for_rollout(seed);
-        sim_game.apply_action(action, rng)?;
+        // 必须走剧本的真实对局路径（拉面 = 策略流），不能用通用 apply_action
+        sim_game.apply_root_action(action, rng)?;
         while sim_game.next() {
             sim_game.run_stage(&self.rollout_trainer, rng)?;
         }

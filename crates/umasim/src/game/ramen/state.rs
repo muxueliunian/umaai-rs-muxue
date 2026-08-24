@@ -308,11 +308,14 @@ impl RamenGame {
     /// 添加羁绊（NPC不增加羁绊）
     pub fn add_friendship(&mut self, person_index: usize, value: i32) {
         if person_index < self.persons.len() && self.persons[person_index].person_type != PersonType::Npc {
+            // 人头下标 ≠ 卡组下标，回写卡组前先按 card_id 反查；
+            // 无卡人头（理事长 / 记者）只记人头这一份羁绊
+            let deck_index = Game::deck_index_of(self, person_index);
             let old_value = self.persons[person_index].friendship;
             let new_value = (self.persons[person_index].friendship + value).min(100);
             self.persons[person_index].friendship = new_value;
-            if person_index < 6 {
-                self.deck[person_index].friendship = new_value;
+            if let Some(deck_index) = deck_index {
+                self.deck[deck_index].friendship = new_value;
             }
             if old_value < 100 {
                 crate::diag!(

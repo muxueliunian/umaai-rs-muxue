@@ -22,7 +22,7 @@ use super::{
 };
 use crate::{
     diag,
-    game::{ActionEnum, BaseAction, FriendOutState, PersonType, traits::Game},
+    game::{ActionEnum, BaseAction, FriendOutState, PersonType, traits::{Game, Person}},
     gamedata::{EventData, GAMECONSTANTS, ramen::RAMENDATA},
     global,
     utils::{system_event, system_event_prob}
@@ -383,8 +383,9 @@ impl RamenAction {
 
         diag!(">> 超级拉面分身分配 (选项 {})", sel + 1);
 
-        // 获取所有支援卡索引（含友人卡，index 0-5）
-        let card_indices: Vec<i32> = (0..6i32)
+        // 获取所有支援卡索引（含友人卡）
+        // 人头下标 ≠ 卡组下标：拉面友人卡在人头 6，写死 0..6 会把它整个漏掉
+        let card_indices: Vec<i32> = (0..game.persons.len() as i32)
             .filter(|&i| {
                 let person = &game.persons[i as usize];
                 person.person_type == PersonType::Card || person.person_type == PersonType::ScenarioCard
@@ -428,6 +429,8 @@ impl RamenAction {
     /// 尝试在指定训练位置添加分身
     ///
     /// 返回错误如果：
+    /// - 该训练已有同一张卡的本体或分身
+    /// - 该训练已有友人（含理事长、记者），而本次要放的也是友人
     /// - 已有5个非NPC人物
     /// - 已满5人且无NPC可挤
     fn try_add_clone(game: &mut super::RamenGame, person_idx: i32, train: usize) -> Result<()> {
@@ -439,6 +442,21 @@ impl RamenAction {
         if game.base.distribution[train].contains(&person_idx) {
             return Err(anyhow::anyhow!(
                 "{}训练已有{}的分身",
+                global!(GAMECONSTANTS).train_names[train],
+                game.persons[person_idx as usize].short_name()
+            ));
+        }
+
+        // 每个训练只能出现一个友人，分身同样受限：
+        // `distribute_person` 对本体维护了这条不变式，分身走的是本函数，必须同样把关。
+        // `is_friend()` 覆盖剧本友人卡、理事长与记者。
+        if game.persons[person_idx as usize].is_friend()
+            && game.base.distribution[train]
+                .iter()
+                .any(|&id| id >= 0 && game.persons[id as usize].is_friend())
+        {
+            return Err(anyhow::anyhow!(
+                "{}训练已有友人，不能再放{}的分身",
                 global!(GAMECONSTANTS).train_names[train],
                 game.persons[person_idx as usize].short_name()
             ));
@@ -717,11 +735,8 @@ impl RamenAction {
                 if game.persons[person_index].person_type != PersonType::Card {
                     continue;
                 }
-                let hint_count = if person_index < 6 {
-                    1 + game.deck[person_index].effect.hint_count_bonus
-                } else {
-                    1
-                };
+                // 人头下标 ≠ 卡组下标，取 hint_count_bonus 前先反查
+                let hint_count = 1 + game.deck_index_of(person_index).map_or(0, |di| game.deck[di].effect.hint_count_bonus);
                 for _ in 0..hint_count {
                     self.push_hint_event(game, person_index, rng)?;
                 }
@@ -731,11 +746,8 @@ impl RamenAction {
                 return Ok(());
             }
             let person_index = p as usize;
-            let hint_count = if person_index < 6 {
-                1 + game.deck[person_index].effect.hint_count_bonus
-            } else {
-                1
-            };
+            // 人头下标 ≠ 卡组下标，取 hint_count_bonus 前先反查
+            let hint_count = 1 + game.deck_index_of(person_index).map_or(0, |di| game.deck[di].effect.hint_count_bonus);
             for _ in 0..hint_count {
                 self.push_hint_event(game, person_index, rng)?;
             }
@@ -750,18 +762,20 @@ impl RamenAction {
     fn push_hint_event(&self, game: &mut super::RamenGame, person_index: usize, rng: &mut impl Rng) -> Result<()> {
         let attr_prob = system_event_prob("hint_attr")?;
         let max_hint = global!(GAMECONSTANTS).max_hint_per_card;
-        if person_index < 6 {
+        // 人头下标 ≠ 卡组下标：反查得到卡组槽位才走支援卡分支，
+        // 无卡人头（理事长 / 记者 / NPC）按 hint_level=1 处理，且名字取人头自己的
+        if let Some(di) = game.deck_index_of(person_index) {
             // 支援卡 hint 等级上限：超过则只触发属性事件（不加技能）
-            let hint_level = (1 + game.deck[person_index].card_value().hint_level)
+            let hint_level = (1 + game.deck[di].card_value().hint_level)
                 .min(5)
-                .min(max_hint - game.deck[person_index].total_hints);
+                .min(max_hint - game.deck[di].total_hints);
             let mut hint_event = if hint_level <= 0 || rng.random_bool(attr_prob) {
                 EventData::hint_attr_event(game.persons[person_index].train_type as usize, person_index)?
             } else {
-                game.deck[person_index].total_hints += hint_level;
+                game.deck[di].total_hints += hint_level;
                 EventData::hint_skill_event(hint_level, person_index)
             };
-            hint_event.name = format!("{} - {}", hint_event.name, game.deck[person_index].short_name());
+            hint_event.name = format!("{} - {}", hint_event.name, game.deck[di].short_name());
             game.base.unresolved_events.push(hint_event);
         } else {
             let hint_level = 1;
@@ -770,7 +784,7 @@ impl RamenAction {
             } else {
                 EventData::hint_skill_event(hint_level, person_index)
             };
-            hint_event.name = format!("{} - {}", hint_event.name, game.deck[person_index].short_name());
+            hint_event.name = format!("{} - {}", hint_event.name, game.persons[person_index].short_name());
             game.base.unresolved_events.push(hint_event);
         }
         Ok(())
@@ -1059,7 +1073,7 @@ mod tests {
     use super::{super::RamenState, *};
     use crate::{
         gamedata::init_global,
-        utils::{get_workspace_root, init_test_logger}
+        utils::{Checks, get_workspace_root, init_test_logger}
     };
 
     #[test]
@@ -1499,5 +1513,136 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    /// 回归：超级拉面分身必须包含友人卡，且分身同样受「每训练一个友人」约束
+    ///
+    /// `distribute_super_ramen_clones` 的候选收集原先写作 `(0..6i32)`，
+    /// 那是温泉布局的卡组范围。拉面的 `init_persons` 只把 5 张非友人卡建成人头
+    /// （占 0-4）再追加理事长（5），友人卡回合 2 才加入、落在人头 6，
+    /// 于是 `0..6` 永远取不到它——filter 里的 `|| ScenarioCard` 是一句死条件，
+    /// 友人卡分身从未生成过。规格见 `ramen_memo_cn.md`「分身来源：包含友人卡」。
+    ///
+    /// 友人卡分身补上之后，`try_add_clone` 必须同样把住 `distribute_person`
+    /// 对本体维护的「每个训练只能出现一个友人」，否则会出现友人卡分身与
+    /// 理事长 / 记者同格这种自然分配产生不出的局面。
+    ///
+    /// 落位是均匀随机（超级拉面分身不计算得意率），故只验不变式、不固化具体
+    /// 训练位；拒绝分支靠多种子遍历覆盖，避免单一种子恰好绕开。
+    #[test]
+    fn test_super_ramen_clones_include_friend_card() -> anyhow::Result<()> {
+        use rand::{SeedableRng, rngs::StdRng};
+
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        // [速]杏目, [智]青春永驻, [耐]名将怒涛, [速]洛林军歌, [速]里见光钻, [友]骏川手纲
+        const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+        const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        };
+        const SEEDS: u64 = 32;
+
+        let mut game = super::super::RamenGame::newgame(102601, &TEST_DECK, TEST_INHERIT)?;
+        game.add_friend_and_npcs()?;
+        game.base.turn = 72; // 超级拉面回合（72-77）
+        game.deck_can_split = true;
+        game.ramen.super_ramen = Some(1); // 选项二：速/耐/力/智 = [0,1,2,4]，根训练不在范围
+
+        let support_indices: Vec<i32> = game
+            .persons
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.person_type == PersonType::Card || p.person_type == PersonType::ScenarioCard
+            })
+            .map(|(i, _)| i as i32)
+            .collect();
+        let find = |ty: PersonType| -> anyhow::Result<i32> {
+            game.persons
+                .iter()
+                .position(|p| p.person_type == ty)
+                .map(|i| i as i32)
+                .ok_or_else(|| anyhow::anyhow!("找不到人头类型 {ty:?}"))
+        };
+        let friend = find(PersonType::ScenarioCard)?;
+        let yayoi = find(PersonType::Yayoi)?;
+        let allowed = super::super::rules::get_super_ramen_clone_train_options()?;
+        let allowed = allowed.get(1).ok_or_else(|| anyhow::anyhow!("缺少超级拉面选项二"))?.clone();
+        println!("支援卡人头 = {support_indices:?}，友人卡 = {friend}，理事长 = {yayoi}，允许训练位 = {allowed:?}");
+
+        let count_of = |g: &super::super::RamenGame, idx: i32| -> usize {
+            g.base.distribution.iter().flatten().filter(|&&p| p == idx).count()
+        };
+        // 每个训练位最多一个友人（含理事长、记者）
+        let friend_ok = |g: &super::super::RamenGame| -> bool {
+            g.base.distribution.iter().all(|d| {
+                d.iter().filter(|&&p| p >= 0 && g.persons[p as usize].is_friend()).count() <= 1
+            })
+        };
+
+        let mut c = Checks::new();
+        c.check(support_indices.len() == 6, "测试卡组应有 5 张训练卡 + 1 张友人卡");
+
+        // 场景 A：空分布起步，出现的每一次都必然是分身
+        let mut a_ok = (true, true, true, true);
+        for seed in 0..SEEDS {
+            game.base.distribution = vec![vec![]; 5];
+            RamenAction::distribute_super_ramen_clones(&mut game, &mut StdRng::seed_from_u64(seed))?;
+            if seed == 0 {
+                println!("场景 A（空分布，seed 0）: {:?}", game.base.distribution);
+            }
+            a_ok.0 &= game.base.distribution.iter().flatten().count() == 6;
+            a_ok.1 &= count_of(&game, friend) == 1;
+            a_ok.2 &= friend_ok(&game);
+            a_ok.3 &= game
+                .base
+                .distribution
+                .iter()
+                .enumerate()
+                .all(|(t, d)| d.is_empty() || allowed.contains(&(t as i32)));
+        }
+        c.check(a_ok.0, "空分布下每张支援卡各生成 1 个分身，合计 6 个占位");
+        c.check(a_ok.1, "友人卡应生成 1 个分身（修复前恒为 0）");
+        c.check(a_ok.2, "任一训练位友人不超过 1 个");
+        c.check(a_ok.3, "分身只落在选项允许的训练位");
+
+        // 场景 B：友人卡本体已在速训练，分身必须另开一格
+        let mut b_ok = (true, true);
+        for seed in 0..SEEDS {
+            game.base.distribution = vec![vec![friend], vec![], vec![], vec![], vec![]];
+            RamenAction::distribute_super_ramen_clones(&mut game, &mut StdRng::seed_from_u64(seed))?;
+            b_ok.0 &= count_of(&game, friend) == 2;
+            b_ok.1 &= game.base.distribution[0].iter().filter(|&&p| p == friend).count() == 1;
+        }
+        c.check(b_ok.0, "友人卡本体 + 分身合计 2 个占位");
+        c.check(b_ok.1, "同一训练不能同时存在本体与分身");
+
+        // 场景 C：理事长占住允许范围内的三个训练位，友人分身只能去剩下那个
+        let mut c_ok = (true, true);
+        for seed in 0..SEEDS {
+            game.base.distribution = vec![vec![yayoi], vec![yayoi], vec![yayoi], vec![], vec![]];
+            RamenAction::distribute_super_ramen_clones(&mut game, &mut StdRng::seed_from_u64(seed))?;
+            if seed == 0 {
+                println!("场景 C（理事长占 0/1/2，seed 0）: {:?}", game.base.distribution);
+            }
+            c_ok.0 &= friend_ok(&game);
+            c_ok.1 &= (0..3).all(|t| !game.base.distribution[t].contains(&friend));
+        }
+        c.check(c_ok.0, "友人卡分身不得与理事长同格");
+        c.check(c_ok.1, "理事长占住的训练位不应出现友人卡分身");
+
+        // 场景 D：非超级拉面回合应原样早退
+        game.base.turn = 71;
+        game.base.distribution = vec![vec![]; 5];
+        RamenAction::distribute_super_ramen_clones(&mut game, &mut StdRng::seed_from_u64(42))?;
+        c.check(
+            game.base.distribution.iter().flatten().count() == 0,
+            "非超级拉面回合不应生成任何分身"
+        );
+
+        c.finish()
     }
 }

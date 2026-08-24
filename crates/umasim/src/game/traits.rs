@@ -38,6 +38,11 @@ pub trait Person: Debug + Clone + PartialEq + Default {
     /// hint setter
     fn set_hint(&mut self, hint: bool);
 
+    /// 支援卡 ID getter。非支援卡人头（理事长 / 记者 / NPC）返回 `None`。
+    ///
+    /// 用于把人头反查回卡组槽位，见 [`Game::deck_index_of`]。
+    fn card_id(&self) -> Option<u32>;
+
     /// provided: 是否为友人，团队，记者或者理事长
     fn is_friend(&self) -> bool {
         self.train_type() > 4 || matches!(self.person_type(), PersonType::Reporter | PersonType::Yayoi)
@@ -276,14 +281,20 @@ pub trait Game: Clone {
     /// 分配Hint. 注意同一个卡的不同分身会同时触发Hint
     fn distribute_hint(&mut self, rng: &mut impl Rng) -> Result<()> {
         let base_hint_rate = global!(GAMECONSTANTS).base_hint_rate / 100.0;
-        let hint_probs: Vec<_> = self
+        // 人头下标 ≠ 卡组下标：预抽 (card_id, hint 概率加成)，循环内按 card_id 反查。
+        // 这里不能调 deck_index_of——它借 &self，与 persons_mut() 冲突。
+        let hint_probs: Vec<(u32, i32)> = self
             .deck()
             .iter()
-            .map(|card| card.card_value().hint_prob_increase)
+            .map(|card| (card.card_id, card.card_value().hint_prob_increase))
             .collect();
         for person in self.persons_mut() {
             if person.person_type() == PersonType::Card {
-                let hint_prob = base_hint_rate * ((100 + hint_probs[person.person_index() as usize]) as f64 / 100.0);
+                let bonus = person
+                    .card_id()
+                    .and_then(|cid| hint_probs.iter().find(|(id, _)| *id == cid))
+                    .map_or(0, |(_, bonus)| *bonus);
+                let hint_prob = base_hint_rate * ((100 + bonus) as f64 / 100.0);
                 person.set_hint(rng.random_bool(hint_prob as f64));
             }
         }
@@ -331,6 +342,46 @@ pub trait Game: Clone {
     fn uma_mut(&mut self) -> &mut Uma;
     /// deck getter
     fn deck(&self) -> &Vec<SupportCard>;
+    /// provided: 人头下标 → 卡组下标。
+    ///
+    /// `persons` 与 `deck` 是两个平行容器，下标**不保证**一一对应：拉面剧本的
+    /// `init_persons` 只放 5 张训练卡再追加理事长，友人卡推迟到回合 2 才加入，
+    /// 于是理事长落在人头 5、友人卡落在人头 6，而 `deck[5]` 是友人卡。
+    /// 需要访问 `deck[..]` 时一律走本方法反查，不要拿人头下标直接索引卡组。
+    ///
+    /// 无卡人头（理事长 / 记者 / NPC）或下标越界返回 `None`。
+    ///
+    /// 前置条件：`deck` 内 `card_id` 唯一。同一张卡的不同突破共享 `card_id`
+    /// （`SupportCard::new` 取 `idrank / 10`），若卡组里放了重复卡，这里会静默
+    /// 命中第一张。现有构造路径均不做去重校验，暂由调用方保证。
+    fn deck_index_of(&self, person_index: usize) -> Option<usize> {
+        let cid = self.persons().get(person_index)?.card_id()?;
+        self.deck().iter().position(|card| card.card_id == cid)
+    }
+    /// provided: 统计一个训练位上吃人数加成的人头数
+    ///
+    /// 训练值公式里的 `1 + 0.05 × 人数` 乘区。支援卡 / 剧本友人卡 / NPC /
+    /// 其他友人 / 团队卡都计入，按 [`PersonType`] 排除理事长与记者。
+    ///
+    /// 分身不新建人头，而是把本体的 `person_index` 再放进另一个训练位，
+    /// 因此这里**按占位逐个计数，不去重**——去重会让分身的加成凭空消失。
+    ///
+    /// 原实现写作 `p != 6 && p != 7`，那是温泉布局（卡 0-5、理事长 6、记者 7）
+    /// 的下标常量。拉面的理事长在 5、友人卡在 6、记者在 12，硬编码下标全错。
+    /// 温泉与 base 改判类型后结果逐位不变，详见 `deck_index_of` 的同类说明。
+    ///
+    /// 负数（`distribute_person` 的「不出现」哨兵）与越界下标一律不计。
+    fn count_training_persons(&self, train: usize) -> usize {
+        let Some(dist) = self.distribution().get(train) else {
+            return 0;
+        };
+        let persons = self.persons();
+        dist.iter()
+            .filter(|&&p| p >= 0)
+            .filter_map(|&p| persons.get(p as usize))
+            .filter(|p| !matches!(p.person_type(), PersonType::Yayoi | PersonType::Reporter))
+            .count()
+    }
     /// provided: 计算来自支援卡的训练buff
     fn calc_training_buff(&self, train: usize) -> Result<CardTrainingEffect> {
         self.default_calc_training_buff(train)
@@ -346,14 +397,23 @@ pub trait Game: Clone {
         let train_dist = self.distribution().get(train);
         if let Some(indices) = train_dist {
             for index in indices {
-                if *index >= 0 && *index < 6 {
-                    let card = &self.deck()[*index as usize];
-                    let (mut effect, _) = card.calc_training_effect(self, train as i32)?;
-                    if !self.is_shining_at(*index as usize, train) {
-                        effect.youqing = 0.0;
-                    }
-                    ret = ret.add(&effect);
+                // 负数为分身占位或空位
+                if *index < 0 {
+                    continue;
                 }
+                let person_index = *index as usize;
+                // 人头下标 ≠ 卡组下标，必须按 card_id 反查；
+                // 无卡人头（理事长 / 记者 / NPC）不贡献任何卡加成
+                let Some(deck_index) = self.deck_index_of(person_index) else {
+                    continue;
+                };
+                let card = &self.deck()[deck_index];
+                let (mut effect, _) = card.calc_training_effect(self, train as i32)?;
+                // 闪彩判定用人头下标，不能用卡组下标
+                if !self.is_shining_at(person_index, train) {
+                    effect.youqing = 0.0;
+                }
+                ret = ret.add(&effect);
             }
         }
         Ok(ret)
@@ -370,12 +430,8 @@ pub trait Game: Clone {
             return Err(anyhow!("训练类型错误: {train}"));
         }
         // 人数, 包括NPC和分身, 排除掉理事长和记者
-        // 防御：distribution 未初始化时返回 0 人数
-        let person_count = self
-            .distribution()
-            .get(train)
-            .map(|d| d.iter().filter(|p| **p != 6 && **p != 7).count())
-            .unwrap_or(0);
+        // 按 PersonType 判定，不再硬编码人头下标（拉面布局与温泉不同）
+        let person_count = self.count_training_persons(train);
         // 基础值
         let basic_value = &self.training_basic_value()[train][train_level];
         let basic_motivation = ((self.uma().motivation - 3) * 10) as f32;

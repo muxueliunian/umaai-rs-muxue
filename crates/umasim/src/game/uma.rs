@@ -273,6 +273,19 @@ impl Uma {
         (self.win_races & free.mask).count_ones()
     }
 
+    /// 自选比赛是否全部达标
+    ///
+    /// [`crate::game::BaseGame::check_free_race`] 只在各区间结束回合的下一回合判定，
+    /// 且不达标会直接终止育成；本方法在任意时点重新比对各区间的完成场数，
+    /// 供基准统计使用。无自选比赛要求的马娘恒为 `true`。
+    pub fn all_free_races_done(&self) -> Result<bool> {
+        Ok(self
+            .get_data()?
+            .free_races
+            .iter()
+            .all(|f| self.count_free_race(f) >= f.count))
+    }
+
     /// 返回当前所处的自选比赛区间
     pub fn find_free_race(&self, turn: i32) -> Option<&FreeRaceData> {
         if let Ok(data) = self.get_data() {

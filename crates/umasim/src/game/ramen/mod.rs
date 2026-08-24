@@ -10,6 +10,7 @@
 pub mod action;
 pub mod effects;
 pub mod events;
+pub mod features;
 pub mod game;
 pub mod policy;
 pub mod rules;
