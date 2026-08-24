@@ -8,7 +8,6 @@
 - **拉面 `RamenSelect` 改用合并动作搜索（P1.2）**：`(ramen, targets)` 一次搜完并缓存 targets 供 `SpecialSelect` 取用，此前拆成两次独立搜索、前一次看不到后一次的收益；改在训练员内部而非游戏层，以免所有训练员都收到合并候选、连手写基线一起作废；取缓存须早于阶段门控，加命中计数守门。**搜索对外层 rng 消耗由两次降为一次，拉面基线作废**
 - **拉面搜索阶段缺省补上 `ramen`**：原缺省只搜 `train`，且两个 toml 都没写这一项，导致每局 61 个 `RamenSelect` 决策点在生产里一次 rollout 都不跑；实测补上后 42 局配对 +2306 分（七个 build 全为正），而同一笔算力加到 `train` 的 `search_n` 上只值 +39 分，即 `train` 一侧已饱和。`default_config.toml` 同步显式写出该项，bench_base 缺省对齐。**改变 MCTS 生产行为与拉面基线**
 - **测试有效性审查后的修补**：补上 `ramen_search_stages` 生产缺省的守门测试——此前把缺省改回 `train` 全量测试照常绿，等于那 +2306 分的配置没有任何防线；按语义解析而非字符串比较，重排写法不误报。合并候选峰值测试原先只有上限，去掉「不吃面」候选仍绿，改为断言「候选数 = 1 + 三地区 targets 数之和」这条与数值无关的结构恒等式并补下限。删除 `test_combined_vs_threestage_pairing` 及其四个统计辅助——该测量壳只断言局数与搜索次数，合并搜索完全坏掉也不会红，且其口径已被三臂实验取代。`score_parts` 与 `calc_score` 那条转发断言补注为「不是公式 oracle」以免误读。
-- **[本地实验，PR 前恢复] release 档改速度优先**：仅为缩短本地跑批等待，注释保留上游原值与恢复要求；两档输出逐位相同
 
 ## 2026-08-24
 - **配置层三处接线修复**：用户 toml 的 `[mcts]` 改为全 Option 覆盖层 + `deny_unknown_fields`（原为完整结构、merge 只拷两项，其余静默失效，而那个残缺 merge 反倒在护着生产参数）；主二进制 onsen 分支改调既有的 `SearchConfig::new_game_config`，不再手抄字段漏掉 `crn_stage_reseed`；补注 `expected_search_stdev` 是 UCB 探索项的缩放标尺而非实测统计量，两处默认值服务不同场景、无需对齐

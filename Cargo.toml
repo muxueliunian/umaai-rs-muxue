@@ -2,25 +2,11 @@
 members = ["crates/umasim", "crates/umaai"]
 resolver = "2"
 
-# ============================================================================
-# ⚠⚠ 本地实验用改动 —— PR 发送前必须恢复为上游原值 ⚠⚠
-#
-# 上游原值（体积优化，明显是有意为之，勿在 PR 中带走本改动）：
-#   opt-level = 'z'
-#   debug = true
-#   codegen-units = 16
-#   lto = false
-#
-# 改成速度优先的理由：实测 30 配对局 28.0s -> 19.2s（1.46x），且两档
-# 输出逐位相同（同 mean、同 30 个 delta、同 corr），不影响任何正确性验证。
-# 项目此前所有耗时数字（含「教师数据 40-67h」估算）都是在体积优化档下
-# 测的，与本档不可比。
-# ============================================================================
 [profile.release]
-opt-level = 3
-debug = false
-codegen-units = 1
-lto = "fat"
+opt-level = 'z'
+debug = true
+codegen-units = 16
+lto = false
 
 [workspace.dependencies]
 umasim = { path = "crates/umasim" }
