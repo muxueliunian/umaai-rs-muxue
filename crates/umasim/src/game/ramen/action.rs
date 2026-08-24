@@ -1095,7 +1095,9 @@ pub fn list_train_actions(can_friend_outing: bool, is_ill: bool, is_xiahesu: boo
 /// - 合并路径（本函数）：RamenSelect 直接列出 ramen × targets 笛卡尔积，一次决策
 ///
 /// 候选数估算：1（不吃）+ Σ 各面 `list_special_targets_for` 长度。
-/// 库存紧张时每个面仅 1~6 种，全富余时 9~10 种；3 面全富余时峰值约 28~31 个。
+/// 库存紧张时每个面仅 1~6 种，全富余时 6~9 种。
+/// 峰值在「全富余库存 + `special_feeling = 4`」下，按 `REGION_RANGES` 每年 C(n,3)
+/// 穷举实测为 **28**（年 1 = 27 / 年 2 = 24 / 年 3 = 28；含不吃面）。
 pub fn list_combined_ramen_select_actions(
     state: &super::RamenState, selected_regions: &[usize; 3]
 ) -> Vec<RamenAction> {

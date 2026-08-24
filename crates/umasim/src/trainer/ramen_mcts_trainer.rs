@@ -7,9 +7,8 @@
 //!
 //! `MctsTrainer` 只 `impl Trainer<OnsenGame>`，且字段与温泉强耦合
 //! （`HandwrittenEvaluator` 只实现了 `Evaluator<OnsenGame>`、`OnsenAction::Dig`
-//! 特判、`last_game: Option<OnsenGame>`）。把它泛型化要连带掀开 `umaai` 的调用
-//! 签名，代价远大于另写一个薄壳。搜索核心 [`FlatSearch`] 本身已泛型化，
-//! 拉面侧缺的只是最外层这一层。
+//! 特判）。把它泛型化要连带掀开 `umaai` 的调用签名，代价远大于另写一个薄壳。
+//! 搜索核心 [`FlatSearch`] 本身已泛型化，拉面侧缺的只是最外层这一层。
 //!
 //! # 阶段门控
 //!

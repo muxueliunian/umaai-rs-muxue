@@ -22,8 +22,10 @@ pub struct SearchConfig {
 
     /// 激进度因子最大值
     ///
-    /// 每次搜索会随机生成 [0, radical_factor_max] 范围的激进度。
-    /// 激进度越高，越倾向选择高分高风险的动作。
+    /// 每次搜索按回合**确定性衰减**，不是随机生成：
+    /// `radical_factor = (剩余回合 / 总回合)^0.5 * radical_factor_max`。
+    /// 激进度越高，越倾向选择高分高风险的动作
+    /// （`weighted_mean(radical_factor)` 的 rank 加权指数越大越偏向高分尾部）。
     /// C++ UmaAi 默认值: 50.0
     pub radical_factor_max: f64,
 

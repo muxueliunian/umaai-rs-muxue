@@ -129,6 +129,7 @@ pub struct MctsConfig {
     pub rollout_evaluator: String,
     /// E4：leaf eval 微批大小（仅在 max_depth>0 && rollout_evaluator="nn" 时生效）
     ///
+    /// **当前未接线**：本字段只被写入、从未被搜索逻辑读取。
     /// 经验值：32（与默认 search_group_size 对齐），后续可按模型/CPU 调整。
     #[serde(default = "default_mcts_rollout_batch_size")]
     pub rollout_batch_size: usize,

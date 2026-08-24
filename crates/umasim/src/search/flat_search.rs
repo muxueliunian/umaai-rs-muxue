@@ -78,6 +78,10 @@ where
     config: SearchConfig,
 
     /// E4：leaf eval 微批大小（仅在 max_depth>0 && leaf_eval=nn 时生效）
+    ///
+    /// **当前未接线**：本字段只被写入、从未被搜索逻辑读取。
+    /// 原设计意图是批量推理（NN 评估器批处理），待 rollout 评估器接入后再消费。
+    /// 配置链（`MctsConfig::rollout_batch_size` → `with_rollout_batch_size`）同样是空转。
     rollout_batch_size: usize
 }
 
@@ -1445,6 +1449,87 @@ mod tests {
         let mut c = Checks::new();
         c.check(a == b, "simulate_common 与同种子双入口逐位一致");
         c.finish()
+    }
+
+    /// P0.1A：温泉 `simulate()` 在 `crn_stage_reseed` 开 / 关时分数向量必须不同
+    ///
+    /// 必须用 [`root_state`]（回合 0 Train），不能用 Dig / Upgrade：
+    /// 那两条路径本来就不调用 `reseed_for_stage`，开关对它们无差别。
+    #[test]
+    fn test_onsen_crn_reseed_changes_result() -> Result<()> {
+        let (game, actions) = root_state()?;
+        println!(
+            "温泉根局面: 回合 {} 阶段 {:?}，候选 {} 个",
+            game.turn, game.stage, actions.len()
+        );
+        ensure!(!actions.is_empty(), "根局面至少要有一个候选");
+        let action = &actions[0];
+        println!("测的候选: {action:?}");
+        ensure!(
+            !matches!(action, OnsenAction::Dig(_) | OnsenAction::Upgrade(_)),
+            "root_state 必须落在 Train 决策点；Dig/Upgrade 不走 reseed，测了会假红"
+        );
+
+        let n = 8;
+        let seeds = RolloutSeeds::from_root(20260822);
+        let search_on = FlatSearch::new(SearchConfig::default().with_crn_stage_reseed(true));
+        let search_off = FlatSearch::new(SearchConfig::default().with_crn_stage_reseed(false));
+
+        let mut vec_on = Vec::with_capacity(n);
+        let mut vec_off = Vec::with_capacity(n);
+        for j in 0..n {
+            let seed = seeds.seed_at(j);
+            let (on, _) = search_on.simulate(&game, action, seed)?;
+            let (off, _) = search_off.simulate(&game, action, seed)?;
+            vec_on.push(on);
+            vec_off.push(off);
+        }
+        println!("crn_stage_reseed=on  : {vec_on:?}");
+        println!("crn_stage_reseed=off : {vec_off:?}");
+        assert_ne!(vec_on, vec_off, "温泉 simulate 开关必须改变分数向量");
+        Ok(())
+    }
+
+    /// P0.1B：拉面走 `simulate_common()`，`crn_stage_reseed` 开 / 关结果必须完全相同
+    ///
+    /// 温泉生产路径走特化 `simulate()`，`simulate_common()` 从不被调用；
+    /// 只有拉面才能验证「泛型路径不受该开关影响」。
+    #[test]
+    fn test_ramen_simulate_common_ignores_reseed() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        println!(
+            "拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个",
+            game.turn(),
+            game.stage,
+            actions.len()
+        );
+        ensure!(!actions.is_empty(), "根局面至少要有一个候选");
+        let action = &actions[0];
+        println!("测的候选: {action:?}");
+
+        let n = 8;
+        let seeds = RolloutSeeds::from_root(20260822);
+        let search_on: FlatSearch<RamenGame> =
+            FlatSearch::new(SearchConfig::default().with_crn_stage_reseed(true));
+        let search_off: FlatSearch<RamenGame> =
+            FlatSearch::new(SearchConfig::default().with_crn_stage_reseed(false));
+
+        let mut vec_on = Vec::with_capacity(n);
+        let mut vec_off = Vec::with_capacity(n);
+        for j in 0..n {
+            let seed = seeds.seed_at(j);
+            let on = search_on.simulate_common(&game, action, seed)?;
+            let off = search_off.simulate_common(&game, action, seed)?;
+            vec_on.push(on.score);
+            vec_off.push(off.score);
+        }
+        println!("crn_stage_reseed=on  : {vec_on:?}");
+        println!("crn_stage_reseed=off : {vec_off:?}");
+        assert_eq!(
+            vec_on, vec_off,
+            "拉面 simulate_common 不得受 crn_stage_reseed 影响"
+        );
+        Ok(())
     }
 
     /// 拉面 CRN 收益小样本（常规测试，给增益断言一条非 ignore 防线）
