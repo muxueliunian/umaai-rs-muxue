@@ -6,7 +6,7 @@ use std::cell::Cell;
 
 use serde::{Deserialize, Serialize};
 
-use super::SearchConfig;
+use super::{SearchConfig, terminal::NoTerminalStats};
 use crate::{
     game::onsen::{action::OnsenAction, game::OnsenGame},
     sample_collector::action_to_global_index,
@@ -195,12 +195,22 @@ impl ActionResult {
 ///
 /// 包含所有动作的搜索结果和最优动作信息。
 #[derive(Debug, Clone)]
-pub struct SearchOutput<A = OnsenAction> {
+pub struct SearchOutput<A = OnsenAction, D = NoTerminalStats> {
     /// 动作列表
     pub actions: Vec<A>,
 
     /// 各动作的搜索结果
     pub action_results: Vec<(ActionResult, ActionResult)>,
+
+    /// 各动作的终局多维统计（不参与排序）
+    ///
+    /// 第二个类型参数默认为 [`NoTerminalStats`]，故既有的裸 `SearchOutput`
+    /// 写法仍解析为 `SearchOutput<OnsenAction, NoTerminalStats>`，温泉侧无需改动。
+    ///
+    /// 长度始终与 `actions` 一致。未接入观测的剧本每项是 ZST
+    /// [`NoTerminalStats`]，占用为零——注意**不是**空 `Vec`。
+    /// 仅 [`Self::default`] 与 [`Self::new`] 构造出的实例此处为空。
+    pub terminal_results: Vec<D>,
 
     /// 最优动作索引
     pub best_action_idx: usize,
@@ -211,21 +221,33 @@ pub struct SearchOutput<A = OnsenAction> {
 
 /// 手写而非 `derive(Default)`：后者会给泛型参数加上多余的 `A: Default` 约束，
 /// 而空 `Vec<A>` 本就不需要 `A` 可默认构造。
-impl<A> Default for SearchOutput<A> {
+impl<A, D> Default for SearchOutput<A, D> {
     fn default() -> Self {
         Self {
             actions: Vec::new(),
             action_results: Vec::new(),
+            terminal_results: Vec::new(),
             best_action_idx: 0,
             radical_factor: 0.0
         }
     }
 }
 
-impl<A> SearchOutput<A> {
+impl<A, D> SearchOutput<A, D> {
     /// 创建搜索输出
     pub fn new(
         actions: Vec<A>, action_results: Vec<(ActionResult, ActionResult)>, radical_factor: f64
+    ) -> Self {
+        Self::with_terminals(actions, action_results, Vec::new(), radical_factor)
+    }
+
+    /// 创建带终局多维统计的搜索输出
+    ///
+    /// `terminal_results` 与 `actions` 按下标对应。未接入观测的剧本传空 `Vec`
+    /// （即 [`Self::new`]）。
+    pub fn with_terminals(
+        actions: Vec<A>, action_results: Vec<(ActionResult, ActionResult)>, terminal_results: Vec<D>,
+        radical_factor: f64
     ) -> Self {
         // 找到加权平均分最高的动作
         let best_action_idx = action_results
@@ -242,6 +264,7 @@ impl<A> SearchOutput<A> {
         Self {
             actions,
             action_results,
+            terminal_results,
             best_action_idx,
             radical_factor
         }

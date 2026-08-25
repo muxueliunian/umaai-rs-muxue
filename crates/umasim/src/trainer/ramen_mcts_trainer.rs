@@ -33,9 +33,12 @@
 //! 合并路径只在 RamenSelect 搜一次（1 次）。随机序列整体位移，拉面基线作废。
 //! 这是预期行为，不是 bug。关闭本开关即退回改动前的三阶段分别搜。
 
-use std::sync::{
-    Mutex,
-    atomic::{AtomicUsize, Ordering}
+use std::{
+    collections::HashMap,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering}
+    }
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -46,10 +49,10 @@ use super::RamenHandwrittenTrainer;
 use crate::{
     game::{
         Game, Trainer,
-        ramen::{RamenAction, RamenGame, RamenStage}
+        ramen::{RamenGame, RamenStage}
     },
     gamedata::{EventChoice, EventData},
-    search::{FlatSearch, SearchConfig, SearchOutput}
+    search::{FlatSearch, RamenSearchOutput, SearchConfig, TerminalStats}
 };
 
 /// 搜索哪些阶段的门控开关
@@ -294,7 +297,7 @@ impl RamenMctsTrainer {
     }
 
     /// 缓存本次搜索的候选统计（次数 / 均分 / 标准差 / PT 均分）
-    fn stash_search_breakdown(&self, output: &SearchOutput<RamenAction>) {
+    fn stash_search_breakdown(&self, output: &RamenSearchOutput) {
         let text = output
             .actions
             .iter()
@@ -313,6 +316,63 @@ impl RamenMctsTrainer {
             .join(" | ");
         if let Ok(mut slot) = self.last_breakdown.lock() {
             *slot = Some(text);
+        }
+    }
+
+    /// 输出终局多维记录：其余候选相对**实际选中动作**的差值
+    ///
+    /// 只打差值而非绝对值：各候选的绝对面板高度相似，人眼分辨不出；
+    /// 「选这个动作，最终智力会多 300」才是可读的因果陈述。
+    ///
+    /// 锚点取 `chosen`（即 `select_action` 真正返回的下标）而非
+    /// `best_action_idx`：`RamenSelection::Pt` 下两者可能不同，拿后者当锚点会
+    /// 对着一个没被选中的动作报差值。
+    ///
+    /// 差值只在**均值**层面成立。阈值类维度（`rmj_ok_*`）本身已是每次 rollout
+    /// 内部归约出的 0/1，其均值是达成率，差值即达成率之差——不要再拿它与 PT
+    /// 均值互推，那正是这套观测要避免的错误。
+    fn log_terminal_breakdown(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
+        if !self.verbose || output.terminal_results.len() != output.actions.len() {
+            return;
+        }
+        let Some(base) = output.terminal_results.get(chosen) else {
+            return;
+        };
+
+        // 基准按 key 建表：两次 visit 靠键名配对，而不是靠下标。
+        // 宏保证同类型的遍历顺序一致，但下标对齐正是 `NamedMetricRef` 要消灭的
+        // 那种耦合——增删维度时不该出现静默错位。
+        let mut base_dims: HashMap<&'static str, f64> = HashMap::new();
+        base.visit(&mut |m| {
+            base_dims.insert(m.key, m.result.mean());
+        });
+
+        for (i, action) in output.actions.iter().enumerate() {
+            if i == chosen {
+                continue;
+            }
+            let Some(stats) = output.terminal_results.get(i) else {
+                continue;
+            };
+            let mut parts: Vec<String> = Vec::new();
+            stats.visit(&mut |m| {
+                let Some(base_mean) = base_dims.get(m.key) else {
+                    return;
+                };
+                let delta = m.result.mean() - base_mean;
+                // 只报可见差异，否则每行都被 20 余维刷屏
+                match m.unit {
+                    "flag" if delta.abs() >= 0.02 => {
+                        parts.push(format!("{}{:+.0}%", m.key, delta * 100.0));
+                    }
+                    "flag" => {}
+                    _ if delta.abs() >= 1.0 => parts.push(format!("{}{delta:+.0}", m.key)),
+                    _ => {}
+                }
+            });
+            if !parts.is_empty() {
+                info!("[回合 {}][终局差异] {action} vs 选中: {}", turn + 1, parts.join(" "));
+            }
         }
     }
 
@@ -416,6 +476,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
                     self.store_pending_combined_targets(best.special_targets);
                 }
                 self.stash_search_breakdown(&output);
+                self.log_terminal_breakdown(game.turn() as i32, idx, &output);
                 if self.verbose {
                     let (res, _) = &output.action_results[idx];
                     info!(
@@ -453,6 +514,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
             RamenSelection::Pt => output.best_action_pt_idx()
         };
         self.stash_search_breakdown(&output);
+        self.log_terminal_breakdown(game.turn() as i32, idx, &output);
         if self.verbose {
             let (res, _) = &output.action_results[idx];
             info!(
@@ -552,7 +614,7 @@ mod tests {
     #[test]
     fn test_year1_region_scored_but_not_searched() -> Result<()> {
         use crate::{
-            game::ramen::{Operation, rules::get_region_combinations},
+            game::ramen::{Operation, RamenAction, rules::get_region_combinations},
             trainer::ramen_handwritten_trainer::ramen_effective_stage
         };
 
