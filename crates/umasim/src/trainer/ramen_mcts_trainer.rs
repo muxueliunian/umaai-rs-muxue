@@ -789,6 +789,37 @@ mod tests {
     /// 改动前（字段尚不存在、等价于三阶段分别搜）实测：
     /// 评分=55153 五维=[2958, 1742, 2200, 866, 1112] skill_pt=7390 scenario_pt=0 searched_count=46
     #[test]
+    /// 按需运行：整局输出终局多维诊断，人工看可读性
+    ///
+    /// 不是断言测试，是**给合作伙伴看仪表长什么样**的观察壳，故 `#[ignore]`。
+    /// 手动跑：
+    /// `cargo test -p umasim --lib -- test_terminal_breakdown_demo --ignored --nocapture`
+    #[test]
+    #[ignore = "整局诊断输出演示，按需手动运行"]
+    fn test_terminal_breakdown_demo() -> Result<()> {
+        // 必须早于 setup：全局 logger 只初始化一次，setup 里设的是 error 级，
+        // 会把诊断用的 info! 整个吞掉
+        let _ = init_test_logger("info");
+        let seed = 42;
+        let (mut game, mut rng) = setup(seed)?;
+        // search_n 取小值：本壳看的是输出形态，不是分数
+        let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(16).with_ucb(false))
+            .with_stages(ramen_and_special_stages())
+            .verbose(true);
+        game.run_full_game(&trainer, &mut rng)?;
+
+        println!(
+            "整局结束: 评分={} 五维={:?} 上限={:?} skill_pt={} 逐年PT={:?} RMJ={:?}",
+            game.uma.calc_score(),
+            game.uma.five_status,
+            game.uma.five_status_limit,
+            game.uma.skill_pt,
+            game.ramen.yearly_scenario_pt,
+            game.ramen.rmj_results
+        );
+        Ok(())
+    }
+
     fn test_combined_gate_off_full_game() -> Result<()> {
         let seed = 42;
         let (mut game, mut rng) = setup(seed)?;
