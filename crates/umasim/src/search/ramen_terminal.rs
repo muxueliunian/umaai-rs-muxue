@@ -11,6 +11,13 @@
 //! `max(0, five_status - limit)` 恒为 0。真正的「被截掉多少训练收益」是状态层
 //! 的观测能力，须在 `add_value` 内部于截断前累加，无法从终局值反推。
 //! 本模块不提供恒零的伪指标。
+//!
+//! # ⚠ 维度已冻结（2026-08-26）
+//!
+//! 合作伙伴用这些维度做手写策略的前后对比。**增删、重命名或重排都会让他此前
+//! 记录的读数不可比**，等于把历史诊断数据作废。
+//! [`FROZEN_DIM_KEYS`] 与 `test_dim_keys_frozen` 是这条约定的守门：改动维度必须
+//! 先与使用方约定，再同步更新那张表，让 diff 显式暴露出来。
 
 use crate::{
     game::ramen::RamenGame,
@@ -60,6 +67,38 @@ define_terminal_record! {
         status_gap_spread => { key: "status_gap_spread", label: "五维评分缺口极差", unit: "score" }
     }
 }
+
+/// 冻结的维度键与顺序（2026-08-26 起）
+///
+/// 与 [`RamenTerminalStats::visit`] 的遍历结果逐项对齐。**不要为了让测试变绿
+/// 而顺手改这张表**——它存在的意义正是让维度变更无法悄悄发生。
+pub const FROZEN_DIM_KEYS: [&str; 25] = [
+    "speed_score",
+    "stamina_score",
+    "power_score",
+    "guts_score",
+    "wisdom_score",
+    "skill_score",
+    "pt_score",
+    "speed_final",
+    "stamina_final",
+    "power_final",
+    "guts_final",
+    "wisdom_final",
+    "speed_headroom",
+    "stamina_headroom",
+    "power_headroom",
+    "guts_headroom",
+    "wisdom_headroom",
+    "scenario_pt_y1",
+    "scenario_pt_y2",
+    "scenario_pt_y3",
+    "rmj_ok_y1",
+    "rmj_ok_y2",
+    "rmj_ok_y3",
+    "status_gap_sum",
+    "status_gap_spread"
+];
 
 impl RamenTerminal {
     /// 从拉面终局局面提取原始事实
@@ -305,6 +344,32 @@ mod tests {
         c.check(stats.scenario_pt_y1.mean() == 1520.0, "PT 均值为 1520（越过阈值 1500）");
         c.check(stats.rmj_ok_y1.mean() == 0.5, "达成率为 0.5，而非从均值反推的 1.0");
 
+        c.finish()
+    }
+
+    /// 维度冻结守门：键名与顺序必须与 [`FROZEN_DIM_KEYS`] 完全一致
+    ///
+    /// 这条测试红了不代表代码坏了，而是**有人动了对外契约**：先与使用方确认，
+    /// 再同步 `FROZEN_DIM_KEYS`。
+    #[test]
+    fn test_dim_keys_frozen() -> Result<()> {
+        let mut c = Checks::new();
+        let stats = RamenTerminalStats::default();
+        let mut keys: Vec<&'static str> = Vec::new();
+        stats.visit(&mut |m| keys.push(m.key));
+
+        println!("当前 {} 维, 冻结表 {} 维", keys.len(), FROZEN_DIM_KEYS.len());
+        for (i, (now, frozen)) in keys.iter().zip(FROZEN_DIM_KEYS.iter()).enumerate() {
+            if now != frozen {
+                println!("  #{i} 不一致: 当前 {now} / 冻结 {frozen}");
+            }
+        }
+        let added: Vec<&str> = keys.iter().filter(|k| !FROZEN_DIM_KEYS.contains(k)).copied().collect();
+        let removed: Vec<&str> = FROZEN_DIM_KEYS.iter().filter(|k| !keys.contains(k)).copied().collect();
+        println!("新增 = {added:?}");
+        println!("移除 = {removed:?}");
+
+        c.check(keys.as_slice() == FROZEN_DIM_KEYS.as_slice(), "维度键名与顺序与冻结表一致");
         c.finish()
     }
 
