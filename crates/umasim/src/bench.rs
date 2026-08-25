@@ -653,8 +653,9 @@ average = [1, 0, 1, 1, 2]
         extra_count: [0, 30, 0, 0, 30, 30]
     };
     /// 改动前 `test_stages_none_matches_handwritten`（seed=42, run_idx=0, 本卡组）抓到的分数与五维。
-    const BASELINE_SCORE: i32 = 51731;
-    const BASELINE_FIVE: [i32; 5] = [2958, 1623, 2200, 824, 841];
+    /// 2026-08-25 更新：不在判定与得意率解耦 + 地区分身缺席优先，模拟数值变化，基线作废重抓。
+    const BASELINE_SCORE: i32 = 52739;
+    const BASELINE_FIVE: [i32; 5] = [2958, 1639, 2200, 845, 855];
 
     /// 把三个地区 id 格式化成与决策日志 `action_desc` 相同的 `地区[a,b,c]`。
     fn region_desc(regions: [usize; 3]) -> String {

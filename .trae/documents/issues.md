@@ -16,6 +16,154 @@
 
 ---
 
+## 人头（person_index）问题解决现状一览（2026-08-25 复核）
+
+| # | 问题 | 状态 | 简要说明 |
+|---|---|---|---|
+| 1 | 人头下标当卡组下标（`< 6` 守卫全线失效） | ✅ 已解决（08-23） | 拉面规则层 `default_calc_training_buff` / `add_friendship` / `deyilv` / hint 路径全部改 `card_id` 反查，回归测试在；base/onsen 两处 `< 6` 回写布局下正确、未动 |
+| 2 | 训练人数加成硬编码「理事长=6、记者=7」 | ✅ 已解决（08-24） | `count_training_persons` 按 `PersonType` 判定，拉面四项全错的旧过滤器废弃，三个回归用例在 |
+| 3 | 超级拉面分身漏友人卡 | ✅ 已解决（08-24） | 候选收集由 `0..6` 改全扫全体人头 + 每训练一个友人约束 |
+| 4 | 分身分配假失败 / 顺序饿死 | ✅ 已解决（08-24） | 概率重试改合法集直选、友人卡优先分配、真无解跳过不中断回合；随机流改用按 `(rule_master, turn, TAG)` 派生局部流 |
+| 5 | 诀窍槽训练加成按旧布局索引 | ✅ 已解决 | `fill_feeling_gauge` 改按 `PersonType` 统计，与显示层 `collect_train_lines` 同口径 |
+| 6 | hint 路径无守卫 `deck[person_index]`（base/onsen） | ⚠️ 待解决（潜伏） | base `basic.rs` / onsen hint 路径原样保留；生产只对 `PersonType::Card` 打 hint 踩不到越界 |
+| 7 | `card_id` 重复校验缺失 | ⚠️ 待解决（防御） | `validate_game_config` 只查 `cards.len()==6`，手写卡组可能触发 `deck_index_of` 静默命中第一张 |
+| 8 | `/* */` 调试块含旧假设 | ⚠️ 待解决（死代码） | `ramen/action.rs` 调试块仍含 `pidx < 6` + `deck[pidx]`，解开注释才会出问题 |
+| 9 | rng_consistency 的 `0..6` 遍历 | ⚠️ 待解决（测试语义） | `run_turns` 同时锁 `deck[i]`/`persons[i]`，友人卡人头 6 锁不到；不影响该测试结论 |
+| 10 | onsen 挖土过滤器 `*p != 6 && *p != 7` | ⚠️ 待统一化 | onsen 布局下正确，按上游意愿未动，属防回归而非 bug |
+| 11 | 手写策略评估器人头计数 `head_count` | ⚠️ 待解决（仅 onsen） | `HandwrittenEvaluator` 只 `impl Evaluator<OnsenGame>`，供温泉 MCTS rollout/leaf 估值；拉面走 `RamenPolicy`、base 走 `HandwrittenTrainer`，均不经此文件 |
+
+> 结论：拉面剧本的「人头」问题已全部清零；剩余未解决项集中在已搁置的温泉剧本与 base 潜伏项，以及拉面侧的死代码 / 测试语义 / 跨剧本防御缺口。详见下文各条目。
+
+
+## 拉面分身分配「假失败」与「顺序饿死」（概率重试 + 友人卡垫底）
+
+- **日期**：2026-08-24（提交 a223a6e，随 PR #19 于 2026-08-25 合入 main）
+- **状态**：已解决
+- **问题描述**：两条分身路径（超级拉面 per-卡、地区拉面 per-训练位）原先都是「随机抽一个落点、放不下再抽」的概率重试，失败仅打 diag 日志、不计数不告警。三处问题：
+  1. **假失败**：超级侧对 4 个候选位有放回抽样、上限 8 次——只剩一格合法位时 `(3/4)^8 ≈ 10%` 概率明明放得下却放弃；友人卡受「每训练一个友人」约束、合法位常只剩一格，且人头下标最大恒排最后，伤害几乎全落在它身上
+  2. **顺序饿死**：六张卡在线贪心放置，前面的普通卡会把后面友人卡的唯一合法位先填满（5 个非 NPC 名额占满）
+  3. **地区侧白耗随机数**：原实现「先抽再查满员」，抽到满员位也算一次随机消耗，且满员是规格内跳过、不是分配失败
+- **排查过程**：
+  - `card_indices` 升序收集，拉面友人卡人头下标必然最大、永远最后分配，只能捡剩位
+  - 两条路径各写一份满员 / 挤 NPC 规则，存在规则漂移；入参负数与越界下标有 panic 风险
+  - 真无解时若返回 `Err`，会经 `run_distribute` 的 `?` 中断整个回合、作废整次搜索 rollout，且只丢弃无解局面这一类盘面——给搜索样本引入系统性缺失偏差
+  - 分身随机直接吃策略流：消耗随重试次数浮动（6~48 次），分配算法的任何改动都会平移同回合后续的训练成败 / 休息 / 外出；地区分身在吃面落地时执行，上游任一处位移都会改掉选卡；MCTS 同回合各候选走过不同路径后策略流长度不同，原方案让各候选的分身随机性互相去相关
+- **解决方案**：
+  1. 先过滤合法落点再均匀抽取：落点条件分布不变（两者都在合法集上均匀），假失败归零，RNG 消耗从 1~8 次降为 1 次
+  2. 友人卡优先分配（稳定排序、普通卡相对顺序不变）；友人先放后普通卡不需回溯（候选位分身前最多 8 个非 NPC，失败要求另外三个候选位各满 5 人共 15 人、矛盾）
+  3. 真无解（三友人占三格 + 第四格 5 张本体）跳过该卡、不返回 `Err`——不让无解盘面作废 rollout
+  4. 地区侧改为先过滤合法卡再抽；候选收集改按 `PersonType` 扫全体人头
+  5. 抽出共用 `can_place_clone`（纯判定）+ `place_clone`（写入），消除两条路径的规则漂移；负数与越界下标由可能 panic 收成拒绝
+  6. 分身随机改用按 `(rule_master, turn, TAG)` 派生的局部流（新增两个冻结 tag）：策略流消耗从浮动 6~48 次降为 0，同回合各候选拿到同一份分身随机性以加强配对方差削减；未注入 `rule_master` 的旧路径回退为从父流取一个字派生，保持既有可复现性契约
+- **验证**：新增 4 个用例（41 项观测），逐条变异测试——关友人优先 → 可解反例 2 项 NG；绕过局部流 → 父流消耗 NG；退回有放回重试 → 场景 C 在 256 种子中漏放 31 次（12.1%，理论 10.0%）；退回地区「先抽再跳过」→ 场景 3 NG。原场景 C 断言只写「不该有什么」，友人分身没放出来时同样成立，已补「必须放出来」。挤 NPC 分支此前零覆盖，改打原语直接测。Release 全量 243 passed / 0 failed，clippy 警告数未增
+- **备注**：**改变拉面模拟数值，既有基线作废；温泉与 base 逐位不变**。关联本文件「超级拉面分身失败是静默的」一条——其问题已随本修复解决（假失败归零）。「拉面规则层四处数值修复」中的训练人数加成、友人卡分身两条属 main 上更早的 08-24 提交，不在本 PR 范围
+
+---
+
+## 拉面杯观测出口局末恒零（scenario_pt / eat_count 未按年归档）
+
+- **日期**：2026-08-24（提交 4fa1ee6）
+- **状态**：已解决
+- **问题描述**：`scenario_pt` 与 `eat_count` 在每年 RMJ 结算回合（23/47/71）清零，而育成结束在回合 77、72-77 不再吃面，局末读到的两个值**恒为 0**——实测 results.csv 这两列 2100 局全零
+- **排查过程**：
+  - `minimal_strategy_ab` 已在外部重算绕过，且口径与 `GameOutcome` 分叉（一个是三年合计、一个写着当年）
+  - 地区选择同样无逐年归档
+  - 年份索引不能用 `current_year()`：回合 23 时它仍判第一年，但那一刻选的是第二年地区
+- **解决方案**：归零前按年归档 PT 与吃面次数，并新增逐年地区选择归档；CSV 换成 `scenario_pt_y1..y3` / `eat_count_y1..y3` / `region_y1..y3`，外部重算一并删除。地区归档的年份索引按回合硬编码（2/23/47 → 0/1/2），与阶段分发共用一处映射，顺带移除其中的 `unreachable!`
+- **备注**：**纯观测出口，模拟数值逐位不变**——同种子分数与五维在改动前后完全相同，基线不受影响
+
+---
+
+## 搜索层 CRN 测量与 UCB 分配的三处错误
+
+- **日期**：2026-08-24（提交 ae89a18）
+- **状态**：已解决
+- **问题描述**：
+  1. **CRN 收益测量对照轴失效**：原用 `crn_stage_reseed` 分臂，该开关只在温泉路径生效、拉面 rollout 根本不读，两臂输入相同等于没有对照
+  2. **CRN 失败样本配对错位**：各候选先各自压缩掉失败样本、再按新下标配对，一侧失败会让此后全部错位一格
+  3. **UCB 首组越预算**：首组无条件跑满 `search_group_size`，大于 `search_n` 时超预算且第二阶段立即退出、自适应分配零次；该 clamp 原本只补在弃用工具的外围
+- **解决方案**：
+  1. 改按「候选间是否共享 `rule_master`」分臂，抽出双种子 rollout 入口（`simulate_common_with_seeds`）拆开决策流与规则主种子；生产路径 `simulate_common` 传相同两值、CRN 语义不变
+  2. 按原始序号取双方都成功的交集计算相关与差值方差
+  3. 首组步长收进 `search_n`；生产配置 12288 > 2048 场景行为不变
+- **验证**：实测独立臂 1.01x（corr 0.002）、共享臂 4.86x（corr 0.77）——CRN 收益真实存在且大幅；生产共享语义与搜索分数逐位不变
+- **备注**：无
+
+---
+
+## `[mcts]` 用户配置覆盖静默失效 + 主二进制 onsen 分支搜索参数手抄漏项
+
+- **日期**：2026-08-24（提交 5915057）
+- **状态**：已解决
+- **问题描述**：
+  1. 用户 toml 的 `[mcts]` 原是完整 `MctsConfig`，merge 只拷 `search_n` 与 `radical_factor_max` 两项，**其余 10 项静默失效**；且 serde 会把未写字段填成代码缺省（512/2200/32）而非 `default_config.toml` 的 2048/15000/64——那个残缺 merge 反倒在护着生产参数，改成整段赋值会直接打坏搜索
+  2. 主二进制 onsen 分支手抄 8 个搜索字段且**漏了 `crn_stage_reseed`**
+  3. `expected_search_stdev` 语义被误读：它是 UCB 探索项的缩放标尺、不是实测统计量
+- **解决方案**：
+  1. 改为 `OverrideMctsConfig` 全 Option + 逐字段覆盖 + `deny_unknown_fields`，整段 `[mcts]` 可省略；缺配置文件时不走 serde 的手写兜底同步改为全 None
+  2. onsen 分支改调既有的 `SearchConfig::new_game_config`（拉面分支与 umaai 早已在用），不再手抄
+  3. 补注释说明两处默认值服务不同场景、无需对齐
+  4. 顺带修假绿测试：`test_override_config_denies_unknown_fields` 原先因「缺 `[mcts]` 段」报错而非因未知字段通过，补对照用例锁住
+- **备注**：日常路径（配置文件存在且内容如现状）逐字段验证数值不变，生产分数不变
+
+---
+
+## 拉面合并动作路径的两处缺陷（搜索层静默清零 / 两次搜索互不可见）
+
+- **日期**：2026-08-25（提交 2c5aea5 / 4432745）
+- **状态**：已解决
+- **问题描述**：
+  1. **合并动作进搜索被静默破坏**：合并动作传进 `apply_root_action` 会被通用 `apply_action` 在 `RamenSelect` 只写 `pending_ramen`、清零 `special_targets`（隐藏风味）且照常返回成功——连和为 3 的非法组合都能悄悄落地；原文档为此明令禁止合并动作进入搜索
+  2. **`RamenSelect` 拆成两次独立搜索**：吃哪碗面与用哪些隐藏风味分开搜，前一次搜索看不到后一次的收益；且 `apply_combined_ramen_decision` 此前只有单测跑过、从未在完整育成中执行过
+- **解决方案**：
+  1. `FlatSearchGame::apply_root_action` 新增合并分支，判别式「`RamenSelect` 阶段 + `StageOnly` + 携带 `special_targets`」三者合起来唯一（三阶段动作不带 targets、special_select 带但只在 SpecialSelect 阶段落地、比赛回合一体化动作 operation 非 StageOnly），转交 `apply_combined_ramen_decision`；补整局冒烟测试
+  2. `RamenMctsTrainer` 在 `RamenSelect` 内部自建 `(ramen, targets)` 合并候选一次搜完，缓存 targets 供紧随的 `SpecialSelect` 直接取用。改在训练员内部而非游戏层——`select_action` 契约是返回传入候选的下标，在 `run_ramen_select` 加合并分支会让所有训练员（含手写基线）都收到合并候选；取缓存须早于阶段门控早退（否则 special 门控关闭时搜索选出的 targets 被静默丢弃、分数上看不出来），加缓存命中计数使该结构约定可被测试钉住。开关默认开启，关闭即退回三阶段分别搜
+- **备注**：搜索对外层 rng 的消耗由两次降为一次，随机序列整体位移，**拉面基线作废**；三阶段动作行为逐位不变
+
+---
+
+## 拉面搜索阶段缺省缺 `ramen`——每局 61 个吃面决策点生产零搜索
+
+- **日期**：2026-08-25（提交 426694a）
+- **状态**：已解决
+- **问题描述**：`ramen_search_stages` 缺省只搜 `train`，且 `default_config.toml` / `game_config.toml` 都没写这一项——**每局 61 个 `RamenSelect` 决策点在生产里一次 rollout 都不跑**（实测该阶段平均决策耗时 2.4us，对比 Train 的 120ms）
+- **排查过程**：三臂对照，每臂 42 局（7 build × 6 局），同 build 同种子配对：
+
+  | 臂 | 配置 | 耗时 | 均分 |
+  |---|---|---|---|
+  | A | train n=64 | 8.27s/局 | 55806.6 |
+  | B | train,ramen n=64 | 12.29s/局 | **58112.6** |
+  | C | train n=96 | 10.95s/局 | 55846.0 |
+
+  - B−A = +2306.0 ± 290.4（t=7.94，39/42 胜，corr 0.8168）；B−C = +2266.6 ± 342.3（等墙钟对照结论不变）；C−A = +39.4 ± 273.9——**train 一侧已饱和**，同一笔算力加到 `train` 的 `search_n` 只值 +39 分
+  - 七个 build 全部为正（+491 speed ~ +4522 wisdom），无一反向
+- **解决方案**：缺省改为 `"train,ramen"`；`default_config.toml` 同步显式写出该项（附实测注释），bench_base 缺省对齐
+- **备注**：**改变 MCTS 生产行为与拉面基线**。测量在 radical_factor=0 下进行，生产的 1.4 一档尚未测。此前缺省改回 `train` 全量测试照常绿的问题，由下条守门测试解决
+
+---
+
+## MCTS 测试地基修补（P0 安全网 + 审查后四处修补）
+
+- **日期**：2026-08-25（提交 3167f2f / c284bb9）
+- **状态**：已解决
+- **问题描述**：审查 PR 范围内新增测试后发现多处「测试形同虚设」：
+  1. `ramen_search_stages` 缺省从 `"train"` 改成 `"train,ramen"`（值 +2306 分）后，把它改回去**全量测试照常绿**（实测 277 passed）——生产配置零防线
+  2. 合并候选峰值测试只有 `peak <= 28` 上限，去掉「不吃面」候选后峰值 28→27 仍然绿
+  3. `test_combined_vs_threestage_pairing` 测量壳只断言「局数对得上、搜索次数 > 0」，合并搜索完全坏掉（两边都走三阶段）断言仍绿；其 search_n=4 对比口径也已被三臂实验取代
+  4. `score_parts().total() == calc_score()` 在当前实现下是转发恒真，容易被误读成硬 oracle
+  5. 阶段 one-hot 宽度「正好等于当前阶段数」——将来新增阶段变体就会改掉输入维度、令已落盘教师数据作废
+  6. 文档卫生：`MctsTrainer` 死字段 `last_game`、`rollout_batch_size` 整条配置链未接线空转
+- **解决方案**：
+  1. 新增 `test_production_default_searches_ramen_stage`：同时钉 serde 缺省函数与 `default_config.toml` 两个真值源，按 `RamenSearchStages::parse` 语义判定（"ramen,train" 等价重排不误报）；变异三组——改坏 serde 侧红、改坏 toml 侧红、等价重排绿
+  2. 峰值测试改为断言结构恒等式「候选数 == 1 + 三地区各自 targets 数之和」（与 gamedata 数值无关）并补下限防动作空间静默收缩；`assert!` 换 `Checks`
+  3. 删除无效测量壳及其四个统计辅助函数
+  4. `score_parts` 与 `calc_score` 那条转发断言补注「不是公式 oracle」（真 oracle 是 `expected_score_parts()`）
+  5. 阶段 one-hot 预留两个恒零空槽
+  6. 删 `last_game`；补动作空间不变量钉死（`special_targets` 之和恒 ≤ 2——budget 公式推出，`validate_special_targets` 为第二道防线——与合并候选峰值上限）、新增 `Uma::score_parts()` 且 `calc_score` 改为对其求和（分量粒度只到 3 项 / 7 项）、温泉 CRN 阶段重播种双向契约测试（避开本就不重播种的 Dig/Upgrade 以免假红）
+- **备注**：**输入维度变化（教师数据需重生成），模拟数值逐位不变**；顺带把 `flat_search.rs` 的 anyhow 导入移进 `mod tests`（五处用法全在测试内）
+
+---
+
 ## 人头下标与卡组槽位的对应关系在拉面剧本被打破（`person_index < 6` 守卫全线失效）
 
 - **日期**：2026-08-23
@@ -62,6 +210,7 @@
 - **备注**：
   - `game/base/basic.rs:218` 与 `game/onsen/game.rs:161` 有同样的 `< 6` 回写模式，但这两个剧本的 `persons[0..6)` 与 `deck` 确实同序，不受影响（见上「影响范围确认」）。**本次未改动这两处**——它们当前行为正确，改动属于防回归而非修 bug，为控制上游 diff 面暂缓。
   - 本条由 NN 特征编码器（`game/ramen/features.rs`）的评审发现——编码器原本也照抄了「人头下标与卡组同序」的假设。**订正：编码器侧此前并未真正修正**（`ef99478` 的 changelog 与本文件都误记为已修），本次连同规则层一并改为 `card_id` 反查。
+  - **复核（2026-08-25，PR #19 合入后）**：拉面侧修复仍全部有效——`default_calc_training_buff`（`traits.rs` 经 `deck_index_of`）、`add_friendship`（`state.rs:384`）、`deyilv`（`game.rs:484`）、默认 `distribute_hint`（`traits.rs` 按 `card_id` 反查）、`handle_hint_event`/`push_hint_event`（`action.rs:776/787/804`）均未回退，回归测试（`test_person_deck_index_mapping_full_game` / `test_training_buff_person_deck_mapping`）仍在。base/onsen 两处 `< 6` 回写仍未动，两剧本布局下当前正确。
   - `deck_index_of` 的前置条件是 `deck` 内 `card_id` 唯一。`SupportCard::new` 取 `idrank / 10` 作 `card_id`，同一张卡的不同突破（如 `302751` / `302754`）`card_id` 相同；现有构造路径均不去重，重复时会静默命中第一张。默认配置 / sampler / bench 不触发，已在 `deck_index_of` 的文档注释里写明，见下条独立记录。
   - **数值影响**：本修复改变拉面模拟结果，不是静默重构。效果从「理事长出现的位置」搬到「友人出现的位置」，友人固有的解锁时序也随之改变（阈值由理事长羁绊改为友人本人羁绊），训练选择 / 失败 / 体力 / 事件轨迹整体分叉。bench 基线、sampler 根局面、按旧编码器落盘的教师数据全部作废，须重跑。
 
@@ -104,20 +253,25 @@
 - **其他待办（非 bug，属清理）**：
   - `game/ramen/rng_consistency.rs` 的 `run_turns` 用 `for i in 0..6` 同时锁 `deck[i]` 与 `persons[i]` 的羁绊。拉面下 `persons[5]` 是理事长、友人卡（人头 6）没被锁到。当前不影响该测试要验证的结论（分布权重走 `deyilv` → 读 `deck`，6 张卡都锁到了；友人卡靠 group buff 闪彩、不看羁绊），但语义上应改成按 `PersonType::Card | ScenarioCard` 遍历。
   - ~~`features.rs` 的 `person_train_slots` 对分身仍是 last-write one-hot~~ —— **已修（2026-08-23）**。本文件「NN 特征编码器首版的五处编码缺陷」原记为已改 multi-hot，实际仍是 `slots[idx] = Some(t)` 后写覆盖（Codex 评审独立复现）。已改为 `Vec<[bool; TRAIN_NUM]>` 掩码，cards 段与 persons 段同步改为逐位写标志，维度不变。该文件是我们自己的代码，不涉及上游授权范围。
+- **复核（2026-08-25，PR #19 合入后）**：一（`count_training_persons` 按 `PersonType` 判定）、二（分身候选全扫 + 每训练一个友人约束）修复仍有效，回归测试（`test_count_training_persons_*` 三个用例）仍在；三（base `basic.rs` hint 路径的 `*p < 6` + `deck[*p]`、onsen hint 路径的 `deck[person_index]`）、四（`validate_game_config` 仍只查 `cards.len()==6`，无 `card_id` 重复校验）、五（`ramen/action.rs` 的 `/* */` 调试块仍含 `pidx < 6` + `deck[pidx]`）均原样未动，与本记录一致；onsen 挖土处（`game.rs:342` 的 `*p != 6 && *p != 7` 过滤器）按上游意愿仍未动，onsen 布局下正确；rng_consistency 待办也未改。**注：「手写策略评估器的人头计数」一项经核实只作用于温泉路径**——`HandwrittenEvaluator` 仅 `impl Evaluator<OnsenGame>`（`handwritten_evaluator.rs:593`），拉面手写策略走 `RamenPolicy`（`RamenHandwrittenTrainer`），与该文件无关，详见下文独立条目。
 
 ---
 
 ## 超级拉面分身失败是静默的（无计数、无告警）
 
 - **日期**：2026-08-24
-- **状态**：待解决
+- **状态**：已解决（2026-08-24，提交 a223a6e，随 PR #19 合入 main）
 - **问题描述**：`ramen/action.rs` 的 `distribute_super_ramen_clones` 对每张支援卡最多重试 `option_trains.len() * 2` 次，全部失败时只走 `diag!(">> 超级拉面分身失败: ...")`，不返回 `Err`、不计数、不进任何统计。生产跑批时分身丢失完全无声。
 - **排查过程**：
   - `choose(rng)` 是有放回采样，选项二只有 4 个训练位 → 8 次重试。若 4 个位里有 3 个被堵死，全落空概率约 `0.75^8 ≈ 10%`。
   - `card_indices` 升序收集，拉面友人卡人头下标必然大于全部训练卡（训练卡开局占 0-4，友人卡回合 2 才加入），**友人卡永远最后一个分配**，只能捡剩位，失败概率系统性最高。
   - 2026-08-24 给分身补了「每训练一个友人」约束后，友人卡又多了一条拒绝理由。生产中理事长 / 记者 `absent_rate = 200`，多数回合不在场，估计失败率在 1% 以下，但非零且不可观测。
-- **解决方案**：待定。倾向把失败次数计入 bench 统计（与 rollout 失败计数同一处理方式），而非改成返回 `Err`——分身失败在规则上是允许的，不该中断育成。
-- **备注**：这个函数在 2026-08-24 之前零测试覆盖，「友人卡分身从未生成」正是靠静默藏了三个月。
+- **解决方案**：按「拉面分身分配『假失败』与『顺序饿死』」条目的修复一并落地：
+  1. 假失败归零——改为先过滤合法落点再均匀抽取，只剩一格合法位时不再以 `0.75^8 ≈ 10%` 概率放弃，RNG 消耗降为 1 次
+  2. 友人卡优先分配，消除「永远最后分配、只能捡剩位」的系统性劣势
+  3. 真无解（三友人占三格 + 第四格 5 张本体）时跳过该卡、不返回 `Err`——返回错误会中断整个回合并作废整次搜索 rollout；跳过仍无计数，但已不再静默丢失合法分身
+  4. 原「把失败次数计入 bench 统计」的方案未采纳：假失败归零后真正无解只剩构造性盘面，跳过即可，不额外引入统计接线
+- **备注**：这个函数在 2026-08-24 之前零测试覆盖，「友人卡分身从未生成」正是靠静默藏了三个月；本次随修复补了 4 个用例（41 项观测）与变异测试，挤 NPC 分支零覆盖问题一并解决。
 
 ## 手写策略评估器的人头计数未随人数加成一并修正
 
@@ -126,6 +280,7 @@
 - **问题描述**：`neural/handwritten_evaluator.rs` 的 `let head_count = game.distribution()[train].len();` 与 `default_calc_training_value` 是同一个「人数」概念，但既不排除理事长 / 记者，也不过滤负数，还是裸下标索引（`distribution` 未初始化会直接 panic，而 `count_training_persons` 返回 0）。
 - **排查过程**：该值用在三处阈值判断（`head_count >= 3`、`head_count >= ABSENT_HEAD_THRESHOLD + 1`），理事长在场会让阈值提前触发。同一文件的 `other_max_head` 用 `distribution()[t].len()` 亦然。
 - **解决方案**：改用 `Game::count_training_persons`。影响的是**手写策略打分依据**而非模拟数值，故与 2026-08-24 的两处数值修复分开，不混进同一次改动。
+- **复核（2026-08-25，PR #19 合入后）**：仍未解决——`handwritten_evaluator.rs:503` 的 `head_count = game.distribution()[train].len()` 与 `:555` 的 `other_max_head` 原样保留，三处阈值判断（`:560` 前期智力攒羁绊、`:565` 多人头部分解锁、`:571` 被迫选择）仍在用裸分布长度（含理事长 / 记者 / 未初始化 panic 风险）。**影响范围订正：该评估器只服务温泉路径**——`HandwrittenEvaluator` 仅 `impl Evaluator<OnsenGame>`（`handwritten_evaluator.rs:593`），供温泉 MCTS 的 rollout 与 leaf 估值使用；拉面手写策略是 `RamenHandwrittenTrainer`（`RamenPolicy`），base 是 `trainer/handwritten_trainer.rs` 的另一套，均不经由此文件。修复不涉及本 PR 改动的文件，维持待解决（影响面限已搁置的温泉剧本）。
 - **备注**：属「人头下标当卡组下标」的同族残留——2026-08-23 修了取值型，2026-08-24 修了计数型与遍历型的模拟侧，策略侧的计数型漏了。
 
 ---
@@ -178,7 +333,7 @@
 ## distribute_person 中"不出现"判定受得意率影响
 
 - **日期**：2026-08-19
-- **状态**：待解决
+- **状态**：已解决（2026-08-25）
 - **问题描述**：当前 `Game::distribute_person`（`traits.rs`）将"不出现"判定和"训练位置分配"混在一起，不在率 = `absent_rate / (500 + absent_rate + deyilv)`，导致得意率会影响"不出现"概率。按剧本原始规则，"不出现"概率应不受得意率影响，得意率只影响训练位置的权重分配。
 - **排查过程**：
   - 用户给出剧本原始算法：
@@ -188,10 +343,14 @@
     - 不在率 = `absent_rate / (500 + absent_rate + deyilv)`（含得意率）
     - 训练位置按 [100+deyilv, 100, 100, 100, 100, absent_rate]（含"不出现"项）分配
   - 关键差异：得意率会拉高"不出现"判定概率（deyilv 越大，不出现概率越低）——这是错误的
-- **解决方案**：将 `distribute_person` 改为两步算法：
-  1. 先用基础权重（不含 deyilv）判定"是否不出现"
-  2. 判定为出现后，按训练位置权重（含 deyilv）随机分配训练位置
-- **备注**：2026-08-19 曾确认暂不动 absent_rate 相关逻辑（涉及 `absent_rate_drop` 等其他领域知识），当时只修复了 `RamenGame::deyilv` 缺剧本加成的问题；`distribute_person` 修正留待本 issue。RamenGame 当前未 override `distribute_person`，两步算法尚未实现。
+- **解决方案**：2026-08-25 按用户确认的**实际规则**落地（用户补充了与文档记载不同的细节）：
+  1. **两步判定**（`traits.rs` `distribute_person` 重写）：第一步先判「不在」，概率 = `absent_rate / (500 + absent_rate)`，**不含得意率**，判定不在即返回 -1；第二步判定出现后才按 `[100+deyilv, 100, 100, 100, 100]` 分配训练位。不在判定不再调用 `deyilv`（旧实现判定前就调了，有写卡效果副作用的浪费）
+  2. **不在权重类型表**（新 `Game::absent_weight`）：支援卡 `50 - absent_rate_drop`、友人/团队卡 `100 - absent_rate_drop`、**理事长/记者固定 200**（不受 `absent_rate_drop` 影响）、NPC 0（必定出现）
+  3. **NPC 必定出现双保险**：`absent_weight` 对 Npc 返回 0 + `distribute_all` 对 NPC 传 `allow_absent=false`（采纳用户建议：把「NPC 无不在率」作为拉面规则放在分布入口，而非只写死在类型表）
+  4. **不在记录**（用户需求 3）：所有被判定不在的人头（**含理事长/记者**，简化后剧本侧再按类型筛）经新的 `Game::record_absent_person` 写入 `RamenState.absent_cards`，`run_distribute` 每回合 `distribute_all` 前清空，供后续剧本机制使用
+  5. **地区分身缺席优先**（用户需求 4，`distribute_region_clones`）：本回合判定「不在」的支援卡（`PersonType::Card`）按缺席记录顺序优先补进 `at_trains` 分身位（先缺谁补谁，放不下顺延）；全部支援卡都在训练后，剩余分身位才随机复制在场支援卡。示例：region 15（中山-速力智，`at_trains=[0,2,4]`）且有支援卡 1 缺席 → 位置 0 补卡 1
+- **验证**：新增 4 个单元测试（不在权重类型表 / `AlwaysTrueRng` 下两步行为验证 / 24 轮集成：NPC 必现 + 记录互斥 + 理事长入记录 / 地区分身缺席优先三场景）。`AlwaysTrueRng` 测试中踩到 rand 0.9 的坑：恒 0 RNG 会让均匀整数采样的 Canon rejection（`lo >= thresh`）无限重试，改返回 1 并注释。**改变拉面模拟数值**：bench seed=42 基线 51731→52739（不在率不含得意率 + 缺席卡优先补分身位），三处逐位基准快照已重抓；全量 279 passed / 0 failed。该修复落在 `distribute_person` 默认实现上，**对 base/onsen 同样生效，属剧本通用正确行为，无需为其重抓基线**（用户确认）
+- **备注**：2026-08-19 曾确认暂不动 absent_rate 相关逻辑（涉及 `absent_rate_drop` 等其他领域知识），当时只修复了 `RamenGame::deyilv` 缺剧本加成的问题；本次按用户确认的实际规则一并落地。`absent_cards` 目前无消费方（用户需求 3 的「后续剧本计算」待继续描述）。
 
 ---
 

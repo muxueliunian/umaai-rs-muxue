@@ -659,6 +659,11 @@ impl Game for RamenGame {
         }
     }
 
+    /// 记录本回合判定为「不在」的卡人头下标（供后续剧本机制计算）
+    fn record_absent_person(&mut self, person_index: i32) {
+        self.ramen.absent_cards.push(person_index);
+    }
+
     fn distribute_hint(&mut self, rng: &mut impl Rng) -> Result<()> {
         let base_hint_rate = global!(GAMECONSTANTS).base_hint_rate / 100.0;
         let hint_bonus_pct = self.calc_hint_bonus_pct() as f64;
@@ -887,6 +892,9 @@ impl RamenGame {
     /// - 满员规则：每个训练位置最多 5 人；已满则优先挤掉 NPC
     /// - 同一训练不能存在相同卡的 `Person` 和分身
     /// - 分身不计算得意率，不包含友人卡
+    /// - **缺席优先**：本回合被判定「不在」的支援卡（`PersonType::Card`）优先按
+    ///   缺席顺序补进 `at_trains` 分身位（先缺谁补谁）；全部支援卡都在训练后，
+    ///   剩余分身位才随机复制在场支援卡
     fn distribute_region_clones(&mut self, region_id: usize, rng: &mut impl Rng) -> Result<()> {
         let ramen_data = global!(RAMENDATA);
         let region = &ramen_data.ramen_region_effect[region_id];
@@ -922,6 +930,19 @@ impl RamenGame {
             .clone_stream(CLONE_REGION_TAG)
             .unwrap_or_else(|| fork_local_stream(rng, CLONE_REGION_TAG));
 
+        // 缺席优先：本回合被判定「不在」的支援卡（`PersonType::Card`，不含友人/理事长/记者）
+        // 优先补进分身位——分身位顺序对应 `at_trains` 顺序，缺席卡按缺席记录顺序
+        // 先缺谁补谁（先尝试第一个分身位，放不下再顺延）。直到全部支援卡都在训练后，
+        // 剩余分身位才随机复制在场支援卡。
+        let absent_cards: Vec<i32> = self
+            .ramen
+            .absent_cards
+            .iter()
+            .copied()
+            .filter(|&i| self.persons[i as usize].person_type == PersonType::Card)
+            .collect();
+        let mut absent_placed = vec![false; absent_cards.len()];
+
         // 对于 at_trains 中的每个训练位置，随机选择一个不重复的支援卡分配分身
         //
         // 语义是 per-训练位（不是 per-卡）：某个位置放不下就是这个位置不出分身，
@@ -932,6 +953,21 @@ impl RamenGame {
                 continue;
             }
 
+            // 1) 缺席优先：按缺席记录顺序取第一个未被安置、且该位置合法的缺席卡
+            let absent_pick = absent_cards
+                .iter()
+                .enumerate()
+                .find(|&(k, &idx)| !absent_placed[k] && RamenAction::can_place_clone(self, idx, train))
+                .map(|(k, &idx)| {
+                    absent_placed[k] = true;
+                    idx
+                });
+            if let Some(person_idx) = absent_pick {
+                RamenAction::place_clone(self, person_idx, train, "地区(缺席优先)")?;
+                continue;
+            }
+
+            // 2) 无缺席卡可用（全部在训练 / 放不下）：原逻辑随机复制在场支援卡
             // 先过滤合法卡再抽。原实现是「先抽再查满员」，满员时白白消耗一次随机数，
             // 且看起来像是算法失败，实际是规格内的跳过。
             let legal: Vec<i32> = card_indices
@@ -1219,6 +1255,8 @@ impl RamenGame {
         if self.is_race_turn() {
             self.reset_distribution();
         } else {
+            // 清零上一回合的「不在」记录（每位人头本回合只判一次）
+            self.ramen.absent_cards.clear();
             // 回合固定流：角标 + 人头分布 + hint
             let mut fixed = self.turn_fixed.take();
             match fixed.as_mut() {
@@ -1973,6 +2011,232 @@ mod tests {
         assert_eq!(scenario_count, 0, "开局不应该有友人卡");
 
         Ok(())
+    }
+
+    /// 确定性 RNG：`random::<f64>()` 恒为 0（`next_u64` 置 1、右移后为 0），
+/// 故 `random_bool(p > 0)` 恒为 true。
+///
+/// 注意 `next_u64` **不能**返回 0：rand 0.9 的均匀整数采样
+/// （Canon rejection，`lo >= thresh` 才接受）在恒 0 输入下会无限重试
+/// （`range=500` 时 `thresh=116`）。返回 1 使 `wmul(500)` 的 `lo=500` 一次通过，
+/// 且 `WeightedIndex` 仍恒选下标 0（`chosen_weight=0`）。
+struct AlwaysTrueRng;
+    impl rand::RngCore for AlwaysTrueRng {
+        fn next_u32(&mut self) -> u32 {
+            1
+        }
+        fn next_u64(&mut self) -> u64 {
+            1
+        }
+        fn fill_bytes(&mut self, dest: &mut [u8]) {
+            dest.fill(1);
+        }
+    }
+
+    /// 不在权重类型表：支援卡 50、友人/团队卡 100、理事长/记者固定 200（不受
+    /// `absent_rate_drop` 影响）、NPC 0（必定出现）
+    #[test]
+    fn test_absent_weight_by_type() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+        let mut c = Checks::new();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 2;
+        game.add_friend_and_npcs()?;
+        // persons: 0-4 训练卡(Card)、5 理事长(Yayoi)、6 友人卡(ScenarioCard)、7-11 NPC
+        let card_i = 0;
+        let yayoi_i = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::Yayoi)
+            .expect("开局应有理事长");
+        let friend_i = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::ScenarioCard)
+            .expect("回合 2 应有友人卡");
+        let npc_i = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::Npc)
+            .expect("回合 2 应有 NPC");
+
+        c.check(game.absent_weight(card_i) == 50, "支援卡不在权重 = 50");
+        c.check(game.absent_weight(yayoi_i) == 200, "理事长不在权重 = 200（固定）");
+        c.check(game.absent_weight(friend_i) == 100, "友人卡不在权重 = 100");
+        c.check(game.absent_weight(npc_i) == 0, "NPC 不在权重 = 0（必定出现）");
+        c.finish()
+    }
+
+    /// 两步算法行为：不在判定与位置分配解耦（得意率只影响第二步）
+    ///
+    /// 用 `random_bool` 恒 true 的 RNG 验证——
+    /// - 支援卡（不在权重 50）判定不在并记录，不进入位置分配；
+    /// - NPC（权重 0）即使 RNG 恒 true 也必定出现；
+    /// - `allow_absent=false`（追加分配）必定出现。
+    #[test]
+    fn test_distribute_person_two_stage_absent() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+        let mut c = Checks::new();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 2;
+        game.add_friend_and_npcs()?;
+        game.reset_distribution(); // 单独调 distribute_person 前初始化 5 个空训练位
+        let card_i = 0i32;
+        let card2_i = 1i32;
+        let npc_i = game
+            .persons
+            .iter()
+            .position(|p| p.person_type == PersonType::Npc)
+            .expect("回合 2 应有 NPC") as i32;
+
+        let mut rng = AlwaysTrueRng;
+        // 支援卡：random_bool 恒 true → 判定不在，绝不走到位置分配
+        let r = game.distribute_person(card_i, true, &mut rng)?;
+        c.check(r == -1, "支援卡在 random_bool 恒 true 时判定不在 (-1)");
+        c.check(game.ramen.absent_cards == vec![card_i], "不在的支援卡被记录");
+        c.check(
+            game.distribution().iter().all(|d| d.is_empty()),
+            "不在判定后未做位置分配（先判不在后分配）"
+        );
+
+        // NPC：不在权重 0 → 跳过不在判定，直接分配
+        let r2 = game.distribute_person(npc_i, true, &mut rng)?;
+        c.check(r2 >= 0, "NPC 在 random_bool 恒 true 时仍出现（无不在率）");
+
+        // allow_absent=false：追加分配必定出现（跳过不在判定）
+        let r3 = game.distribute_person(card2_i, false, &mut rng)?;
+        c.check(r3 >= 0, "追加分配(allow_absent=false)在 random_bool 恒 true 时仍出现");
+        c.finish()
+    }
+
+    /// 集成：多轮 `distribute_all` 下，不在记录只含支援卡/友人/团队卡、
+    /// 与分布互斥，且 NPC 从未缺席
+    #[test]
+    fn test_absent_recorded_and_npc_always_present() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+        let mut c = Checks::new();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.base.turn = 2;
+        game.add_friend_and_npcs()?;
+        // 记者在回合 12 才加入，这里直接塞一个记者人头验证其不在记录排除
+        game.add_person(BasePerson {
+            person_index: 0,
+            person_type: PersonType::Reporter,
+            train_type: -1,
+            chara_id: 0,
+            friendship: 0,
+            is_hint: false,
+            card_id: None
+        });
+        let npc_idx: Vec<i32> = game
+            .persons
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.person_type == PersonType::Npc)
+            .map(|(i, _)| i as i32)
+            .collect();
+        let mut rng = StdRng::seed_from_u64(20260825);
+        let mut seen_absent = false;
+        let mut seen_yayoi_absent = false;
+        for round in 0..24 {
+            game.ramen.absent_cards.clear(); // 模拟 run_distribute 的回合清理
+            game.distribute_all(&mut rng)?;
+            // NPC 必定出现
+            for &i in &npc_idx {
+                let present = game.at_trains(i).iter().any(|b| *b);
+                c.check(present, &format!("第{round}轮 NPC#{i} 出现在训练中"));
+            }
+            // 不在记录：不含 NPC（必定出现）、与分布互斥；理事长/记者也一并记录
+            for &i in &game.ramen.absent_cards {
+                let ty = game.persons[i as usize].person_type;
+                c.check(ty != PersonType::Npc, &format!("记录 #{i} 不含 NPC（实际 {ty:?}）"));
+                let in_training = game.at_trains(i).iter().any(|b| *b);
+                c.check(!in_training, &format!("记录 #{i} 当回合不出现在任何训练中"));
+                if ty == PersonType::Yayoi {
+                    seen_yayoi_absent = true;
+                }
+            }
+            seen_absent |= !game.ramen.absent_cards.is_empty();
+        }
+        c.check(seen_absent, "24 轮分布中至少出现一次「不在」判定");
+        c.check(seen_yayoi_absent, "理事长被判定不在时也入记录（剧本侧再按类型筛选）");
+        c.finish()
+    }
+
+    /// 地区拉面分身——缺席优先：本回合判定「不在」的支援卡优先补进分身位
+    ///
+    /// 用 region 15（中山-速力智，`at_trains = [0, 2, 4]`），即用户示例的
+    /// 「位置 [0,2,4] 需要分身」场景。
+    #[test]
+    fn test_region_clones_absent_priority() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+        let mut c = Checks::new();
+
+        let new_game = |absent: Vec<i32>| -> Result<(RamenGame, Vec<i32>)> {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.base.turn = 2;
+            game.add_friend_and_npcs()?;
+            game.reset_distribution();
+            game.ramen.absent_cards = absent; // 模拟本回合 run_distribute 的判定结果
+            let card_idx: Vec<i32> = (0..game.persons.len() as i32)
+                .filter(|&i| game.persons[i as usize].person_type == PersonType::Card)
+                .collect();
+            Ok((game, card_idx))
+        };
+
+        // 场景 A：仅支援卡 1 缺席 → 优先出现在第一个分身位 0
+        {
+            let (mut game, _) = new_game(vec![1])?;
+            let mut rng = StdRng::seed_from_u64(7);
+            game.distribute_region_clones(15, &mut rng)?;
+            let d = &game.base.distribution;
+            println!("A(缺席[1]): 位置0={:?} 位置2={:?} 位置4={:?}", d[0], d[2], d[4]);
+            c.check(d[0].contains(&1), "缺席支援卡 1 优先出现在第一个分身位 0");
+            c.check(d[0] == vec![1], "位置 0 只有缺席卡 1 的分身（占位不追加随机复制）");
+        }
+
+        // 场景 B：支援卡 1、3 缺席 → 依次补 0、2 两个分身位
+        {
+            let (mut game, _) = new_game(vec![1, 3])?;
+            let mut rng = StdRng::seed_from_u64(7);
+            game.distribute_region_clones(15, &mut rng)?;
+            let d = &game.base.distribution;
+            println!("B(缺席[1,3]): 位置0={:?} 位置2={:?} 位置4={:?}", d[0], d[2], d[4]);
+            c.check(d[0].contains(&1), "缺席卡 1 依次补位 → 位置 0");
+            c.check(d[2].contains(&3), "缺席卡 3 依次补位 → 位置 2");
+            c.check(!d[2].contains(&1), "缺席卡 1 不重复出现在位置 2");
+        }
+
+        // 场景 C：全员在训练（无缺席）→ 剩余分身位按原逻辑随机复制在场卡
+        {
+            let (mut game, cards) = new_game(vec![])?;
+            let mut rng = StdRng::seed_from_u64(7);
+            game.distribute_region_clones(15, &mut rng)?;
+            let d = &game.base.distribution;
+            println!("C(无缺席): 位置0={:?} 位置2={:?} 位置4={:?}", d[0], d[2], d[4]);
+            for &t in &[0usize, 2, 4] {
+                c.check(d[t].len() == 1, &format!("无缺席时位置 {t} 放一个复制分身"));
+                if let Some(&x) = d[t].first() {
+                    c.check(cards.contains(&x), &format!("位置 {t} 的分身来自支援卡 #{x}"));
+                }
+            }
+        }
+        c.finish()
     }
 
     /// 拉面杯要求卡组必须包含新友人卡（idrank 303051-303054，card_id=30305）

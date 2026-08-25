@@ -77,6 +77,17 @@ pub struct RamenState {
     /// 诀窍角标分配（回合 2-71 时每个训练随机分配一个诀窍类型）
     pub train_feeling_type: Option<[FeelingType; 5]>,
 
+    // ========== 缺席记录 ==========
+    /// 本回合被判定为「不在」的全部人头下标（支援卡/友人/团队卡/理事长/记者；
+    /// NPC 必定出现、永不在列）
+    ///
+    /// 由 `distribute_all` → `distribute_person` 判定不在时经
+    /// [`crate::game::Game::record_absent_person`] 写入（匹配 vs 说「不在卡池」）。
+    /// 每回合 `run_distribute` 的 `distribute_all` 调用前清空，不跨回合残留。
+    /// 剧本侧按需按 [`PersonType`] 筛选（如只处理支援卡与友人/团队卡）。
+    #[serde(default)]
+    pub absent_cards: Vec<i32>,
+
     // ========== 三阶段决策 pending ==========
     /// 当前回合已选定的面（`RamenSelect` 阶段写入，`Train` 阶段消费）
     /// - None: 不吃面

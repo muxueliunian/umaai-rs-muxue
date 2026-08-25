@@ -749,14 +749,15 @@ mod tests {
         );
         let mut c = Checks::new();
         c.check(game.turn() == 77, "跑满 77 回合");
-        c.check(score == 55153, "评分与改动前逐位相同");
+        // 2026-08-25 更新：不在判定与得意率解耦 + 地区分身缺席优先，模拟数值变化，基准重抓
+        c.check(score == 56916, "评分与改动前逐位相同");
         c.check(
-            game.uma.five_status == [2958, 1742, 2200, 866, 1112],
+            game.uma.five_status == [2958, 2150, 2200, 1091, 706],
             "五维与改动前逐位相同"
         );
-        c.check(game.uma.skill_pt == 7390, "技能点与改动前逐位相同");
+        c.check(game.uma.skill_pt == 7685, "技能点与改动前逐位相同");
         c.check(game.ramen.scenario_pt == 0, "剧本 PT 与改动前逐位相同");
-        c.check(searched == 46, "searched_count 与改动前逐位相同");
+        c.check(searched == 43, "searched_count 与改动前逐位相同");
         c.finish()
     }
 

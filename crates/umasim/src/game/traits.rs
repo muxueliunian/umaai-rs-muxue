@@ -204,58 +204,71 @@ pub trait Game: Clone {
             p.set_hint(false);
         }
     }
+    /// 人头「不在」权重（先判定不出现用，不含得意率）
+    ///
+    /// 剧本实际规则：支援卡基础 50、友人/团队卡基础 100（两者均可被
+    /// `absent_rate_drop` 降低）；记者/理事长**固定 200**，不受 `absent_rate_drop`
+    /// 影响；NPC 在拉面剧本里必定出现，没有不在率（返回 0）。
+    fn absent_weight(&self, person_index: usize) -> i32 {
+        match self.persons()[person_index].person_type() {
+            PersonType::Card => 50 - self.absent_rate_drop(),
+            PersonType::Yayoi | PersonType::Reporter => 200,
+            PersonType::ScenarioCard | PersonType::OtherFriend | PersonType::TeamCard => {
+                100 - self.absent_rate_drop()
+            }
+            PersonType::Npc => 0
+        }
+    }
+    /// 记录本回合判定为「不在」的人头（供剧本后续机制计算）
+    ///
+    /// 默认空实现；拉面剧本 override 写入 [`RamenState::absent_cards`]。
+    fn record_absent_person(&mut self, _person_index: i32) {}
     /// 追加分配一个在persons里已经存在的人头, -1为不在
     /// 如果要新加角色 需要手动添加到persons里
     fn distribute_person(&mut self, person_index: i32, allow_absent: bool, rng: &mut impl Rng) -> Result<i32> {
         let person = self.persons()[person_index as usize].clone();
         let train_type = person.train_type() as usize;
-        // 计算不在率
-        let mut absent_rate = match person.person_type() {
-            PersonType::Card => 50 - self.absent_rate_drop(),
-            PersonType::Yayoi | PersonType::Reporter => 200,
-            _ => 100 - self.absent_rate_drop()
-        };
-        if !allow_absent {
-            absent_rate = 0;
+        // 不在权重按人头类型（见 absent_weight）：记者/理事长固定 200 不受 drop 影响，
+        // NPC 必定出现。追加分配（allow_absent=false）时不判不在。
+        let absent_rate = if allow_absent { self.absent_weight(person_index as usize) } else { 0 };
+        // 第一步：先判定"不在"。分母为 5 个训练位基础权重之和（各 100），
+        // **不含得意率**——得意率只影响出现后的训练位分配（第二步）。
+        if absent_rate > 0 && rng.random_bool(absent_rate as f64 / (500 + absent_rate) as f64) {
+            // 所有被判定不在的人头（支援卡/友人/团队卡/理事长/记者；NPC 到不了这里）
+            // 全部记录，剧本侧需要「不在卡池」时再按类型筛选。
+            self.record_absent_person(person_index);
+            return Ok(-1);
         }
-        // 计算得意率权重
-        let mut weights = [100, 100, 100, 100, 100, absent_rate];
-        let mut real_deyilv = 0;
+        // 第二步：已判定出现，按训练位权重（含得意率）随机分配位置
+        let mut weights = [100, 100, 100, 100, 100];
         if train_type <= 4 {
-            real_deyilv = self.deyilv(person_index)? as i32;
-            weights[train_type] += real_deyilv;
+            weights[train_type] += self.deyilv(person_index)? as i32;
         }
-        let weights_sum = 500 + absent_rate + real_deyilv;
-        // 先判断是否不在
-        if rng.random_bool(absent_rate as f64 / weights_sum as f64) {
+        let dist = WeightedIndex::new(&weights)?;
+        // 尝试分配
+        let d = self.distribution();
+        let mut ok = false;
+        let mut retries = 0;
+        let mut train = 0;
+        while !ok && retries < 10 {
+            train = dist.sample(rng);
+            retries += 1;
+            // 不能多于5人或出现同样人头
+            if d[train].len() >= 5 || d[train].contains(&person_index) {
+                continue;
+            }
+            // 每个训练只能出现一个友人
+            if person.is_friend() && d[train].iter().any(|index| self.persons()[*index as usize].is_friend()) {
+                continue;
+            }
+            ok = true;
+        }
+        if !ok {
+            diag!("分配角色#{person_index}失败");
             Ok(-1)
         } else {
-            let dist = WeightedIndex::new(&weights[0..5])?;
-            // 尝试分配
-            let d = self.distribution();
-            let mut ok = false;
-            let mut retries = 0;
-            let mut train = 0;
-            while !ok && retries < 10 {
-                train = dist.sample(rng);
-                retries += 1;
-                // 不能多于5人或出现同样人头
-                if d[train].len() >= 5 || d[train].contains(&person_index) {
-                    continue;
-                }
-                // 每个训练只能出现一个友人
-                if person.is_friend() && d[train].iter().any(|index| self.persons()[*index as usize].is_friend()) {
-                    continue;
-                }
-                ok = true;
-            }
-            if !ok {
-                diag!("分配角色#{person_index}失败");
-                Ok(-1)
-            } else {
-                self.distribution_mut()[train as usize].push(person_index);
-                Ok(train as i32)
-            }
+            self.distribution_mut()[train as usize].push(person_index);
+            Ok(train as i32)
         }
     }
     /// 重新分配所有人头
@@ -272,7 +285,11 @@ pub trait Game: Clone {
         for ty in sequence {
             for i in 0..self.persons().len() {
                 if self.persons()[i].person_type() == ty && self.person_is_available(i) {
-                    self.distribute_person(i as i32, true, rng)?;
+                    // NPC 必定出现（拉面杯规则：NPC 没有不在率）：
+                    // 对 NPC 传 allow_absent=false 跳过不在判定，其余人头允许缺席。
+                    // （absent_weight 对 Npc 返回 0 是同一规则的类型表表达，双保险。）
+                    let allow_absent = self.persons()[i].person_type() != PersonType::Npc;
+                    self.distribute_person(i as i32, allow_absent, rng)?;
                 }
             }
         }
