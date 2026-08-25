@@ -4,7 +4,8 @@
 //!
 //! 阶段流转设计：
 //! - `RamenStage::next()`：负责回合内普通阶段流转（Begin → Distribute → Train → AfterTrain）
-//! - `Game::next()`：负责跨阶段流转（AfterTrain → NextTurn → Begin/特殊阶段）
+//! - `Game::next()`：负责跨阶段流转（AfterTrain → NextTurn → Begin/特殊阶段），
+//!   以及 turn 2 的 `Begin → RegionSelect → BeginAfterRegionSelect` 分叉
 
 use anyhow::{Result, anyhow};
 #[cfg(feature = "cli")]
@@ -21,7 +22,6 @@ use super::{
     RamenStage,
     effects::calc_ramen_training_effect,
     events::assign_train_feeling_type,
-    policy::fixed_super_ramen_selection,
     rules::{self, get_turn_special_feeling}
 };
 use crate::{
@@ -73,7 +73,8 @@ impl Game for RamenGame {
     /// 阶段推进
     ///
     /// 回合内流转由 `RamenStage::next()` 处理（Begin → Distribute → Train → AfterTrain）。
-    /// 本方法负责 AfterTrain → NextTurn 以及 NextTurn 的回合边界逻辑。
+    /// 本方法负责 AfterTrain → NextTurn、NextTurn 的回合边界，以及 turn 2 的
+    /// `Begin → RegionSelect → BeginAfterRegionSelect` 分叉。
     fn next(&mut self) -> bool {
         // RamenSelect 阶段：
         // - combined_decision=true（合并决策路径，由 apply_combined_ramen_decision 写入）→ 直接推 Train
@@ -106,6 +107,12 @@ impl Game for RamenGame {
                 crate::diag!("ground_ramen_effects 失败");
             }
             self.stage = RamenStage::Train;
+            return true;
+        }
+
+        // turn 2：Begin 前半段结束后进入地区选择（阶段边界，可供搜索落根）
+        if self.stage == RamenStage::Begin && self.base.turn == 2 {
+            self.stage = RamenStage::RegionSelect;
             return true;
         }
 
@@ -220,10 +227,19 @@ impl Game for RamenGame {
             return self.advance_turn();
         }
 
-        // 特殊阶段（RegionSelect/SuperRamenSelect/Settlement）→ 推进到下一回合
+        // 特殊阶段：turn 2 的 RegionSelect 回到 Begin 后半段；
+        // turn 23/47 的 RegionSelect 以及 SuperRamenSelect / Settlement 推进到下一回合。
+        // 绝不能让 turn 2 走 advance_turn()，否则会整段跳过 turn 2。
+        if self.stage == RamenStage::RegionSelect {
+            if self.base.turn == 2 {
+                self.stage = RamenStage::BeginAfterRegionSelect;
+                return true;
+            }
+            return self.advance_turn();
+        }
         if matches!(
             self.stage,
-            RamenStage::RegionSelect | RamenStage::SuperRamenSelect | RamenStage::Settlement
+            RamenStage::SuperRamenSelect | RamenStage::Settlement
         ) {
             return self.advance_turn();
         }
@@ -234,6 +250,7 @@ impl Game for RamenGame {
     fn run_stage<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
         match self.stage {
             RamenStage::Begin => self.run_begin(trainer, rng)?,
+            RamenStage::BeginAfterRegionSelect => self.run_begin_suffix(trainer, rng)?,
             RamenStage::Distribute => self.run_distribute(rng)?,
             RamenStage::RamenSelect => self.run_ramen_select(trainer, rng)?,
             RamenStage::SpecialSelect => self.run_special_select(trainer, rng)?,
@@ -246,13 +263,26 @@ impl Game for RamenGame {
                 let year_idx = super::RamenState::region_archive_year_idx(self.base.turn)?;
                 self.run_region_select(trainer, rng, year_idx)?;
             }
-            RamenStage::SuperRamenSelect => self.run_super_ramen_select()?,
+            RamenStage::SuperRamenSelect => self.run_super_ramen_select(trainer, rng)?,
             RamenStage::Settlement => {} // RMJ 结算在 next() 中处理
         }
         Ok(())
     }
 
     fn list_actions(&self) -> Result<Vec<Self::Action>> {
+        // SuperRamenSelect / RegionSelect 必须在 is_race_turn 短路之前：
+        // turn 71 若是比赛回合，否则会错误返回比赛动作；
+        // RegionSelect 若落到 `_` 回退会拿到训练+吃面组合，搜索比的是错误动作空间。
+        match self.stage {
+            RamenStage::SuperRamenSelect => {
+                return super::action::list_super_ramen_select_actions();
+            }
+            RamenStage::RegionSelect => {
+                return super::action::list_region_select_actions(self.base.turn);
+            }
+            _ => {}
+        }
+
         // race_turn 短路：仅"比赛"一个动作，跳过 RamenSelect/SpecialSelect
         if self.is_race_turn() {
             return Ok(vec![RamenAction::no_ramen(Operation::Race)]);
@@ -1122,7 +1152,22 @@ impl RamenGame {
     }
 
     /// Begin 阶段：动态人头管理、隐藏风味、事件处理
+    ///
+    /// turn 2 只跑前半段，地区选择交给独立的 `RegionSelect` 阶段；
+    /// 后半段由 [`Self::run_begin_suffix`] 在 `BeginAfterRegionSelect` 执行。
+    /// 其它回合前半+后半连续跑完，行为与拆分前逐位一致。
     fn run_begin<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
+        self.run_begin_prefix()?;
+        if self.base.turn == 2 {
+            return Ok(());
+        }
+        self.run_begin_suffix(trainer, rng)
+    }
+
+    /// Begin 前半段：重置随机流、清 pending、日志、人头、诀窍初始化
+    ///
+    /// 每回合只应执行一次。`BeginAfterRegionSelect` **不得**再调用本函数。
+    fn run_begin_prefix(&mut self) -> Result<()> {
         // 回合开始：重置两条规则流（注入 rule_master 后每回合从 0 计数，v2 §4.2）
         self.reset_turn_streams();
         // 三阶段决策 pending 防御性清空（Train 阶段结束后已清，但再确保一次）
@@ -1142,15 +1187,18 @@ impl RamenGame {
 
         // 诀窍值初始化/重置（回合2/24/48），同时处理隐藏风味
         // （init_feeling_stocks 内部已输出初始化结果，不重复打印回合信息）
-        let initialized = matches!(self.base.turn, 2 | 24 | 48);
-        if initialized {
+        if matches!(self.base.turn, 2 | 24 | 48) {
             self.init_feeling_stocks();
         }
+        Ok(())
+    }
 
-        // 第1年地区选择（回合2开始时）
-        if self.base.turn == 2 {
-            self.run_region_select(trainer, rng, 0)?;
-        }
+    /// Begin 后半段：隐藏风味、回合开始事件链、超级拉面自动效果
+    ///
+    /// turn 2 由 `BeginAfterRegionSelect` 调用；其它回合由 [`Self::run_begin`] 连续执行。
+    /// **不得**重置随机流、加人头或初始化诀窍。
+    fn run_begin_suffix<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
+        let initialized = matches!(self.base.turn, 2 | 24 | 48);
 
         // 固定回合分配隐藏风味（初始化回合已由 init_feeling_stocks 处理，跳过）
         // （已输出"隐藏风味 +N"增量，不重复打印回合信息）
@@ -1401,23 +1449,28 @@ impl RamenGame {
         }
     }
 
-    /// 年度地区选择（在 NextTurn 阶段 RMJ 结算后调用，通过 Trainer 统一接口决策）
+    /// 年度地区选择（通过 Trainer 统一接口决策）
+    ///
+    /// 候选由 [`list_actions`](Game::list_actions) 生成。第 3 年 `fixed` 策略
+    /// **不经过 trainer** 直接落地（单候选直达，搜索侧 `list_actions` 也只给 1 个）。
     ///
     /// `year_idx`: 0=第1年(地区0-4), 1=第2年(地区5-9), 2=第3年(地区10-19)
     fn run_region_select<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng, year_idx: usize) -> Result<()> {
         let ramen_data = global!(RAMENDATA);
         let year = year_idx + 1;
-        // Phase 2 步骤 5：策略路由（仅第3年 year_idx=2 生效；第1/2年固定走 all 枚举）
-        // - Fixed：跳过 120 组合枚举，直接用 ramen_region_fixed[0]
-        // - All：枚举所有组合交给 Trainer（默认）
+        // 第 3 年 Fixed：跳过 trainer，避免 RandomTrainer 对单候选 shuffle 多消耗决策 rng。
+        // 组合本身仍由 `region_select_combos` 这一份真值来源产出，避免与
+        // `list_actions` 各读一次 GAMECONFIG 而在未来悄悄漂移。
         if year_idx == 2 && matches!(global!(GAMECONFIG).ramen_region_strategy, RamenRegionStrategy::Fixed) {
-            let fixed = global!(GAMECONFIG).ramen_region_fixed.as_ref().ok_or_else(|| {
-                anyhow::anyhow!("ramen_region_strategy=fixed 但未设置 ramen_region_fixed（仅第3年需要，长度 = 1）")
-            })?;
-            if fixed.is_empty() {
-                anyhow::bail!("ramen_region_fixed 长度必须 = 1（仅第3年）");
-            }
-            let combo = fixed[0];
+            let cfg = global!(GAMECONFIG);
+            let combos = super::action::region_select_combos(
+                year_idx,
+                cfg.ramen_region_strategy,
+                cfg.ramen_region_fixed.as_deref()
+            )?;
+            let combo = *combos
+                .first()
+                .ok_or_else(|| anyhow::anyhow!("第3年 Fixed 策略未产出任何组合"))?;
             let names: Vec<&str> = combo
                 .iter()
                 .filter_map(|&idx| ramen_data.ramen_region_effect.get(idx).map(|r| r.name.as_str()))
@@ -1427,23 +1480,39 @@ impl RamenGame {
             self.apply_action_with_strategy(&action, rng)?;
             return Ok(());
         }
-        // 第1/2年 或 第3年 all 策略：枚举所有组合
-        // （明细组合由 RecordingTrainer verbose 候选栏展示，这里不重复打印）
-        let combos = super::rules::get_region_combinations(year_idx)?;
-        diag!("==== 第{}年 地区选择 ({}种组合) ====", year, combos.len());
-        let actions: Vec<RamenAction> = combos
-            .iter()
-            .map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c)))
-            .collect();
+        let actions = self.list_actions()?;
+        if actions.is_empty() {
+            anyhow::bail!("RegionSelect 候选为空 (year_idx={year_idx}, turn={})", self.base.turn);
+        }
+        diag!("==== 第{}年 地区选择 ({}种组合) ====", year, actions.len());
         let selection = trainer.select_action(self, &actions, rng)?;
+        if selection >= actions.len() {
+            anyhow::bail!(
+                "RegionSelect 选项索引超出范围: selection={selection}, actions_len={}",
+                actions.len()
+            );
+        }
         self.apply_action_with_strategy(&actions[selection], rng)
     }
 
-    /// SuperRamenSelect 阶段：超级拉面选择
-    fn run_super_ramen_select(&mut self) -> Result<()> {
-        let _option = fixed_super_ramen_selection()?;
-        self.ramen.super_ramen = Some(1); // 选项二（索引 1）
-        diag!("超级拉面选择: 选项二");
+    /// SuperRamenSelect 阶段：由 trainer 从 `list_actions` 候选中选择
+    ///
+    /// 生产路径不再固定写入选项二；手写 / Local 基策在 trainer 侧查找
+    /// `Operation::SuperRamenSelect(1)` 对应的候选位置，维持选项二回退。
+    fn run_super_ramen_select<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
+        let actions = self.list_actions()?;
+        if actions.is_empty() {
+            anyhow::bail!("SuperRamenSelect 候选为空");
+        }
+        let selection = trainer.select_action(self, &actions, rng)?;
+        if selection >= actions.len() {
+            anyhow::bail!(
+                "SuperRamenSelect 选项索引超出范围: selection={selection}, actions_len={}",
+                actions.len()
+            );
+        }
+        diag!("超级拉面选择: {}", actions[selection]);
+        self.apply_action_with_strategy(&actions[selection], rng)?;
         Ok(())
     }
 
@@ -1944,7 +2013,11 @@ mod tests {
 
     use super::*;
     use crate::{
-        game::{CardTrainingEffect, PersonType, ramen::events::assign_train_feeling_type},
+        game::{
+            CardTrainingEffect, PersonType,
+            ramen::events::assign_train_feeling_type,
+            traits::{Game, Trainer}
+        },
         gamedata::{ActionValue, EventChoice, init_global},
         trainer::{ManualTrainer, RandomTrainer},
         utils::{Checks, get_workspace_root, init_test_logger}
@@ -3755,24 +3828,20 @@ struct AlwaysTrueRng;
         Ok(())
     }
 
-    /// 第1/2 年在 Fixed 策略下仍走 all 枚举（不应用 ramen_region_fixed）
+    /// 第 1 年地区选择走真实阶段路径，从全枚举候选里落地
+    ///
+    /// 本测试**不再**尝试设置 `ramen_region_strategy=Fixed`：
+    /// `init_global_with_config` 幂等，globals 已初始化时会直接返回 `Ok(())` 并
+    /// 丢弃传入 config，测试并行跑在同一进程里根本设不进去——旧版本因此一直在
+    /// 对着默认配置空转，声称验证了 Fixed 却什么都没验。
+    /// 「Fixed 仅第 3 年生效」现由
+    /// `test_year3_fixed_list_actions_single_candidate` 用纯函数显式传参覆盖。
     #[test]
-    fn test_year1_2_always_all_regardless_of_strategy() -> Result<()> {
-        use crate::gamedata::init_global_with_config;
+    fn test_year1_region_select_uses_full_enumeration() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         let _ = init_test_logger("info");
-        // 即使设为 Fixed 策略，第1/2年也应走 all 枚举（不会被 fixed 覆盖）
-        let mut config = crate::gamedata::GameConfig::default_for_init();
-        config.scenario = "ramen".to_string();
-        config.trainer = "manual".to_string();
-        config.uma = TEST_UMA_ID;
-        config.cards = TEST_DECK;
-        config.blue_count = [12, 0, 0, 0, 6];
-        config.extra_count = [10, 0, 0, 20, 20, 40];
-        config.ramen_region_strategy = crate::gamedata::RamenRegionStrategy::Fixed;
-        config.ramen_region_fixed = Some(vec![[99, 99, 99]]);
-        let _ = init_global_with_config(&config);
+        let _ = init_global();
 
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
         game.add_friend_and_npcs()?;
@@ -3780,14 +3849,19 @@ struct AlwaysTrueRng;
         game.stage = RamenStage::RegionSelect;
         let mut rng = StdRng::seed_from_u64(20260819);
         let trainer = ManualTrainer::with_mock_inputs(vec![]);
-        // 第1年（year_idx=0）：Fixed 策略应不生效，走 all 枚举（默认选 [0,1,2]）
+
+        let candidates = game.list_actions()?;
+        println!("第 1 年 RegionSelect 候选数={}", candidates.len());
+        let mut c = Checks::new();
+        c.check(candidates.len() == 10, "第 1 年枚举 C(5,3)=10 个组合");
+
         game.run_region_select(&trainer, &mut rng, 0)?;
-        assert_eq!(
-            game.ramen.selected_regions,
-            [0, 1, 2],
-            "第1年 Fixed 策略应仍走 all 枚举（fixed 仅第3年生效）"
+        println!("落地地区={:?}", game.ramen.selected_regions);
+        c.check(
+            game.ramen.selected_regions == [0, 1, 2],
+            "ManualTrainer 无输入时取候选 0，即组合 [0,1,2]"
         );
-        Ok(())
+        c.finish()
     }
 
     /// 回合 0-1 / 超级拉面回合应跳过 RamenSelect/SpecialSelect，直接从 Distribute 跳到 Train
@@ -4343,4 +4417,229 @@ struct AlwaysTrueRng;
         c.finish()
     }
 
+    /// 探测 trainer：数 `select_action` 里 RegionSelect 动作出现的次数，以及当时的 `game.stage`
+    struct RegionProbe {
+        /// 任意阶段收到地区动作的次数
+        region_calls: std::cell::Cell<usize>,
+        /// `stage == Begin` 时收到地区动作的次数
+        begin_region_calls: std::cell::Cell<usize>
+    }
+
+    impl Trainer<RamenGame> for RegionProbe {
+        fn select_action(
+            &self, game: &RamenGame, actions: &[<RamenGame as Game>::Action], _rng: &mut StdRng
+        ) -> Result<usize> {
+            if actions.iter().any(|a| matches!(a.operation, Operation::RegionSelect(_))) {
+                self.region_calls.set(self.region_calls.get() + 1);
+                if game.stage == RamenStage::Begin {
+                    self.begin_region_calls.set(self.begin_region_calls.get() + 1);
+                }
+            }
+            Ok(0)
+        }
+
+        fn select_choice(
+            &self, _game: &RamenGame, _choices: &[Vec<EventChoice>], _rng: &mut StdRng
+        ) -> Result<usize> {
+            Ok(0)
+        }
+
+        fn select_event_choice(
+            &self,
+            _game: &RamenGame,
+            _event: &crate::gamedata::EventData,
+            _choices: &[Vec<EventChoice>],
+            _rng: &mut StdRng
+        ) -> Result<usize> {
+            Ok(0)
+        }
+    }
+
+    /// 推进到 turn 2 的 `Begin`
+    fn advance_to_turn2_begin(game: &mut RamenGame, trainer: &impl Trainer<RamenGame>, rng: &mut StdRng) -> Result<()> {
+        game.run_stage(trainer, rng)?;
+        while game.next() {
+            if game.turn() == 2 && game.stage == RamenStage::Begin {
+                return Ok(());
+            }
+            game.run_stage(trainer, rng)?;
+        }
+        anyhow::bail!("未能推进到 turn 2 Begin")
+    }
+
+    /// turn 2 阶段序列严格为 Begin → RegionSelect → BeginAfterRegionSelect → Distribute
+    #[test]
+    fn test_turn2_stage_sequence() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.set_rule_master(1);
+        let probe = RegionProbe {
+            region_calls: std::cell::Cell::new(0),
+            begin_region_calls: std::cell::Cell::new(0)
+        };
+        let mut rng = StdRng::seed_from_u64(1);
+        advance_to_turn2_begin(&mut game, &probe, &mut rng)?;
+
+        let mut c = Checks::new();
+        let mut seq = vec![format!("{:?}", game.stage)];
+        game.run_stage(&probe, &mut rng)?;
+        c.check(game.turn() == 2, "Begin 前半后回合仍为 2");
+        c.check(probe.begin_region_calls.get() == 0, "run_begin 不再内联选地区");
+        Game::next(&mut game);
+        seq.push(format!("{:?}", game.stage));
+        c.check(game.stage == RamenStage::RegionSelect, "Begin 后是 RegionSelect");
+        c.check(game.turn() == 2, "进入 RegionSelect 时回合仍为 2");
+
+        let actions = game.list_actions()?;
+        println!("turn2 RegionSelect 候选={}", actions.len());
+        c.check(
+            actions
+                .iter()
+                .all(|a| matches!(a.operation, Operation::RegionSelect(_))),
+            "list_actions 在 RegionSelect 只给地区动作"
+        );
+        c.check(actions.len() == 10, "第 1 年 C(5,3)=10");
+
+        game.run_stage(&probe, &mut rng)?;
+        c.check(probe.region_calls.get() == 1, "地区选择只走 trainer 一次");
+        c.check(probe.begin_region_calls.get() == 0, "Begin 阶段从未收到地区动作");
+        c.check(
+            game.ramen.yearly_selected_regions[0] != [0, 0, 0],
+            "第 1 年归档已写入"
+        );
+        Game::next(&mut game);
+        seq.push(format!("{:?}", game.stage));
+        c.check(
+            game.stage == RamenStage::BeginAfterRegionSelect,
+            "RegionSelect 后是 BeginAfterRegionSelect"
+        );
+        c.check(game.turn() == 2, "地区选择后回合仍为 2");
+
+        let persons_before_suffix = game.persons.len();
+        let special_before_suffix = game.ramen.special_feeling;
+        let y1_before_suffix = game.ramen.yearly_selected_regions[0];
+        let event_before = game.event.map(|e| e.counter()).unwrap_or(0);
+        game.run_stage(&probe, &mut rng)?;
+        Game::next(&mut game);
+        seq.push(format!("{:?}", game.stage));
+        println!("turn2 序列: {seq:?}");
+        println!(
+            "人头 {}→{} 隐藏风味 {}→{} 事件流 {}→{} 归档 {:?}",
+            persons_before_suffix,
+            game.persons.len(),
+            special_before_suffix,
+            game.ramen.special_feeling,
+            event_before,
+            game.event.map(|e| e.counter()).unwrap_or(0),
+            game.ramen.yearly_selected_regions[0]
+        );
+        let seq_text = seq.join(" → ");
+        c.check(
+            seq_text == "Begin → RegionSelect → BeginAfterRegionSelect → Distribute",
+            "turn 2 阶段序列严格为 Begin → RegionSelect → BeginAfterRegionSelect → Distribute"
+        );
+        c.check(game.turn() == 2, "后半段结束后回合仍为 2");
+        c.check(game.persons.len() == persons_before_suffix, "人头初始化只发生一次");
+        c.check(
+            game.ramen.special_feeling == special_before_suffix,
+            "诀窍/隐藏风味初始化只发生一次（后半段不再 init）"
+        );
+        c.check(
+            game.ramen.yearly_selected_regions[0] == y1_before_suffix,
+            "第 1 年归档只写一次"
+        );
+        c.check(
+            game.event.map(|e| e.counter()).unwrap_or(0) > event_before,
+            "Begin 后半段事件链确实执行（事件流被消耗）"
+        );
+        c.finish()
+    }
+
+    /// 非 turn 2 的回合阶段序列不含 `BeginAfterRegionSelect`
+    #[test]
+    fn test_non_turn2_has_no_begin_after_region_select() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut c = Checks::new();
+        for turn in [0, 1, 3, 24] {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.base.turn = turn;
+            game.stage = RamenStage::Begin;
+            Game::next(&mut game);
+            println!("turn={turn} Begin.next → {:?}", game.stage);
+            c.check(
+                game.stage == RamenStage::Distribute,
+                &format!("turn {turn} Begin 下一阶段是 Distribute")
+            );
+            c.check(
+                game.stage != RamenStage::BeginAfterRegionSelect,
+                &format!("turn {turn} 不含 BeginAfterRegionSelect")
+            );
+        }
+        for turn in [23, 47] {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            game.base.turn = turn;
+            game.stage = RamenStage::RegionSelect;
+            Game::next(&mut game);
+            println!("turn={turn} RegionSelect.next → turn={} {:?}", game.turn(), game.stage);
+            c.check(game.turn() == turn + 1, &format!("turn {turn} RegionSelect 推进回合"));
+            c.check(
+                game.stage == RamenStage::Begin,
+                &format!("turn {turn} RegionSelect 下一阶段是下一回合 Begin")
+            );
+        }
+        c.finish()
+    }
+
+    /// 第 3 年 `fixed` 策略 `list_actions` 必须是单候选，第 1 年不受影响
+    #[test]
+    fn test_year3_fixed_list_actions_single_candidate() -> Result<()> {
+        use crate::{game::ramen::action::region_select_combos, gamedata::RamenRegionStrategy};
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        // 策略与 fixed 表**显式传参**，不经全局配置。
+        // `init_global_with_config` 幂等：globals 已初始化时直接返回 Ok(()) 并丢弃
+        // 传入 config，测试并行跑在同一进程里，谁先 init_global 谁说了算。
+        // 早先靠它设置 Fixed 的测试其实一直在对着默认配置空转。
+        let fixed = [[10usize, 15, 19]];
+        let mut c = Checks::new();
+
+        let y1 = region_select_combos(0, RamenRegionStrategy::Fixed, Some(&fixed))?;
+        println!("Fixed 策略下第 1 年组合数={}", y1.len());
+        c.check(y1.len() == 10, "第 1 年 Fixed 不生效，仍枚举 C(5,3)=10");
+
+        let y2 = region_select_combos(1, RamenRegionStrategy::Fixed, Some(&fixed))?;
+        println!("Fixed 策略下第 2 年组合数={}", y2.len());
+        c.check(y2.len() == 10, "第 2 年 Fixed 不生效，仍枚举 C(5,3)=10");
+
+        let y3_all = region_select_combos(2, RamenRegionStrategy::All, None)?;
+        println!("All 策略下第 3 年组合数={}", y3_all.len());
+        c.check(y3_all.len() == 120, "第 3 年 All 枚举 C(10,3)=120");
+
+        let y3_fixed = region_select_combos(2, RamenRegionStrategy::Fixed, Some(&fixed))?;
+        println!("Fixed 策略下第 3 年组合={y3_fixed:?}");
+        c.check(y3_fixed.len() == 1, "第 3 年 Fixed 必须单候选直达，不能恢复 120 组合");
+        c.check(y3_fixed.first() == Some(&[10, 15, 19]), "单候选就是 ramen_region_fixed[0]");
+
+        // fixed 表缺失 / 为空都必须报错，不能静默回退成 120 枚举
+        let missing = region_select_combos(2, RamenRegionStrategy::Fixed, None);
+        println!("第 3 年 Fixed 但未设置 fixed 表: {missing:?}");
+        c.check(missing.is_err(), "fixed 表缺失时报错");
+        let empty: [[usize; 3]; 0] = [];
+        let empty_res = region_select_combos(2, RamenRegionStrategy::Fixed, Some(&empty));
+        println!("第 3 年 Fixed 但 fixed 表为空: {empty_res:?}");
+        c.check(empty_res.is_err(), "fixed 表为空时报错");
+
+        c.finish()
+    }
 }

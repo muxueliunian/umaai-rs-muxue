@@ -173,21 +173,16 @@ pub const GEN1_SHAPES: [DeckShape; 3] = [
 ///
 /// 白名单而非黑名单，因为「合法阶段」是可枚举的、而「嵌套决策」不是。
 ///
-/// # 为什么必须过滤
-///
-/// 第 1 年地区选择由 `run_begin` **内联调用** `run_region_select`（`game.rs` 回合 2 分支），
-/// 此时 `game.stage` 仍是 [`RamenStage::Begin`]。这种决策点**不在阶段入口**，
-/// 拿它当根局面会破坏搜索的契约：搜索按 `apply_action → next()` 推进，
-/// 会把 `Begin` 的后半段（隐藏风味分配、事件）整段跳过；
-/// 而若像回归测试那样对快照重新 `run_stage`，则会把 `Begin` 完整重跑一遍、
-/// 导致 `init_feeling_stocks` 二次执行。
-///
-/// 这与 Phase 1 踩过的「空推进 `next()` 得到非法状态」是同一类错误：**根不在阶段边界**。
-/// 实测未过滤时约 1/78 的采样（`truncate_turn == 2`）落进这个陷阱。
+/// 第 1 年地区选择已是 turn 2 的 [`RamenStage::RegionSelect`] 阶段边界，
+/// 本白名单会自动捕获它。`Begin` / `BeginAfterRegionSelect` 不是决策点，不收录。
 fn is_capturable_stage(stage: &RamenStage) -> bool {
     matches!(
         stage,
-        RamenStage::RamenSelect | RamenStage::SpecialSelect | RamenStage::Train | RamenStage::RegionSelect
+        RamenStage::RamenSelect
+            | RamenStage::SpecialSelect
+            | RamenStage::Train
+            | RamenStage::RegionSelect
+            | RamenStage::SuperRamenSelect
     )
 }
 
@@ -981,11 +976,14 @@ mod tests {
         }
         let mut stage_list: Vec<_> = stages.iter().collect();
         stage_list.sort();
-        // 未过滤时，回合 2 的第 1 年地区选择会以 stage=Begin 被采到（约 1/78）。
-        // 那种根局面不在阶段入口，会破坏搜索的 `apply_action -> next()` 契约。
+        // SuperRamenSelect 已是阶段入口，允许捕获。
+        // 第 1 年地区选择现在也走 turn 2 的 RegionSelect 阶段，同样在白名单内。
         for (stage, count) in stages.iter() {
             assert!(
-                matches!(stage.as_str(), "RamenSelect" | "SpecialSelect" | "Train" | "RegionSelect"),
+                matches!(
+                    stage.as_str(),
+                    "RamenSelect" | "SpecialSelect" | "Train" | "RegionSelect" | "SuperRamenSelect"
+                ),
                 "捕获到非阶段入口的根局面: {stage} x{count}"
             );
         }

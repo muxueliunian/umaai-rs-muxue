@@ -27,16 +27,21 @@ use crate::{
 
 /// 决策所属的**有效阶段**（按动作类型纠正 `game.stage`）
 ///
-/// 第 1 年地区选择由 `run_begin` 在 turn 2 内联调用 `run_region_select`，
-/// 此时 `game.stage` 仍是 [`RamenStage::Begin`]。只按 `game.stage` 分派的训练员
-/// 会把它落到默认分支、恒选候选 0——第 1 年的地区**从未经过策略打分**。
-/// 因此一律按动作携带的 [`Operation`] 判定，`game.stage` 只作为回退。
+/// 第 1 年地区选择已是独立的 [`RamenStage::RegionSelect`]（turn 2 在 `Begin`
+/// 前半段之后），不再发生在 `Begin` 内部。本函数保留作防御性兼容：若有人
+/// 仍把 `RegionSelect` 动作塞进其它阶段，按 [`Operation`] 纠正，避免落到
+/// `select_action` 的 `_ => (0, vec![])` 恒选候选 0。
+///
+/// 超级拉面同样按动作类型纠正：缺分支会把选项二静默变成选项一。
 ///
 /// 判定用 `any` 而非 `all`：地区选择的候选集是同构的，命中一个即可；
 /// 用 `all` 会在候选集混入其他动作时静默退回默认分支。
 pub fn ramen_effective_stage(game: &RamenGame, actions: &[RamenAction]) -> RamenStage {
     if actions.iter().any(|a| matches!(a.operation, Operation::RegionSelect(_))) {
         return RamenStage::RegionSelect;
+    }
+    if actions.iter().any(|a| matches!(a.operation, Operation::SuperRamenSelect(_))) {
+        return RamenStage::SuperRamenSelect;
     }
     game.stage.clone()
 }
@@ -143,8 +148,8 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
             RamenStage::RamenSelect => self.policy.decide_ramen(game, actions)?,
             RamenStage::SpecialSelect => self.policy.decide_special(game, actions)?,
             RamenStage::Train => self.policy.decide_train(game, actions)?,
-            // 地区选择：第 1/2/3 年分别在 turn 2/23/47 触发（第 3 年 fixed 策略不走 trainer）
-            // 第 1 年的 `game.stage` 是 Begin，靠 `ramen_effective_stage` 纠正到这里
+            // 地区选择：第 1/2/3 年分别在 turn 2/23/47 触发（第 3 年 fixed 为单候选，走上方早退）
+            // turn → year_idx 与 `region_archive_year_idx` 一致，拆 Begin 后 turn 号不变
             RamenStage::RegionSelect => {
                 let year_idx = match game.turn() {
                     2 => 0,
@@ -154,6 +159,8 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
                 };
                 self.policy.decide_region(game, year_idx, actions)?
             }
+            // 查找 SuperRamenSelect(1) 的候选位置，不是硬编码返回下标 1
+            RamenStage::SuperRamenSelect => self.policy.decide_super_ramen(game, actions)?,
             // 其他阶段（Begin/Distribute/AfterTrain 等）不应有多个候选
             _ => (0, vec![])
         };
@@ -230,17 +237,20 @@ mod tests {
         let score = game.uma.calc_score();
         let rank = global!(GAMECONSTANTS).get_rank_name(score);
         println!(
-            "手写策略完整局: 回合={} 评分={} ({}) RMJ={:?} 吃面={} 五维={:?}",
+            "手写策略完整局: 回合={} 评分={} ({}) RMJ={:?} 吃面={} 五维={:?} super_ramen={:?}",
             game.turn(),
             score,
             rank,
             game.ramen.rmj_results,
             game.ramen.eat_count,
             game.uma.five_status,
+            game.ramen.super_ramen
         );
-        assert_eq!(game.turn(), 77);
-        assert!(score > 0);
-        Ok(())
+        let mut c = crate::utils::Checks::new();
+        c.check(game.turn() == 77, "跑满 77 回合");
+        c.check(score > 0, "评分为正");
+        c.check(game.ramen.super_ramen == Some(1), "手写回退必须钉死选项二");
+        c.finish()
     }
 
     /// 确定性：同 seed 两次整局，事件选择与动作选择均一致（决策序列可复现）

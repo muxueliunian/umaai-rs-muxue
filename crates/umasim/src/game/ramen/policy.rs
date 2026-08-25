@@ -541,8 +541,8 @@ impl RamenPolicy {
                 // 健康时治病无收益（生病由守门规则直通，这里给 0 分避免误选）
                 out.reason = "治病".to_string();
             }
-            Operation::RegionSelect(_) | Operation::StageOnly => {
-                anyhow::bail!("Train 阶段不应出现 RegionSelect/StageOnly 操作");
+            Operation::RegionSelect(_) | Operation::StageOnly | Operation::SuperRamenSelect(_) => {
+                anyhow::bail!("Train 阶段不应出现 RegionSelect/StageOnly/SuperRamenSelect 操作");
             }
         }
         Ok(out)
@@ -723,16 +723,61 @@ pub fn fixed_region_selection(year_idx: usize) -> Result<[usize; 3]> {
     Ok([range[0], range[1], range[2]])
 }
 
+/// 手写策略固定选择的超级拉面选项下标（选项二）
+///
+/// **「选项二」这件事只在这里定义一次。** 生产路径接上 trainer 之后，
+/// 「固定选项二」同时被 [`fixed_super_ramen_selection`] 与
+/// [`RamenPolicy::decide_super_ramen`] 需要；各写一次 `1` 会变成两个真值来源，
+/// 将来改默认选项时漏掉一处不会有任何报错。
+///
+/// 这是 `training_limit_options` 的**位置下标**，数据里没有 option ID 概念。
+pub const FIXED_SUPER_RAMEN_INDEX: usize = 1;
+
 /// 超级拉面选择策略：固定选项二
 ///
-/// 初期固定选择 `training_limit_options` 的第二个选项（索引 1）。
-/// 返回选项对应的训练位置列表。
+/// 返回 [`FIXED_SUPER_RAMEN_INDEX`] 对应选项的训练位置列表。
+///
+/// 生产路径已改走 trainer（`run_super_ramen_select` → `decide_super_ramen`），
+/// 本函数保留为**对外兼容 API**，同时充当选项表长度的守门。
 pub fn fixed_super_ramen_selection() -> Result<Vec<i32>> {
     let options = get_super_ramen_clone_train_options()?;
-    if options.len() < 2 {
-        anyhow::bail!("超级拉面选项不足 2 个");
+    options
+        .get(FIXED_SUPER_RAMEN_INDEX)
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("超级拉面选项不足：需要下标 {FIXED_SUPER_RAMEN_INDEX}，实得 {} 个", options.len()))
+}
+
+impl RamenPolicy {
+    /// SuperRamenSelect 阶段：继续固定 [`FIXED_SUPER_RAMEN_INDEX`]（选项二）
+    ///
+    /// 不是硬编码返回下标 1，而是**按身份查找**携带该选项的候选位置。
+    /// 候选顺序若变化，仍能钉住「选项二」而不是「第 2 个候选」。
+    /// 不按卡组打分（属手写策略调参，不在本次范围）。
+    pub fn decide_super_ramen(
+        &self, _game: &RamenGame, actions: &[RamenAction]
+    ) -> Result<(usize, Vec<RamenPolicyOutput>)> {
+        if actions.is_empty() {
+            anyhow::bail!("SuperRamenSelect 阶段候选为空");
+        }
+        let idx = actions
+            .iter()
+            .position(|a| matches!(a.operation, Operation::SuperRamenSelect(i) if i == FIXED_SUPER_RAMEN_INDEX))
+            .ok_or_else(|| {
+                anyhow::anyhow!("候选中找不到超级拉面选项下标 {FIXED_SUPER_RAMEN_INDEX}")
+            })?;
+        let mut scores = Vec::with_capacity(actions.len());
+        for (i, _) in actions.iter().enumerate() {
+            let mut out = RamenPolicyOutput::default();
+            if i == idx {
+                out.score = 1.0;
+                out.reason = "固定选项二".to_string();
+            } else {
+                out.reason = "非选项二".to_string();
+            }
+            scores.push(out);
+        }
+        Ok((idx, scores))
     }
-    Ok(options[1].clone())
 }
 
 #[cfg(test)]
@@ -786,6 +831,35 @@ mod tests {
         assert_eq!(sel, vec![0, 1, 2, 4]);
 
         Ok(())
+    }
+
+    /// 固定选项二是按 `SuperRamenSelect(1)` 查找，不是硬编码返回下标 1
+    #[test]
+    fn test_decide_super_ramen_finds_option_two() -> anyhow::Result<()> {
+        use crate::utils::Checks;
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+
+        let game = make_game()?;
+        let policy = RamenPolicy::default();
+        // 故意把选项二放到候选末尾，下标 1 是选项一
+        let actions = vec![
+            RamenAction::super_ramen_select(0),
+            RamenAction::super_ramen_select(2),
+            RamenAction::super_ramen_select(1)
+        ];
+        let (idx, outs) = policy.decide_super_ramen(&game, &actions)?;
+        println!("decide_super_ramen idx={idx} reason={}", outs[idx].reason);
+        let mut c = Checks::new();
+        c.check(idx == 2, "选项二在候选末尾时仍选中它，而不是下标 1");
+        c.check(
+            matches!(actions[idx].operation, Operation::SuperRamenSelect(1)),
+            "选中的动作确实是 SuperRamenSelect(1)"
+        );
+        c.finish()
     }
 
     // ========== 手写策略核心测试 ==========

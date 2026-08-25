@@ -456,12 +456,6 @@ impl RamenGame {
         self.reset_turn_streams();
     }
 
-    /// 按当前 `(rule_master, turn)` 重置两条规则流（counter 归零）
-    ///
-    /// 回合固定流 master = `derive_seed(rule_master, [turn])`；
-    /// 策略流 master = `derive_seed(rule_master, [turn, STRATEGY_TAG])`。
-    /// 未注入 rule_master 时清空两条流（规则层回退旧行为）。
-    /// 调用时机：`run_begin` 回合开始时（每次进入 Begin 阶段）。
     /// 按 `(rule_master, turn, tag)` 派生一条分身分配用的局部流
     ///
     /// 与从父流 fork 的做法（[`crate::rng::fork_local_stream`]）相比有两处好处：
@@ -478,6 +472,13 @@ impl RamenGame {
             .map(|master| SplitmixRng::new(derive_seed(master, &[self.base.turn as u64, tag])))
     }
 
+    /// 按当前 `(rule_master, turn)` 重置两条规则流（counter 归零）
+    ///
+    /// 回合固定流 master = `derive_seed(rule_master, [turn])`；
+    /// 策略流 master = `derive_seed(rule_master, [turn, STRATEGY_TAG])`。
+    /// 未注入 rule_master 时清空两条流（规则层回退旧行为）。
+    /// 调用时机：`run_begin` 前半段（每次进入 `Begin`）。
+    /// `BeginAfterRegionSelect` **不得**再调用，否则事件流被重置、随机语义已错。
     pub fn reset_turn_streams(&mut self) {
         match self.rule_master {
             Some(master) => {

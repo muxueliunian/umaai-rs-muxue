@@ -23,7 +23,7 @@ use super::{
 use crate::{
     diag,
     game::{ActionEnum, BaseAction, FriendOutState, PersonType, traits::{Game, Person}},
-    gamedata::{EventData, GAMECONSTANTS, ramen::RAMENDATA},
+    gamedata::{EventData, GAMECONFIG, GAMECONSTANTS, RamenRegionStrategy, ramen::RAMENDATA},
     global,
     rng::{CLONE_SUPER_TAG, fork_local_stream},
     utils::{system_event, system_event_prob}
@@ -116,6 +116,18 @@ impl RamenAction {
         }
     }
 
+    /// 创建 `SuperRamenSelect` 阶段动作（承载超级拉面选项下标）。
+    ///
+    /// `idx` 是 `finals_effect.training_limit_options` 的位置下标，不是地区拉面 ID。
+    /// `ramen` / `special_targets` 保持空：这两个字段的语义不属于超级拉面。
+    pub fn super_ramen_select(idx: usize) -> Self {
+        Self {
+            ramen: None,
+            special_targets: None,
+            operation: Operation::SuperRamenSelect(idx)
+        }
+    }
+
     /// 是否包含吃面决策
     pub fn is_eating_ramen(&self) -> bool {
         self.ramen.is_some()
@@ -183,7 +195,8 @@ impl RamenAction {
                     .collect();
                 format!("地区[{}]", names.join(","))
             }
-            Operation::StageOnly => String::new()
+            Operation::StageOnly => String::new(),
+            Operation::SuperRamenSelect(idx) => format!("超级拉面选项 {}", idx + 1)
         }
     }
 }
@@ -218,7 +231,8 @@ impl Operation {
             Operation::FriendOuting => Some(BaseAction::FriendOuting),
             Operation::Clinic => Some(BaseAction::Clinic),
             Operation::RegionSelect(_) => None,
-            Operation::StageOnly => None
+            Operation::StageOnly => None,
+            Operation::SuperRamenSelect(_) => None
         }
     }
 }
@@ -308,8 +322,27 @@ impl ActionEnum for RamenAction {
                         }
                         // 按设计：治病动作不获得诀窍槽
                     }
+                    Operation::SuperRamenSelect(_) => {
+                        return Err(anyhow!(
+                            "超级拉面选择只能在 SuperRamenSelect 阶段执行（当前 Train）"
+                        ));
+                    }
                 }
                 Ok(())
+            }
+            RamenStage::SuperRamenSelect => {
+                // 只写字段，不切阶段、不推进回合；阶段推进一律留给 Game::next()
+                match self.operation {
+                    Operation::SuperRamenSelect(idx) => {
+                        let n = super::rules::get_super_ramen_clone_train_options()?.len();
+                        if idx >= n {
+                            return Err(anyhow!("超级拉面选项下标越界: idx={idx}, 共 {n} 个"));
+                        }
+                        game.ramen.super_ramen = Some(idx);
+                        Ok(())
+                    }
+                    other => Err(anyhow!("SuperRamenSelect 阶段收到非法动作: {other:?}"))
+                }
             }
             // 其他阶段（如 RegionSelect）保持旧行为，按 operation 直接分发
             // 拉面效果已由 ground_ramen_effects() 在阶段过渡时落地，此处不再重复
@@ -320,6 +353,12 @@ impl ActionEnum for RamenAction {
                         apply_region_selection(game, regions)?;
                     }
                     Operation::StageOnly => {}
+                    Operation::SuperRamenSelect(_) => {
+                        return Err(anyhow!(
+                            "超级拉面选择只能在 SuperRamenSelect 阶段执行（当前 {:?})",
+                            game.stage
+                        ));
+                    }
                     Operation::Rest => {
                         if let Some(base_action) = self.operation.to_base_action() {
                             base_action.apply(&mut game.base, rng)?;
@@ -1046,6 +1085,57 @@ pub fn list_special_select_actions(state: &super::RamenState, ramen_idx: usize) 
         .into_iter()
         .map(|t| RamenAction::special_select(ramen_idx, t))
         .collect())
+}
+
+/// `SuperRamenSelect` 阶段的候选动作：每个 `training_limit_options` 下标一个。
+///
+/// 数据源是纯位置下标，没有 option ID。所有候选的 `ramen` / `special_targets`
+/// 均为空，`operation = SuperRamenSelect(idx)`。
+pub fn list_super_ramen_select_actions() -> Result<Vec<RamenAction>> {
+    let n = super::rules::get_super_ramen_clone_train_options()?.len();
+    Ok((0..n).map(RamenAction::super_ramen_select).collect())
+}
+
+/// `RegionSelect` 阶段的候选动作
+///
+/// - 第 1/2 年：枚举该年全部组合（C(5,3)=10）
+/// - 第 3 年 `ramen_region_strategy=all`：C(10,3)=120
+/// - 第 3 年 `ramen_region_strategy=fixed`：**单候选直达**，不展开 120 组合
+///
+/// 年份下标见 [`super::RamenState::region_archive_year_idx`]（turn 2/23/47 → 0/1/2）。
+pub fn list_region_select_actions(turn: i32) -> Result<Vec<RamenAction>> {
+    let year_idx = super::RamenState::region_archive_year_idx(turn)?;
+    let cfg = global!(GAMECONFIG);
+    let combos = region_select_combos(year_idx, cfg.ramen_region_strategy, cfg.ramen_region_fixed.as_deref())?;
+    Ok(combos
+        .into_iter()
+        .map(|c| RamenAction::no_ramen(Operation::RegionSelect(c)))
+        .collect())
+}
+
+/// 地区候选组合的**纯函数**实现：策略与 fixed 表由调用方显式传入
+///
+/// 与 [`list_region_select_actions`] 拆开的理由是**可测性**：
+/// `init_global_with_config` 是幂等的（globals 已初始化时直接返回 `Ok(())` 并
+/// 丢弃传入 config），测试进程里只要有任何一条用例先调过 `init_global()`，
+/// 后续想设置非默认策略的用例就会**静默地对着默认配置跑且不报错**。
+/// 因此策略分支必须能脱离全局配置单独验证，否则守门测试是空转的。
+///
+/// 只有 `get_region_combinations` 仍读 `RAMENDATA`——那是静态数据不是可调配置。
+pub fn region_select_combos(
+    year_idx: usize, strategy: RamenRegionStrategy, fixed: Option<&[[usize; 3]]>
+) -> Result<Vec<[usize; 3]>> {
+    // fixed 仅第 3 年生效；第 1/2 年一律走全枚举
+    if year_idx == 2 && matches!(strategy, RamenRegionStrategy::Fixed) {
+        let fixed = fixed.ok_or_else(|| {
+            anyhow!("ramen_region_strategy=fixed 但未设置 ramen_region_fixed（仅第3年需要，长度 = 1）")
+        })?;
+        let first = fixed
+            .first()
+            .ok_or_else(|| anyhow!("ramen_region_fixed 长度必须 = 1（仅第3年）"))?;
+        return Ok(vec![*first]);
+    }
+    super::rules::get_region_combinations(year_idx)
 }
 
 /// `Train` 阶段的候选动作：所有 Operation ×（带 pending 的完整动作）
@@ -2007,7 +2097,7 @@ mod tests {
         let mut rng = StdRng::seed_from_u64(1);
         let mut c = Checks::new();
 
-        // 第 1 年：turn 2 / Begin（真正的年度选择路径，走 apply 的 `_` 分支）
+        // 第 1 年：turn 2。生产路径已是 RegionSelect 阶段；Begin 的 `_` 分支仍能归档。
         game.base.turn = 2;
         game.stage = RamenStage::Begin;
         let y1 = [0usize, 1, 2];
@@ -2064,6 +2154,82 @@ mod tests {
             game_train.ramen.yearly_selected_regions[0] == [0, 0, 0],
             "Train 阶段 turn 23 不得写入第 1 年"
         );
+
+        c.finish()
+    }
+
+    /// SuperRamenSelect：候选恰好 3 个；apply 只写字段；越界 / 错误阶段返回 Err
+    #[test]
+    fn test_super_ramen_select_list_and_apply() -> anyhow::Result<()> {
+        use crate::game::{
+            ActionEnum,
+            ramen::{RamenGame, RamenStage}
+        };
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+
+        let inherit = crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        };
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let mut game = RamenGame::newgame(102601, &deck, inherit)?;
+        let mut rng = StdRng::seed_from_u64(1);
+        let mut c = Checks::new();
+
+        game.base.turn = 71;
+        game.stage = RamenStage::SuperRamenSelect;
+        // 即使 turn 71 被标成比赛回合，候选也必须是 3 个超级拉面选项
+        game.uma.career_races |= 1u64 << (71 - 11);
+
+        let actions = crate::game::traits::Game::list_actions(&game)?;
+        println!(
+            "SuperRamenSelect list_actions (is_race_turn={}): {} 个 -> {:?}",
+            game.is_race_turn(),
+            actions.len(),
+            actions.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+        );
+        c.check(game.is_race_turn(), "本测试强制 turn 71 为比赛回合");
+        c.check(actions.len() == 3, "恰好 3 个超级拉面候选");
+        c.check(
+            actions.iter().all(|a| matches!(a.operation, Operation::SuperRamenSelect(_))),
+            "候选全部是 SuperRamenSelect"
+        );
+        c.check(
+            actions.iter().all(|a| a.ramen.is_none() && a.special_targets.is_none()),
+            "不复用 ramen / special_targets 字段"
+        );
+        c.check(actions[0].to_string() == "超级拉面选项 1", "Display 选项 1");
+        c.check(actions[1].to_string() == "超级拉面选项 2", "Display 选项 2");
+        c.check(actions[2].to_string() == "超级拉面选项 3", "Display 选项 3");
+        c.check(actions[0].as_base_action().is_none(), "to_base_action 为 None");
+
+        let turn_before = game.turn();
+        let stage_before = game.stage.clone();
+        actions[1].apply(&mut game, &mut rng)?;
+        println!("apply 选项二后 super_ramen={:?} stage={:?} turn={}", game.ramen.super_ramen, game.stage, game.turn());
+        c.check(game.ramen.super_ramen == Some(1), "apply 写入选项二");
+        c.check(game.stage == stage_before, "apply 不切阶段");
+        c.check(game.turn() == turn_before, "apply 不推进回合");
+
+        let oob = RamenAction::super_ramen_select(99);
+        let oob_err = oob.apply(&mut game, &mut rng);
+        println!("越界 apply: {oob_err:?}");
+        c.check(oob_err.is_err(), "越界下标返回 Err");
+
+        game.stage = RamenStage::Train;
+        let wrong_stage = RamenAction::super_ramen_select(1).apply(&mut game, &mut rng);
+        println!("错误阶段 Train apply: {wrong_stage:?}");
+        c.check(wrong_stage.is_err(), "错误阶段返回 Err，不静默忽略");
+
+        game.stage = RamenStage::Begin;
+        let wrong_begin = RamenAction::super_ramen_select(1).apply(&mut game, &mut rng);
+        println!("错误阶段 Begin apply: {wrong_begin:?}");
+        c.check(wrong_begin.is_err(), "Begin 阶段同样返回 Err");
 
         c.finish()
     }
