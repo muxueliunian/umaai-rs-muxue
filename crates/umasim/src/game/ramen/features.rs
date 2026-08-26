@@ -148,10 +148,10 @@ const TRAIN_TYPE_NUM: usize = 6;
 const CARD_TYPE_NUM: usize = 7;
 /// [`PersonType`] 变体数
 const PERSON_TYPE_NUM: usize = 7;
-/// [`RamenStage`] 变体数 + **2 个预留空槽**。
+/// [`RamenStage`] 变体数 + **1 个预留空槽**（槽 0–9 给既有变体，槽 10 给
+/// [`RamenStage::BeginAfterRegionSelect`]，槽 11 仍空）。
 ///
-/// 预留是为了将来拆分阶段（如把 `Begin` 拆成两个变体以支持第 1 年地区选择进搜索）时
-/// **只填空槽、不改 [`INPUT_DIM`]**，避免已落盘的教师数据作废。
+/// 预留是为了拆分阶段时 **只填空槽、不改 [`INPUT_DIM`]**，避免已落盘的教师数据作废。
 /// 新增变体时只需在 [`stage_index`] 里给它分配一个 ≥ 10 的下标，本常量不动。
 const STAGE_NUM: usize = 12;
 /// 年份分档数（年 1 / 年 2 / 年 3 / URA）
@@ -416,18 +416,30 @@ fn encode_global(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
 /// 且第 3 年 C(10,3)=120 种组合下样本极稀疏；展开成
 /// `xunlian / youqing / pt_bonus / hint_count / at_trains` 后
 /// 可以泛化到没见过的地区组合。
+///
+/// 尚未选出时（live `selected_regions` 仍是默认 `[0,0,0]` 这类非法重复组合）
+/// 效果块填零，避免编成三份「地区 0」。不新增维度。
 fn encode_regions(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
-    let data = global!(RAMENDATA);
-    for &rid in game.ramen.selected_regions.iter().take(REGION_PER_YEAR) {
-        let region = data
-            .ramen_region_effect
-            .get(rid)
-            .ok_or_else(|| anyhow::anyhow!("地区效果缺失: region_id={rid}"))?;
-        w.num(region.xunlian, SCALE_PCT);
-        w.num(region.youqing, SCALE_PCT);
-        w.num(region.pt_bonus, SCALE_PCT);
-        w.num(region.hint_count, SCALE_SMALL);
-        w.multihot(region.at_trains.iter().filter_map(|&t| usize::try_from(t).ok()), TRAIN_NUM);
+    // live 默认 [0,0,0] 不是合法组合。第 1 年 RegionSelect 根上若直接
+    // `get(0)` 会编成三份「地区 0」的效果。当年尚未选出（id 有重复）时填零。
+    let live = game.ramen.selected_regions;
+    let unset = live[0] == live[1] || live[1] == live[2] || live[0] == live[2];
+    if unset {
+        // 每地区：xunlian / youqing / pt_bonus / hint_count + at_trains[TRAIN_NUM]
+        w.zeros(REGION_PER_YEAR * (4 + TRAIN_NUM));
+    } else {
+        let data = global!(RAMENDATA);
+        for &rid in live.iter().take(REGION_PER_YEAR) {
+            let region = data
+                .ramen_region_effect
+                .get(rid)
+                .ok_or_else(|| anyhow::anyhow!("地区效果缺失: region_id={rid}"))?;
+            w.num(region.xunlian, SCALE_PCT);
+            w.num(region.youqing, SCALE_PCT);
+            w.num(region.pt_bonus, SCALE_PCT);
+            w.num(region.hint_count, SCALE_SMALL);
+            w.multihot(region.at_trains.iter().filter_map(|&t| usize::try_from(t).ok()), TRAIN_NUM);
+        }
     }
     // 本回合正在吃 / 已选定要吃的面，指向 selected_regions 的哪一个
     for pick in [game.ramen.current_ramen, game.ramen.pending_ramen] {
@@ -566,7 +578,9 @@ fn stage_index(stage: &RamenStage) -> usize {
         RamenStage::NextTurn => 6,
         RamenStage::RegionSelect => 7,
         RamenStage::SuperRamenSelect => 8,
-        RamenStage::Settlement => 9
+        RamenStage::Settlement => 9,
+        // 预留槽 10；槽 11 仍空。0–9 不得重排。
+        RamenStage::BeginAfterRegionSelect => 10
     }
 }
 
@@ -779,6 +793,8 @@ mod tests {
     }
 
     /// P0.5：`STAGE_NUM` 预留空槽后 `INPUT_DIM == 754`，且大于 `RamenStage` 实际变体数
+    ///
+    /// 槽 10 已分给 `BeginAfterRegionSelect`，还剩 1 个空槽。
     #[test]
     fn test_stage_num_reserve_slots() -> Result<()> {
         let n_stage = enum_iterator::cardinality::<RamenStage>();
@@ -787,17 +803,21 @@ mod tests {
         println!("G_TURN = {G_TURN}");
         println!("GLOBAL_DIM = {GLOBAL_DIM}");
         println!("INPUT_DIM = {INPUT_DIM}");
-        assert_eq!(INPUT_DIM, 754, "预留 2 个阶段空槽后 INPUT_DIM 必须为 754");
-        assert!(
+        let mut c = Checks::new();
+        c.check(INPUT_DIM == 754, "填预留槽后 INPUT_DIM 必须仍为 754");
+        c.check(
             STAGE_NUM > n_stage,
-            "STAGE_NUM={STAGE_NUM} 必须大于 RamenStage 变体数 {n_stage}"
+            &format!("STAGE_NUM={STAGE_NUM} 必须大于 RamenStage 变体数 {n_stage}（还剩 1 个空槽）")
         );
-        assert_eq!(
-            G_TURN,
-            2 + YEAR_NUM + STAGE_NUM,
+        c.check(
+            STAGE_NUM - n_stage == 1,
+            "预留槽用掉一个后应还剩 1 个"
+        );
+        c.check(
+            G_TURN == 2 + YEAR_NUM + STAGE_NUM,
             "G_TURN 必须等于 2 个 num + YEAR_NUM + STAGE_NUM"
         );
-        Ok(())
+        c.finish()
     }
 
     /// 开局局面能编码，长度恒为 INPUT_DIM，且不含 NaN / Inf
@@ -912,6 +932,69 @@ mod tests {
         let diff2 = base.iter().zip(after2.iter()).filter(|(x, y)| x != y).count();
         println!("改动 five_status_limit[3] 后变化位数: {diff2}");
         c.check(diff2 == 1, "属性上限也必须进特征");
+        c.finish()
+    }
+
+    /// 第 1 年 RegionSelect 根：维度不变、未选择时地区效果块为零、
+    /// `BeginAfterRegionSelect` 占用预留槽 10
+    #[test]
+    fn test_year1_region_root_features() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut c = Checks::new();
+        let mut unset = make_game()?;
+        unset.base.turn = 2;
+        unset.stage = RamenStage::RegionSelect;
+        let v_unset = encode(&unset)?;
+        println!(
+            "y1 RegionSelect 未选择: len={} live={:?} yearly={:?}",
+            v_unset.len(),
+            unset.ramen.selected_regions,
+            unset.ramen.yearly_selected_regions
+        );
+        c.check(v_unset.len() == INPUT_DIM, "y1 RegionSelect 根特征长度 == INPUT_DIM(754)");
+        c.check(INPUT_DIM == 754, "INPUT_DIM 仍为 754");
+
+        let mut set = unset.clone();
+        set.ramen.selected_regions = [0, 1, 2];
+        set.ramen.yearly_selected_regions[0] = [0, 1, 2];
+        let v_set = encode(&set)?;
+        let diffs: Vec<(usize, f32, f32)> = v_unset
+            .iter()
+            .zip(v_set.iter())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, (a, b))| (i, *a, *b))
+            .collect();
+        println!("未选择 vs 已选择差异 {} 位，前几个: {:?}", diffs.len(), diffs.iter().take(6).collect::<Vec<_>>());
+        c.check(!diffs.is_empty(), "选择后地区块应与未选择不同");
+        c.check(
+            diffs.iter().all(|(_, a, _)| *a == 0.0),
+            "未选择时地区效果块必须为零（不能编成三份地区 0）"
+        );
+
+        let mut after = unset.clone();
+        after.stage = RamenStage::BeginAfterRegionSelect;
+        let mut begin = unset.clone();
+        begin.stage = RamenStage::Begin;
+        let v_after = encode(&after)?;
+        let v_begin = encode(&begin)?;
+        let stage_diffs: Vec<usize> = v_begin
+            .iter()
+            .zip(v_after.iter())
+            .enumerate()
+            .filter(|(_, (a, b))| a != b)
+            .map(|(i, _)| i)
+            .collect();
+        println!("Begin vs BeginAfterRegionSelect 差异下标: {stage_diffs:?}");
+        c.check(stage_diffs.len() == 2, "阶段 one-hot 应恰好两位变化（槽 0 ↔ 槽 10）");
+        if stage_diffs.len() == 2 {
+            let gap = stage_diffs[1].abs_diff(stage_diffs[0]);
+            println!("槽距 {gap}（期望 10）");
+            c.check(gap == 10, "BeginAfterRegionSelect 使用预留槽 10");
+        }
         c.finish()
     }
 }

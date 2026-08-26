@@ -2,6 +2,16 @@
 
 本文件用于简要记录每次任务的修改内容。
 
+## 2026-08-26
+- **搜索终局多维记录（P2）**：rollout 闭包返回值由单一 `SearchScore` 扩为 `RolloutOutcome<T>`，内核新增 `search_with_terminal` 按候选累加终局观测量，原 `search_with` 退为把结果包成空记录的兼容包装；`SearchOutput` 加第二个默认类型参数与 `terminal_results` 字段，温泉侧裸写法仍解析为原类型、一行未改。观测统计另建无直方图的 `MomentResult`——复用 `ActionResult` 会每维每候选分配十万格直方图，且其加权均值对「距上限」这类量纲无意义。维度经宏从单一字段清单同时生成记录 / 累加器 / 名称绑定，不留平行名表。新增 `CandidateAccum` 收拢两条评分统计与终局统计、失败计数，使三者只在同一成功分支推进；UCB 两阶段失败计数统一到末尾一次告警，不再一半 warn 一半累加。**纯观测出口，温泉与拉面模拟数值均逐位不变**
+- **拉面终局 25 维与诊断出口**：七分量取现成 `score_parts`，另记五维终值 / 距上限 / 逐年剧本 PT / 逐年 RMJ 达成 / 五维评分缺口之和与极差。阈值与极差类维度必须在 rollout 内部先归约再平均——PT 均值越过阈值不等于达成率 100%，逐维矩统计也重建不出「一半速度满、一半智力满」这类失衡。RMJ 直接读规则层 `rmj_results` 而非按阈值重算（真实阈值来自 `ramen_success_pt` 且第 3 年另有大成功分支，重算等于给结算造第二数据源）。诊断出口按维度键配对，打「其余候选 vs 实际选中动作」的均值差，锚点用真正返回的下标而非最优下标（PT 口径下两者可能不同）。「最差维缺口」曾入选后被换掉：取 max 分不开「五维全荒废」与「四维满 + 一维荒废」，而这正是该维度要诊断的事。**维度自此冻结**：合作伙伴用它做手写策略前后对比，增删 / 重命名 / 重排都会让历史读数不可比，故以 `FROZEN_DIM_KEYS` 与守门测试锁死键名与顺序，改动必须先与使用方约定再显式改表
+- **超级拉面纳入搜索**：`run_super_ramen_select` 此前不接 trainer、写死选项二，门控 `super` 是死开关；改走 `list_actions → select_action → apply`，新增 `Operation::SuperRamenSelect(usize)`。手写与 Local 同步补分支——两者默认分支恒选候选 0，缺分支会把选项二静默换成选项一，而它同时是 rollout 基策。**门控默认关闭，手写逐位不变**
+- **第 1 年地区纳入搜索**：原内联在 `run_begin` 中途、`stage` 仍是 `Begin`，在那里开搜会跳过回合开始事件链等后半段；拆出 `BeginAfterRegionSelect`，回合 2 走 `Begin → RegionSelect → BeginAfterRegionSelect → Distribute`，其余回合前后半连续执行。新阶段用 features 早先预留的空槽 10，`INPUT_DIM` 不动；顺带修 `encode_regions` 未选出时被编成三份「地区 0」。**门控默认关闭，手写逐位不变；`all()` 语义变真，历史 `all` 基线作废**
+- **超级拉面搜索平局回退**：`deck_can_split == false` 时三个选项对结局等价、CRN 下逐位同分，`max_by` 取候选 0 会把选项二静默换掉（分数不变，状态与日志变）；改为仅在确实平局时回退，判定口径跟随 `selection`
+- **地区候选生成抽为纯函数**：`init_global_with_config` 幂等，测试并行下非默认配置根本设不进去且不报错，`test_year1_2_always_all_regardless_of_strategy` 因此长期空转仍绿；策略分支改为显式传参的 `region_select_combos`，守门测试直接调它，`run_region_select` 的 Fixed 短路同步复用
+- **补回 `test_combined_gate_off_full_game` 的 `#[test]`**：上次提交插入观察壳时占用了它的属性行，该测试自此静默不运行；加静态扫描核对全仓无第二处
+- **拉面 MCTS 诊断出口接线**：`log_terminal_breakdown` 此前只受 `verbose` 开关控制，而两个生产入口都没设它，等于仪器造好却够不着；主二进制单局运行改为开启 verbose，另补 `#[ignore]` 的整局观察壳（`test_terminal_breakdown_demo`）供人工看输出形态。观察壳须自行把日志级别设为 info——全局 logger 只初始化一次，测试 setup 设的 error 级会把诊断的 info! 整个吞掉
+
 ## 2026-08-25
 - **拉面动作空间不变量 + 终局分分解（MCTS 完成计划 P0 安全网）**：钉死 `special_targets` 之和 ≤ 2 与合并候选峰值上限、新增 `Uma::score_parts()` 使 `calc_score` 对其求和、补温泉 CRN 阶段重播种的双向契约测试；顺带删 `MctsTrainer` 死字段 `last_game`、`rollout_batch_size` 标注为未接线空转、阶段 one-hot 预留两个空槽以免将来加阶段改掉输入维度。**输入维度变化（教师数据需重生成），模拟数值逐位不变**
 - **搜索层接受拉面合并动作（P1.1）**：`apply_root_action` 新增合并分支转交 `apply_combined_ramen_decision`，此前合并动作会被通用 `apply_action` 静默清零隐藏风味、连非法组合都照常返回成功；判别式为「`RamenSelect` + `StageOnly` + 携带 targets」，补整局冒烟（该落地入口此前从未在完整育成中跑过）。**三阶段动作逐位不变**

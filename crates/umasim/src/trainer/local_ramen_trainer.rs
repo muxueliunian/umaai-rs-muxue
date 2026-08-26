@@ -194,6 +194,8 @@ impl Trainer<RamenGame> for LocalRamenTrainer {
                 let year = match game.turn() { 2 => 0, 23 => 1, 47 => 2, _ => 0 };
                 self.policy.decide_region(game, year, actions)?
             }
+            // 缺此分支会落到 `_ => (0, vec![])`，选项二静默变成选项一
+            RamenStage::SuperRamenSelect => self.policy.decide_super_ramen(game, actions)?,
             _ => (0, Vec::new())
         };
         self.stash(&outputs);

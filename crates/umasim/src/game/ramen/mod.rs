@@ -27,7 +27,12 @@ pub use state::*;
 /// 拉面杯回合阶段
 ///
 /// 拉面杯在普通回合的基础上增加了地区选择和超级拉面选择阶段。
-/// 超级拉面选择初期固定为选项二，不做独立决策。
+/// 超级拉面是正规决策点（3 个候选），默认手写策略仍固定选项二；
+/// 是否走搜索由 [`crate::trainer::RamenSearchStages::super_ramen_select`] 门控。
+///
+/// 第 1 年地区选择也是阶段边界上的正规决策点：turn 2 为
+/// `Begin`（前半）→ `RegionSelect` → `BeginAfterRegionSelect`（后半）。
+/// 搜索根必须落在阶段入口，不能在 `Begin` 中途内联选地区。
 ///
 /// 可操作部分（Train）拆为三阶段状态机：
 /// - `RamenSelect`：选择吃哪碗面（含不吃）→ 写入 `pending_ramen`
@@ -54,19 +59,32 @@ pub enum RamenStage {
     // --- 特殊阶段
     /// 推进到下一回合（处理回合边界逻辑）
     NextTurn,
-    /// 年度地区选择（回合 23/47/71 结束后，RMJ 结算后）
+    /// 年度地区选择
+    ///
+    /// - turn 2：第 1 年（`Begin` 前半段之后、后半段之前）
+    /// - turn 23/47：第 2/3 年（当年 RMJ 结算后、推进回合前）
     RegionSelect,
     /// 超级拉面选择（第 71 回合结束后）
     SuperRamenSelect,
     /// 剧本结算（回合 23/47/71 结束时）
-    Settlement
+    Settlement,
+    /// 第 1 年地区选择之后的 Begin 后半段（仅 turn 2）
+    ///
+    /// turn 2 的执行顺序是 `Begin` 前半 → `RegionSelect` → 本阶段 → `Distribute`。
+    /// 本阶段只跑隐藏风味、回合开始事件链和超级拉面自动效果，
+    /// **不得**再次重置随机流、加人头或初始化诀窍。
+    ///
+    /// 追加在枚举末尾，避免改动已有变体的 bincode 判别值。
+    BeginAfterRegionSelect
 }
 
 impl RamenStage {
     /// 获取回合内的下一个阶段，如果已到回合末尾则返回 None
     pub fn next(&self) -> Option<Self> {
         match self {
+            // turn 2 由 `Game::next` 拦截为 RegionSelect，其它回合走 Distribute
             Self::Begin => Some(Self::Distribute),
+            Self::BeginAfterRegionSelect => Some(Self::Distribute),
             Self::Distribute => Some(Self::RamenSelect),
             Self::RamenSelect => Some(Self::SpecialSelect),
             Self::SpecialSelect => Some(Self::Train),
@@ -74,7 +92,8 @@ impl RamenStage {
             Self::AfterTrain => Some(Self::NextTurn),
             // NextTurn 在 run_stage 中推进回合，回到 Begin 或特殊阶段
             Self::NextTurn => None,
-            // 特殊阶段处理后回到 Begin
+            // 特殊阶段：turn 2 的 RegionSelect 由 Game::next 接到 BeginAfterRegionSelect；
+            // turn 23/47 的 RegionSelect 以及 SuperRamenSelect / Settlement 推进回合
             Self::RegionSelect | Self::SuperRamenSelect | Self::Settlement => None
         }
     }
@@ -134,5 +153,11 @@ pub enum Operation {
     /// 用于 `RamenSelect`/`SpecialSelect` 阶段的 `RamenAction`，这些阶段的决策
     /// 仅体现在 `ramen` 或 `special_targets` 字段上，不需要真正的基础操作。
     /// `apply` 看到此变体时直接切阶段、不执行任何操作。
-    StageOnly
+    StageOnly,
+    /// 超级拉面选择（`training_limit_options` 的位置下标）
+    ///
+    /// 数据源是纯位置下标，没有 option ID 概念。不要复用 [`RamenAction::ramen`]
+    /// 承载本字段：那个字段的语义是地区拉面 ID，复用会让 Display、合并动作判别、
+    /// RandomTrainer 启发式全部看错。
+    SuperRamenSelect(usize)
 }

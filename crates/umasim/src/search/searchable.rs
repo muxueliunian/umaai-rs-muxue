@@ -134,6 +134,8 @@ impl FlatSearchGame for RamenGame {
     }
 
     /// 拉面 stage key（保留实现仅为满足 trait；规则层接管后不再被调用）
+    ///
+    /// 0–9 与既有变体一一对应，不得重排。[`RamenStage::BeginAfterRegionSelect`] 用新键 10。
     fn crn_stage_key(&self) -> u64 {
         match self.stage {
             RamenStage::Begin => 0,
@@ -145,7 +147,8 @@ impl FlatSearchGame for RamenGame {
             RamenStage::NextTurn => 6,
             RamenStage::RegionSelect => 7,
             RamenStage::SuperRamenSelect => 8,
-            RamenStage::Settlement => 9
+            RamenStage::Settlement => 9,
+            RamenStage::BeginAfterRegionSelect => 10
         }
     }
 

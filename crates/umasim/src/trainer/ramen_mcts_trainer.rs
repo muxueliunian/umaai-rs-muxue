@@ -12,8 +12,8 @@
 //!
 //! # 阶段门控
 //!
-//! 一局约 170 个决策点（实测单局：Train 69 / RamenSelect 61 / SpecialSelect 25 /
-//! Event 15 / RegionSelect 3），全搜代价高。[`RamenSearchStages`] 允许只搜指定阶段，
+//! 一局约 171 个决策点（实测单局：Train 69 / RamenSelect 61 / SpecialSelect 25 /
+//! Event 15 / RegionSelect 3 / SuperRamenSelect 1），全搜代价高。[`RamenSearchStages`] 允许只搜指定阶段，
 //! 未选中的阶段直接转发给手写策略。这样既能压预算，也能单独测量
 //! 「只搜 Train」/「只搜 RamenSelect」各自的边际收益。
 //!
@@ -33,9 +33,12 @@
 //! 合并路径只在 RamenSelect 搜一次（1 次）。随机序列整体位移，拉面基线作废。
 //! 这是预期行为，不是 bug。关闭本开关即退回改动前的三阶段分别搜。
 
-use std::sync::{
-    Mutex,
-    atomic::{AtomicUsize, Ordering}
+use std::{
+    collections::HashMap,
+    sync::{
+        Mutex,
+        atomic::{AtomicUsize, Ordering}
+    }
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -46,17 +49,17 @@ use super::RamenHandwrittenTrainer;
 use crate::{
     game::{
         Game, Trainer,
-        ramen::{RamenAction, RamenGame, RamenStage}
+        ramen::{Operation, RamenGame, RamenStage, policy::FIXED_SUPER_RAMEN_INDEX}
     },
     gamedata::{EventChoice, EventData},
-    search::{FlatSearch, SearchConfig, SearchOutput}
+    search::{ActionResult, FlatSearch, RamenSearchOutput, SearchConfig, TerminalStats}
 };
 
 /// 搜索哪些阶段的门控开关
 ///
 /// 字段对应 [`RamenStage`] 中会产生多候选的阶段。未列出的阶段
-/// （`Begin` / `Distribute` / `AfterTrain` / `NextTurn` / `Settlement`）
-/// 不产生真正的选择空间，无需门控。
+/// （`Begin` / `BeginAfterRegionSelect` / `Distribute` / `AfterTrain` /
+/// `NextTurn` / `Settlement`）不产生真正的选择空间，无需门控。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RamenSearchStages {
     /// 训练/比赛选择（决策点最多，约占一局的 45%）
@@ -65,22 +68,21 @@ pub struct RamenSearchStages {
     pub ramen_select: bool,
     /// 隐藏风味用法
     pub special_select: bool,
-    /// 年度地区选择
-    ///
-    /// **只覆盖第 2/3 年，且这是有意的**：第 1 年在 `run_begin` 的 turn 2 中途内联
-    /// 调用，`game.stage` 仍是 `Begin`，不在阶段入口上；从那里开搜会让 rollout 的
-    /// `apply → next()` 跳过 `run_begin` 后半段。第 1 年一律转发手写策略打分
-    /// （手写侧已由 `ramen_effective_stage` 修好，不再恒选候选 0）。
+    /// 年度地区选择（turn 2 / 23 / 47 的 `RegionSelect` 阶段，含第 1 年）
     pub region_select: bool,
-    /// 超级拉面选择
+    /// 超级拉面选择（回合 71 后、一局一次，3 个候选）
     ///
-    /// **当前恒为死开关**：`run_super_ramen_select` 不接 trainer，固定选项二
-    /// （`ramen/game.rs`）。保留字段是为了上游哪天把它交回 trainer 时不用改签名。
+    /// 默认配置 `ramen_search_stages = "train,ramen"` 不打开本开关。
+    /// [`Self::all`] 现在会真正搜这一步；历史 `all` 基线因此作废。
     pub super_ramen_select: bool
 }
 
 impl RamenSearchStages {
     /// 全部阶段都搜
+    ///
+    /// **历史 `all` 基线已作废**：超级拉面接入 trainer 后 `all` 会真的搜
+    /// `SuperRamenSelect`；第 1 年地区抬到 `RegionSelect` 阶段边界后，`all`
+    /// 也会真的搜 turn 2 的地区选择（以前卡在 `Begin` 内部搜不到）。
     pub fn all() -> Self {
         Self {
             train: true,
@@ -294,7 +296,7 @@ impl RamenMctsTrainer {
     }
 
     /// 缓存本次搜索的候选统计（次数 / 均分 / 标准差 / PT 均分）
-    fn stash_search_breakdown(&self, output: &SearchOutput<RamenAction>) {
+    fn stash_search_breakdown(&self, output: &RamenSearchOutput) {
         let text = output
             .actions
             .iter()
@@ -316,11 +318,113 @@ impl RamenMctsTrainer {
         }
     }
 
+    /// 输出终局多维记录：其余候选相对**实际选中动作**的差值
+    ///
+    /// 只打差值而非绝对值：各候选的绝对面板高度相似，人眼分辨不出；
+    /// 「选这个动作，最终智力会多 300」才是可读的因果陈述。
+    ///
+    /// 锚点取 `chosen`（即 `select_action` 真正返回的下标）而非
+    /// `best_action_idx`：`RamenSelection::Pt` 下两者可能不同，拿后者当锚点会
+    /// 对着一个没被选中的动作报差值。
+    ///
+    /// 差值只在**均值**层面成立。阈值类维度（`rmj_ok_*`）本身已是每次 rollout
+    /// 内部归约出的 0/1，其均值是达成率，差值即达成率之差——不要再拿它与 PT
+    /// 均值互推，那正是这套观测要避免的错误。
+    fn log_terminal_breakdown(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
+        if !self.verbose || output.terminal_results.len() != output.actions.len() {
+            return;
+        }
+        let Some(base) = output.terminal_results.get(chosen) else {
+            return;
+        };
+
+        // 基准按 key 建表：两次 visit 靠键名配对，而不是靠下标。
+        // 宏保证同类型的遍历顺序一致，但下标对齐正是 `NamedMetricRef` 要消灭的
+        // 那种耦合——增删维度时不该出现静默错位。
+        let mut base_dims: HashMap<&'static str, f64> = HashMap::new();
+        base.visit(&mut |m| {
+            base_dims.insert(m.key, m.result.mean());
+        });
+
+        for (i, action) in output.actions.iter().enumerate() {
+            if i == chosen {
+                continue;
+            }
+            let Some(stats) = output.terminal_results.get(i) else {
+                continue;
+            };
+            let mut parts: Vec<String> = Vec::new();
+            stats.visit(&mut |m| {
+                let Some(base_mean) = base_dims.get(m.key) else {
+                    return;
+                };
+                let delta = m.result.mean() - base_mean;
+                // 只报可见差异，否则每行都被 20 余维刷屏
+                match m.unit {
+                    "flag" if delta.abs() >= 0.02 => {
+                        parts.push(format!("{}{:+.0}%", m.key, delta * 100.0));
+                    }
+                    "flag" => {}
+                    _ if delta.abs() >= 1.0 => parts.push(format!("{}{delta:+.0}", m.key)),
+                    _ => {}
+                }
+            });
+            if !parts.is_empty() {
+                info!("[回合 {}][终局差异] {action} vs 选中: {}", turn + 1, parts.join(" "));
+            }
+        }
+    }
+
     /// 清空本次缓存（转发给手写策略时用，避免读到上一条搜索的陈旧文本）
     fn clear_breakdown(&self) {
         if let Ok(mut slot) = self.last_breakdown.lock() {
             *slot = None;
         }
+    }
+
+    /// 超级拉面平局回退：分数与选项二完全相同时改选选项二
+    ///
+    /// `deck_can_split == false`（卡组训练类型数 < 5）时
+    /// [`RamenAction::distribute_super_ramen_clones`](crate::game::ramen::RamenAction)
+    /// 直接早返回，三个选项对结局**完全等价**：CRN 下各候选逐位同分，
+    /// `best_action_idx` 的 `max_by` 取到的是候选 0，于是打开 `super` 门控会把
+    /// 手写一直固定的选项二静默换成选项一。**分数不变，变的是状态与日志**——
+    /// 属于最难排查的一类差异。
+    ///
+    /// 因此只在**确实平局**时向手写回退对齐；一旦搜索真的分出高下，
+    /// 就完全按搜索结果走，不干预。
+    ///
+    /// 非 `SuperRamenSelect` 阶段原样返回。
+    ///
+    /// 平局判定**必须与 `selection` 用同一口径**：`Score` 比 `.0.mean()`，
+    /// `Pt` 比 `.1.weighted_mean(radical_factor)`。两边错位会把「Pt 口径下并非
+    /// 平局」误判成平局，反而覆盖掉正确选择。
+    fn break_super_ramen_tie(
+        game: &RamenGame, actions: &[<RamenGame as Game>::Action], output: &RamenSearchOutput,
+        selection: RamenSelection, idx: usize
+    ) -> usize {
+        if game.stage != RamenStage::SuperRamenSelect {
+            return idx;
+        }
+        let Some(fallback_idx) = actions.iter().position(|a| {
+            matches!(a.operation, Operation::SuperRamenSelect(i) if i == FIXED_SUPER_RAMEN_INDEX)
+        }) else {
+            return idx;
+        };
+        if fallback_idx == idx {
+            return idx;
+        }
+        // 取不到统计就不干预
+        let (Some(chosen), Some(fallback)) =
+            (output.action_results.get(idx), output.action_results.get(fallback_idx))
+        else {
+            return idx;
+        };
+        let metric = |r: &(ActionResult, ActionResult)| match selection {
+            RamenSelection::Score => r.0.mean(),
+            RamenSelection::Pt => r.1.weighted_mean(output.radical_factor)
+        };
+        if metric(chosen) == metric(fallback) { fallback_idx } else { idx }
     }
 
     /// 取出并清空合并搜索缓存的 targets
@@ -382,14 +486,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
         }
 
         // 单候选无选择空间，跑搜索纯属浪费预算
-        // 门控**必须**用未经纠正的 `game.stage`
-        //
-        // 第 1 年地区选择由 `run_begin` 在 turn 2 中途内联调用，此时 `game.stage`
-        // 仍是 `Begin`。若按 `ramen_effective_stage` 把它纠正成 `RegionSelect` 去开搜索，
-        // `simulate_common` 的 `apply → while next()` 会从 Begin 直接跳到 Distribute，
-        // **跳过 `run_begin` 后半段**（隐藏风味分配、refresh_mind、回合开始事件链），
-        // rollout 评的是一个不存在的局面。`sampler.rs` 对根局面的约束同理。
-        // 纠正只用于把决策转发给手写策略打分（`fallback` 内部会做）。
+        // 门控**必须**用未经纠正的 `game.stage`（第 1 年地区已是正规 `RegionSelect`）
         if actions.len() <= 1 || !self.stages.contains(&game.stage) {
             self.clear_breakdown();
             return self.fallback.select_action(game, actions, rng);
@@ -416,6 +513,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
                     self.store_pending_combined_targets(best.special_targets);
                 }
                 self.stash_search_breakdown(&output);
+                self.log_terminal_breakdown(game.turn() as i32, idx, &output);
                 if self.verbose {
                     let (res, _) = &output.action_results[idx];
                     info!(
@@ -452,7 +550,9 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
             RamenSelection::Score => output.best_action_idx,
             RamenSelection::Pt => output.best_action_pt_idx()
         };
+        let idx = Self::break_super_ramen_tie(game, actions, &output, self.selection, idx);
         self.stash_search_breakdown(&output);
+        self.log_terminal_breakdown(game.turn() as i32, idx, &output);
         if self.verbose {
             let (res, _) = &output.action_results[idx];
             info!(
@@ -472,6 +572,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
         self.clear_breakdown();
         self.fallback.select_choice(game, choices, rng)
     }
+
 
     fn select_event_choice(
         &self, game: &RamenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
@@ -530,6 +631,10 @@ mod tests {
         c.check(s.contains(&RamenStage::Train), "Train 命中");
         c.check(!s.contains(&RamenStage::SpecialSelect), "SpecialSelect 不命中");
         c.check(!RamenSearchStages::all().contains(&RamenStage::Begin), "Begin 永不命中");
+        c.check(
+            !RamenSearchStages::all().contains(&RamenStage::BeginAfterRegionSelect),
+            "BeginAfterRegionSelect 永不命中"
+        );
 
         // 四类必须报错的输入：静默接受会让实验对照组悄悄退化成纯手写策略
         c.check(RamenSearchStages::parse("train,bogus").is_err(), "未知阶段名报错");
@@ -542,42 +647,59 @@ mod tests {
         c.finish()
     }
 
-    /// 第 1 年地区选择：手写策略必须打分，MCTS 门控必须**不**搜
-    ///
-    /// 两个方向都要钉住：
-    /// - `ramen_effective_stage` 把 `Begin` + RegionSelect 动作纠正为 `RegionSelect`，
-    ///   否则手写策略落到默认分支恒选候选 0（第 1 年从未经过打分）；
-    /// - MCTS 门控**不得**用纠正后的阶段，否则会在 `run_begin` 中途开搜，
-    ///   rollout 的 `apply -> next()` 会跳过 `run_begin` 后半段。
+    /// 第 1 年地区选择已是阶段边界上的正规决策点，门控 `region` 必须进搜索
     #[test]
-    fn test_year1_region_scored_but_not_searched() -> Result<()> {
+    fn test_year1_region_is_searched() -> Result<()> {
         use crate::{
-            game::ramen::{Operation, rules::get_region_combinations},
+            game::ramen::Operation,
             trainer::ramen_handwritten_trainer::ramen_effective_stage
         };
 
         let mut c = Checks::new();
-        let (game, _rng) = setup(42)?;
-        // 第 1 年地区选择在 run_begin 内部触发、外部观察不到，
-        // 故直接构造该决策点的候选集来验证两个判定
-        let combos = get_region_combinations(0)?;
-        let actions: Vec<RamenAction> = combos
-            .iter()
-            .map(|&combo| RamenAction::no_ramen(Operation::RegionSelect(combo)))
-            .collect();
-        println!("game.stage={:?} 第 1 年地区候选={}", game.stage, actions.len());
+        let (mut game, mut rng) = setup(42)?;
+        let hw = RamenHandwrittenTrainer::new();
+        game.run_stage(&hw, &mut rng)?;
+        let mut reached = false;
+        while game.next() {
+            if game.stage == RamenStage::RegionSelect && game.turn() == 2 {
+                reached = true;
+                break;
+            }
+            game.run_stage(&hw, &mut rng)?;
+        }
+        c.check(reached, "真实推进到 turn 2 RegionSelect");
+        c.check(game.turn() == 2, "回合仍为 2");
+
+        let actions = game.list_actions()?;
+        println!(
+            "根: turn={} stage={:?} 候选={}",
+            game.turn(),
+            game.stage,
+            actions.len()
+        );
+        c.check(actions.len() > 1, "第 1 年有多个地区候选");
+        c.check(
+            actions
+                .iter()
+                .all(|a| matches!(a.operation, Operation::RegionSelect(_))),
+            "候选全是 RegionSelect（不是训练+吃面回退）"
+        );
 
         let eff = ramen_effective_stage(&game, &actions);
-        println!("ramen_effective_stage = {eff:?}");
-        c.check(eff == RamenStage::RegionSelect, "有效阶段纠正为 RegionSelect（手写据此打分）");
-        c.check(game.stage == RamenStage::Begin, "raw game.stage 仍是 Begin");
+        println!("ramen_effective_stage = {eff:?} raw = {:?}", game.stage);
+        c.check(eff == RamenStage::RegionSelect, "有效阶段是 RegionSelect");
+        c.check(game.stage == RamenStage::RegionSelect, "raw game.stage 已是 RegionSelect");
 
-        let gate = RamenSearchStages::all();
-        c.check(
-            !gate.contains(&game.stage),
-            "MCTS 门控用 raw stage，第 1 年不进搜索（否则 rollout 跳过 run_begin 后半）"
-        );
-        c.check(gate.contains(&eff), "纠正后的阶段本身被门控覆盖（说明上一条不是巧合）");
+        let gate = RamenSearchStages {
+            region_select: true,
+            ..RamenSearchStages::none()
+        };
+        c.check(gate.contains(&game.stage), "门控 region 命中第 1 年");
+
+        let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(2).with_ucb(false))
+            .with_stages(gate);
+        let _idx = trainer.select_action(&game, &actions, &mut rng)?;
+        c.check(trainer.searched_count() == 1, "第 1 年 RegionSelect 走过搜索");
         c.finish()
     }
 
@@ -601,11 +723,21 @@ mod tests {
 
         let mut c = Checks::new();
         println!("手写={score_hw} / MCTS(stages=none)={score_mcts}");
+        println!(
+            "  五维 {:?} vs {:?}  PT {} vs {}  super_ramen {:?} vs {:?}",
+            game_hw.uma.five_status,
+            game_mcts.uma.five_status,
+            game_hw.ramen.scenario_pt,
+            game_mcts.ramen.scenario_pt,
+            game_hw.ramen.super_ramen,
+            game_mcts.ramen.super_ramen
+        );
         c.check(score_hw == score_mcts, "门控全关 == 纯手写策略");
-        println!("  五维 {:?} vs {:?}", game_hw.uma.five_status, game_mcts.uma.five_status);
         c.check(game_hw.uma.five_status == game_mcts.uma.five_status, "五维一致");
         c.check(game_hw.uma.skill_pt == game_mcts.uma.skill_pt, "技能点一致");
         c.check(game_hw.ramen.scenario_pt == game_mcts.ramen.scenario_pt, "剧本 PT 一致");
+        c.check(game_hw.ramen.super_ramen == game_mcts.ramen.super_ramen, "super_ramen 一致");
+        c.check(game_hw.ramen.super_ramen == Some(1), "门控关时仍是选项二");
         c.check(trainer.searched_count() == 0, "门控全关时一次搜索都没发生");
         c.finish()
     }
@@ -720,6 +852,37 @@ mod tests {
             special_select: true,
             ..RamenSearchStages::none()
         }
+    }
+
+    /// 按需运行：整局输出终局多维诊断，人工看可读性
+    ///
+    /// 不是断言测试，是**给合作伙伴看仪表长什么样**的观察壳，故 `#[ignore]`。
+    /// 手动跑：
+    /// `cargo test -p umasim --lib -- test_terminal_breakdown_demo --ignored --nocapture`
+    #[test]
+    #[ignore = "整局诊断输出演示，按需手动运行"]
+    fn test_terminal_breakdown_demo() -> Result<()> {
+        // 必须早于 setup：全局 logger 只初始化一次，setup 里设的是 error 级，
+        // 会把诊断用的 info! 整个吞掉
+        let _ = init_test_logger("info");
+        let seed = 42;
+        let (mut game, mut rng) = setup(seed)?;
+        // search_n 取小值：本壳看的是输出形态，不是分数
+        let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(16).with_ucb(false))
+            .with_stages(ramen_and_special_stages())
+            .verbose(true);
+        game.run_full_game(&trainer, &mut rng)?;
+
+        println!(
+            "整局结束: 评分={} 五维={:?} 上限={:?} skill_pt={} 逐年PT={:?} RMJ={:?}",
+            game.uma.calc_score(),
+            game.uma.five_status,
+            game.uma.five_status_limit,
+            game.uma.skill_pt,
+            game.ramen.yearly_scenario_pt,
+            game.ramen.rmj_results
+        );
+        Ok(())
     }
 
     /// 硬性验收 1 的对照尺子：`use_combined_ramen_select = false` 必须与改动前逐位相同
@@ -919,6 +1082,216 @@ mod tests {
         c.check(game.turn() == 77, "跑满 77 回合");
         c.check(trainer.searched_count() > 0, "RamenSelect 走过合并搜索");
         c.check(hits > 0, "SpecialSelect 必须命中合并缓存（门控关也要用）");
+        c.finish()
+    }
+
+    /// 门控 `super`：整局恰好搜索一次；门控关时为 0
+    #[test]
+    fn test_super_ramen_gate_searches_once() -> Result<()> {
+        let seed = 42;
+
+        let (mut game_on, mut rng_on) = setup(seed)?;
+        let stages_on = RamenSearchStages {
+            super_ramen_select: true,
+            ..RamenSearchStages::none()
+        };
+        let trainer_on = RamenMctsTrainer::new(SearchConfig::default().with_search_n(4).with_ucb(false))
+            .with_stages(stages_on);
+        game_on.run_full_game(&trainer_on, &mut rng_on)?;
+        let searched_on = trainer_on.searched_count();
+        println!(
+            "gate=super: 回合={} 评分={} searched={} super_ramen={:?}",
+            game_on.turn(),
+            game_on.uma.calc_score(),
+            searched_on,
+            game_on.ramen.super_ramen
+        );
+
+        let (mut game_off, mut rng_off) = setup(seed)?;
+        let trainer_off = RamenMctsTrainer::new(SearchConfig::default().with_search_n(4).with_ucb(false))
+            .with_stages(RamenSearchStages::none());
+        game_off.run_full_game(&trainer_off, &mut rng_off)?;
+        let searched_off = trainer_off.searched_count();
+        println!(
+            "gate=none: 回合={} searched={} super_ramen={:?}",
+            game_off.turn(),
+            searched_off,
+            game_off.ramen.super_ramen
+        );
+
+        let mut c = Checks::new();
+        c.check(game_on.turn() == 77, "门控开跑满 77 回合");
+        c.check(searched_on == 1, "门控 super 整局恰好搜索一次");
+        c.check(searched_off == 0, "门控关时一次搜索都没有");
+        c.check(game_off.ramen.super_ramen == Some(1), "门控关仍选选项二");
+        c.finish()
+    }
+
+    /// 根节点冒烟：真实推进到 SuperRamenSelect，小 search_n 跑通 3 候选，
+    /// apply_root_action 后下一阶段是 turn 72 的 Begin
+    #[test]
+    fn test_super_ramen_search_root_smoke() -> Result<()> {
+        use crate::search::{FlatSearch, FlatSearchGame};
+
+        let (mut game, mut rng) = setup(42)?;
+        let hw = RamenHandwrittenTrainer::new();
+        game.run_stage(&hw, &mut rng)?;
+        let mut reached = false;
+        while game.next() {
+            if game.stage == RamenStage::SuperRamenSelect {
+                reached = true;
+                break;
+            }
+            game.run_stage(&hw, &mut rng)?;
+        }
+        let mut c = Checks::new();
+        c.check(reached, "真实推进到 SuperRamenSelect");
+        c.check(game.turn() == 71, "超级拉面选择发生在回合 71");
+
+        let actions = game.list_actions()?;
+        println!(
+            "根: turn={} stage={:?} 候选={} {:?}",
+            game.turn(),
+            game.stage,
+            actions.len(),
+            actions.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+        );
+        c.check(actions.len() == 3, "根上恰好 3 个候选");
+
+        let search = FlatSearch::<RamenGame>::new(SearchConfig::default().with_search_n(4).with_ucb(false));
+        let output = search.search(&game, &actions, &mut rng)?;
+        println!(
+            "search 最优 #{} {} 各候选 n={:?}",
+            output.best_action_idx,
+            actions[output.best_action_idx],
+            output.action_results.iter().map(|(r, _)| r.count()).collect::<Vec<_>>()
+        );
+        c.check(output.action_results.len() == 3, "搜索覆盖 3 个候选");
+        c.check(
+            output.action_results.iter().all(|(r, _)| r.count() > 0),
+            "每个候选都有样本"
+        );
+
+        let best = &actions[output.best_action_idx];
+        game.apply_root_action(best, &mut rng)?;
+        c.check(game.stage == RamenStage::SuperRamenSelect, "apply_root_action 不切阶段");
+        c.check(game.turn() == 71, "apply_root_action 不推进回合");
+        c.check(game.ramen.super_ramen.is_some(), "根动作已写入 super_ramen");
+
+        let advanced = game.next();
+        println!("next()={} turn={} stage={:?}", advanced, game.turn(), game.stage);
+        c.check(advanced, "next() 能推进");
+        c.check(game.turn() == 72, "下一回合是 72");
+        c.check(game.stage == RamenStage::Begin, "下一阶段是 Begin");
+        c.finish()
+    }
+
+    /// 门控 `region`：三年 RegionSelect 都是多候选且门控命中（测试 init 为 All）
+    ///
+    /// 第 3 年 `ramen_region_strategy=fixed` 时 `list_actions` 只有 1 个候选，
+    /// 不会进搜索（少一次）。本测试不跑搜索，只数会触发搜索的决策点。
+    #[test]
+    fn test_region_gate_three_years() -> Result<()> {
+        let (mut game, mut rng) = setup(42)?;
+        let hw = RamenHandwrittenTrainer::new();
+        let gate = RamenSearchStages {
+            region_select: true,
+            ..RamenSearchStages::none()
+        };
+        let mut visits = 0usize;
+        let mut searchable = 0usize;
+        game.run_stage(&hw, &mut rng)?;
+        while game.next() {
+            if game.stage == RamenStage::RegionSelect {
+                visits += 1;
+                let actions = game.list_actions()?;
+                let would = actions.len() > 1 && gate.contains(&game.stage);
+                println!(
+                    "RegionSelect turn={} 候选={} would_search={would}",
+                    game.turn(),
+                    actions.len()
+                );
+                if would {
+                    searchable += 1;
+                }
+            }
+            game.run_stage(&hw, &mut rng)?;
+        }
+        let mut c = Checks::new();
+        c.check(game.turn() == 77, "跑满 77 回合");
+        c.check(visits == 3, "三年各到一次 RegionSelect");
+        c.check(searchable == 3, "All 策略下三年都是多候选，门控各搜一次");
+        c.finish()
+    }
+
+    /// 第 1 年根交给 FlatSearch：每个候选都能跑到终局且有样本；同根同种子两次逐位一致
+    #[test]
+    fn test_year1_region_search_root_smoke() -> Result<()> {
+        use crate::search::{FlatSearch, FlatSearchGame};
+
+        let (mut game, mut rng) = setup(42)?;
+        let hw = RamenHandwrittenTrainer::new();
+        game.run_stage(&hw, &mut rng)?;
+        let mut reached = false;
+        while game.next() {
+            if game.stage == RamenStage::RegionSelect && game.turn() == 2 {
+                reached = true;
+                break;
+            }
+            game.run_stage(&hw, &mut rng)?;
+        }
+        let mut c = Checks::new();
+        c.check(reached, "真实推进到 turn 2 RegionSelect");
+        let actions = game.list_actions()?;
+        println!(
+            "根: turn={} stage={:?} 候选={}",
+            game.turn(),
+            game.stage,
+            actions.len()
+        );
+        c.check(actions.len() > 1, "第 1 年多个地区候选");
+
+        let search = FlatSearch::<RamenGame>::new(SearchConfig::default().with_search_n(2).with_ucb(false));
+        let output = search.search(&game, &actions, &mut rng)?;
+        println!(
+            "search 最优 #{} 各候选 n={:?}",
+            output.best_action_idx,
+            output.action_results.iter().map(|(r, _)| r.count()).collect::<Vec<_>>()
+        );
+        c.check(output.action_results.len() == actions.len(), "搜索覆盖全部候选");
+        c.check(
+            output.action_results.iter().all(|(r, _)| r.count() > 0),
+            "每个候选都有样本"
+        );
+
+        use rand::SeedableRng;
+        let search2 = FlatSearch::<RamenGame>::new(SearchConfig::default().with_search_n(2).with_ucb(false));
+        let mut rng_a = StdRng::seed_from_u64(99);
+        let mut rng_b = StdRng::seed_from_u64(99);
+        let a = search.search(&game, &actions, &mut rng_a)?;
+        let b = search2.search(&game, &actions, &mut rng_b)?;
+        let same = a.action_results.iter().zip(b.action_results.iter()).all(|((ra, _), (rb, _))| {
+            ra.count() == rb.count() && (ra.mean() - rb.mean()).abs() < f64::EPSILON
+        });
+        println!(
+            "同根同种子两次: best {} vs {} same={same}",
+            a.best_action_idx, b.best_action_idx
+        );
+        c.check(same, "同根同种子两次逐位一致");
+        c.check(a.best_action_idx == b.best_action_idx, "最优下标一致");
+
+        let best = &actions[output.best_action_idx];
+        game.apply_root_action(best, &mut rng)?;
+        c.check(game.stage == RamenStage::RegionSelect, "apply_root_action 不切阶段");
+        c.check(game.turn() == 2, "apply_root_action 不推进回合");
+        let advanced = game.next();
+        println!("next()={} turn={} stage={:?}", advanced, game.turn(), game.stage);
+        c.check(advanced, "next() 能推进");
+        c.check(game.turn() == 2, "地区选择后回合仍为 2");
+        c.check(
+            game.stage == RamenStage::BeginAfterRegionSelect,
+            "turn 2 RegionSelect 下一阶段是 BeginAfterRegionSelect"
+        );
         c.finish()
     }
 }

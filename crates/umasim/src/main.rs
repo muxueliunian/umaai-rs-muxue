@@ -418,8 +418,10 @@ async fn main() -> Result<()> {
                                 game_config.mcts.ramen_search_stages,
                                 game_config.mcts.radical_factor_max
                             );
-                            let ramen_trainer =
-                                RamenMctsTrainer::new(SearchConfig::new_game_config(&game_config)).with_stages(stages);
+                            // verbose: 单局手动运行才开，输出每个决策点的候选统计与终局多维差异
+                            let ramen_trainer = RamenMctsTrainer::new(SearchConfig::new_game_config(&game_config))
+                                .with_stages(stages)
+                                .verbose(true);
                             run_ramen_once(
                                 &ramen_trainer,
                                 game_config.uma,

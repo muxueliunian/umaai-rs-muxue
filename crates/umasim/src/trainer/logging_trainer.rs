@@ -62,19 +62,28 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for LoggingTrainer<T> {
         let idx = self.inner.select_action(game, actions, rng)?;
         let elapsed_us = start.elapsed().as_micros() as u64;
         if self.logging {
-            // 阶段标记：地区选择动作在 Begin/turn2（第 1 年）或 RegionSelect 阶段发生，
-            // 统一按动作类型判定为 RegionSelect，便于调参按阶段分组
+            // 阶段标记：
+            // - 第 1/2/3 年地区选择都在 `RegionSelect` 阶段；仍按动作类型识别一层，
+            //   避免候选被塞进其它阶段时日志串台
+            // - 超级拉面已是正规 `SuperRamenSelect` 阶段，`{:?}` 即可；
+            //   仍按动作类型识别一层，避免将来再被嵌进别的阶段时日志串台
             let is_region_select = actions
                 .get(idx)
                 .is_some_and(|a| matches!(a.operation, Operation::RegionSelect(_)));
+            let is_super_ramen_select = actions
+                .get(idx)
+                .is_some_and(|a| matches!(a.operation, Operation::SuperRamenSelect(_)));
             let row = DecisionLogRow {
                 seed: self.seed,
                 turn: game.turn(),
                 stage: if is_region_select {
                     "RegionSelect".to_string()
+                } else if is_super_ramen_select {
+                    "SuperRamenSelect".to_string()
                 } else {
                     match &game.stage {
                         RamenStage::RegionSelect => "RegionSelect".to_string(),
+                        RamenStage::SuperRamenSelect => "SuperRamenSelect".to_string(),
                         other => format!("{other:?}")
                     }
                 },
