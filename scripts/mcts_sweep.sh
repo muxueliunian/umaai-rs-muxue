@@ -29,7 +29,11 @@ cargo --version
 echo "（edition 2024 需要 rustc >= 1.85）"
 echo
 
-cargo build --release --bin mcts_panel_probe
+# ⚠ 必须关 diag：默认 feature 含 diag，rollout 路径每回合都会构造 explain 字符串
+# （comfy-table + ANSI 解析）。实测 1200 局手写 1494ms → 1083ms，快 27.5%，
+# 且 31 个字段逐位一致（只有 elapsed_ms 变）。MCTS 档同样验过一致。
+BUILD_FLAGS="--no-default-features --features cli"
+cargo build --release $BUILD_FLAGS --bin mcts_panel_probe
 
 # run <名字> <MP_TRAINER> <search_n> <ucb> <runs>
 run() {
