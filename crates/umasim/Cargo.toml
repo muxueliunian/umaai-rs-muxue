@@ -27,6 +27,14 @@ name = "mcts_rollout_switch_verify"
 path = "tools/data_collection/mcts_rollout_switch_verify.rs"
 
 [[bin]]
+name = "handwritten_tuning"
+path = "tools/data_collection/handwritten_tuning.rs"
+
+[[bin]]
+name = "mcts_panel_probe"
+path = "tools/data_collection/mcts_panel_probe.rs"
+
+[[bin]]
 name = "sim_profiler"
 path = "tools/data_collection/sim_profiler.rs"
 # pprof-rs 只支持 Linux/macOS（依赖 pthread/siginfo/ucontext 等 Unix API），
