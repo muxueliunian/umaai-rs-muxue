@@ -918,15 +918,15 @@ mod tests {
         // 2026-08-27 更新（两次叠加）：
         // (1) 五维上限剧本化，速度上限 2958→3337，整局数值变化；
         // (2) fallback 与 rollout 均切到 RecommendedRamenTrainer，gate-off 即纯推荐策略跑局。
-        // 上游 (2) 抓的 66705 / [3258,...] 是在 (1) 之前测的，两者叠加后须重抓。
-        c.check(score == 66705, "评分与改动前逐位相同");
+        // 上游 (2) 抓的 66705 / [3258,...] 是在 (1) 之前测的，两者叠加后已在本分支重抓。
+        c.check(score == 62698, "评分与改动前逐位相同");
         c.check(
-            game.uma.five_status == [3258, 2304, 2200, 1107, 1259],
+            game.uma.five_status == [3337, 1983, 2200, 1005, 1065],
             "五维与改动前逐位相同"
         );
-        c.check(game.uma.skill_pt == 8641, "技能点与改动前逐位相同");
+        c.check(game.uma.skill_pt == 8441, "技能点与改动前逐位相同");
         c.check(game.ramen.scenario_pt == 0, "剧本 PT 与改动前逐位相同");
-        c.check(searched == 53, "searched_count 与改动前逐位相同");
+        c.check(searched == 66, "searched_count 与改动前逐位相同");
         c.finish()
     }
 
