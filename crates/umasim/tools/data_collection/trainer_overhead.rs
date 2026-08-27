@@ -73,7 +73,7 @@ where
 
         // 决策日志未启用——为了拿到 elapsed_us，需要再跑一遍开启 logging 的版本。
         // 这两次跑耗时几乎相同（只多 DecisionLog 的少量 format + RefCell push），
-        // 但为了避免再跑一遍对总耗时的污染，本测试只在最后一局开启 logging 取一次分阶段数据。
+        // 但为了避免再跑一遍对总耗时的污染，本工具只在第 1 局开启 logging 取一次分阶段数据。
         if run_idx == 0 {
             let mut trainer_log = LoggingTrainer::new(make_trainer(), run_idx);
             trainer_log.set_logging(true);

@@ -6,7 +6,9 @@
 //!
 //! 用法：
 //! ```text
-//! cargo run --release --bin sim_profiler
+//! # 本 bin 有 required-features = ["profiler"]，不加 --features 会被 cargo 拒绝启动
+//! # pprof-rs 只支持 Linux/macOS，Windows 上无法运行
+//! cargo run --release --features profiler --bin sim_profiler
 //! go tool pprof -top logs/profile/baseline.pb.gz
 //! go tool pprof -tree logs/profile/baseline.pb.gz
 //! ```
