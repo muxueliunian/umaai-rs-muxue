@@ -3,10 +3,17 @@
 # [config_override] 段字段均为可选覆盖（None = 不覆盖 default）；未知字段会解析报错（防拼错）。
 # 完整段说明见 default_config.toml 顶部"配置段"块：simulation / search / policy / output / dev
 
+# ---------- 拉面杯第3年地区选择策略（**顶层覆盖**；fixed 仅第3年生效）----------
+# 注意：顶层字段必须写在所有 [xxx] 段**之前**（本文件顶部），写在 [mcts] 段后会
+# 被 [mcts] 的未知字段检查吸收，解除注释也不生效。要启用请把下面两行移到文件顶
+# 部（第 5 行注释之后）再取消注释：
+#   ramen_region_strategy = "fixed"   # "all"（默认）/"fixed"（仅第3年，跳过 120 组合枚举）
+#   ramen_region_fixed = [[10, 12, 14]]   # 仅当 fixed 时生效，长度必须 = 1
+
 # ---------- 常用区：[config_override] 段 ----------
 [config_override]
 uma = 101901
-cards = [302424, 302894, 303044, 302924, 303024, 303054]
+cards = [303124, 303114, 303134, 303094, 303064, 303054]
 blue_count = [15, 0, 0, 0, 3]
 log_level = "info"
 
@@ -14,7 +21,7 @@ log_level = "info"
 num_threads = 24
 
 # 种马额外属性 [速度, 耐力, 力量, 根性, 智力, 技能点]
-extra_count = [10, 10, 20, 20, 20, 40]
+extra_count = [0, 10, 30, 10, 30, 40]
 
 # 温泉选择是否允许蒙特卡洛自由发挥（安卓马建议 false 减少世界线；须写在本段内才生效）
 mcts_selected_onsen = true
@@ -23,10 +30,6 @@ mcts_selected_onsen = true
 [mcts]
 search_n = 12288
 radical_factor_max = 1.4
-
-# ---------- 拉面杯第3年地区选择策略（顶层覆盖；fixed 仅第3年生效）----------
-# ramen_region_strategy = "fixed"   # "all"（默认）/"fixed"（仅第3年，跳过 120 组合枚举）
-# ramen_region_fixed = [[10, 12, 14]]   # 仅当 fixed 时生效，长度必须 = 1
 
 
 # ============================================================

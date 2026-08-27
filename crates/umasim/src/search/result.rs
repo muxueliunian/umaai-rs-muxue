@@ -303,7 +303,6 @@ impl<A, D> SearchOutput<A, D> {
     pub fn best_result(&self) -> &ActionResult {
         &self.action_results[self.best_action_idx].0
     }
-
 }
 
 impl SearchOutput<OnsenAction> {

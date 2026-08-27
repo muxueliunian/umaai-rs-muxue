@@ -7,11 +7,9 @@
 //!
 //! 按项目规范以 println 输出对比结果，不 assert。
 
-use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::{cell::RefCell, collections::BTreeMap};
 
 use anyhow::Result;
-
 use rand::RngCore;
 
 use crate::{
@@ -24,7 +22,7 @@ use crate::{
         traits::Trainer
     },
     rng::SplitmixRng,
-    trainer::{RandomTrainer, RamenHandwrittenTrainer},
+    trainer::{RamenHandwrittenTrainer, RandomTrainer},
     utils::{get_workspace_root, init_test_logger}
 };
 
@@ -49,7 +47,7 @@ struct TurnSnap {
     /// 本回合事件计数增量（ID -> 次数）
     event_delta: Vec<(u32, u32)>,
     /// 回合结束时固定流已消费次数（调试固定流序列用）
-    fixed_counter: u64,
+    fixed_counter: u64
 }
 
 /// 局面快照 Trainer：每次决策前记录当前回合的固定局面
@@ -63,7 +61,7 @@ struct SnapTrainer<T> {
     /// 当前回合是否已记录
     recorded_turn: RefCell<i32>,
     /// 事件增量暂存（记录快照时合并）
-    pending_delta: RefCell<Vec<(u32, u32)>>,
+    pending_delta: RefCell<Vec<(u32, u32)>>
 }
 
 impl<T> SnapTrainer<T> {
@@ -74,7 +72,7 @@ impl<T> SnapTrainer<T> {
             snaps: RefCell::new(Vec::new()),
             last_events: RefCell::new(BTreeMap::new()),
             recorded_turn: RefCell::new(-1),
-            pending_delta: RefCell::new(Vec::new()),
+            pending_delta: RefCell::new(Vec::new())
         }
     }
 
@@ -107,7 +105,7 @@ impl<T> SnapTrainer<T> {
                 feeling: game.ramen.train_feeling_type,
                 hints,
                 event_delta: std::mem::take(&mut *self.pending_delta.borrow_mut()),
-                fixed_counter: game.turn_fixed.as_ref().map(|r| r.counter()).unwrap_or(u64::MAX),
+                fixed_counter: game.turn_fixed.as_ref().map(|r| r.counter()).unwrap_or(u64::MAX)
             });
         } else {
             // 同回合后续决策：事件增量并入待记录
@@ -182,8 +180,8 @@ fn test_layer2_cross_strategy_consistency() -> Result<()> {
     let _ = crate::gamedata::init_global();
 
     let master = 20260822u64;
-    let mut rt = SnapTrainer::new(RandomTrainer);
-    let mut ht = SnapTrainer::new(RamenHandwrittenTrainer::new());
+    let rt = SnapTrainer::new(RandomTrainer);
+    let ht = SnapTrainer::new(RamenHandwrittenTrainer::new());
     run_turns(&rt, master, 20)?;
     run_turns(&ht, master, 20)?;
 
@@ -202,14 +200,15 @@ fn test_layer2_cross_strategy_consistency() -> Result<()> {
         if let Some(h) = hmap.get(turn) {
             compared += 1;
             // 一致性判定口径：角标 + 分布表 + 固定流消费量（hint 依赖 PT 档位，不参与）
-            let same = r.feeling == h.feeling
-                && r.dist == h.dist
-                && r.fixed_counter == h.fixed_counter;
+            let same = r.feeling == h.feeling && r.dist == h.dist && r.fixed_counter == h.fixed_counter;
             if !same {
                 mismatch += 1;
             }
             let fixed_only = |d: &[(u32, u32)]| -> Vec<(u32, u32)> {
-                d.iter().copied().filter(|(id, _)| !(5007..=5011).contains(id) && *id != 830305102).collect()
+                d.iter()
+                    .copied()
+                    .filter(|(id, _)| !(5007..=5011).contains(id) && *id != 830305102)
+                    .collect()
             };
             let same_dist = r.dist == h.dist;
             let same_feel = r.feeling == h.feeling;
@@ -217,7 +216,6 @@ fn test_layer2_cross_strategy_consistency() -> Result<()> {
             // 属游戏机制而非随机错位——单独输出，不作为一致性的判定口径。
             let same_hint = r.hints == h.hints;
             println!(
-
                 "回合 {}: 角标一致={same_feel} 分布一致={same_dist} | 固定流消费 随机={} 手写={} | hint一致={same_hint}(依赖PT档位) | 事件增量 随机={:?} 手写={:?}",
                 turn,
                 r.fixed_counter,
@@ -253,7 +251,7 @@ fn test_layer3_turn_reset_isolation() -> Result<()> {
     struct TrainAll;
     impl Trainer<RamenGame> for TrainAll {
         fn select_choice(
-            &self, _game: &RamenGame, _choices: &[Vec<crate::gamedata::EventChoice>], _rng: &mut rand::rngs::StdRng,
+            &self, _game: &RamenGame, _choices: &[Vec<crate::gamedata::EventChoice>], _rng: &mut rand::rngs::StdRng
         ) -> Result<usize> {
             Ok(0)
         }
@@ -271,7 +269,7 @@ fn test_layer3_turn_reset_isolation() -> Result<()> {
     struct RestAll;
     impl Trainer<RamenGame> for RestAll {
         fn select_choice(
-            &self, _game: &RamenGame, _choices: &[Vec<crate::gamedata::EventChoice>], _rng: &mut rand::rngs::StdRng,
+            &self, _game: &RamenGame, _choices: &[Vec<crate::gamedata::EventChoice>], _rng: &mut rand::rngs::StdRng
         ) -> Result<usize> {
             Ok(0)
         }
@@ -287,8 +285,8 @@ fn test_layer3_turn_reset_isolation() -> Result<()> {
     }
 
     let master = 777u64;
-    let mut ta = SnapTrainer::new(TrainAll);
-    let mut ra = SnapTrainer::new(RestAll);
+    let ta = SnapTrainer::new(TrainAll);
+    let ra = SnapTrainer::new(RestAll);
     run_turns(&ta, master, 20)?;
     run_turns(&ra, master, 20)?;
 
@@ -310,7 +308,7 @@ fn test_layer3_turn_reset_isolation() -> Result<()> {
                     println!("回合 {turn}: 分布/角标/固定流消费一致 = {same}");
                 }
             }
-            _ => println!("回合 {turn}: 一侧无决策（比赛/无决策回合），跳过"),
+            _ => println!("回合 {turn}: 一侧无决策（比赛/无决策回合），跳过")
         }
     }
     println!("不一致回合数: {mismatch}（应为 0）");
@@ -324,7 +322,11 @@ fn test_layer3_clone_isolation() -> Result<()> {
     let mut b = a;
     let _ = b.next_u64();
     println!("===== 层 3b：克隆隔离 =====");
-    println!("原流 counter={}（消费克隆后应保持），克隆流 counter={}", a.counter(), b.counter());
+    println!(
+        "原流 counter={}（消费克隆后应保持），克隆流 counter={}",
+        a.counter(),
+        b.counter()
+    );
     println!("原流下一个值不受克隆消费影响: {:#018x}", a.next_u64());
     Ok(())
 }

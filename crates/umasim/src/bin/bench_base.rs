@@ -32,12 +32,12 @@ use serde::Deserialize;
 use umasim::{
     bench::{self, CardPickOpts, RESULTS_HEADER, load_player_builds, outcome_to_row},
     game::InheritInfo,
-    gamedata::{GAMEDATA, init_global_with_config},
+    gamedata::{GAMEDATA, RamenRegionStrategy, init_global_with_config},
     global,
     output::decision_log::DecisionLogRow,
     search::SearchConfig,
     trainer::{
-        LoggingTrainer, RamenHandwrittenTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection, RandomTrainer
+        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection, RandomTrainer, RecommendedRamenTrainer
     },
     utils::{get_workspace_root, load_game_config}
 };
@@ -61,7 +61,13 @@ struct BenchConfig {
     out_dir: String,
     /// 是否落盘决策日志
     decision_log: bool,
-    /// 训练员: "random"（基线）| "handwritten"（手写策略）| "mcts"（手写 + 扁平搜索）
+    /// 训练员: "random"（基线）| "handwritten"（正式手写策略）| "mcts"（手写 + 扁平搜索）
+    ///
+    /// `handwritten` 档跑的是 **正式推荐手写策略**（[`RecommendedRamenTrainer`]：
+    /// 三年分治 + 方案 E 残余折扣 + 动态属性平衡 + 吃面联动 + 体力门限等全机制）。
+    /// 早期实现曾用纯策略核心 [`RamenHandwrittenTrainer`]（rollout 基策/组件对照用），
+    /// 2026-08-26 手动局对比实测：核心 (47796) vs 推荐 (58380) 差 +10584，
+    /// 基准语义修正为「当前最强手写策略」。
     trainer: String,
     /// mcts 专用：**每个候选**的 rollout 次数
     ///
@@ -221,7 +227,13 @@ fn main() -> Result<()> {
     let cfg = apply_cli(load_bench_config(&workspace_root)?)?;
 
     // 初始化全局数据（注入用户可调项：race_grades / mcts_turn_bonus 等）
-    let game_config = load_game_config()?;
+    let mut game_config = load_game_config()?;
+    // 基准测试模拟的是"策略决策"而非"玩家手动操作"——
+    // Y3 地区选择必须交回策略（All 枚举），不受 game_config.toml / default_config.toml
+    // 中为了手动模式而设的 `ramen_region_strategy="fixed"` 影响。
+    // （手动模式 ramen_player / ramen_manual 才保留 fixed 配置。）
+    game_config.ramen_region_strategy = RamenRegionStrategy::All;
+    game_config.ramen_region_fixed = None;
     init_global_with_config(&game_config)?;
 
     // 卡组来源：玩家 build 预置（每个 build 用代表卡自动生成卡组）
@@ -274,11 +286,9 @@ fn main() -> Result<()> {
         // 打印卡组信息（含卡名）
         let cards_desc = deck
             .iter()
-            .map(|id| {
-                match data.get_card(id / 10) {
-                    Ok(card) => format!("{} {}", id, card.card_name),
-                    Err(_) => id.to_string()
-                }
+            .map(|id| match data.get_card(id / 10) {
+                Ok(card) => format!("{} {}", id, card.card_name),
+                Err(_) => id.to_string()
             })
             .collect::<Vec<_>>()
             .join(", ");
@@ -296,7 +306,7 @@ fn main() -> Result<()> {
                     (outcome, trainer.take_records())
                 }
                 "handwritten" => {
-                    let trainer = LoggingTrainer::new(RamenHandwrittenTrainer::new(), log_seed);
+                    let trainer = LoggingTrainer::new(RecommendedRamenTrainer::new(), log_seed);
                     let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())
                 }
@@ -345,10 +355,7 @@ fn main() -> Result<()> {
             rmj_mean,
             free_race_rate(&outcomes) * 100.0,
         );
-        all_results.push(BuildResults {
-            name: build.name(),
-            outcomes
-        });
+        all_results.push(BuildResults { name: build.name(), outcomes });
     }
 
     // ===== 落盘结果 CSV（合并单文件，build 列为第一列）=====

@@ -169,7 +169,7 @@
             "choices": [[{
                 "value": {
                     "status_pt": [ 4, 4, 4, 4, 4, 0 ],
-                    "vital": 5,
+                    "vital": 10,
                     "friendship": 10,
                     "motivation": 1
                 }
@@ -181,7 +181,7 @@
             "trigger": { "type": "Random", "max_time": 5 },
             "choices": [[{
                 "value": {
-                    "status_pt": [ 6, 6, 6, 6, 6, 0 ],
+                    "status_pt": [ 8, 6, 8, 6, 8, 20 ],
                     "vital": 10,
                     "friendship": 5,
                     "hint_level": 3
@@ -194,9 +194,9 @@
             "trigger": { "type": "Random", "max_time": 5 },
             "choices": [[{
                 "value": {
-                    "status_pt": [ 8, 8, 8, 8, 8, 10 ],
+                    "status_pt": [ 8, 8, 8, 8, 8, 40 ],
                     "friendship": 5,
-                    "hint_level": 2
+                    "hint_level": 6
                 }
             }]]
         } 

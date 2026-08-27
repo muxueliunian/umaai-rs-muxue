@@ -162,7 +162,7 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for LoggingTrainer<T> {
 }
 #[cfg(test)]
 mod tests {
-    use rand::SeedableRng;
+   // use rand::SeedableRng;
 
     use super::*;
     use crate::{

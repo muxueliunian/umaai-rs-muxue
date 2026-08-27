@@ -142,6 +142,13 @@ pub fn init_test_logger(spec: &str) -> Result<()> {
     Ok(())
 }
 
+/// Core-only 测试不携带 CLI 日志后端；保留同一公开签名，让测试无需按 feature
+/// 重复分支。`log` facade 在未安装 logger 时会安全地丢弃记录。
+#[cfg(all(test, not(feature = "cli")))]
+pub fn init_test_logger(_spec: &str) -> Result<()> {
+    Ok(())
+}
+
 /// 把当前工作目录修改为exe所在目录
 pub fn check_working_dir() -> Result<()> {
     let exe_path = std::env::current_exe()?;
@@ -437,7 +444,9 @@ pub(crate) fn fallback_override_game_config() -> OverrideGameConfig {
             pt_favor_rate: None,
             race_grades: None
         },
-        mcts: OverrideMctsConfig::default()
+        mcts: OverrideMctsConfig::default(),
+        ramen_region_strategy: None,
+        ramen_region_fixed: None
     }
 }
 
@@ -568,6 +577,10 @@ mod tests {
         let p = resolve_user_config_path();
         println!("用户配置路径: {}", p.display());
         assert!(p.ends_with("game_config.toml"));
-        assert!(!p.to_string_lossy().contains(".."), "不应含上级目录跳转: {}", p.display());
+        assert!(
+            !p.to_string_lossy().contains(".."),
+            "不应含上级目录跳转: {}",
+            p.display()
+        );
     }
 }

@@ -1,10 +1,10 @@
 use std::fmt::Display;
 
 use anyhow::{Result, anyhow};
+use colored::Colorize;
 use rand::Rng;
 use rand_distr::{Distribution, weighted::WeightedIndex};
 use serde::{Deserialize, Serialize};
-use colored::Colorize;
 
 use crate::{
     diag,
@@ -48,8 +48,9 @@ impl BaseAction {
     pub fn do_race(game: &mut BaseGame, _rng: &mut impl Rng) -> Result<()> {
         let race_bonus = (100 + game.uma.race_bonus) as f32 / 100.0;
         if game.uma.is_race_turn(game.turn) {
-            diag!("{}", format!(
-                ">> 生涯比赛 - 比赛加成: {}", game.uma.race_bonus).bright_magenta()
+            diag!(
+                "{}",
+                format!(">> 生涯比赛 - 比赛加成: {}", game.uma.race_bonus).bright_magenta()
             );
             let mut event = system_event("race_career")?.clone();
             // 事件面板乘算比赛加成
@@ -63,8 +64,9 @@ impl BaseAction {
             } else {
                 global!(GAMECONSTANTS).race_grades[game.turn as usize]
             };
-            diag!("{}", format!(
-                ">> 自选比赛 G{grade} - 比赛加成: {}", game.uma.race_bonus).bright_magenta()
+            diag!(
+                "{}",
+                format!(">> 自选比赛 G{grade} - 比赛加成: {}", game.uma.race_bonus).bright_magenta()
             );
             let event_name = format!("race_g{grade}");
             let mut event = system_event(&event_name)?.clone();

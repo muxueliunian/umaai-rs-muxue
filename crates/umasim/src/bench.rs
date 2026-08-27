@@ -72,6 +72,12 @@ pub struct GameOutcome {
     pub yearly_eat_count: [i32; 3],
     /// 逐年地区选择（每格三个地区 id）。CSV 编码见 [`encode_region_cell`]。
     pub yearly_selected_regions: [[usize; 3]; 3],
+    /// 逐年观测：友情训练回合数（下标 0/1/2 = 第 1/2/3 年）。纯观测采集。
+    pub yearly_friend_turns: [i32; 3],
+    /// 逐年观测：诀窍获得数（槽满清零 +1 的次数）。纯观测采集。
+    pub yearly_gauge_gain: [i32; 3],
+    /// 逐年观测：诀窍溢出数（库存超上限被丢弃）。纯观测采集。
+    pub yearly_gauge_overflow: [i32; 3],
     /// 五次友人出行是否全部完成。
     pub friend_all: bool,
     /// 自选比赛是否全部达标（不达标即育成失败）。
@@ -101,6 +107,9 @@ pub fn run_seeded<T: Trainer<RamenGame>>(
         rmj_ok: game.ramen.rmj_results.iter().filter(|&&ok| ok).count(),
         yearly_eat_count: game.ramen.yearly_eat_count,
         yearly_selected_regions: game.ramen.yearly_selected_regions,
+        yearly_friend_turns: game.ramen.yearly_friend_turns,
+        yearly_gauge_gain: game.ramen.yearly_gauge_gain,
+        yearly_gauge_overflow: game.ramen.yearly_gauge_overflow,
         friend_all: game.friend.out_used.iter().all(|used| *used),
         free_race_ok: game.uma.all_free_races_done()?,
         elapsed_ms
@@ -134,7 +143,7 @@ pub fn parse_region_cell(cell: &str) -> Result<[usize; 3]> {
 }
 
 /// results.csv 表头。只留逐年列，不留三年合计；合计由使用方自己加。
-pub const RESULTS_HEADER: [&str; 22] = [
+pub const RESULTS_HEADER: [&str; 31] = [
     "build",
     "seed",
     "score",
@@ -156,6 +165,15 @@ pub const RESULTS_HEADER: [&str; 22] = [
     "region_y1",
     "region_y2",
     "region_y3",
+    "friend_turns_y1",
+    "friend_turns_y2",
+    "friend_turns_y3",
+    "gauge_gain_y1",
+    "gauge_gain_y2",
+    "gauge_gain_y3",
+    "gauge_overflow_y1",
+    "gauge_overflow_y2",
+    "gauge_overflow_y3",
     "elapsed_ms"
 ];
 
@@ -183,6 +201,15 @@ pub fn outcome_to_row(build: &str, outcome: &GameOutcome) -> Vec<String> {
         encode_region_cell(&outcome.yearly_selected_regions[0]),
         encode_region_cell(&outcome.yearly_selected_regions[1]),
         encode_region_cell(&outcome.yearly_selected_regions[2]),
+        outcome.yearly_friend_turns[0].to_string(),
+        outcome.yearly_friend_turns[1].to_string(),
+        outcome.yearly_friend_turns[2].to_string(),
+        outcome.yearly_gauge_gain[0].to_string(),
+        outcome.yearly_gauge_gain[1].to_string(),
+        outcome.yearly_gauge_gain[2].to_string(),
+        outcome.yearly_gauge_overflow[0].to_string(),
+        outcome.yearly_gauge_overflow[1].to_string(),
+        outcome.yearly_gauge_overflow[2].to_string(),
         format!("{:.3}", outcome.elapsed_ms),
     ]
 }

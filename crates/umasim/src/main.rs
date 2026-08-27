@@ -302,7 +302,7 @@ async fn main() -> Result<()> {
                     match game_config.scenario.as_str() {
                         "ramen" => {
                             // 拉面杯手写策略（当前主线剧本的默认策略）
-                            let trainer = RamenHandwrittenTrainer::new();
+                            let trainer = RecommendedRamenTrainer::new();
                             run_ramen_once(&trainer, game_config.uma, &game_config.cards, inherit.clone(), &mut rng)
                         }
                         "onsen" => {

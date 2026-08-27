@@ -790,11 +790,26 @@ fn default_simulation_count() -> usize {
 /// `default_config.toml` 的生产参数。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OverrideGameConfig {
+    /// 温泉顺序（可选；game_config.toml 可省略 `[onsen_order]` 段，使用 default）
+    #[serde(default)]
     pub onsen_order: OnsenOrder,
     pub config_override: OverrideConfig,
     /// MCTS 可选覆盖（`None` 字段不改写 default）
     #[serde(default)]
-    pub mcts: OverrideMctsConfig
+    pub mcts: OverrideMctsConfig,
+    /// 拉面杯第3年地区选择策略（顶层覆盖；对应 `GameConfig::ramen_region_strategy`）
+    ///
+    /// `None` = 不覆盖 default_config.toml。注意：game_config.toml 顶层写
+    /// `ramen_region_strategy = "fixed"`/`ramen_region_fixed = [[...]]` 才走这里；
+    /// `[config_override]` 段内没有这两个字段（地区策略不是"常用覆盖项"）。
+    #[serde(default)]
+    pub ramen_region_strategy: Option<RamenRegionStrategy>,
+    /// 第3年固定地区组合（顶层覆盖；仅 `ramen_region_strategy=fixed` 时生效）
+    ///
+    /// `None` = 不覆盖 default；写 `ramen_region_fixed = [[.., .., ..]]` 即覆盖；
+    /// 要显式清空 default 的 fixed 组合可写空数组 `[]`。
+    #[serde(default)]
+    pub ramen_region_fixed: Option<Vec<[usize; 3]>>
 }
 
 /// MCTS 覆盖配置：每个字段都是可选覆盖（`None` = 不覆盖 `default_config.toml`）。
@@ -956,6 +971,12 @@ impl OverrideGameConfig {
         if let Some(v) = m.crn_stage_reseed {
             ret.mcts.crn_stage_reseed = v;
         }
+        if let Some(v) = self.ramen_region_strategy {
+            ret.ramen_region_strategy = v;
+        }
+        if let Some(v) = self.ramen_region_fixed {
+            ret.ramen_region_fixed = Some(v);
+        }
         ret
     }
 }
@@ -988,7 +1009,9 @@ mod tests {
         OverrideGameConfig {
             onsen_order: OnsenOrder::default(),
             config_override: cfg,
-            mcts: OverrideMctsConfig::default()
+            mcts: OverrideMctsConfig::default(),
+            ramen_region_strategy: None,
+            ramen_region_fixed: None
         }
     }
 
@@ -1094,6 +1117,57 @@ year3 = []
         println!("无 bogus / 无 [mcts] 解析 = {:?}", result.as_ref().map(|_| "ok"));
         let mut c = Checks::new();
         c.check(result.is_ok(), "去掉 bogus_field 后应解析成功（[mcts] 可省略）");
+        c.finish()
+    }
+
+    /// 顶层覆盖：game_config.toml 顶层写 `ramen_region_strategy` / `ramen_region_fixed` 必须生效
+    /// （回归：此前顶层字段被 serde 静默忽略，解除 game_config.toml 注释后无法切换第3年固定选区。
+    /// 注意 TOML 结构：顶层字段必须写在所有 `[...]` 段**之前**，否则会被归入前一个段。
+    /// 用户 game_config.toml 曾把这两个字段写在 `[mcts]` 段后 → 被 `[mcts]` 的 unknown field 吸收。）
+    #[test]
+    fn test_top_level_region_override_takes_effect() -> Result<()> {
+        let base = GameConfig::default_for_init();
+        // 模拟 game_config.toml 顶层（段之前）写区域策略
+        let text = r#"
+ramen_region_strategy = "fixed"
+ramen_region_fixed = [[10, 12, 14]]
+
+[config_override]
+uma = 100901
+"#;
+        let mut c = Checks::new();
+        match toml::from_str::<OverrideGameConfig>(text) {
+            Ok(ov) => {
+                println!(
+                    "顶层 region 解析: strategy={:?} fixed={:?}",
+                    ov.ramen_region_strategy, ov.ramen_region_fixed
+                );
+                let merged = ov.merge(&base);
+                println!(
+                    "merge 后: strategy={:?} fixed={:?}",
+                    merged.ramen_region_strategy, merged.ramen_region_fixed
+                );
+                c.check(
+                    matches!(
+                        merged.ramen_region_strategy,
+                        RamenRegionStrategy::Fixed
+                    ),
+                    "顶层 ramen_region_strategy=fixed 应覆盖进 GameConfig",
+                );
+                c.check(
+                    merged.ramen_region_fixed.as_deref() == Some(&[[10, 12, 14]]),
+                    "顶层 ramen_region_fixed 应覆盖进 GameConfig",
+                );
+            }
+            Err(e) => {
+                println!("顶层 region 解析失败: {e:?}");
+                c.check(false, "顶层 region 字段应可解析");
+            }
+        }
+        c.check(
+            RamenRegionStrategy::default() == RamenRegionStrategy::All,
+            "RamenRegionStrategy 缺省应为 All（对照）",
+        );
         c.finish()
     }
 

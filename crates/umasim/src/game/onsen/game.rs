@@ -4,7 +4,11 @@ use anyhow::{Result, anyhow};
 use colored::Colorize;
 #[cfg(feature = "cli")]
 use comfy_table::{ColumnConstraint, Table, Width};
-use rand::{Rng, rngs::StdRng, seq::{IndexedRandom, IteratorRandom}};
+use rand::{
+    Rng,
+    rngs::StdRng,
+    seq::{IndexedRandom, IteratorRandom}
+};
 use rand_distr::{Distribution, weighted::WeightedIndex};
 
 use crate::{

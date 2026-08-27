@@ -35,6 +35,77 @@
 > 结论：拉面剧本的「人头」问题已全部清零；剩余未解决项集中在已搁置的温泉剧本与 base 潜伏项，以及拉面侧的死代码 / 测试语义 / 跨剧本防御缺口。详见下文各条目。
 
 
+## 自动 vs 玩家手动：吃面-训练覆盖差距（玩家 87% vs 自动 52%）
+
+- **日期**：2026-08-26
+- **状态**：已解决（2026-08-26，C 方案简化落地 + 弱位 boost 未满修复）
+- **问题描述**：同种子（seed=61444, stamina build）对比玩家手动局与推荐策略自动局的吃面-训练行为。决策日志逐回合解析"`RamenSelect` 吃哪碗面 → `Train` 练哪个位"，检查训练位是否落在吃面 `at_trains` 覆盖内：
+  - **玩家**：训练 60 回合，吃面 31 碗且全部跟训练，其中 **27/31（87%）训练位在 at_trains 覆盖内**；仅 4 次错配（t4 吃速练力 / t40/t53/t64 吃耐练速）
+  - **自动**：训练仅 52 回合（少 8），吃面 28 碗少 3 碗；吃面跟训练 **13/25（52%）覆盖**，12 次错配（t2 吃速练智 / t4 吃智练力 / t7 吃速练耐 / t10 吃智练速 / t13 吃速练耐 / t16 吃智练耐 / t26、t38 吃耐力练智 / t40 吃耐根练速 / t61 吃耐练根 / t64、t66 吃耐练速）
+  - speed build 同差异：玩家 90% vs 自动 46%
+- **分数**：玩家 stamina 64196 vs 自动 54639（差 −9557）；speed 63851 vs 57110（−6741）。五维差距集中在智位（玩家 1783 vs 自动 973）与训练回合数（60 vs 52）
+- **排查过程**：
+  - 自动的 `ramen_train_coupling_weight=2.0`（at_trains 覆盖位加分）与弱位 boost 都在，但**加分不足以压过其他训练位的自然高分**（t2 吃速面后智训练 245 分 > 速训练 83 分——智的早期羁绊/动态平衡/弱位偏好加成叠加后仍高于速+耦合）
+  - 自动选面（`decide_ramen`）阶段**不前瞻"吃完练哪个位"**——选面独立于训练选择，导致"吃了速面却练智"的错配
+  - 玩家行为隐含"吃面→练覆盖位"的两步联动（面选好即锁定最有效的训练窗口）
+- **解决方案（C 方案简化，用户拍板）**：
+  1. 新增 `LocalRamenConfig.eat_requires_covered_train`（推荐 preset 开启）——`decide_ramen` 对每个吃面候选预演"该面落地后的 `decide_train` 最优动作"（clone + `current_ramen=Some(rid)` + `clear_pending()`，不落地随机分身），最优动作不是该面 `at_trains` 覆盖训练位时把该吃面候选降为 `NEG_INFINITY`。覆盖位判定用完整 `decide_train`（coupling/弱位 boost/体力门禁全部参与），非简单 at_trains 静态匹配
+  2. 弱位 boost（`ramen_weak_train_boost` 的 decide_train 分支）与 `ramen_window_alignment` 的 `weak_mult` 补 **"未满"条件**（`five_status[tr] < five_status_limit[tr]`）——已满位只剩 PT 收益，弱位加成本意为培养副属性，对已满位放大只会虚高其训练分（把"无属性价值"的位错抬成最优，测试构造中暴露）
+- **验证**：stamina seed=61444 × 10 seed：吃面训练 at_trains 覆盖 **80%→99%**，score_mean **58249→58972（+723）**、skill_pt_mean **7825→7970（+145）**。新增单测 `eat_covered_train_gate_blocks_mismatched_ramen`（局面 A 智满→智面拒；局面 B 其他满智低→智面过/速面拒）；全量 306 passed / 4 failed（pre-existing 基线），零新增失败。**改变拉面模拟数值，基线作废**
+- **备选（未采纳）**：A 强化 coupling（软加分不彻底）；B 弱位 boost 限定覆盖位（已随"未满"修复部分吸收）；C 完整 `ramen_lookahead`（clone+ground 分身随机，成本高且旧实验关闭）
+- **备注**：本条目是"玩家吃面是否更覆盖有效训练"的直接回答——**是，玩家 87% vs 自动 52%**；修复后自动达 99%。吃面-训练联动是继训练等级马太效应后的第二大分差来源，但单点启发式可修（无需 MCTS）。
+
+---
+
+
+## 地区选择修正公式落地（你qing 在 at_trains 内独立生效）+ low_count_youqing 弃用
+
+- **日期**：2026-08-25
+- **状态**：已解决
+- **问题描述**：`score_region` 原公式 `bias_sum × (xunlian × 40 + youqing × 1) + pt × 30 + hint × 15` 让 Y2 id 5（中山-全，youqing=10 覆盖 5 位）天然胜出——`bias_sum` 给高分（5 位总和=6）但实际你qing 仅在该训练位触发一次（per_train=2）；Y3 地区因 `pt_bonus` 几乎全 50、`youqing` 40~60 梯度窄，跨 build 区分度低。先前为缓解"少卡位不被加权"问题引入的 `low_count_youqing` 在全 101 种验证下反转——智向 build 严重受损（-3447）：把 build 次要位（耐/力）对应地区评分压过主训位（智）对应地区（id 9→id 7）。
+- **排查过程**（**两阶段修正**）：
+  1. 首轮 480 局验证 `low_count_youqing_weight=0.5, k=3` 在 4 个 [player_builds] build 上 3/4 一致正向（加权均值 +337），但仅看 4 build 不够全面
+  2. 全 101 种 × 20 局配对验证同参数：52/101（51.5%）build 正向、加权均值 +242，但智向 build 严重受伤（最差 `1sta+2pow+2wis` -3447）；speed/power_wisdom/spd2_gut0 上永远 delta=0（b 选了与 a 完全相同的地区组合，delta=0 来自 RNG 流偏移）
+  3. 诊断智向 build 受伤机制：Y2 `id 9`（小仓智，at_trains=[智]，youqing=50）→ `id 7`（京都耐根，at_trains=[耐,根]，youqing=50）；lowc 加权让 `bias=1` 的位（耐、智）对应地区评分压过 `bias=2` 的主训位（智）对应地区——本意是"补 build 不在乎的位"，实际是"反 build 主训位加权"
+  4. 用户洞察"少但不是没有"（仅 bias==1 加权，bias=0 排除）——修正后 3 速 build 上 +541 但智向 build 仍受伤，问题不在 bias 数量定义而在加权"次要位 vs 主训位"的根本错向
+  5. 重新审视基线：`plain`（无 lowc 加权）的 a_score 在智向 build 上比 lowc50 高 3447 分——说明 `bias_sum` 已经自然把 build 主训位对应地区评分最高，`low_count_youqing` 反而打破这种自然偏向
+  6. **第一阶段修正**：提出 `youqing / |at_trains|` 标准化为单格友情加成，让 Y2 id 5 (per_train=2) 自动输给单点 (per_train=50)。全 101 种验证：新公式 1104/2020（54.7%）build 优于旧 plain，加权均值 +160.5；但**`deck_can_split=true`（玩家真实 build）平均 -337 略损**——之前结论被残缺 build 拉高
+  7. **用户再次洞察游戏机制**：`region.youqing` 在 `at_trains` 内**每个训练位独立生效**——三点组合 youqing=40 at_trains=[速力智] 在速/力/智**每个**位训练时都获得 +40，**不是分散到 13.3**。`/n_trains` 标准化**方向错误**——应该是"覆盖训练位越多越好"
+  8. **第二阶段修正（当前）**：去掉 `max(0.5)` 兜底（无卡位贡献 0），加"无卡位惩罚"（每个 `build 在该位无卡` 的训练位 -10）。公式：`bias_sum_in_at_trains × youqing + pt_bonus×30 + hint×15 - waste×10`。`max(0.5)` 让"覆盖广且含无卡位"地区（Y2 id 5）评分偏高，无卡位惩罚让 id 5 (含 2 无卡位 = 50-20=30) 显著低于 id 9 智单点 (无 waste = 50)
+- **解决方案**：
+  1. `score_region` 改为：循环 `at_trains`，累加 `bias[t] > 0` 的位贡献到 `bias_sum`，累加 `bias[t] == 0` 的位到 `n_waste`
+  2. 返回 `bias_sum × (xunlian×40 + youqing×1) + pt_bonus×30 + hint×15 - n_waste × 10`
+  3. 删除 `RamenPolicy::low_count_youqing` 函数（约 26 行）
+  4. `decide_region` 移除 `if low_count_youqing_weight != 0.0 { ... }` 分支
+  5. `RamenPolicyConfig` 删除 `region_low_count_youqing_weight` / `region_low_count_k` 字段及 default
+  6. `RecommendedRamenTrainer::with_region_overrides` 标 `#[deprecated]` 等价 `new()`（保留接口防外部实验覆盖）
+  7. region_matrix 加 `SAMPLE_BUILDS` 按 build 名抽样 + `ALL_COMPOSITIONS=1` 跑全 101 种 + `OUT_PREFIX` 分文件保留（避免覆盖）
+- **验证**：全 101 种 × 20 局同种子配对（`region-matrix-baseline-plain.csv` 旧 vs `region-matrix-corrected-plain.csv` 新）：
+  - **`deck_can_split=true`（种类 ≥ 4，玩家真实 build，420 局）平均 +99.9 正向**——核心指标，说明对真实玩家 build 修正公式确实更优
+  - `deck_can_split=false`（种类 < 4，残缺 build，1600 局）平均 -7.3 中性略负——这些是 hint_special/地区分身/finals extra 都失效的残缺 build，不是实际玩家 build
+  - 总加权 +15（被残缺 build 拉低）；最差 build `1speed+1stamina+1guts+2wisdom` -2074
+  - top 1 build `1speed+2stamina+1guts+1wisdom` +1611（覆盖耐/根/智多点，你qing 40 × bias_sum=3 + waste=0）
+  - 各 build 实际选区典型：top 1 Y2 选 id 7（耐根 waste=0）→ Y3 选 id 11/17/19（覆盖 build 实际卡位的三点组合）
+  - `test_region_build_sensitivity`（速向 vs 智向选不同 Y3 组合）继续通过
+- **备注**：原 `workbench_improve_1.md` §1 规划的 `feeling_yield` / `recipe_balance` / `low_count_youqing_bonus` 三指标中，`low_count_youqing` 思路被"修正公式"取代——`bias_sum × youqing` 隐式表达 build 训练倾向 + `waste` 惩罚排除"覆盖广但无卡位"的反例地区。`youqing / |at_trains|` 标准化方向错误（用户洞察：三点组合 youqing 不分散到各位）。**地区基线作废，需重抓 bench/搜索/MCTS 三处快照**
+
+
+## 地区选择诀窍类指标弃用（净获得 / 配方失衡 / 吃出碗数）
+
+- **日期**：2026-08-25
+- **状态**：已解决（结论 = 弃用）
+- **问题描述**：为让地区选择"看出更多东西"（workbench_improve_1 §1），实现了三个组合级指标——全年诀窍净获得（`gain - overflow`）、配方消耗失衡（`recipe_balance`）、卡少训练位 youqing 加权（`low_count_youqing`）。后两者（前者经用户建议改消费端）实测均无区分度。
+- **排查过程**：
+  1. 最小实验一（同种子配对扫权重）：`feelyield`/`recipebal` 权重扫到百级仍 0/20 改变选择，`lowc` 20/20 改变但平均分 -72
+  2. 诊断：第 3 年 120 组合 baseline 总分 top 12 只差 40 分，但净获得全范围仅 40-46（top 内 41-43 恒定）——**总量守恒**（`base_dist` 恒 10/回合 → 总清零 ≈ 总填充/7）
+  3. 固定地区 A/B 整局对比（3 速 build 固定卡组，20 局同种子）：
+     - 旧数据组：A=60069 vs B=59222（A +847），B 诀窍获得更多、溢出更少却更低分 → 生产端与评分**逆行**
+     - 新数据组（第二年 5→7/8→7）：A=58785 vs B=59006（B +221），net/imb 与评分方向不稳定，baseline 静态分也不能预测整局（A 静态全面占优却输）
+  4. 消费端（吃出碗数 `meals_eaten`，加库存检查）：A 19 碗 vs B 19 碗**完全守恒**——产能是瓶颈时消费端 = 生产端，依旧守恒
+- **解决方案**：三个诀窍类指标全部弃用（代码删除，仅保留观测埋点 `yearly_friend_turns/gauge_gain/gauge_overflow` 与 `region_gauge_diagnostic` 采集工具）。地区选择保留「卡组 bias × 词条」静态打分为主 + `low_count_youqing` 为唯一组合级加权（有真实区分度，参数待调）。验证手段固化：`region_matrix` 的 `FIXED_AB` 固定地区整局同种子对比是唯一可信判据。
+- **备注**：数学本质——`base_dist` 总量守恒使生产端/消费端任何口径都≈恒定，±5 是全部信号；地区选择的真实价值由整局动态（训练位实际利用率、吃面窗口）决定，静态公式难以建模，未来可考虑接入整局搜索验证。
+
+
 ## 拉面分身分配「假失败」与「顺序饿死」（概率重试 + 友人卡垫底）
 
 - **日期**：2026-08-24（提交 a223a6e，随 PR #19 于 2026-08-25 合入 main）

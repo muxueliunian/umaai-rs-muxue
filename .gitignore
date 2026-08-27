@@ -11,3 +11,6 @@ training
 scripts/export_support_card/*.json
 master.mdb
 .claude
+
+# Generated benchmark and training reports
+/benchmark-results/

@@ -48,7 +48,9 @@ use rand::{Rng, rngs::StdRng};
 use crate::{
     bench::seeded_rngs,
     game::{
-        Game, InheritInfo, Trainer,
+        Game,
+        InheritInfo,
+        Trainer,
         ramen::{RamenAction, RamenGame, RamenStage}
     },
     gamedata::{EventChoice, GAMEDATA},
@@ -110,13 +112,34 @@ impl UmaEntry {
 /// 均衡（杏目 10-10-10）。自选比赛要求 4 无 3 有，其中小栗帽两段区间、
 /// 第二段限 G1，是守门逻辑最硬的测试用例。
 pub const GEN1_UMAS: [UmaEntry; 7] = [
-    UmaEntry { game_id: 100603, alias: "小栗帽[芦毛灰姑娘]" },
-    UmaEntry { game_id: 102403, alias: "摩耶重炮[Rock in MewMeow]" },
-    UmaEntry { game_id: 112901, alias: "杏目[The Changer]" },
-    UmaEntry { game_id: 110602, alias: "菱钻奇宝[快乐小音符]" },
-    UmaEntry { game_id: 113101, alias: "放声欢呼" },
-    UmaEntry { game_id: 108702, alias: "真弓快车[不融化的糖果]" },
-    UmaEntry { game_id: 100301, alias: "东海帝王[无上喜悦]" }
+    UmaEntry {
+        game_id: 100603,
+        alias: "小栗帽[芦毛灰姑娘]"
+    },
+    UmaEntry {
+        game_id: 102403,
+        alias: "摩耶重炮[Rock in MewMeow]"
+    },
+    UmaEntry {
+        game_id: 112901,
+        alias: "杏目[The Changer]"
+    },
+    UmaEntry {
+        game_id: 110602,
+        alias: "菱钻奇宝[快乐小音符]"
+    },
+    UmaEntry {
+        game_id: 113101,
+        alias: "放声欢呼"
+    },
+    UmaEntry {
+        game_id: 108702,
+        alias: "真弓快车[不融化的糖果]"
+    },
+    UmaEntry {
+        game_id: 100301,
+        alias: "东海帝王[无上喜悦]"
+    }
 ];
 
 /// 采样空间中的一张支援卡（满破）
@@ -140,17 +163,50 @@ impl CardEntry {
 /// 类型分布 6 速 / 2 耐 / 1 力 / 1 智 / 1 友——**类型不在此硬编码**，
 /// 一律由 `cardDB.json` 读出，见 [`SamplingSpace::gen1`]。
 pub const GEN1_CARD_POOL: [CardEntry; 11] = [
-    CardEntry { idrank: 302754, alias: "[天才的乌托邦]东海帝王" },
-    CardEntry { idrank: 302984, alias: "[刀光迸发Clash！]跳舞城" },
-    CardEntry { idrank: 302424, alias: "[改变世界的目光]杏目" },
-    CardEntry { idrank: 302824, alias: "[铭记于心，京之华]气槽" },
-    CardEntry { idrank: 303024, alias: "[永恒的誓言，永恒的光辉]里见光钻" },
-    CardEntry { idrank: 302924, alias: "[响彻吧，两人的凯歌]洛林军歌" },
-    CardEntry { idrank: 303044, alias: "[其执念如怒涛般汹涌]名将怒涛" },
-    CardEntry { idrank: 303004, alias: "[载着热闹的未来奔驰吧！]樱花千代王" },
-    CardEntry { idrank: 302834, alias: "[优雅，闪耀的旅途]美妙姿势" },
-    CardEntry { idrank: 302894, alias: "[Innovator]青春永驻" },
-    CardEntry { idrank: 303054, alias: "[一杯怀旧之味]骏川手纲" }
+    CardEntry {
+        idrank: 302754,
+        alias: "[天才的乌托邦]东海帝王"
+    },
+    CardEntry {
+        idrank: 302984,
+        alias: "[刀光迸发Clash！]跳舞城"
+    },
+    CardEntry {
+        idrank: 302424,
+        alias: "[改变世界的目光]杏目"
+    },
+    CardEntry {
+        idrank: 302824,
+        alias: "[铭记于心，京之华]气槽"
+    },
+    CardEntry {
+        idrank: 303024,
+        alias: "[永恒的誓言，永恒的光辉]里见光钻"
+    },
+    CardEntry {
+        idrank: 302924,
+        alias: "[响彻吧，两人的凯歌]洛林军歌"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 303004,
+        alias: "[载着热闹的未来奔驰吧！]樱花千代王"
+    },
+    CardEntry {
+        idrank: 302834,
+        alias: "[优雅，闪耀的旅途]美妙姿势"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    }
 ];
 
 /// 卡组构成：5 张普通卡的类型分布，友人卡固定 1 张
@@ -164,9 +220,18 @@ pub struct DeckShape {
 
 /// 第一代的 3 种卡组构成
 pub const GEN1_SHAPES: [DeckShape; 3] = [
-    DeckShape { counts: [3, 1, 0, 0, 1], name: "3速1耐1智1友" },
-    DeckShape { counts: [2, 2, 0, 0, 1], name: "2速2耐1智1友" },
-    DeckShape { counts: [2, 1, 1, 0, 1], name: "2速1耐1力1智1友" }
+    DeckShape {
+        counts: [3, 1, 0, 0, 1],
+        name: "3速1耐1智1友"
+    },
+    DeckShape {
+        counts: [2, 2, 0, 0, 1],
+        name: "2速2耐1智1友"
+    },
+    DeckShape {
+        counts: [2, 1, 1, 0, 1],
+        name: "2速1耐1力1智1友"
+    }
 ];
 
 /// 该阶段的决策点能否作为搜索根局面
@@ -206,7 +271,10 @@ pub struct DeckPlan {
 
 /// 第一代继承因子（沿用 `bench_config.toml` 现值，第一代固定不随机）
 pub fn gen1_inherit() -> InheritInfo {
-    InheritInfo { blue_count: [15, 0, 0, 0, 3], extra_count: [10, 10, 20, 20, 20, 40] }
+    InheritInfo {
+        blue_count: [15, 0, 0, 0, 3],
+        extra_count: [10, 10, 20, 20, 20, 40]
+    }
 }
 
 /// 枚举好的采样空间
@@ -237,7 +305,10 @@ impl SamplingSpace {
                     }
                 }
                 t if (0..5).contains(&t) => by_type[t as usize].push(entry.idrank),
-                other => bail!("卡池中 {} 的类型 {other} 不受支持（第一代只接受普通卡与友人卡）", entry.alias)
+                other => bail!(
+                    "卡池中 {} 的类型 {other} 不受支持（第一代只接受普通卡与友人卡）",
+                    entry.alias
+                )
             }
         }
         let Some(friend) = friend else {
@@ -260,7 +331,11 @@ impl SamplingSpace {
                     let mut deck = [0u32; 6];
                     deck[..5].copy_from_slice(&normals);
                     deck[5] = friend;
-                    plans.push(DeckPlan { uma: uma.game_id, deck, shape: shape.name });
+                    plans.push(DeckPlan {
+                        uma: uma.game_id,
+                        deck,
+                        shape: shape.name
+                    });
                 }
             }
         }
@@ -780,17 +855,14 @@ mod tests {
         // k = 1：每个元素各成一组，保持输入顺序
         assert_eq!(combinations(&pool, 1), vec![vec![10], vec![20], vec![30], vec![40]]);
         // k = 2：C(4,2) = 6，按下标字典序
-        assert_eq!(
-            combinations(&pool, 2),
-            vec![
-                vec![10, 20],
-                vec![10, 30],
-                vec![10, 40],
-                vec![20, 30],
-                vec![20, 40],
-                vec![30, 40]
-            ]
-        );
+        assert_eq!(combinations(&pool, 2), vec![
+            vec![10, 20],
+            vec![10, 30],
+            vec![10, 40],
+            vec![20, 30],
+            vec![20, 40],
+            vec![30, 40]
+        ]);
         // 空池：k = 0 有解，k > 0 无解
         let empty: [u32; 0] = [];
         assert_eq!(combinations(&empty, 0), vec![Vec::<u32>::new()]);
@@ -901,16 +973,23 @@ mod tests {
     fn test_epsilon_perturbs_trajectory() -> Result<()> {
         setup()?;
         let space = SamplingSpace::gen1()?;
-        let plain = SamplerConfig { epsilon: 0.0, ..SamplerConfig::default() };
-        let noisy = SamplerConfig { epsilon: 0.15, ..SamplerConfig::default() };
+        let plain = SamplerConfig {
+            epsilon: 0.0,
+            ..SamplerConfig::default()
+        };
+        let noisy = SamplerConfig {
+            epsilon: 0.15,
+            ..SamplerConfig::default()
+        };
 
         let mut differ = 0;
         let mut compared = 0;
         for index in 0..40u64 {
             // 任一侧育成提前失败就跳过：那种情况下两侧不可比
-            let (SampleOutcome::Captured(a), SampleOutcome::Captured(b)) =
-                (sample_position(&space, &plain, index)?, sample_position(&space, &noisy, index)?)
-            else {
+            let (SampleOutcome::Captured(a), SampleOutcome::Captured(b)) = (
+                sample_position(&space, &plain, index)?,
+                sample_position(&space, &noisy, index)?
+            ) else {
                 continue;
             };
             compared += 1;
@@ -932,7 +1011,10 @@ mod tests {
         setup()?;
         let space = SamplingSpace::gen1()?;
         for bad in [-0.1, 1.5] {
-            let config = SamplerConfig { epsilon: bad, ..SamplerConfig::default() };
+            let config = SamplerConfig {
+                epsilon: bad,
+                ..SamplerConfig::default()
+            };
             let err = sample_position(&space, &config, 0).expect_err("越界 epsilon 应当报错");
             println!("epsilon={bad} -> {err}");
         }
@@ -1040,12 +1122,25 @@ mod tests {
             let pos = must_capture(&space, &config, index)?;
             let mut rng = pos.decision_rng.clone();
             let out = search.search(&pos.game, &pos.actions, &mut rng)?;
-            println!("index={index} 回合 {} 阶段 {:?} 候选 {}", pos.turn, pos.stage, pos.actions.len());
+            println!(
+                "index={index} 回合 {} 阶段 {:?} 候选 {}",
+                pos.turn,
+                pos.stage,
+                pos.actions.len()
+            );
             for (i, result) in out.action_results.iter().enumerate() {
-                println!("  #{i} {} n={} mean={:.1}", pos.actions[i], result.0.count(), result.0.mean());
+                println!(
+                    "  #{i} {} n={} mean={:.1}",
+                    pos.actions[i],
+                    result.0.count(),
+                    result.0.mean()
+                );
             }
             assert_eq!(out.action_results.len(), pos.actions.len(), "搜索输出应与候选表等长");
-            assert!(out.action_results.iter().any(|r| r.0.count() > 0), "搜索没有产出任何有效样本");
+            assert!(
+                out.action_results.iter().any(|r| r.0.count() > 0),
+                "搜索没有产出任何有效样本"
+            );
         }
         Ok(())
     }

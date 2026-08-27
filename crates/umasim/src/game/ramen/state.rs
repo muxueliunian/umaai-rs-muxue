@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::{FeelingType, RamenStage, rules::NPC_CHARA_IDS};
 use crate::{
     game::{BaseGame, BasePerson, InheritInfo, PersonType, traits::Game},
-    gamedata::ramen::RAMENDATA,
+    gamedata::{GAMECONSTANTS, ramen::RAMENDATA},
     global,
     rng::{EventRng, SplitmixRng, StrategyRng, StreamTag, TurnFixedRng, derive_seed}
 };
@@ -74,6 +74,27 @@ pub struct RamenState {
     /// 映射：turn 2 → 0，turn 23 → 1，turn 47 → 2。
     #[serde(default)]
     pub yearly_selected_regions: [[usize; 3]; 3],
+    /// 观测用：当前年份下标（0/1/2），供诀窍流转埋点定位年份数组。
+    ///
+    /// 在 RMJ 归档（[`Self::archive_year_counters`]）时顺带推进（turn 71 后封顶 2），
+    /// 初始 0。**纯观测**，不参与任何规则/策略逻辑。
+    #[serde(default)]
+    pub obs_year: usize,
+    /// 观测用：逐年友情训练回合数（下标 0/1/2 = 第 1/2/3 年）。
+    ///
+    /// 写入点在 `fill_feeling_gauge`（`is_shining` 时累加）。**纯观测**。
+    #[serde(default)]
+    pub yearly_friend_turns: [i32; 3],
+    /// 观测用：逐年诀窍获得数（槽满 [`GAUGE_LIMIT`] 清零 +1 的次数）。
+    ///
+    /// 写入点在 `add_gauge` 清零分支。**纯观测**。
+    #[serde(default)]
+    pub yearly_gauge_gain: [i32; 3],
+    /// 观测用：逐年诀窍溢出数（库存超 [`FEELING_LIMIT`] 被丢弃）。
+    ///
+    /// 写入点在 `add_feeling` 丢弃分支。**纯观测**。
+    #[serde(default)]
+    pub yearly_gauge_overflow: [i32; 3],
     /// 诀窍角标分配（回合 2-71 时每个训练随机分配一个诀窍类型）
     pub train_feeling_type: Option<[FeelingType; 5]>,
 
@@ -284,6 +305,8 @@ impl RamenState {
             .yearly_eat_count
             .get_mut(year_idx)
             .ok_or_else(|| anyhow!("yearly_eat_count 下标 {year_idx} 越界"))? = self.eat_count;
+        // 观测：推进当前年份（turn 71 结算后封顶 2，覆盖超级拉面回合）
+        self.obs_year = (year_idx + 1).min(2);
         Ok(())
     }
 
@@ -331,14 +354,14 @@ impl RamenGame {
             .extend(global!(RAMENDATA).friend_events.values().map(|e| e.id));
         // 五维属性上限：拉面杯剧本数据覆盖（Phase 2 步骤 1：从 constants.json 隔离到 scenario_ramen）
         // 若 scenario_ramen.json 未提供该字段，回退到全局默认值（防御）
+        //
+        // 注意：温泉剧本对应字段（onsen/game.rs:135）有 `min(2800)` 防御性 cap，
+        // 但拉面剧本 speed 基础上限是 3100，`min(2800)` 会硬截断——把限高速玩家进 3100+
+        // 区间到不可达。两剧本基值范围不同，不能共用同一 cap：拉面无防御需要。
         if let Some(limit) = global!(RAMENDATA).five_status_limit_base {
-            for i in 0..5 {
-                ret.uma.five_status_limit[i] = limit[i].min(2800);
-            }
+            ret.uma.five_status_limit = limit;
         } else {
-            for i in 0..5 {
-                ret.uma.five_status_limit[i] = ret.uma.five_status_limit[i].min(2800);
-            }
+            ret.uma.five_status_limit = global!(GAMECONSTANTS).five_status_limit_base;
         }
         // 携带4种卡以上才能分身
         ret.deck_can_split = ret.card_type_count.iter().filter(|x| **x > 0).count() >= 4;
@@ -484,7 +507,10 @@ impl RamenGame {
             Some(master) => {
                 let turn = self.base.turn as u64;
                 self.turn_fixed = Some(TurnFixedRng::new(derive_seed(master, &[turn])));
-                self.strategy = Some(StrategyRng::new(derive_seed(master, &[turn, StreamTag::Strategy.tag()])));
+                self.strategy = Some(StrategyRng::new(derive_seed(master, &[
+                    turn,
+                    StreamTag::Strategy.tag()
+                ])));
                 self.event = Some(EventRng::new(derive_seed(master, &[turn, StreamTag::Event.tag()])));
             }
             None => {

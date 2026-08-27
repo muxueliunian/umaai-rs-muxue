@@ -79,13 +79,8 @@ impl<T> RecordingTrainer<T> {
 
     /// 追加一条决策记录
     fn record(
-        &self,
-        game: &RamenGame,
-        stage: &str,
-        candidates: Vec<String>,
-        candidate_details: Vec<String>,
-        candidate_recipes: Vec<String>,
-        selected: usize
+        &self, game: &RamenGame, stage: &str, candidates: Vec<String>, candidate_details: Vec<String>,
+        candidate_recipes: Vec<String>, selected: usize
     ) {
         let selected_desc = candidates.get(selected).cloned().unwrap_or_default();
         self.log.borrow_mut().push(TurnDecision {
@@ -102,6 +97,7 @@ impl<T> RecordingTrainer<T> {
     /// 候选的可读文本（选项名 + 配方 + 内联效果预览）：
     /// - Train 阶段训练候选：`(速训练, "", 速60 力15 39pt 体力-22 诀窍槽 A+6 B+5 C+8)`
     /// - RamenSelect 阶段吃面候选：`(吃面/中山-全, 配方A2B0C3, (训+20,友情+50,...))`
+    /// - RegionSelect 阶段地区候选：`(札幌-速, 配方A2B2C1, youqing50 pt_bonus50 训练位[速])`
     /// - 其他动作：`(Display 文本, "", "")`
     fn candidate_text(&self, game: &RamenGame, a: &RamenAction) -> Result<(String, String, String)> {
         match game.stage {
@@ -176,8 +172,41 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for RecordingTrainer<T> {
     fn select_action(
         &self, game: &RamenGame, actions: &[<RamenGame as Game>::Action], rng: &mut StdRng
     ) -> Result<usize> {
-        // 实时模式：先展示候选（含内联预览），再交 inner 决策
+        // 实时模式：按阶段分摊，避免每回合重复打三次相同信息
+        // - RamenSelect（回合第一阶段，Distribute 完成后的全状态）：
+        //     打马娘状态 + 剧本状态 + 训练明细 + 候选
+        // - SpecialSelect（buff 未应用，训练值与 RamenSelect 阶段等价）：只打候选
+        // - Train（吃面已 ground_ramen_effects，buff 已应用）：重打训练明细 + 候选
         if self.verbose {
+            match game.stage {
+                RamenStage::RamenSelect => {
+                    // Distribute 完成（回合第一阶段，吃面与否决定前）
+                    // ——打马娘状态 + 剧本状态 + 训练明细，玩家可对比"不吃面"和"吃面"训练值
+                    if let Ok(status) = game.explain() {
+                        println!("{status}");
+                    }
+                    let script_info = game.explain_ramen_info();
+                    if !script_info.is_empty() {
+                        println!("{script_info}");
+                    }
+                    if let Ok(dist_info) = game.explain_distribution() {
+                        println!("{dist_info}");
+                    }
+                }
+                RamenStage::Train => {
+                    // 训练阶段：玩家已选了面或决定不吃。仅当玩家选了面（current_ramen 已落地）
+                    // 时训练明细与 RamenSelect 阶段不同——重打印；不吃面时不重复打。
+                    if game.ramen.current_ramen.is_some() {
+                        if let Ok(dist_info) = game.explain_distribution() {
+                            println!("{dist_info}");
+                        }
+                    }
+                }
+                RamenStage::SpecialSelect => {
+                    // 吃面 buff 还未 ground（仍 pending），训练值与 RamenSelect 等价，跳过
+                }
+                _ => {}
+            }
             println!("{}", self.render_candidates(game, actions)?);
         }
         let idx = self.inner.select_action(game, actions, rng)?;
@@ -200,11 +229,7 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for RecordingTrainer<T> {
 
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
         if self.verbose {
-            println!(
-                "== 候选 [回合 {} · 事件] {} 个 ==",
-                game.turn() + 1,
-                choices.len()
-            );
+            println!("== 候选 [回合 {} · 事件] {} 个 ==", game.turn() + 1, choices.len());
             for (i, x) in choices.iter().enumerate() {
                 let text = x.iter().map(|y| y.explain()).collect::<Vec<_>>().join(" | ");
                 println!("  {}. {}", i + 1, text.bright_yellow());
@@ -212,11 +237,7 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for RecordingTrainer<T> {
         }
         let idx = self.inner.select_choice(game, choices, rng)?;
         if self.verbose {
-            let text = choices[idx]
-                .iter()
-                .map(|y| y.explain())
-                .collect::<Vec<_>>()
-                .join(" | ");
+            let text = choices[idx].iter().map(|y| y.explain()).collect::<Vec<_>>().join(" | ");
             println!("→ 选择: {}\n", text.bright_yellow());
         }
         let candidates: Vec<String> = choices
@@ -246,11 +267,7 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for RecordingTrainer<T> {
         }
         let idx = self.inner.select_event_choice(game, event, choices, rng)?;
         if self.verbose {
-            let text = choices[idx]
-                .iter()
-                .map(|y| y.explain())
-                .collect::<Vec<_>>()
-                .join(" | ");
+            let text = choices[idx].iter().map(|y| y.explain()).collect::<Vec<_>>().join(" | ");
             println!("→ 选择: {}\n", text.bright_yellow());
         }
         let candidates: Vec<String> = choices
@@ -287,10 +304,7 @@ pub fn render_turn_situation(game: &RamenGame) -> Result<String> {
 pub fn render_decision(d: &TurnDecision) -> String {
     // SpecialSelect 阶段仅 1 个候选且无隐藏风味替换（0 替换）时，玩家没有真实
     // 选择空间，用提示代替"1 个候选"列表
-    if d.stage.starts_with("SpecialSelect")
-        && d.candidates.len() == 1
-        && !d.candidates[0].contains("(替换")
-    {
+    if d.stage.starts_with("SpecialSelect") && d.candidates.len() == 1 && !d.candidates[0].contains("(替换") {
         return format!(
             "== 决策 [回合 {} · SpecialSelect] 无隐藏风味可选，自动 0 替换 ==",
             d.turn + 1
@@ -317,7 +331,11 @@ pub fn render_decision(d: &TurnDecision) -> String {
             parts.push(detail);
         }
         let line = parts.join(" ");
-        lines.push(if mark.is_empty() { line } else { format!("{line} {mark}") });
+        lines.push(if mark.is_empty() {
+            line
+        } else {
+            format!("{line} {mark}")
+        });
     }
     lines.join("\n")
 }
@@ -426,17 +444,21 @@ mod tests {
             anyhow::bail!("应停在回合 31 开始，实际 turn={} stage={:?}", game.turn(), game.stage);
         }
 
-        // 切回 info：第 31 回合的规则层 diag（效果）可见
+        // 切回 info：第 31 回合的规则层 diag（效果）可见。Core-only 测试没有
+        // flexi_logger/LOGGER，保持静默即可；测试验证的是流程与渲染，不依赖日志后端。
+        #[cfg(feature = "cli")]
         if let Some(logger) = crate::gamedata::LOGGER.get() {
-            let handle = logger
-                .lock()
-                .map_err(|_| anyhow::anyhow!("LOGGER 锁中毒"))?;
+            let handle = logger.lock().map_err(|_| anyhow::anyhow!("LOGGER 锁中毒"))?;
             let spec = flexi_logger::LogSpecification::try_from("info")?;
             handle.set_new_spec(spec);
         }
 
         println!("╔════════════════════════════════════════════╗");
-        println!("║  完整回合信息基线（第 {} 回合 · turn={}）   ║", game.turn() + 1, game.turn());
+        println!(
+            "║  完整回合信息基线（第 {} 回合 · turn={}）   ║",
+            game.turn() + 1,
+            game.turn()
+        );
         println!("╚════════════════════════════════════════════╝");
         println!();
         println!("【局面 · 回合开始】");

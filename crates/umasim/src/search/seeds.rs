@@ -22,7 +22,6 @@
 //!
 //! `InternalSeed` 已随拉面接驳退役（规则层直接注入 rollout 种子，无需分频道派生）。
 
-
 use crate::rng::splitmix64;
 
 /// SplitMix64 的 gamma 增量常数（黄金比例）

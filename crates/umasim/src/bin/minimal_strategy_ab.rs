@@ -52,15 +52,17 @@ fn main() -> Result<()> {
     init_global_with_config(&load_game_config()?)?;
 
     println!("A=master 现有手写基准；B=现有基准+受限本地修正（最多牺牲120点基础训练分）。");
-    println!("开始 A/B：每套策略 {RUNS} 局，基础种子 {BASE_SEED}，局号 0..{}", RUNS - 1);
+    println!(
+        "开始 A/B：每套策略 {RUNS} 局，基础种子 {BASE_SEED}，局号 0..{}",
+        RUNS - 1
+    );
 
     let mut outcomes_a = Vec::with_capacity(RUNS);
     let mut outcomes_b = Vec::with_capacity(RUNS);
     let mut records_a = Vec::new();
     let mut records_b = Vec::new();
-    let mut divergences = String::from(
-        "run_idx\tfinal_comparison\tturn\tstage\tA_action\tB_action\tA_breakdown\tB_breakdown\n"
-    );
+    let mut divergences =
+        String::from("run_idx\tfinal_comparison\tturn\tstage\tA_action\tB_action\tA_breakdown\tB_breakdown\n");
 
     for run_idx in 0..RUNS as u64 {
         let trainer_a = LoggingTrainer::new(RamenHandwrittenTrainer::new(), run_idx);
@@ -84,9 +86,7 @@ fn main() -> Result<()> {
         let comparison = compare_scores(outcome_a.score, outcome_b.score);
 
         if let Some((row_a, row_b)) = log_a.rows.iter().zip(&log_b.rows).find(|(row_a, row_b)| {
-            row_a.turn != row_b.turn
-                || row_a.stage != row_b.stage
-                || row_a.action_desc != row_b.action_desc
+            row_a.turn != row_b.turn || row_a.stage != row_b.stage || row_a.action_desc != row_b.action_desc
         }) {
             divergences.push_str(&format!(
                 "{run_idx}\t{comparison}\t{}\t{}\t{}\t{}\t{}\t{}\n",
@@ -98,9 +98,7 @@ fn main() -> Result<()> {
                 clean_tsv_field(row_b.score_breakdown.as_deref().unwrap_or(""))
             ));
         } else {
-            divergences.push_str(&format!(
-                "{run_idx}\t{comparison}\t-\t无分歧\t-\t-\t-\t-\n"
-            ));
+            divergences.push_str(&format!("{run_idx}\t{comparison}\t-\t无分歧\t-\t-\t-\t-\n"));
         }
 
         println!(
@@ -114,8 +112,7 @@ fn main() -> Result<()> {
     }
 
     fs::create_dir_all("logs")?;
-    DecisionLog { rows: records_a }
-        .save_to(std::path::Path::new("logs/A_existing_decisions.csv"))?;
+    DecisionLog { rows: records_a }.save_to(std::path::Path::new("logs/A_existing_decisions.csv"))?;
     DecisionLog { rows: records_b }.save_to(std::path::Path::new("logs/B_local_decisions.csv"))?;
     fs::write("logs/first_divergence.tsv", divergences)?;
 

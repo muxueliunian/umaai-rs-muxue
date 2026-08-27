@@ -96,6 +96,10 @@ pub fn add_gauge(state: &mut RamenState, feeling_type: FeelingType, amount: i32)
     if state.feeling_slot[idx] >= GAUGE_LIMIT {
         state.feeling_slot[idx] = 0;
         add_feeling(state, feeling_type, 1);
+        // 观测：清零获得 1 诀窍（纯采集，不影响逻辑）
+        if let Some(slot) = state.yearly_gauge_gain.get_mut(state.obs_year) {
+            *slot += 1;
+        }
         1
     } else {
         0
@@ -116,6 +120,10 @@ pub fn add_feeling(state: &mut RamenState, feeling_type: FeelingType, count: i32
                 let oldest_idx = oldest as usize;
                 if state.feeling_stock[oldest_idx] > 0 {
                     state.feeling_stock[oldest_idx] -= 1;
+                    // 观测：溢出丢弃 1 诀窍（纯采集，不影响逻辑）
+                    if let Some(slot) = state.yearly_gauge_overflow.get_mut(state.obs_year) {
+                        *slot += 1;
+                    }
                 }
                 state.feeling_queue.remove(0);
             } else {

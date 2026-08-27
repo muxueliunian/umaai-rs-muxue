@@ -202,7 +202,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
 }
 #[cfg(test)]
 mod tests {
-    use rand::SeedableRng;
+    //use rand::SeedableRng;
 
     use super::*;
     use crate::{

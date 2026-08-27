@@ -314,7 +314,11 @@ where
         if !self.config.crn_stage_reseed {
             return;
         }
-        *rng = StdRng::seed_from_u64(RolloutSeeds::stage_seed(rollout_seed, game.turn(), game.crn_stage_key()));
+        *rng = StdRng::seed_from_u64(RolloutSeeds::stage_seed(
+            rollout_seed,
+            game.turn(),
+            game.crn_stage_key()
+        ));
     }
 
     /// rollout 决策器
@@ -584,7 +588,6 @@ where
         // println!("--------------------");
         best_idx
     }
-
 }
 
 impl FlatSearch<OnsenGame> {
@@ -603,7 +606,6 @@ impl FlatSearch<OnsenGame> {
             Ok(SearchScore { score, score_pt })
         })
     }
-
 
     /// 模拟单个动作到终局
     ///
@@ -693,7 +695,6 @@ impl FlatSearch<OnsenGame> {
             Ok((score_mean, score_mean + pt_bias))
         }
     }
-
 
     #[cfg(feature = "onnx")]
     /// 单次 rollout，跑到终局或 `max_depth` 截断处（NN leaf 微批路径用）
@@ -833,7 +834,7 @@ impl FlatSearch<RamenGame> {
 ///
 /// 显式 match 而非依赖枚举判别值：`OnsenTurnStage` 的变体顺序若调整，
 /// 这里会编译报错提醒同步，而不是静默改变所有历史种子。
-fn stage_id(stage: &OnsenTurnStage) -> u64 {
+fn _stage_id(stage: &OnsenTurnStage) -> u64 {
     match stage {
         OnsenTurnStage::Begin => 0,
         OnsenTurnStage::Distribute => 1,
@@ -908,9 +909,8 @@ impl<'a> crate::game::Trainer<OnsenGame> for SimulationTrainer<'a> {
 mod tests {
     use std::cell::RefCell;
 
-    use anyhow::anyhow;
     use rand::SeedableRng;
-
+    use anyhow::anyhow;
     use super::*;
     use crate::{
         game::{
@@ -1152,7 +1152,10 @@ mod tests {
         let normal = capture(42, false)?;
         let reversed = capture(42, true)?;
         for (i, (a, b)) in normal.iter().zip(reversed.iter()).enumerate() {
-            println!("动作 {i}: 正序 n={} mean={:.6} | 逆序 n={} mean={:.6}", a.n, a.mean, b.n, b.mean);
+            println!(
+                "动作 {i}: 正序 n={} mean={:.6} | 逆序 n={} mean={:.6}",
+                a.n, a.mean, b.n, b.mean
+            );
         }
         assert_eq!(normal, reversed, "各动作统计量不应随候选顺序变化");
         Ok(())
@@ -1272,7 +1275,12 @@ mod tests {
     #[test]
     fn test_ramen_root_search_reproducible() -> Result<()> {
         let (game, actions) = ramen_root()?;
-        println!("拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个", game.turn(), game.stage, actions.len());
+        println!(
+            "拉面根局面: 回合 {} 阶段 {:?}，候选 {} 个",
+            game.turn(),
+            game.stage,
+            actions.len()
+        );
 
         let a = ramen_search(42)?;
         let b = ramen_search(42)?;
@@ -1934,8 +1942,13 @@ mod tests {
         const ROLLOUTS: usize = 200;
 
         let (game, actions) = root_state()?;
-        println!("根局面: 回合 {} 阶段 {:?}，候选 {} 个
-", game.turn, game.stage, actions.len());
+        println!(
+            "根局面: 回合 {} 阶段 {:?}，候选 {} 个
+",
+            game.turn,
+            game.stage,
+            actions.len()
+        );
 
         for reseed in [false, true] {
             let cfg = SearchConfig::default().with_crn_stage_reseed(reseed);
@@ -1970,7 +1983,11 @@ mod tests {
                 scores.push(ok_scores);
             }
 
-            let label = if reseed { "开启按阶段重播种" } else { "仅共享起始种子" };
+            let label = if reseed {
+                "开启按阶段重播种"
+            } else {
+                "仅共享起始种子"
+            };
             println!("===== {label} =====");
 
             let mut corrs = Vec::new();

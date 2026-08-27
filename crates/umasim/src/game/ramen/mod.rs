@@ -13,10 +13,10 @@ pub mod events;
 pub mod features;
 pub mod game;
 pub mod policy;
-pub mod rules;
-pub mod state;
 #[cfg(test)]
 mod rng_consistency;
+pub mod rules;
+pub mod state;
 
 pub use action::*;
 use enum_iterator::Sequence;

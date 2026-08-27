@@ -8,9 +8,9 @@
 //!   以及 turn 2 的 `Begin → RegionSelect → BeginAfterRegionSelect` 分叉
 
 use anyhow::{Result, anyhow};
+use colored::Colorize;
 #[cfg(feature = "cli")]
 use comfy_table::{ColumnConstraint, Table, Width};
-use colored::Colorize;
 use rand::{Rng, SeedableRng, prelude::IndexedRandom, rngs::StdRng};
 use rand_distr::{Distribution, weighted::WeightedIndex};
 
@@ -284,7 +284,7 @@ impl Game for RamenGame {
         }
 
         // race_turn 短路：仅"比赛"一个动作，跳过 RamenSelect/SpecialSelect
-        if self.is_race_turn() {
+        if self.is_race_turn() && self.stage == RamenStage::Train {
             return Ok(vec![RamenAction::no_ramen(Operation::Race)]);
         }
 
@@ -618,7 +618,7 @@ impl Game for RamenGame {
             }
             rows.push(row);
         }
-        // cli 下输出完整表格；core-only 下退化为简化文本（保留训练 + 失败率计算）
+        // cli 下输出完整表格 + 训练数值计算明细；core-only 下退化为简化文本
         #[cfg(feature = "cli")]
         {
             let mut table = Table::new();
@@ -626,9 +626,11 @@ impl Game for RamenGame {
             for col in table.column_iter_mut() {
                 col.set_constraint(ColumnConstraint::Absolute(Width::Percentage(20)));
             }
-            let lines = vec![table.to_string()];
-            // 训练数值计算明细（速 速17 力2 9pt 体力-22 诀窍槽...）暂时屏蔽，
-            // 需要时恢复：self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
+            let mut lines = vec![table.to_string()];
+            // 训练数值计算明细（每训练位一行：数值 + 失败率 + 诀窍槽 A/B/C 增量）
+            // ——玩家手动玩时此为决策依据；调用 `collect_train_lines` 输出 5 行
+            //   紧跟在人头分布表之后，序列化为文字段落（cli 兼容）
+            self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
             Ok(lines.join("\n"))
         }
         #[cfg(not(feature = "cli"))]
@@ -637,8 +639,8 @@ impl Game for RamenGame {
             for (i, row) in rows.iter().enumerate() {
                 lines.push(format!("[{}] {}", i, row.join(" ")));
             }
-            // 训练数值计算明细暂时屏蔽，需要时恢复：
-            // self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
+            // core-only 也保留训练数值计算明细（褪化为文本，仍可用于结构化日志）
+            self.collect_train_lines(&mut lines, &headers, &dist, show_ramen)?;
             Ok(lines.join("\n"))
         }
     }
@@ -1233,12 +1235,12 @@ impl RamenGame {
         // 友人解锁判定（触发条件依赖 friend.out_state——是否点击友人）
         let unlock_event = match ev.as_mut() {
             Some(s) => self.try_friend_unlock(s),
-            None => self.try_friend_unlock(rng),
+            None => self.try_friend_unlock(rng)
         };
         // 事件生成（随机部分；Fixed 剧本事件无随机，天然逐位一致）
         let mut events = match ev.as_mut() {
             Some(s) => self.generate_events(s),
-            None => self.generate_events(rng),
+            None => self.generate_events(rng)
         };
         if unlock_event.is_some() {
             // 解锁触发时取代一般随机事件（与原语义一致）
@@ -1249,7 +1251,7 @@ impl RamenGame {
         for event in &events {
             match ev.as_mut() {
                 Some(s) => self.run_event_on(event, trainer, rng, s)?,
-                None => self.run_event(event, trainer, rng)?,
+                None => self.run_event(event, trainer, rng)?
             }
         }
         self.event = ev;
@@ -1332,7 +1334,7 @@ impl RamenGame {
                 let mut strat = self.strategy.take();
                 match strat.as_mut() {
                     Some(s) => super::action::RamenAction::distribute_super_ramen_clones(self, s)?,
-                    None => super::action::RamenAction::distribute_super_ramen_clones(self, rng)?,
+                    None => super::action::RamenAction::distribute_super_ramen_clones(self, rng)?
                 }
                 self.strategy = strat;
             }
@@ -1359,7 +1361,7 @@ impl RamenGame {
         let mut strat = self.strategy.take();
         let result = match strat.as_mut() {
             Some(s) => self.apply_action(action, s),
-            None => self.apply_action(action, rng),
+            None => self.apply_action(action, rng)
         };
         self.strategy = strat;
         result
@@ -1371,20 +1373,7 @@ impl RamenGame {
     /// 否则由 trainer 从候选面（不含/含至少一面）中选一个，apply 写 pending_ramen。
     fn run_ramen_select<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
         // race_turn 短路：直接执行比赛，stage 切到 AfterTrain
-        if self.is_race_turn() {
-            let actions = self.list_actions()?;
-            // actions 此时仅含 [no_ramen(Race)]，但 trainer 不必要再选；
-            // 直接应用比赛行为（与旧行为兼容，比赛无随机，走策略流无副作用）。
-            self.apply_action_with_strategy(&actions[0], rng)?;
-            // race_turn 不进入 SpecialSelect/Train，直接跳到 AfterTrain
-            self.stage = RamenStage::AfterTrain;
-            // 立即处理 AfterTrain 阶段遗留的 unresolved_events（如 race_career）
-            // 否则下次 next() 会跳过 run_after_train，直接到 NextTurn
-            self.run_after_train(trainer, rng)?;
-            self.stage = RamenStage::NextTurn;
-            return Ok(());
-        }
-
+        // 固定比赛回合仍先经过选面/隐藏风味阶段；Train 阶段只提供比赛动作。
         let actions = self.list_actions()?;
         let selection = trainer.select_action(self, &actions, rng)?;
         self.apply_action_with_strategy(&actions[selection], rng)?;
@@ -1436,11 +1425,18 @@ impl RamenGame {
         diag!("【事件】#{} {}", event.id, event.name);
         if event.player_select && event.choices.len() > 1 {
             for (index, choice) in event.choices.iter().enumerate() {
-                diag!("  选项 {}: {}", index + 1, crate::explain::Explain::event_choice(choice));
+                diag!(
+                    "  选项 {}: {}",
+                    index + 1,
+                    crate::explain::Explain::event_choice(choice)
+                );
             }
             let selection = trainer.select_event_choice(self, event, &event.choices, decision_rng)?;
             if selection >= event.choices.len() {
-                return Err(anyhow!("事件选项索引超出范围: selection={selection}, choices_len={}", event.choices.len()));
+                return Err(anyhow!(
+                    "事件选项索引超出范围: selection={selection}, choices_len={}",
+                    event.choices.len()
+                ));
             }
             diag!("  → 选择 选项 {}", selection + 1);
             self.apply_event(&event, selection, rule_rng)
@@ -1810,9 +1806,6 @@ impl RamenGame {
     /// 被 `explain_distribution` 在 cli / core 两种模式下复用，避免重复实现。
     /// 作为 inherent 方法（不属于 `Game` trait），保证 `Game::explain_distribution` 内
     /// 通过 `self.collect_train_lines(...)` 调用时优先匹配 inherent 实现。
-    ///
-    /// 暂时屏蔽（训练数值计算明细）：调用点已注释，需要时恢复调用并删除本 allow。
-    #[allow(dead_code)]
     fn collect_train_lines(
         &self, lines: &mut Vec<String>, headers: &[String], _dist: &[Vec<i32>], show_ramen: bool
     ) -> Result<()> {
@@ -1856,7 +1849,14 @@ impl RamenGame {
         };
 
         let dist = &self.base.distribution;
-        let support_count = dist[train]
+        // 防护：`distribution` 未填满 5 行（早期回合 / unit-test 直接构造 game 调本方法），
+        // 跳过该位的 buff 统计（不影响 explain_distribution 自身的 line 553 fill）
+        if train >= dist.len() {
+            // 训练位尚未就绪，返回一行只含失败率=0 + 数值零的占位文本，调用方仍可读
+            return Ok(format!("{label} 训练位未就绪"));
+        }
+        let dist_train = &dist[train];
+        let support_count = dist_train
             .iter()
             .filter(|&&p| {
                 p >= 0
@@ -1866,7 +1866,7 @@ impl RamenGame {
             .count();
         // NPC 数量 = 本训练位置实际分配的 Npc 人数（`ramen_memo_cn.md` 算例：
         // NPC数量=3 时加成 floor(3/2)，非固定 5；与生效层 `fill_feeling_gauge` 一致）
-        let npc_count = dist[train]
+        let npc_count = dist_train
             .iter()
             .filter(|&&p| {
                 p >= 0
@@ -1902,7 +1902,12 @@ impl RamenGame {
 
         let gauge_detail = format!("诀窍槽 A+{} B+{} C+{}", gauge_a, gauge_b, gauge_c);
         if effective_fail > 0.0 {
-            Ok(format!("{label} {} 失败率: {}% {}", value.explain(), effective_fail, gauge_detail))
+            Ok(format!(
+                "{label} {} 失败率: {}% {}",
+                value.explain(),
+                effective_fail,
+                gauge_detail
+            ))
         } else {
             Ok(format!("{label} {} {}", value.explain(), gauge_detail))
         }

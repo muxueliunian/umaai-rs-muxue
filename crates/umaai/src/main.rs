@@ -1,10 +1,7 @@
 //! umaai-rs - Rewrite UmaAI in Rust
 //!
 //! author: curran
-use std::{
-    sync::Mutex,
-    time::Instant
-};
+use std::{sync::Mutex, time::Instant};
 
 use anyhow::Result;
 use colored::Colorize;

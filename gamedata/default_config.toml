@@ -57,7 +57,7 @@ race_grades = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 0, 3, 4, 3, 3, 4, 3, 3, 2, 3,
 # 仅对第3年生效（解决 C(10,3)=120 组合性能问题）；第1/2年固定走 all 枚举。
 # 注意：本段字段必须在任意 [xxx] 段之前声明（顶层平铺），否则会被前一个段吞掉。
 # ramen_region_strategy: "all"（默认；枚举 120 组合）| "fixed"（按 ramen_region_fixed 单组合，跳过枚举）
-ramen_region_strategy = "all"
+ramen_region_strategy = "fixed"
 # 仅当 ramen_region_strategy="fixed" 时生效
 ramen_region_fixed = [[11, 14, 15]]
 
