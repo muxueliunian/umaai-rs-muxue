@@ -1643,11 +1643,20 @@ impl RecommendedRamenTrainer {
             policy.cap_discount_weight = 1.0;
 
             let mut local = LocalRamenConfig::default();
-            local.status_reserve_max = 40.0;
+            // 2026-08-28 上限修复后重扫（speed+stamina 两个主流配卡，500 局/build 同 seed 配对）：
+            // 旧值是在五维上限有缺陷时调的——速度被压在 2958、永远够不着上限，
+            // 「近上限衰减」从未真正生效，故 reserve/gap/over 当时等于在盲调。
+            local.status_reserve_max = 80.0;
             local.dynamic_vital = true;
             local.probabilistic_hint = true;
             local.expected_fail = true;
-            local.max_base_score_sacrifice = 140.0;
+            // 140 → 8000（+1325，t=16.5）。本参数限制启发式为长期收益牺牲多少本回合收益，
+            // 单调上升到 ~8000 才见顶、20000 后回落。需要放大 57 倍才最优说明旧值不是
+            // 「没调准」而是把策略锁死在短视模式：顶级人类打法正是持续牺牲当前收益去
+            // 顶终局面板。speed build 受益最大（+1974），因为它短板最多、最依赖长线规划。
+            local.max_base_score_sacrifice = 8000.0;
+            // 6 → 24（+83，t=2.4）。48/96 增益不再显著且 SE 翻倍，取 24。
+            local.hint_bonus = 24.0;
             local.ramen_window_weight = 0.10;
             // 吃面-训练联动（训练侧显式项）+ 吃面必成价值 + 隐藏风味饥饿加成：
             // 见 LocalRamenConfig 对应字段注释；数值经 base_seed=61444 配对矩阵调优
@@ -1662,9 +1671,12 @@ impl RecommendedRamenTrainer {
             // 字段保留可配（matrix_variant `fh`），preset 关闭。
             local.friend_future_hidden_weight = 0.0;
             // 动态属性平衡：按五维完成度修正训练边际价值（短板追赶 + 近上限衰减）。
+            // 2026-08-28 在 sacrifice=8000 的新基线上重扫：gap 0.5 → 10（+344，t=5.4；
+            // 20 以上回落）、over 0.5 → 4（+99，t=3.6）。⚠ 两者与 sacrifice 强耦合——
+            // 在旧的 sacrifice=140 基线上 gap 最优只有 3.0 且增益仅 +126，必须一起改。
             local.dynamic_status_balance = true;
-            local.status_gap_strength = 0.5;
-            local.status_overflow_strength = 0.5;
+            local.status_gap_strength = 10.0;
+            local.status_overflow_strength = 4.0;
             local.ramen_lookahead_weight = 0.0;
             local.ramen_lookahead_samples = 1;
             local.effective_ramen_failure = false;
