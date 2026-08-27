@@ -854,15 +854,20 @@ impl RamenGame {
         Self::apply_ramen_friendship(self)?;
 
         // 3. 显示 buff + distribution（玩家在选训练前看到效果）
-        crate::diag!("---- 吃面后 ----");
-        // 吃面后插入一行马娘状态（诀窍/PT 消耗后的最新状态）
-        crate::diag!("{}", self.uma.explain()?);
-        let ramen_info = self.explain_ramen_info();
-        if !ramen_info.is_empty() {
-            crate::diag!("{}", ramen_info);
-        }
-        if let Ok(dist_info) = self.explain_distribution() {
-            crate::diag!("训练:\n{}", dist_info);
+        // 整段 cfg(feature = "diag")：MCTS rollout 编译时关掉 diag feature 可省
+        // comfy-table 构造 + ANSI 解析（最贵的展示开销）；? 在 cfg 包块内整段消失。
+        #[cfg(feature = "diag")]
+        {
+            crate::diag!("---- 吃面后 ----");
+            // 吃面后插入一行马娘状态（诀窍/PT 消耗后的最新状态）
+            crate::diag!("{}", self.uma.explain()?);
+            let ramen_info = self.explain_ramen_info();
+            if !ramen_info.is_empty() {
+                crate::diag!("{}", ramen_info);
+            }
+            if let Ok(dist_info) = self.explain_distribution() {
+                crate::diag!("训练:\n{}", dist_info);
+            }
         }
 
         Ok(())
@@ -1176,12 +1181,17 @@ impl RamenGame {
         self.ramen.clear_pending();
 
         // 回合标题（turn_flow 风格分节；每回合一次）
-        diag!("────────── 回合 {} · 回合开始 ──────────", self.base.turn + 1);
-        diag!("{}", self.explain()?);
-        // 显示拉面杯信息（剧本机制未开启或URA回合时简化显示）
-        let ramen_info = self.explain_ramen_info();
-        if !ramen_info.is_empty() {
-            diag!("{}", ramen_info);
+        // 整段 cfg(feature = "diag")：MCTS rollout 编译时关掉 diag 可省
+        // self.explain() 构造 String + self.explain_ramen_info() 构造 String。
+        #[cfg(feature = "diag")]
+        {
+            diag!("────────── 回合 {} · 回合开始 ──────────", self.base.turn + 1);
+            diag!("{}", self.explain()?);
+            // 显示拉面杯信息（剧本机制未开启或URA回合时简化显示）
+            let ramen_info = self.explain_ramen_info();
+            if !ramen_info.is_empty() {
+                diag!("{}", ramen_info);
+            }
         }
 
         // 动态人头管理
@@ -1339,6 +1349,8 @@ impl RamenGame {
                 self.strategy = strat;
             }
 
+            // 训练后展示（comfy-table + ANSI 解析；MCTS rollout 编译时关 diag 跳过）
+            #[cfg(feature = "diag")]
             diag!("训练:\n{}", self.explain_distribution()?);
         }
         Ok(())
@@ -1422,15 +1434,22 @@ impl RamenGame {
     fn run_event_on<T: Trainer<Self>>(
         &mut self, event: &EventData, trainer: &T, decision_rng: &mut StdRng, rule_rng: &mut impl Rng
     ) -> Result<()> {
-        diag!("【事件】#{} {}", event.id, event.name);
-        if event.player_select && event.choices.len() > 1 {
-            for (index, choice) in event.choices.iter().enumerate() {
-                diag!(
-                    "  选项 {}: {}",
-                    index + 1,
-                    crate::explain::Explain::event_choice(choice)
-                );
+        // 事件三段展示（标题 / 选项描述 / 选择结果）—— MCTS rollout 编译时关 diag 跳过
+        // Explain::event_choice() 构造 String，开销可观
+        #[cfg(feature = "diag")]
+        {
+            diag!("【事件】#{} {}", event.id, event.name);
+            if event.player_select && event.choices.len() > 1 {
+                for (index, choice) in event.choices.iter().enumerate() {
+                    diag!(
+                        "  选项 {}: {}",
+                        index + 1,
+                        crate::explain::Explain::event_choice(choice)
+                    );
+                }
             }
+        }
+        let selection = if event.player_select && event.choices.len() > 1 {
             let selection = trainer.select_event_choice(self, event, &event.choices, decision_rng)?;
             if selection >= event.choices.len() {
                 return Err(anyhow!(
@@ -1438,7 +1457,13 @@ impl RamenGame {
                     event.choices.len()
                 ));
             }
+            #[cfg(feature = "diag")]
             diag!("  → 选择 选项 {}", selection + 1);
+            selection
+        } else {
+            0
+        };
+        if event.player_select && event.choices.len() > 1 {
             self.apply_event(&event, selection, rule_rng)
         } else {
             self.apply_event(&event, 0, rule_rng)

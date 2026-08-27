@@ -47,5 +47,8 @@ ndarray = "0.17.1"
 # 保序 map（bench player_builds 解析；已由 toml 间接依赖，仅提升为直接依赖）
 indexmap = { version = "2.14.0", features = ["serde"] }
 
+# CPU/Heap profiler（pprof-rs，Google pprof 协议；sim_profiler bin 用）
+pprof = "0.15.0"
+
 # Git 钩子分发（cargo-husky：构建时把 .cargo-husky/hooks/ 复制到 .git/hooks/）
 # cargo-husky = { version = "1.5.0", default-features = false, features = ["user-hooks"] }

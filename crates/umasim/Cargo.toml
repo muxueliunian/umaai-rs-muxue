@@ -26,6 +26,10 @@ path = "tools/data_collection/trainer_overhead.rs"
 name = "mcts_rollout_switch_verify"
 path = "tools/data_collection/mcts_rollout_switch_verify.rs"
 
+[[bin]]
+name = "sim_profiler"
+path = "tools/data_collection/sim_profiler.rs"
+
 [features]
 default = ["cli", "diag"]
 diag = []
@@ -74,3 +78,4 @@ tokio = { workspace = true, optional = true }
 
 tract-onnx = { workspace = true, optional = true }
 indexmap.workspace = true
+pprof = { workspace = true, features = ["protobuf-codec"] }

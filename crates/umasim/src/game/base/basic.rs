@@ -390,7 +390,9 @@ impl Game for BasicGame {
         //diag!("-- Turn {}-{:?} --", self.turn, self.stage);
         match self.stage {
             TurnStage::Begin => {
+                #[cfg(feature = "diag")]
                 println!("-----------------------------------------");
+                #[cfg(feature = "diag")]
                 diag!("{}", self.explain()?);
                 let mut events = self.generate_events(rng);
                 // 友人强制事件
@@ -421,6 +423,7 @@ impl Game for BasicGame {
                 } else {
                     self.distribute_all(rng)?;
                     self.distribute_hint(rng)?;
+                    #[cfg(feature = "diag")]
                     diag!("训练:\n{}", self.explain_distribution()?);
                 }
             }

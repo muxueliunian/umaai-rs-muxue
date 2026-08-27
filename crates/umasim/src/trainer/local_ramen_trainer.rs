@@ -2479,5 +2479,137 @@ mod tests {
 
         Ok(())
     }
+
+    /// Top 函数精确 microbench
+    ///
+    /// pprof 采样给出占比估算，但单次真实耗时需 wall-clock 直测。
+    /// 在固定局面（speed build turn=30 seed=61444）下，对 sim_profiler
+    /// 测出的 top 函数逐个直接调用 N=100000 次，记总/最小/平均时间。
+    ///
+    /// 输出单位：纳秒；3 轮取 min/mean 减小调度噪声。
+    ///
+    /// 跑法：`cargo test --release microbench_top_fns -- --nocapture`
+    #[test]
+    fn microbench_top_fns() {
+        use std::{hint::black_box, time::Instant};
+
+        use crate::{
+            bench, game::{Game, InheritInfo, ramen::RamenGame}, gamedata::init_global_with_config, trainer::{
+                LoggingTrainer, RecommendedRamenTrainer
+            }, utils::{get_workspace_root, load_game_config}
+        };
+
+        const N: usize = 100_000;
+        const UMA: u32 = 102_601;
+        const DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+        const INHERIT: InheritInfo = InheritInfo {
+            blue_count: [15, 0, 0, 0, 3],
+            extra_count: [0, 10, 30, 10, 30, 40]
+        };
+
+        let workspace_root = get_workspace_root().unwrap();
+        std::env::set_current_dir(workspace_root).unwrap();
+        init_global_with_config(&load_game_config().unwrap()).unwrap();
+
+        let (mut rng, rule_master) = bench::seeded_rngs(61444, 30);
+        let mut game = RamenGame::newgame(UMA, &DECK, INHERIT).unwrap();
+        game.set_rule_master(rule_master);
+        // 推进到 turn 30（避开 turn 0-1 边界、地区选择、第 1 年体力波动）
+        let mut trainer = LoggingTrainer::new(RecommendedRamenTrainer::new(), 30);
+        trainer.set_logging(false);
+        while game.turn() < 30 {
+            if !game.next() {
+                break;
+            }
+            game.run_stage(&trainer, &mut rng).unwrap();
+        }
+        let local = LocalRamenTrainer::new();
+        let gain_sample: [i32; 6] = [10, 5, 0, 0, 5, 0];
+
+        // 每函数：warmup + 3 轮 × N 次
+        fn run<F: FnMut()>(name: &str, mut f: F, n: usize) -> (u128, f64) {
+            // Warmup
+            for _ in 0..1000 {
+                black_box(f());
+            }
+            let mut min_total = u128::MAX;
+            let mut mean_sum = 0.0f64;
+            for round in 0..3 {
+                let start = Instant::now();
+                for _ in 0..n {
+                    black_box(f());
+                }
+                let total = start.elapsed().as_nanos();
+                min_total = min_total.min(total);
+                mean_sum += total as f64 / n as f64;
+                println!("  {} 轮 {}: total={} ns, mean={:.1} ns/call", name, round + 1, total, total as f64 / n as f64);
+            }
+            (min_total, mean_sum / 3.0)
+        }
+
+        println!("\n=== Top 函数 microbench (speed build turn=30 seed=61444) ===");
+        println!("采样函数单位：ns/op；3 轮取 min/mean\n");
+
+        // 1. reserve_penalty
+        let (min1, mean1) = run("LocalRamenTrainer::reserve_penalty", || {
+            let _ = black_box(local.reserve_penalty(&game, &gain_sample));
+        }, N);
+        println!(">>> reserve_penalty           min/单轮={} ns   mean/3轮={:.1} ns/call\n", min1, mean1);
+
+        // 2. default_calc_training_buff
+        let (min2, mean2) = run("RamenGame::default_calc_training_buff(0)", || {
+            let _ = black_box(game.default_calc_training_buff(0).unwrap());
+        }, N);
+        println!(">>> default_calc_training_buff   min/单轮={} ns   mean/3轮={:.1} ns/call\n", min2, mean2);
+
+        // 3. calc_training_value（先用 buff 准备）
+        let buffs = game.default_calc_training_buff(0).unwrap();
+        let (min3, mean3) = run("RamenGame::calc_training_value", || {
+            let _ = black_box(game.calc_training_value(&buffs, 0).unwrap());
+        }, N);
+        println!(">>> calc_training_value         min/单轮={} ns   mean/3轮={:.1} ns/call\n", min3, mean3);
+
+        // 4. SupportCard::calc_training_effect
+        let sample_card = &game.deck()[0];
+        let (min4, mean4) = run("SupportCard::calc_training_effect", || {
+            let _ = black_box(sample_card.calc_training_effect(&game, 0).unwrap());
+        }, N);
+        println!(">>> SupportCard::calc_training_effect  min/单轮={} ns   mean/3轮={:.1} ns/call\n", min4, mean4);
+
+        // 5. CardTrainingEffect::clone
+        let (min5, mean5) = run("CardTrainingEffect::clone", || {
+            let _ = black_box(buffs.clone());
+        }, N);
+        println!(">>> CardTrainingEffect::clone    min/单轮={} ns   mean/3轮={:.1} ns/call\n", min5, mean5);
+
+        // 6. Trainer::select_action（LocalRamenTrainer）—— 整段打分耗时
+        let train_actions: Vec<crate::game::ramen::RamenAction> = (0..5)
+            .map(|tr| {
+                use crate::game::ramen::{Operation, TrainingType};
+                crate::game::ramen::RamenAction::no_ramen(Operation::Train(match tr {
+                    0 => TrainingType::Speed,
+                    1 => TrainingType::Stamina,
+                    2 => TrainingType::Power,
+                    3 => TrainingType::Guts,
+                    _ => TrainingType::Wisdom,
+                }))
+            })
+            .collect();
+        use rand::SeedableRng;
+        let mut action_rng = rand::rngs::StdRng::seed_from_u64(42);
+        let (min6, mean6) = run("LocalRamenTrainer::select_action(train)", || {
+            let _ = black_box(local.select_action(&game, &train_actions, &mut action_rng).unwrap());
+        }, N);
+        println!(">>> LocalRamenTrainer::select_action  min/单轮={} ns   mean/3轮={:.1} ns/call\n", min6, mean6);
+
+        println!("\n=== 对比 pprof ticks 数据（1000 局，no diag feature）===");
+        println!("reserve_penalty:               148 ticks (~17.2%) [private, 不可直测]");
+        println!("default_calc_training_buff:     64 ticks (~7.4%) [Game trait]");
+        println!("calc_training_value:            40 ticks (~4.6%) [Game trait]");
+        println!("SupportCard::calc_training_effect: 20 ticks (~2.3%) [public]");
+        println!("LocalRamenTrainer::select_action  n/a [含整段打分链路]");
+        println!("\n注意：reserve_penalty 是 LocalRamenTrainer private 方法，从外部不可直测。");
+        println!("select_action 总耗时 - reserve_penalty 预估 ≈ 其他打分项。");
+    }
 }
 

@@ -14,3 +14,8 @@ master.mdb
 
 # Generated benchmark and training reports
 /benchmark-results/
+
+# Local Go toolchain caches (used for pprof tooling during profiling)
+.gocache/
+.gopath/
+/tmp/

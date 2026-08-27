@@ -9,6 +9,8 @@
 - **MCTS rollout 与 fallback 切到正式推荐策略**：搜索评分改用 `RecommendedRamenTrainer`（含吃面联动/体力门限/友人节奏/动态属性平衡等全机制），门控全关时与推荐策略逐位等价；新增 `for_rollout()` 关闭 breakdown 采集避免线程锁争用。诊断工具落盘 `trainer_overhead_diagnostic` 与 `mcts_rollout_switch_verify`
 - **搜索掉分待调优**：search_n=4 / 128 × 30/10 局对照，搜索结果均略低于纯推荐策略（train_only -3k~-13k、train+ramen -2k~-15k），疑 rollout 评估路径 / radical_factor=0 取 mean 口径 / Score vs Pt 口径需后续调试
 - **硬守门测试基线重抓**：随 trainer 切换，4 个 hardcode 分数/五维/skill_pt/scenario_pt/searched_count 测试重抓基线；`test_combined_on_skips_special_search` 放宽为「SpecialSelect 大多数走缓存命中」（race_turn 选 ramen 偶发触发重搜，缓存检查逻辑不变）
+- **rollout 加速：cfg(feature="diag") gate 掉 5 处 explain 类调用**：复用现有 diag feature，编译期排除 MCTS rollout 路径的屏幕输出代码（`self.explain_distribution` / `self.explain_ramen_info` / `self.explain` / `self.uma.explain` / `Explain::event_choice`），整段（含 `?`）随 diag feature 关闭编译期消失。**整局 CPU 时间 -29%（0.48s → 0.34s/200 局），分数完全一致 66313；MCTS search_n=128 train_only 外推 ~22.4s → ~16s/局**
+- **perf 诊断工具**：新增 `sim_profiler`（pprof-rs 0.15 + 自写 top-fold）+ `microbench_top_fns` 单元测试，定位训练打分链热点；新增 `pprof = "0.15"` workspace 依赖
 
 ## 2026-08-26
 - **吃面后必训练 at_trains 覆盖位（C 方案）**：新增 `LocalRamenConfig.eat_requires_covered_train`（推荐 preset 开启）——`decide_ramen` 对每个吃面候选预演"落地后最优训练位"，不在该面 `at_trains` 内则否决，实现"吃面后必训练覆盖位、不训练就不吃面"。吃面训练覆盖实测 80%→99%，总分与技能点双升。**改变拉面模拟数值，基线作废**
