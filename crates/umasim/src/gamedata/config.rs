@@ -901,6 +901,13 @@ pub struct OverrideConfig {
     /// 种马额外属性（可选覆盖）
     #[serde(default)]
     pub extra_count: Option<Array6>,
+    /// 训练员类型（可选覆盖；`"manual" | "random" | "handwritten" | "collector" | "neuralnet" | "mcts"`）
+    ///
+    /// `None` = 不覆盖 `default_config.toml`（仍是 `handwritten`）。
+    /// `trainer` 是 `GameConfig` 顶层字段、原本不在 `OverrideConfig` 里，
+    /// 此处加进来让 `game_config.toml` 能顶层切换 trainer 跑特定场景（不污染 default）。
+    #[serde(default)]
+    pub trainer: Option<String>,
     /// 温泉选择是否使用蒙特卡洛（可选覆盖）
     #[serde(default)]
     pub mcts_selected_onsen: Option<bool>,
@@ -941,6 +948,9 @@ impl OverrideGameConfig {
         }
         if let Some(v) = o.log_level {
             ret.log_level = v;
+        }
+        if let Some(v) = o.trainer {
+            ret.trainer = v;
         }
         if let Some(v) = o.mcts_selected_onsen {
             ret.mcts_selected_onsen = v;
@@ -1024,6 +1034,7 @@ mod tests {
             cards: None,
             blue_count: None,
             extra_count: None,
+            trainer: None,
             mcts_selected_onsen: None,
             log_level: None,
             num_threads: None,

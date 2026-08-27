@@ -18,19 +18,22 @@ blue_count = [15, 0, 0, 0, 3]
 log_level = "info"
 
 # 线程数（建议 = CPU 核心数；特定处理器如 Intel 14900k 若崩溃/蓝屏可改为 8）
-num_threads = 24
+num_threads = 16
 
 # 种马额外属性 [速度, 耐力, 力量, 根性, 智力, 技能点]
-extra_count = [0, 10, 30, 10, 30, 40]
+extra_count = [0, 20, 50, 20, 50, 20]
+
+# 训练员类型（可选覆盖 default_config.toml 的 trainer）
+# "manual" | "random" | "handwritten" | "collector" | "neuralnet" | "mcts"
+trainer = "mcts"
 
 # 温泉选择是否允许蒙特卡洛自由发挥（安卓马建议 false 减少世界线；须写在本段内才生效）
 mcts_selected_onsen = true
 
 # ---------- 常用区：[mcts] 段（覆盖默认搜索参数）----------
 [mcts]
-search_n = 12288
+search_n = 4096
 radical_factor_max = 1.4
-
 
 # ============================================================
 # 温泉遗留段（Phase 6 删除温泉时代预期移除）

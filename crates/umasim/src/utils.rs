@@ -437,6 +437,7 @@ pub(crate) fn fallback_override_game_config() -> OverrideGameConfig {
             cards: None,
             blue_count: None,
             extra_count: None,
+            trainer: None,
             mcts_selected_onsen: None,
             log_level: None,
             num_threads: None,
@@ -546,6 +547,29 @@ mod tests {
 
         cfg.trainer = "unknown".to_string();
         assert!(validate_game_config(&cfg).is_err());
+    }
+
+    /// `[config_override] trainer` 应能覆盖 `default_config.toml` 的 trainer。
+    ///
+    /// 回归：trainer 是 GameConfig 顶层字段，原本不在 OverrideConfig 里，
+    /// game_config.toml 顶层写 trainer=... 会被 serde 默默忽略。
+    /// 本测试是 OverrideConfig 收容 trainer 字段的合并守门。
+    #[test]
+    fn test_override_config_trainer_overrides_default() -> Result<()> {
+        let root = get_workspace_root()?;
+        let def_path = root.join("gamedata").join("default_config.toml");
+        let default_config: GameConfig = toml::from_str(&fs_err::read_to_string(&def_path)?)?;
+
+        let mut o = fallback_override_game_config();
+        o.config_override.trainer = Some("mcts".to_string());
+        let merged = o.merge(&default_config);
+        println!(
+            "覆盖前 default trainer = {}，覆盖后 merged trainer = {}",
+            default_config.trainer, merged.trainer
+        );
+        let mut c = Checks::new();
+        c.check(merged.trainer == "mcts", "OverrideConfig.trainer 覆盖 default");
+        c.finish()
     }
 
     #[test]
