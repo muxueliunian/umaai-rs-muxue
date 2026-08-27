@@ -18,6 +18,9 @@
 //!                 group >= search_n 时首轮就满足终止判据，自适应轮数为零、
 //!                 结果与均匀分配逐位相同。
 //! - `MP_STAGES`   搜索阶段（缺省 train,ramen）
+//! - `MP_TRAINER`  `mcts`（缺省）或 `hw`。`hw` 跑纯 `RecommendedRamenTrainer`，
+//!                 不开搜索，用于产出**与 MCTS 逐局同种子**的手写基线；
+//!                 此时 `MP_SEARCH_N` / `MP_RF` / `MP_UCB` 等一律忽略。
 //! - `MP_OUT`      CSV 输出目录（缺省 logs/mcts_panel）
 
 use std::{env, sync::Mutex, time::Instant};
@@ -29,7 +32,10 @@ use umasim::{
     game::InheritInfo,
     gamedata::{RamenRegionStrategy, init_global_with_config},
     search::SearchConfig,
-    trainer::{LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection},
+    trainer::{
+        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection,
+        RecommendedRamenTrainer
+    },
     utils::{get_workspace_root, load_game_config}
 };
 
@@ -45,7 +51,13 @@ fn main() -> Result<()> {
     let ucb: bool = ev::<u32>("MP_UCB", 0) > 0;
     let group: usize = ev("MP_GROUP", 32);
     let stages_s: String = ev("MP_STAGES", "train,ramen".to_string());
+    let trainer_s: String = ev("MP_TRAINER", "mcts".to_string());
     let out_dir_s: String = ev("MP_OUT", "logs/mcts_panel".to_string());
+    anyhow::ensure!(
+        matches!(trainer_s.as_str(), "mcts" | "hw"),
+        "MP_TRAINER 只接受 mcts / hw，实得 {trainer_s}"
+    );
+    let use_mcts = trainer_s == "mcts";
 
     let workspace_root = get_workspace_root()?;
     std::env::set_current_dir(&workspace_root)?;
@@ -74,16 +86,24 @@ fn main() -> Result<()> {
         .with_radical_factor_max(rf);
     let search_config = SearchConfig { search_group_size: group, ..search_config };
     anyhow::ensure!(
-        !ucb || group < search_n,
+        !use_mcts || !ucb || group < search_n,
         "UCB 下 group({group}) 必须小于 search_n({search_n})，否则自适应轮数为零（见 flat_search.rs:479）"
     );
     let stages = RamenSearchStages::parse(&stages_s)?;
 
-    println!(
-        "mcts_panel_probe: search_n={search_n}/候选 rf={rf} stages={stages_s} runs={runs}/build \
-         seed={seed} builds={targets:?} 线程={}",
-        rayon::current_num_threads()
-    );
+    if use_mcts {
+        println!(
+            "mcts_panel_probe[mcts]: search_n={search_n}/候选 rf={rf} ucb={ucb} group={group} \
+             stages={stages_s} runs={runs}/build seed={seed} builds={targets:?} 线程={}",
+            rayon::current_num_threads()
+        );
+    } else {
+        println!(
+            "mcts_panel_probe[hw]: 纯 RecommendedRamenTrainer（无搜索） runs={runs}/build \
+             seed={seed} builds={targets:?} 线程={}",
+            rayon::current_num_threads()
+        );
+    }
 
     // (build_idx, run_idx) 全部摊平后一起并行：外层并行才能把 24 核吃满
     let jobs: Vec<(usize, u64)> =
@@ -95,12 +115,21 @@ fn main() -> Result<()> {
     let mut outcomes: Vec<(usize, u64, bench::GameOutcome)> = jobs
         .into_par_iter()
         .map(|(bi, run_idx)| {
-            let mcts = RamenMctsTrainer::new(search_config.clone())
-                .with_stages(stages)
-                .with_selection(RamenSelection::Score);
-            let mut trainer = LoggingTrainer::new(mcts, seed + run_idx);
-            trainer.set_logging(false);
-            let o = bench::run_seeded(102601, &decks[bi], &inherit, seed, run_idx, &trainer)?;
+            // 两档 run_seeded 的泛型实参不同，只能各自展开；除 trainer 外参数逐字相同，
+            // 保证 hw 基线与 MCTS 是同 uma / 同卡组 / 同继承 / 同种子的配对局。
+            let o = if use_mcts {
+                let mcts = RamenMctsTrainer::new(search_config.clone())
+                    .with_stages(stages)
+                    .with_selection(RamenSelection::Score);
+                let mut trainer = LoggingTrainer::new(mcts, seed + run_idx);
+                trainer.set_logging(false);
+                bench::run_seeded(102601, &decks[bi], &inherit, seed, run_idx, &trainer)?
+            } else {
+                let mut trainer =
+                    LoggingTrainer::new(RecommendedRamenTrainer::new(), seed + run_idx);
+                trainer.set_logging(false);
+                bench::run_seeded(102601, &decks[bi], &inherit, seed, run_idx, &trainer)?
+            };
             let mut d = done.lock().unwrap();
             *d += 1;
             println!(
