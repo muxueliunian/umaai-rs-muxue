@@ -1,5 +1,8 @@
 {
     "scenario_id": 12,
+    "five_status_limit_base": [
+        3000,2200,2200,2200,2400
+    ],
     "link_chara_id": [ 1003, 1026, 1080, 1099, 1100, 9050 ],
     "link_effect": {
         "1003": 1,

@@ -197,9 +197,14 @@ impl Uma {
         ))
     }
 
-    pub fn new(id: u32) -> Result<Self> {
+    /// 建立马娘对象
+    ///
+    /// `limit_base` 是**所在剧本**的五维上限基值（不含继承）。每个剧本的基值都不同，
+    /// 必须由调用方从对应的 `scenario_*.json` 取，不能在这里读全局常量——
+    /// 早期版本先写全局值、再由各剧本事后修正，那种「打补丁」写法正是
+    /// 「整体赋值擦掉继承增量」缺陷的来源。基值在构造时一次写对，之后只做加法。
+    pub fn new(id: u32, limit_base: Array5) -> Result<Self> {
         let gamedata = global!(GAMEDATA);
-        let cons = global!(GAMECONSTANTS);
         let data = gamedata.get_uma(id)?;
         Ok(Self {
             uma_id: id,
@@ -208,7 +213,7 @@ impl Uma {
             motivation: 3,
             five_status: data.five_status_initial.clone(),
             five_status_bonus: data.five_status_bonus.clone(),
-            five_status_limit: cons.five_status_limit_base.clone(),
+            five_status_limit: limit_base,
             skill_score: 510, // 固有按5星计算,
             total_hints: 21,  // 按全部初始技能3级打折计算
             career_races: data.zip_races(),
@@ -248,8 +253,8 @@ impl Uma {
         let cons = global!(GAMECONSTANTS);
         let mut five_status = [0i32; 5];
         for i in 0..5 {
-            let status = self.five_status[i].min(self.five_status_limit[i]).max(0) as usize;
-            five_status[i] = cons.five_status_final_score[status];
+            let status = self.five_status[i].min(self.five_status_limit[i]);
+            five_status[i] = cons.status_final_score(status);
         }
         ScoreParts {
             skill: self.skill_score,
@@ -271,8 +276,8 @@ impl Uma {
         let mut score = self.skill_score + (self.skill_pt as f32 * cons.pt_score_rate) as i32;
         score = (score as f32 * cons.pt_favor_rate) as i32;
         for i in 0..5 {
-            let status = self.five_status[i].min(self.five_status_limit[i]).max(0) as usize;
-            score += cons.five_status_final_score[status];
+            let status = self.five_status[i].min(self.five_status_limit[i]);
+            score += cons.status_final_score(status);
         }
         // 乘一个系数与原本评分数量级接近
         ((score as f64) * 0.37) as i32
@@ -363,7 +368,7 @@ mod tests {
         init_test_logger("info")?;
         init_global()?;
 
-        let uma = Uma::new(101901)?;
+        let uma = Uma::new(101901, global!(GAMECONSTANTS).five_status_limit_base)?;
         println!("{}", uma.explain()?);
         Ok(())
     }
@@ -375,7 +380,7 @@ mod tests {
         init_test_logger("info")?;
         init_global()?;
 
-        let mut uma = Uma::new(101901)?;
+        let mut uma = Uma::new(101901, global!(GAMECONSTANTS).five_status_limit_base)?;
         uma.win_races = 0b110000_000000_1;
         println!("{:?}", uma.list_races());
         Ok(())
@@ -386,8 +391,12 @@ mod tests {
         let cons = global!(GAMECONSTANTS);
         let mut five_status = [0i32; 5];
         for i in 0..5 {
+            // 刻意**不**调 `cons.status_final_score()`：这份是用来对照 `score_parts()` 的
+            // 独立实现，两边共用同一个查表函数就不再是 oracle 了。这里自己按同一套语义
+            // （先夹 0、再饱和到表末）另写一遍。
+            let table = &cons.five_status_final_score;
             let status = uma.five_status[i].min(uma.five_status_limit[i]).max(0) as usize;
-            five_status[i] = cons.five_status_final_score[status];
+            five_status[i] = table[status.min(table.len() - 1)];
         }
         ScoreParts {
             skill: uma.skill_score,

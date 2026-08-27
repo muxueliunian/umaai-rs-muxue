@@ -707,10 +707,12 @@ impl RamenPolicy {
     /// 单维属性增量的评分（按 five_status_final_score 差分）
     fn status_gain(&self, game: &RamenGame, i: usize, inc: i32) -> f32 {
         let cons = global!(GAMECONSTANTS);
-        let cur = game.uma.five_status[i].min(game.uma.five_status_limit[i]).max(0) as usize;
-        let next = (cur + inc as usize).min(game.uma.five_status_limit[i] as usize);
-        let cur_score = cons.five_status_final_score.get(cur).copied().unwrap_or(0) as f32;
-        let next_score = cons.five_status_final_score.get(next).copied().unwrap_or(0) as f32;
+        // `inc` 取 i32：负值若直接 `as usize` 会回绕成天文数字，debug 下加法直接溢出 panic。
+        // 当前训练增量恒为正打不到，这里显式夹到 0 以免将来引入负增量时静默炸掉。
+        let cur = game.uma.five_status[i].min(game.uma.five_status_limit[i]).max(0);
+        let next = cur.saturating_add(inc.max(0)).min(game.uma.five_status_limit[i]);
+        let cur_score = cons.status_final_score(cur) as f32;
+        let next_score = cons.status_final_score(next) as f32;
         (next_score - cur_score) * self.config.status_rate
     }
 

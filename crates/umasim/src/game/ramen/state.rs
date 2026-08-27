@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use super::{FeelingType, RamenStage, rules::NPC_CHARA_IDS};
 use crate::{
     game::{BaseGame, BasePerson, InheritInfo, PersonType, traits::Game},
-    gamedata::{GAMECONSTANTS, ramen::RAMENDATA},
+    gamedata::ramen::RAMENDATA,
     global,
     rng::{EventRng, SplitmixRng, StrategyRng, StreamTag, TurnFixedRng, derive_seed}
 };
@@ -335,7 +335,7 @@ impl RamenGame {
             anyhow::bail!("卡组未携带新友人卡(idrank=303051-303054，card_id=30305)，拉面杯模拟器仅支持新友人卡组");
         }
         let mut ret = RamenGame {
-            base: BaseGame::new(uma_id, deck_ids, inherit)?,
+            base: BaseGame::new(uma_id, deck_ids, inherit, global!(RAMENDATA).status_limit_base())?,
             stage: RamenStage::Begin,
             persons: vec![],
             ramen: RamenState::default(),
@@ -352,17 +352,6 @@ impl RamenGame {
         ret.base
             .friend_event_ids
             .extend(global!(RAMENDATA).friend_events.values().map(|e| e.id));
-        // 五维属性上限：拉面杯剧本数据覆盖（Phase 2 步骤 1：从 constants.json 隔离到 scenario_ramen）
-        // 若 scenario_ramen.json 未提供该字段，回退到全局默认值（防御）
-        //
-        // 注意：温泉剧本对应字段（onsen/game.rs:135）有 `min(2800)` 防御性 cap，
-        // 但拉面剧本 speed 基础上限是 3100，`min(2800)` 会硬截断——把限高速玩家进 3100+
-        // 区间到不可达。两剧本基值范围不同，不能共用同一 cap：拉面无防御需要。
-        if let Some(limit) = global!(RAMENDATA).five_status_limit_base {
-            ret.uma.five_status_limit = limit;
-        } else {
-            ret.uma.five_status_limit = global!(GAMECONSTANTS).five_status_limit_base;
-        }
         // 携带4种卡以上才能分身
         ret.deck_can_split = ret.card_type_count.iter().filter(|x| **x > 0).count() >= 4;
         // 初始化人头（Game trait 方法）

@@ -5,7 +5,11 @@ use std::{collections::HashMap, sync::OnceLock};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
-use crate::gamedata::{EventData, TrainingBasicTable, load_json};
+use crate::{
+    gamedata::{EventData, GAMECONSTANTS, TrainingBasicTable, load_json},
+    global,
+    utils::Array5
+};
 
 /// 拉面基础效果
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -164,16 +168,25 @@ pub struct RamenScenarioData {
     /// 友人事件
     #[serde(default)]
     pub friend_events: HashMap<String, EventData>,
-    /// 五维属性上限（拉面杯剧本覆盖，Phase 2 步骤 1 从 constants.json 隔离）
-    /// basic/onsen 仍使用 `GAMECONSTANTS.five_status_limit_base`；拉面杯使用此字段
+    /// 拉面杯剧本的五维属性上限基值（不含继承）
+    ///
+    /// 每个剧本的上限基值都不同，由各自的 `scenario_*.json` 提供；
+    /// `constants.json` 的同名字段只作 basic 剧本与缺字段时的兜底。
+    /// 读取请走 [`RamenScenarioData::status_limit_base`]，不要直接用本字段。
     #[serde(default)]
-    pub five_status_limit_base: Option<[i32; 5]>
+    pub five_status_limit_base: Option<Array5>
 }
 
 impl RamenScenarioData {
     /// 从 JSON 文件加载拉面杯剧本数据
     pub fn load() -> Result<Self> {
         load_json("gamedata/scenario_ramen.json")
+    }
+
+    /// 解析拉面杯的五维上限基值：剧本 JSON 未提供时回退到全局默认值
+    pub fn status_limit_base(&self) -> Array5 {
+        self.five_status_limit_base
+            .unwrap_or_else(|| global!(GAMECONSTANTS).five_status_limit_base)
     }
 }
 

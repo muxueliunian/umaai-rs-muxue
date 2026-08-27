@@ -83,6 +83,29 @@ impl GameConstants {
         load_json("gamedata/constants.json")
     }
 
+    /// 查五维属性对应的终局评分，越界饱和到表末
+    ///
+    /// `five_status_final_score` 长度有限（当前 3399 档），而五维上限 =
+    /// 剧本基值 + 继承三次，蓝因子拉满时会超出表长。此前三处消费点行为各不相同：
+    /// 裸下标会 panic，`unwrap_or(0)` 会静默把分数算成 0（进而让手写策略
+    /// 误判该维收益为极大负值、永久回避它）。统一走本方法，越界一律饱和。
+    pub fn status_final_score(&self, status: i32) -> i32 {
+        // 不用 `get().unwrap_or(0)` 兜底：那正是缺陷 C 的形态——下标算错时静默返回 0，
+        // 把「查不到」伪装成「零分」。这里下标已饱和到 len-1，非空表必然命中；
+        // 空表是数据损坏，返回 0 是唯一合理的降级。
+        match self.five_status_final_score.last() {
+            None => 0,
+            Some(&last) => {
+                let idx = (status.max(0) as usize).min(self.five_status_final_score.len() - 1);
+                if idx == self.five_status_final_score.len() - 1 {
+                    last
+                } else {
+                    self.five_status_final_score[idx]
+                }
+            }
+        }
+    }
+
     pub fn get_rank_name(&self, score: i32) -> String {
         self.rank_scores
             .iter()
@@ -987,7 +1010,12 @@ mod tests {
     use fs_err::read_to_string;
 
     use super::*;
-    use crate::{trainer::RamenSearchStages, utils::Checks};
+    use crate::{
+        gamedata::{onsen::ONSENDATA, ramen::RAMENDATA},
+        global,
+        trainer::RamenSearchStages,
+        utils::Checks
+    };
 
     /// 构造全 None 的覆盖配置（= 不覆盖任何字段）。
     fn empty_override() -> OverrideConfig {
@@ -1365,6 +1393,59 @@ ramen_search_stages = "train,region"
         c.check(from_toml.ramen_select, "toml 缺省搜 ramen（值 +2306 分）");
         c.check(from_serde.train, "serde 缺省搜 train");
         c.check(from_serde.ramen_select, "serde 缺省搜 ramen（值 +2306 分）");
+        c.finish()
+    }
+
+    /// [`GameConstants::status_final_score`] 越界必须**饱和**，不得 panic、不得返回 0
+    ///
+    /// 守缺陷 C 的回归：五维上限 = 剧本基值 + 继承三次，蓝因子拉满会超出评分表长度。
+    /// 此前三处消费点行为不一致——裸下标 panic、`unwrap_or(0)` 静默返回 0。
+    /// 后者最坏：`status_gain` 会算出约 -19000 的巨大负分，手写策略永久回避该维且不报错。
+    /// 本测试专门锁「越界返回表末且非 0」，改回 `unwrap_or(0)` 式实现即红。
+    #[test]
+    fn test_status_final_score_saturates_out_of_range() -> anyhow::Result<()> {
+        std::env::set_current_dir(crate::utils::get_workspace_root()?)?;
+        let cons = GameConstants::load()?;
+        let table = &cons.five_status_final_score;
+        let len = table.len();
+        let last = *table.last().ok_or_else(|| anyhow::anyhow!("评分表为空，constants.json 数据损坏"))?;
+        println!("评分表长度={len} 表末={last}");
+
+        let mut c = Checks::new();
+        c.check(cons.status_final_score(-1) == table[0], "负值查表 = 表首");
+        c.check(cons.status_final_score(0) == table[0], "0 查表 = 表首");
+        c.check(cons.status_final_score(2800) == table[2800], "表内值逐位相同");
+        c.check(cons.status_final_score(len as i32 - 1) == last, "最后一档 = 表末");
+
+        // 越界：必须饱和到表末，而不是 0
+        for over in [len as i32, len as i32 + 100, i32::MAX] {
+            let got = cons.status_final_score(over);
+            println!("越界 {over} -> {got}（期望 {last}）");
+            c.check(got == last, &format!("越界 {over} 饱和到表末"));
+            c.check(got != 0, &format!("越界 {over} 不得返回 0"));
+        }
+        c.finish()
+    }
+
+    /// 各剧本五维上限基值的**数据契约**：JSON 里的权威值不得被无意改动
+    ///
+    /// 与 `test_newgame_status_limit_is_scenario_base_plus_inherit` 分工：那条守
+    /// **代码路径**（基值有没有被事后补丁擦掉），期望值从 JSON 推导，因此改数据不误报；
+    /// 本条守**数据本身**。两条都在，才既能抓住「代码改坏」也能抓住「数据漂移」。
+    ///
+    /// 另一个只有本条能抓的回归：拉面 JSON 与 `constants.json` 当前数值恰好相同，
+    /// 若有人把拉面误接成全局常量，路径测试仍会绿。
+    #[test]
+    fn test_scenario_status_limit_base_contract() -> anyhow::Result<()> {
+        std::env::set_current_dir(crate::utils::get_workspace_root()?)?;
+        let _ = crate::gamedata::init_global();
+        let ramen = global!(RAMENDATA).status_limit_base();
+        let onsen = global!(ONSENDATA).status_limit_base();
+        println!("拉面基值={ramen:?} 温泉基值={onsen:?}");
+        let mut c = Checks::new();
+        c.check(ramen == [3100, 2400, 2200, 2200, 2400], "拉面杯五维上限基值");
+        c.check(onsen == [3000, 2200, 2200, 2200, 2400], "温泉杯五维上限基值");
+        c.check(ramen != onsen, "两剧本基值必须不同（否则剧本隔离形同虚设）");
         c.finish()
     }
 }

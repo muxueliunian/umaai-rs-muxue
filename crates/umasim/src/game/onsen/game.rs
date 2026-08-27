@@ -123,17 +123,13 @@ impl OnsenGame {
 
     pub fn newgame(uma_id: u32, deck_ids: &[u32; 6], inherit: InheritInfo) -> Result<Self> {
         let mut ret = OnsenGame {
-            base: BaseGame::new(uma_id, deck_ids, inherit)?,
+            base: BaseGame::new(uma_id, deck_ids, inherit, global!(ONSENDATA).status_limit_base())?,
             stage: OnsenTurnStage::Begin,
             persons: vec![],
             onsen_state: vec![true, false, false, false, false, false, false, false, false, false],
             dig_level: [1, 1, 1],
             ..Default::default()
         };
-        // 上限规范化
-        for i in 0..5 {
-            ret.uma.five_status_limit[i] = ret.uma.five_status_limit[i].min(2800);
-        }
         // 蓝因子
         for i in 0..5 {
             ret.dig_blue_count[i] = (ret.inherit.blue_count[i] as f32 / 3.0).ceil() as i32;
@@ -1507,9 +1503,6 @@ impl Game for OnsenGame {
                 self.uma.add_value(&inherit_value);
                 self.uma.five_status_limit.add_eq(&inherit_limit);
                 diag!("当前 limit: {:?}", self.uma.five_status_limit);
-                for i in 0..5 {
-                    self.uma.five_status_limit[i] = self.uma.five_status_limit[i].min(2800);
-                }
             }
             5007 => {
                 // 大成功事件
