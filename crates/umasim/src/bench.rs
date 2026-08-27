@@ -681,8 +681,10 @@ average = [1, 0, 1, 1, 2]
     };
     /// 改动前 `test_stages_none_matches_handwritten`（seed=42, run_idx=0, 本卡组）抓到的分数与五维。
     /// 2026-08-25 更新：不在判定与得意率解耦 + 地区分身缺席优先，模拟数值变化，基线作废重抓。
-    const BASELINE_SCORE: i32 = 52739;
-    const BASELINE_FIVE: [i32; 5] = [2958, 1639, 2200, 845, 855];
+    /// 2026-08-27 更新：五维上限剧本化——剧本基值前置 + 删除 `min(2800)` 硬截断 +
+    /// 保住开局继承增量，速度上限 2958→3337，模拟数值整体变化，基线重抓。
+    const BASELINE_SCORE: i32 = 55839;
+    const BASELINE_FIVE: [i32; 5] = [3337, 1533, 2200, 823, 833];
 
     /// 把三个地区 id 格式化成与决策日志 `action_desc` 相同的 `地区[a,b,c]`。
     fn region_desc(regions: [usize; 3]) -> String {

@@ -202,7 +202,7 @@ impl BasicGame {
 
     pub fn newgame(uma_id: u32, deck_ids: &[u32; 6], inherit: InheritInfo) -> Result<Self> {
         let mut ret = BasicGame {
-            base: BaseGame::new(uma_id, deck_ids, inherit)?,
+            base: BaseGame::new(uma_id, deck_ids, inherit, global!(GAMECONSTANTS).five_status_limit_base)?,
             persons: vec![]
         };
         ret.init_persons()?;

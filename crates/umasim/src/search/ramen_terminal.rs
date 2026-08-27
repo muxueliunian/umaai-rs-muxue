@@ -107,15 +107,11 @@ impl RamenTerminal {
     /// `calc_score()` 逐位可加回去，不另造一套平行算法。
     pub fn from_game(game: &RamenGame) -> Self {
         let cons = global!(GAMECONSTANTS);
-        let table = &cons.five_status_final_score;
         let uma = &game.uma;
         let parts = uma.score_parts();
 
         // 查表下标必须与 score_parts 同一套截断口径，否则七分量对不上总分
-        let lookup = |v: i32| -> i32 {
-            let idx = (v.max(0) as usize).min(table.len().saturating_sub(1));
-            table[idx]
-        };
+        let lookup = |v: i32| -> i32 { cons.status_final_score(v) };
 
         let mut headroom = [0.0f64; 5];
         let mut final_status = [0.0f64; 5];

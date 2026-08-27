@@ -6,7 +6,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     game::CardTrainingEffect,
-    gamedata::{ActionValue, EventData, TrainingBasicTable, load_json},
+    gamedata::{ActionValue, EventData, GAMECONSTANTS, TrainingBasicTable, load_json},
+    global,
     utils::{Array5, AttributeArray}
 };
 
@@ -50,12 +51,25 @@ pub struct OnsenScenarioData {
     /// 超回复触发概率
     pub super_probs: Vec<i32>,
     /// 剧本事件
-    pub scenario_events: Vec<EventData>
+    pub scenario_events: Vec<EventData>,
+    /// 温泉杯剧本的五维属性上限基值（不含继承）
+    ///
+    /// 每个剧本的上限基值都不同，由各自的 `scenario_*.json` 提供；
+    /// `constants.json` 的同名字段只作 basic 剧本与缺字段时的兜底。
+    /// 读取请走 [`OnsenScenarioData::status_limit_base`]，不要直接用本字段。
+    #[serde(default)]
+    pub five_status_limit_base: Option<Array5>
 }
 
 impl OnsenScenarioData {
     pub fn load() -> Result<Self> {
         load_json("gamedata/scenario_onsen.json")
+    }
+
+    /// 解析温泉杯的五维上限基值：剧本 JSON 未提供时回退到全局默认值
+    pub fn status_limit_base(&self) -> Array5 {
+        self.five_status_limit_base
+            .unwrap_or_else(|| global!(GAMECONSTANTS).five_status_limit_base)
     }
 }
 

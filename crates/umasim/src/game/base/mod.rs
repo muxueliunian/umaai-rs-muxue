@@ -89,8 +89,12 @@ impl BaseGame {
     }
 
     /// 建立游戏对象
-    pub fn new(uma_id: u32, deck_ids: &[u32; 6], inherit: InheritInfo) -> Result<Self> {
-        let mut uma = Uma::new(uma_id)?;
+    ///
+    /// `limit_base` 由调用的剧本提供（见 [`Uma::new`]）。构造顺序是
+    /// **先写剧本基值、再加继承**；任何剧本都不得在本函数返回后整体赋值
+    /// `five_status_limit`，那会擦掉这里已累加的开局继承增量。
+    pub fn new(uma_id: u32, deck_ids: &[u32; 6], inherit: InheritInfo, limit_base: Array5) -> Result<Self> {
+        let mut uma = Uma::new(uma_id, limit_base)?;
         diag!("{}", uma.explain()?);
         let mut deck = vec![];
         let mut friend_id = None;
@@ -311,8 +315,9 @@ mod tests {
 
     use super::*;
     use crate::{
-        gamedata::*,
-        utils::{get_workspace_root, init_test_logger}
+        game::{base::basic::BasicGame, onsen::game::OnsenGame, ramen::RamenGame},
+        gamedata::{*, onsen::ONSENDATA, ramen::RAMENDATA},
+        utils::{Checks, get_workspace_root, init_test_logger}
     };
 
     #[test]
@@ -339,7 +344,7 @@ mod tests {
         let game = BaseGame::new(101901, &[302424, 302464, 302484, 302564, 302574, 302644], InheritInfo {
             blue_count: [15, 3, 0, 0, 0],
             extra_count: [0, 30, 0, 0, 30, 30]
-        })?;
+        }, global!(GAMECONSTANTS).five_status_limit_base)?;
         println!("{}", game.explain()?);
         let score = game.uma.calc_score();
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
@@ -540,7 +545,7 @@ mod tests {
         let mut game = BaseGame::new(101901, &[302424, 302464, 302484, 302564, 302574, 302644], InheritInfo {
             blue_count: [15, 3, 0, 0, 0],
             extra_count: [0, 30, 0, 0, 30, 30]
-        })?;
+        }, global!(GAMECONSTANTS).five_status_limit_base)?;
         // 强制设置可预测的 friend bonus
         game.friend.event_bonus = 30;
         game.friend.vital_bonus = 20;
@@ -619,7 +624,7 @@ mod tests {
         let mut game = BaseGame::new(101901, &[302424, 302464, 302484, 302564, 302644, 302694], InheritInfo {
             blue_count: [15, 3, 0, 0, 0],
             extra_count: [0, 30, 0, 0, 30, 30]
-        })?;
+        }, global!(GAMECONSTANTS).five_status_limit_base)?;
         // 验证 friend.event_bonus 和 vital_bonus 都是 0
         assert_eq!(game.friend.event_bonus, 0);
         assert_eq!(game.friend.vital_bonus, 0);
@@ -635,5 +640,55 @@ mod tests {
         assert_eq!(game.uma.five_status[3] - init_status[3], 9);
         assert_eq!(game.uma.five_status[4] - init_status[4], 9);
         Ok(())
+    }
+
+    /// 三个剧本的开局五维上限都必须是「本剧本基值 + 开局继承」，不得被任何常量截断
+    ///
+    /// 守两类历史缺陷：
+    /// 1. 硬编码 `min(2800)`——温泉时代的防御值，速度基值提高后变成硬截断；
+    /// 2. 剧本在 `BaseGame::new` 之后**整体赋值** `five_status_limit`，
+    ///    把这里已累加的 `inherit_limit_newgame` 增量擦掉。
+    ///
+    /// 期望值直接用各剧本 JSON 的基值，因此改坏代码会红、改动剧本数据不会误报。
+    #[test]
+    fn test_newgame_status_limit_is_scenario_base_plus_inherit() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let inherit = InheritInfo { blue_count: [15, 3, 0, 0, 0], extra_count: [0, 30, 0, 0, 30, 30] };
+        let newgame_inherit = inherit.inherit_limit_newgame();
+        let basic_deck = [302424, 302464, 302484, 302564, 302574, 302644];
+        let ramen_deck = [302424, 302894, 303044, 302924, 303024, 303054];
+
+        let cases: [(&str, Array5, Array5); 3] = [
+            (
+                "basic",
+                BasicGame::newgame(101901, &basic_deck, inherit.clone())?.uma.five_status_limit,
+                global!(GAMECONSTANTS).five_status_limit_base
+            ),
+            (
+                "onsen",
+                OnsenGame::newgame(101901, &basic_deck, inherit.clone())?.uma.five_status_limit,
+                global!(ONSENDATA).status_limit_base()
+            ),
+            (
+                "ramen",
+                RamenGame::newgame(102601, &ramen_deck, inherit.clone())?.uma.five_status_limit,
+                global!(RAMENDATA).status_limit_base()
+            )
+        ];
+
+        let mut c = Checks::new();
+        for (name, got, base) in cases {
+            for i in 0..5 {
+                let want = base[i] + newgame_inherit[i];
+                println!("{name} 维度 {i}: 剧本基值 {} + 开局继承 {} = {want}，实际 {}", base[i], newgame_inherit[i], got[i]);
+                c.check(got[i] == want, &format!("{name} 维度 {i} 上限 = {want}"));
+            }
+            c.check(got[0] > base[0], &format!("{name} 速度上限必须含开局继承增量"));
+            c.check(got[0] > 2800, &format!("{name} 速度上限不得被 2800 截断"));
+        }
+        c.finish()
     }
 }
