@@ -1699,6 +1699,20 @@ impl RecommendedRamenTrainer {
         }
     }
 
+    /// 创建 rollout 专用实例（关闭三份年的 breakdown 采集）
+    ///
+    /// 搜索/批跑场景必须用本构造器：24 线程共享同一个 rollout trainer，
+    /// `stash` 每次决策都无条件 `format!` 出全候选分解并锁同一把 `Mutex`，
+    /// 而 rollout 内部的分解文本没有任何消费者——纯锁争用开销。
+    /// 与 [`LocalRamenTrainer::for_rollout`] / [`RamenHandwrittenTrainer::for_rollout`] 同构。
+    pub fn for_rollout() -> Self {
+        let mut trainer = Self::new();
+        for year in trainer.years.iter_mut() {
+            year.collect_breakdown = false;
+        }
+        trainer
+    }
+
     fn year(game: &RamenGame) -> usize {
         if game.turn() < 24 {
             0

@@ -18,6 +18,14 @@ name = "ramen_player"
 path = "src/bin/ramen_player.rs"
 required-features = ["cli", "diag"]
 
+[[bin]]
+name = "trainer_overhead_diagnostic"
+path = "tools/data_collection/trainer_overhead.rs"
+
+[[bin]]
+name = "mcts_rollout_switch_verify"
+path = "tools/data_collection/mcts_rollout_switch_verify.rs"
+
 [features]
 default = ["cli", "diag"]
 diag = []

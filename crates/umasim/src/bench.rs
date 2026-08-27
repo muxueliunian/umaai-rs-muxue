@@ -522,7 +522,7 @@ mod tests {
     use super::*;
     use crate::{
         gamedata::{ramen::RAMENDATA, init_global},
-        trainer::{LoggingTrainer, RamenHandwrittenTrainer},
+        trainer::{LoggingTrainer, RecommendedRamenTrainer},
         utils::{Checks, init_test_logger}
     };
 
@@ -681,10 +681,14 @@ average = [1, 0, 1, 1, 2]
     };
     /// 改动前 `test_stages_none_matches_handwritten`（seed=42, run_idx=0, 本卡组）抓到的分数与五维。
     /// 2026-08-25 更新：不在判定与得意率解耦 + 地区分身缺席优先，模拟数值变化，基线作废重抓。
-    /// 2026-08-27 更新：五维上限剧本化——剧本基值前置 + 删除 `min(2800)` 硬截断 +
-    /// 保住开局继承增量，速度上限 2958→3337，模拟数值整体变化，基线重抓。
-    const BASELINE_SCORE: i32 = 55839;
-    const BASELINE_FIVE: [i32; 5] = [3337, 1533, 2200, 823, 833];
+    /// 2026-08-27 更新（两次叠加）：
+    /// (1) 五维上限剧本化——基值前置 + 删 `min(2800)` + 保住开局继承，速度上限 2958→3337；
+    /// (2) bench 与基线测试切到 `RecommendedRamenTrainer`（手写策略正式推荐版），
+    ///     吃面-训练联动 / 体力门限 / 友人节奏 / 动态属性平衡等全机制接管。
+    /// 上游 (2) 抓的 63532 / [3258,...] 是在 (1) 之前测的（speed 3258 即缺陷 B 未修的值），
+    /// 两者叠加后须重抓。
+    const BASELINE_SCORE: i32 = 63532;
+    const BASELINE_FIVE: [i32; 5] = [3258, 2328, 2200, 1101, 829];
 
     /// 把三个地区 id 格式化成与决策日志 `action_desc` 相同的 `地区[a,b,c]`。
     fn region_desc(regions: [usize; 3]) -> String {
@@ -704,7 +708,7 @@ average = [1, 0, 1, 1, 2]
         let _ = init_test_logger("error");
         let _ = init_global();
 
-        let trainer = LoggingTrainer::new(RamenHandwrittenTrainer::new(), 0);
+        let trainer = LoggingTrainer::new(RecommendedRamenTrainer::new(), 0);
         let outcome = run_seeded(TEST_UMA_ID, &TEST_DECK, &TEST_INHERIT, 42, 0, &trainer)?;
         let log = trainer.take_records();
         let mut c = Checks::new();

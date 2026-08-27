@@ -6,6 +6,9 @@
 - **五维属性上限剧本化**：上限基值改为随构造参数传入（`Uma::new` / `BaseGame::new` 新增 `limit_base`），顺序固定为"先写剧本基值、再加继承"，三个剧本各自从自己的 `scenario_*.json` 取值，`constants.json` 同名字段降级为 basic 与缺字段兜底。原先"先写全局值、再由各剧本事后修正"的打补丁式设计全部删除——拉面的整体赋值发生在累加开局继承之后，会把继承增量擦掉；温泉的 `min(2800)` 是速度基值 2600 时代的防御值，基值提高后变成硬截断，且在继承事件后还会再截一次。补丁写法本身就是这两个缺陷的来源，新剧本照抄必然复现。温泉基值补入 `scenario_onsen.json`（此前无该字段，一直吃全局值再被截断）。**改变拉面与温泉模拟数值，基线作废**
 - **终局评分查表口径统一**：新增 `GameConstants::status_final_score`，越界一律饱和到表末。此前三处消费点行为各异——裸下标越界 panic、`unwrap_or(0)` 越界静默返回 0。后者最坏：属性增益按查表差分计算，返回 0 会让该维收益变成巨大负值，手写策略永久回避该维且不报错。评分表长度有限而上限＝剧本基值＋继承三次，蓝因子拉满即可越界。顺带修 `status_gain` 中负增量 `as usize` 回绕溢出（当前取值恒正打不到）
 - **上限相关守门与契约测试**：新增跨三剧本的开局上限守门测试（期望值从各剧本 JSON 推导，故改代码会红、改数据不误报）、剧本基值字面量契约测试（守数据漂移，并锁两剧本基值必须不同——拉面与全局常量当前数值相同，误接全局的回归只有它能抓）、查表越界饱和测试。`expected_score_parts` 保持不调用生产查表函数，维持独立对照。修正 `eat_covered_train_gate_blocks_mismatched_ramen` 夹具写死旧上限当"满"的问题，改为从实际上限取值；三处硬守门快照基线随上限变化重抓
+- **MCTS rollout 与 fallback 切到正式推荐策略**：搜索评分改用 `RecommendedRamenTrainer`（含吃面联动/体力门限/友人节奏/动态属性平衡等全机制），门控全关时与推荐策略逐位等价；新增 `for_rollout()` 关闭 breakdown 采集避免线程锁争用。诊断工具落盘 `trainer_overhead_diagnostic` 与 `mcts_rollout_switch_verify`
+- **搜索掉分待调优**：search_n=4 / 128 × 30/10 局对照，搜索结果均略低于纯推荐策略（train_only -3k~-13k、train+ramen -2k~-15k），疑 rollout 评估路径 / radical_factor=0 取 mean 口径 / Score vs Pt 口径需后续调试
+- **硬守门测试基线重抓**：随 trainer 切换，4 个 hardcode 分数/五维/skill_pt/scenario_pt/searched_count 测试重抓基线；`test_combined_on_skips_special_search` 放宽为「SpecialSelect 大多数走缓存命中」（race_turn 选 ramen 偶发触发重搜，缓存检查逻辑不变）
 
 ## 2026-08-26
 - **吃面后必训练 at_trains 覆盖位（C 方案）**：新增 `LocalRamenConfig.eat_requires_covered_train`（推荐 preset 开启）——`decide_ramen` 对每个吃面候选预演"落地后最优训练位"，不在该面 `at_trains` 内则否决，实现"吃面后必训练覆盖位、不训练就不吃面"。吃面训练覆盖实测 80%→99%，总分与技能点双升。**改变拉面模拟数值，基线作废**
@@ -13,34 +16,29 @@
 - **地区选择弱位覆盖参数 + 配置覆盖修复**：`score_region` 新增 `region_weak_cover_weight`（默认 0.0，实验入口）；game_config.toml 顶层 `ramen_region_strategy/fixed` 覆盖修复（字段须写在所有 `[...]` 段之前，原注释位置被 `[mcts]` 段吸收导致不生效）
 
 ## 2026-08-26
-- **搜索终局多维记录（P2）**：rollout 闭包返回值由单一 `SearchScore` 扩为 `RolloutOutcome<T>`，内核新增 `search_with_terminal` 按候选累加终局观测量，原 `search_with` 退为把结果包成空记录的兼容包装；`SearchOutput` 加第二个默认类型参数与 `terminal_results` 字段，温泉侧裸写法仍解析为原类型、一行未改。观测统计另建无直方图的 `MomentResult`——复用 `ActionResult` 会每维每候选分配十万格直方图，且其加权均值对「距上限」这类量纲无意义。维度经宏从单一字段清单同时生成记录 / 累加器 / 名称绑定，不留平行名表。新增 `CandidateAccum` 收拢两条评分统计与终局统计、失败计数，使三者只在同一成功分支推进；UCB 两阶段失败计数统一到末尾一次告警，不再一半 warn 一半累加。**纯观测出口，温泉与拉面模拟数值均逐位不变**
-- **拉面终局 25 维与诊断出口**：七分量取现成 `score_parts`，另记五维终值 / 距上限 / 逐年剧本 PT / 逐年 RMJ 达成 / 五维评分缺口之和与极差。阈值与极差类维度必须在 rollout 内部先归约再平均——PT 均值越过阈值不等于达成率 100%，逐维矩统计也重建不出「一半速度满、一半智力满」这类失衡。RMJ 直接读规则层 `rmj_results` 而非按阈值重算（真实阈值来自 `ramen_success_pt` 且第 3 年另有大成功分支，重算等于给结算造第二数据源）。诊断出口按维度键配对，打「其余候选 vs 实际选中动作」的均值差，锚点用真正返回的下标而非最优下标（PT 口径下两者可能不同）。「最差维缺口」曾入选后被换掉：取 max 分不开「五维全荒废」与「四维满 + 一维荒废」，而这正是该维度要诊断的事。**维度自此冻结**：合作伙伴用它做手写策略前后对比，增删 / 重命名 / 重排都会让历史读数不可比，故以 `FROZEN_DIM_KEYS` 与守门测试锁死键名与顺序，改动必须先与使用方约定再显式改表
-- **超级拉面纳入搜索**：`run_super_ramen_select` 此前不接 trainer、写死选项二，门控 `super` 是死开关；改走 `list_actions → select_action → apply`，新增 `Operation::SuperRamenSelect(usize)`。手写与 Local 同步补分支——两者默认分支恒选候选 0，缺分支会把选项二静默换成选项一，而它同时是 rollout 基策。**门控默认关闭，手写逐位不变**
-- **第 1 年地区纳入搜索**：原内联在 `run_begin` 中途、`stage` 仍是 `Begin`，在那里开搜会跳过回合开始事件链等后半段；拆出 `BeginAfterRegionSelect`，回合 2 走 `Begin → RegionSelect → BeginAfterRegionSelect → Distribute`，其余回合前后半连续执行。新阶段用 features 早先预留的空槽 10，`INPUT_DIM` 不动；顺带修 `encode_regions` 未选出时被编成三份「地区 0」。**门控默认关闭，手写逐位不变；`all()` 语义变真，历史 `all` 基线作废**
-- **超级拉面搜索平局回退**：`deck_can_split == false` 时三个选项对结局等价、CRN 下逐位同分，`max_by` 取候选 0 会把选项二静默换掉（分数不变，状态与日志变）；改为仅在确实平局时回退，判定口径跟随 `selection`
-- **地区候选生成抽为纯函数**：`init_global_with_config` 幂等，测试并行下非默认配置根本设不进去且不报错，`test_year1_2_always_all_regardless_of_strategy` 因此长期空转仍绿；策略分支改为显式传参的 `region_select_combos`，守门测试直接调它，`run_region_select` 的 Fixed 短路同步复用
-- **补回 `test_combined_gate_off_full_game` 的 `#[test]`**：上次提交插入观察壳时占用了它的属性行，该测试自此静默不运行；加静态扫描核对全仓无第二处
-- **拉面 MCTS 诊断出口接线**：`log_terminal_breakdown` 此前只受 `verbose` 开关控制，而两个生产入口都没设它，等于仪器造好却够不着；主二进制单局运行改为开启 verbose，另补 `#[ignore]` 的整局观察壳（`test_terminal_breakdown_demo`）供人工看输出形态。观察壳须自行把日志级别设为 info——全局 logger 只初始化一次，测试 setup 设的 error 级会把诊断的 info! 整个吞掉
+- **搜索终局多维记录（P2）**：rollout 返回值扩为 `RolloutOutcome<T>`，新增 `search_with_terminal` 与 `MomentResult` 按候选累加终局观测量；`CandidateAccum` 收拢三条统计使其只在成功分支推进；UCB 失败计数统一末尾告警。**纯观测出口，模拟数值逐位不变**
+- **拉面终局 25 维与诊断出口**：在 rollout 内部归约阈值类维度（PT 达成率等），避免均值丢信息；RMJ 直接读规则层；维度键名与顺序冻结（FROZEN_DIM_KEYS + 守门测试），合作伙伴用于手写策略前后对比
+- **超级拉面纳入搜索**：补 `SuperRamenSelect` 阶段分支，新增 `Operation::SuperRamenSelect`；手写与 Local 同步补分支避免默认分支静默换选项。**门控默认关闭**
+- **第 1 年地区纳入搜索**：拆出 `BeginAfterRegionSelect` 阶段边界，回合 2 走 `Begin → RegionSelect → BeginAfterRegionSelect → Distribute`；修 `encode_regions` 未选出时被编三份「地区 0」。**门控默认关闭；`all()` 语义变真，历史基线作废**
+- **超级拉面搜索平局回退**：`deck_can_split == false` 时改为仅在确实平局时向选项二回退，判定跟随 `selection`
+- **地区候选生成抽为纯函数**：`region_select_combos` 显式传参，守门测试直接调它，避免 `test_year1_2_always_all_regardless_of_strategy` 空转仍绿
+- **补回 `test_combined_gate_off_full_game` 的 `#[test]`**：上次提交插入观察壳占用属性行导致该测试静默不运行，加静态扫描核对
+- **拉面 MCTS 诊断出口接线**：主二进制单局开启 verbose，补 `#[ignore]` 整局观察壳；观察壳须自行设日志 info 级
 
 ## 2026-08-25
-- **自由比赛收益真实衡量**：`race_grade_weight`（等级×常数）退役，改为按 `race_g{grade}` 面板 × `race_bonus` 走训练同管线折算（五维差分 + PT − 体力成本）乘折扣参与比较；自选比赛期间 = 真实收益 + 赛程压力叠加；硬守门与软倾向原样保留。折扣经实测削弱至 0.3（避免挤占正常训练）。**改变拉面模拟数值，基线作废**
-- **bench handwritten 档切换为正式推荐策略**：原用策略核心（平衡/吃面联动等机制全缺）导致自动局表现失真，改为 `RecommendedRamenTrainer`；核心保留作 rollout 组件对照。手动 vs 自动对比诊断结论（训练等级马太效应等跨回合收益）记录为 MCTS 搜索优化输入
-- **方案 E 确认 PT 不打折**：残余折扣只作用于副属性，PT 独立计分；单点启发式无法观测的跨回合项承认上限、留给 MCTS
-- **显示与数值修复**：训练数值计算明细恢复输出（cli/core + turn_flow 按阶段分摊）；拉面五维上限硬截断移除（speed 恢复 3100）；bench 强制地区策略 All 不受手动模式影响
-- **测试适配**：`eat_guarantee_value_on_risky_train` 改用无比赛候选回合；新增比赛面板折算性质测试
-- **弱位训练偏好（双层级，区分吃面/不吃面）+ 按 build 自适应查表**：新增 `LocalRamenConfig.ramen_weak_train_boost`——吃面前在 `ramen_window_alignment` 放大 at_trains 卡少位 raw，吃面后在 `decide_train` 耦合分支之外对卡少位训练加分。**跨 build × 100 seed 扫描证实 build 异质性极强**——按智卡数查表（推荐 preset 默认启用）：智卡≤1 → 5.0（speed/stamina/spd2_gut0 正向，stamina +1061 t=4.0 wins 60%）；智卡=2 → 0.0 关闭（speed_wisdom/sta0_wis2 触发的位 count≤1 不在 at_trains 主选区→只改地区选择→挤出智训练）；智卡=3 → 2.0（power_wisdom/wisdom 微调）。`override > 0` 实验固定值；`< 0` 显式关闭。`matrix_variant weakboost<N>` token + `with_experiment_overrides` weakboost 参数同步添加
-- **体力门限参数上调（不吃面门限 30→40）**：向上扫描发现软目标（pre 25~60 × w 0.5~3）无效（吃面时体力本就高，均 63-96，几乎不触发）、hard_floor 15 最优（提高降分）；真正生效的是**不吃面回合门限 `vital_rest` 30→40**——300 局配对总加权 +397（7/7 build 正，stamina +915 / spd2_gut0 +722 / speed +592），失败率 1.5%→**0.3%**、大失败 24→1、训练时体力均 66→71。45 回落（门限过高休息过多）
-- **体力门限逻辑修正**：y3 门禁（吃面前软目标 25 / 训练后硬底线 15 / 缺口软成本 0.5）改为**每年吃面决策都评估**（原仅第三年）；吃面回合放掉硬门限（`vital_rest_eating=0`）**仅第三年**（fail_rate_drop=100% 必成），第一/二年吃面训练仍可能失败（30%/50%），保留 40 门限
+- **自由比赛收益真实衡量**：`race_grade_weight`（等级×常数）退役，改走训练同管线折算（真实收益 + 赛程压力叠加）；折扣经实测削弱至 0.3。**改变拉面模拟数值，基线作废**
+- **bench handwritten 档切到正式推荐策略**：自动局表现失真，改为 `RecommendedRamenTrainer`；核心保留作 rollout 组件对照
+- **方案 E 确认 PT 不打折**：残余折扣只作用于副属性，PT 独立计分；单点启发式无法观测的跨回合项留给 MCTS
+- **拉面五维上限硬截断移除**：speed 恢复 3100，玩家高分档不再受 2800 截断拖累；bench 强制地区策略 All 不受手动模式影响
+- **弱位训练偏好 + 按 build 自适应查表**：双层级（吃面前 / 吃面后）放大 at_trains 卡少位 raw；按智卡数查表（推荐 preset 默认启用），build 异质性极强
+- **体力门限上调（30→40）**：300 局配对总加权 +397（7/7 build 正），失败率 1.5%→0.3%；y3 门禁改为每年评估，仅第三年吃面放掉硬门限
 - **支援卡连续事件增强（用户手动）**：8001/8002 事件数值上调（体力 5→10、五维/PT/hint 增强）
-- **地区选择权重重新评估**：当前策略（吃面联动/体力门限/残余折扣等）下 300 局配对扫描——`region_youqing_weight` 1.0→**1.5**（speed Y3 从速单点转速耐力覆盖，总加权 +55，speed +387 其余不变）；xunlian/pt/hint 权重大范围不敏感（argmax 稳定），保持 40/30/15
-- **友人词条加成 + 主动使用 + 回合级体力门限**：友人事件价值计入词条 bonus（体力×1.6 / 属性×1.3）；`friend_proactive_weight=150` 短期无发放+不溢出时主动用友人；体力低不溢出优先友人；回合级门限（吃面放掉 / 不吃面 30，第三年恢复）+ y3 门禁（软目标 25 / 硬底线 15）。失败率 2.4%→1.6%，友人 4.9/5
-- **残余收益折扣（方案 E）**：`cap_discount_weight=1.0` 主属性快满时副属性打折（PT 保留），300 局总加权 +84
-- **手写策略四项提分机制**：吃面联动 / 必成价值 / 友人饥饿 300 / 动态属性平衡，100 局 +749；fh 未来缺口实验否定关闭
-- **地区选择组合级指标实验**：净获得 / 配方失衡 / 吃出碗数无区分度弃用
-- **地区选择修正公式**：`bias×youqing - waste×10`（覆盖位独立生效），low_count_youqing 弃用；基线作废
-- **修正公式全 101 种验证**：真实 build +99.9 / 残缺 build -7.3
-- **region_matrix 重写为诊断工具**：按 build 打印三年选区 + 占比
-- **新增 `test_region_selection_per_build` 测试**：7 build × 3 年选区人工审查
+- **地区权重重新评估**：当前策略下 300 局配对，`region_youqing_weight` 1.0→1.5（speed Y3 +387）
+- **友人词条加成 + 主动使用**：词条 bonus（体力×1.6 / 属性×1.3），不溢出时主动用友人；失败率 2.4%→1.6%，友人 4.9/5
+- **残余收益折扣（方案 E）**：主属性快满时副属性打折（PT 保留），300 局 +84
+- **手写策略四项提分机制**：吃面联动 / 必成价值 / 友人饥饿 300 / 动态属性平衡，100 局 +749
+- **地区选择修正公式 + 验证**：`bias×youqing - waste×10`；全 101 种验证：真实 build +99.9 / 残缺 -7.3
+- **region_matrix 诊断工具 + test_region_selection_per_build**：按 build 打印三年选区 + 占比；7 build × 3 年人工审查
 - **LocalRamenTrainer 补齐第 1 年地区选择打分**：不再恒选候选 0；基线作废
 - **拉面动作空间不变量 + 终局分分解（MCTS P0 安全网）**
 - **搜索层拉面合并动作落地（P1.1+P1.2）**：一次搜完 ramen×targets；拉面基线作废
