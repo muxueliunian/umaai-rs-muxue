@@ -2488,7 +2488,11 @@ mod tests {
     ///
     /// 输出单位：纳秒；3 轮取 min/mean 减小调度噪声。
     ///
-    /// 跑法：`cargo test --release microbench_top_fns -- --nocapture`
+    /// 跑法：`cargo test --release microbench_top_fns -- --ignored --nocapture`
+    ///
+    /// `#[ignore]`：本测试 `set_current_dir` 改的是**进程级全局 CWD**，与并行跑的其他
+    /// 测试互相污染；且 N=100000×3 轮在 debug 下极慢。它本就是手动剖析工具，不是守门。
+    #[ignore]
     #[test]
     fn microbench_top_fns() {
         use std::{hint::black_box, time::Instant};

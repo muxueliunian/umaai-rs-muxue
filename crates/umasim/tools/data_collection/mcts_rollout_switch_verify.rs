@@ -8,12 +8,12 @@
 //! 输出每档的均值/标准差/最小/最大，便于快速看出切到 REC rollout 后搜索排序
 //! 是否真的比手写策略提分。
 
-use std::{collections::BTreeMap, env};
+use std::env;
 
 use anyhow::Result;
 use umasim::{
-    bench, game::{InheritInfo, ramen::RamenGame}, gamedata::init_global_with_config, search::{SearchConfig}, trainer::{
-        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection, RecommendedRamenTrainer
+    bench, game::{InheritInfo, ramen::RamenGame}, gamedata::init_global_with_config, search::SearchConfig, trainer::{
+        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RecommendedRamenTrainer
     }, utils::{get_workspace_root, load_game_config}
 };
 

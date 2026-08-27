@@ -29,6 +29,9 @@ path = "tools/data_collection/mcts_rollout_switch_verify.rs"
 [[bin]]
 name = "sim_profiler"
 path = "tools/data_collection/sim_profiler.rs"
+# pprof-rs 只支持 Linux/macOS（依赖 pthread/siginfo/ucontext 等 Unix API），
+# 在 Windows 上编译失败，故不进 default，需显式 `--features profiler`
+required-features = ["profiler"]
 
 [features]
 default = ["cli", "diag"]
@@ -45,6 +48,10 @@ cli = [
 ]
 no-color = ["colored/no-color"]
 onnx = ["dep:tract-onnx"]
+# CPU 采样 profiler（sim_profiler bin）。**仅 Linux/macOS 可用**——pprof-rs 用
+# pthread_self / siginfo_t / ucontext_t 等 Unix API，Windows 上编译不过，
+# 因此不放进 default，性能剖析请在 Linux 机器上开此 feature 跑。
+profiler = ["dep:pprof"]
 
 [dependencies]
 anyhow.workspace = true
@@ -78,4 +85,4 @@ tokio = { workspace = true, optional = true }
 
 tract-onnx = { workspace = true, optional = true }
 indexmap.workspace = true
-pprof = { workspace = true, features = ["protobuf-codec"] }
+pprof = { workspace = true, features = ["protobuf-codec"], optional = true }
