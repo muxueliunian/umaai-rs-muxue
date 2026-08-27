@@ -6,11 +6,11 @@
 - **五维属性上限剧本化**：上限基值改为随构造参数传入（`Uma::new` / `BaseGame::new` 新增 `limit_base`），顺序固定为"先写剧本基值、再加继承"，三个剧本各自从自己的 `scenario_*.json` 取值，`constants.json` 同名字段降级为 basic 与缺字段兜底。原先"先写全局值、再由各剧本事后修正"的打补丁式设计全部删除——拉面的整体赋值发生在累加开局继承之后，会把继承增量擦掉；温泉的 `min(2800)` 是速度基值 2600 时代的防御值，基值提高后变成硬截断，且在继承事件后还会再截一次。补丁写法本身就是这两个缺陷的来源，新剧本照抄必然复现。温泉基值补入 `scenario_onsen.json`（此前无该字段，一直吃全局值再被截断）。**改变拉面与温泉模拟数值，基线作废**
 - **终局评分查表口径统一**：新增 `GameConstants::status_final_score`，越界一律饱和到表末。此前三处消费点行为各异——裸下标越界 panic、`unwrap_or(0)` 越界静默返回 0。后者最坏：属性增益按查表差分计算，返回 0 会让该维收益变成巨大负值，手写策略永久回避该维且不报错。评分表长度有限而上限＝剧本基值＋继承三次，蓝因子拉满即可越界。顺带修 `status_gain` 中负增量 `as usize` 回绕溢出（当前取值恒正打不到）
 - **上限相关守门与契约测试**：新增跨三剧本的开局上限守门测试（期望值从各剧本 JSON 推导，故改代码会红、改数据不误报）、剧本基值字面量契约测试（守数据漂移，并锁两剧本基值必须不同——拉面与全局常量当前数值相同，误接全局的回归只有它能抓）、查表越界饱和测试。`expected_score_parts` 保持不调用生产查表函数，维持独立对照。修正 `eat_covered_train_gate_blocks_mismatched_ramen` 夹具写死旧上限当"满"的问题，改为从实际上限取值；三处硬守门快照基线随上限变化重抓
-- **MCTS rollout 与 fallback 切到正式推荐策略**：搜索评分改用 `RecommendedRamenTrainer`（含吃面联动/体力门限/友人节奏/动态属性平衡等全机制），门控全关时与推荐策略逐位等价；新增 `for_rollout()` 关闭 breakdown 采集避免线程锁争用。诊断工具落盘 `trainer_overhead_diagnostic` 与 `mcts_rollout_switch_verify`
-- **搜索掉分待调优**：search_n=4 / 128 × 30/10 局对照，搜索结果均略低于纯推荐策略（train_only -3k~-13k、train+ramen -2k~-15k），疑 rollout 评估路径 / radical_factor=0 取 mean 口径 / Score vs Pt 口径需后续调试
-- **硬守门测试基线重抓**：随 trainer 切换，4 个 hardcode 分数/五维/skill_pt/scenario_pt/searched_count 测试重抓基线；`test_combined_on_skips_special_search` 放宽为「SpecialSelect 大多数走缓存命中」（race_turn 选 ramen 偶发触发重搜，缓存检查逻辑不变）
-- **rollout 加速：cfg(feature="diag") gate 掉 5 处 explain 类调用**：复用现有 diag feature，编译期排除 MCTS rollout 路径的屏幕输出代码（`self.explain_distribution` / `self.explain_ramen_info` / `self.explain` / `self.uma.explain` / `Explain::event_choice`），整段（含 `?`）随 diag feature 关闭编译期消失。**整局 CPU 时间 -29%（0.48s → 0.34s/200 局），分数完全一致 66313；MCTS search_n=128 train_only 外推 ~22.4s → ~16s/局**
-- **perf 诊断工具**：新增 `sim_profiler`（pprof-rs 0.15 + 自写 top-fold）+ `microbench_top_fns` 单元测试，定位训练打分链热点；新增 `pprof = "0.15"` workspace 依赖
+- **MCTS rollout 与 fallback 切到正式推荐策略**：原用机制残缺的策略核心评估局面；门控全关时逐位等价，rollout 档关掉观测开销
+- **搜索掉分归因**：缺省 `radical_factor_max=50` 使有效样本量恒 3.9%，选择偏差压过搜索收益；rf=0 后方向反转，缺省值不动
+- **硬守门快照重抓与收紧**：4 处基线随 trainer 切换重抓；合并搜索重搜断言改回逐位快照（先前放宽到搜 28/29 次也绿）；`for_rollout` 补决策等价守门
+- **rollout 加速 −29% CPU**：编译期消掉 rollout 路径的屏幕输出，分数逐位一致；**仅关 diag 时生效**，umasim 自己的 bin 需显式关
+- **perf 诊断工具与 Windows 可构建性**：新增 `sim_profiler`；pprof 编不过 Windows，收进可选 `profiler` feature；`microbench_top_fns` 改进程级 CWD，加 `#[ignore]`
 
 ## 2026-08-26
 - **吃面后必训练 at_trains 覆盖位（C 方案）**：新增 `LocalRamenConfig.eat_requires_covered_train`（推荐 preset 开启）——`decide_ramen` 对每个吃面候选预演"落地后最优训练位"，不在该面 `at_trains` 内则否决，实现"吃面后必训练覆盖位、不训练就不吃面"。吃面训练覆盖实测 80%→99%，总分与技能点双升。**改变拉面模拟数值，基线作废**
