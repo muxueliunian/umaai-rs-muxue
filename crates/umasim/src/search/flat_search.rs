@@ -83,7 +83,7 @@ enum LeafEvaluator {
 }
 
 impl LeafEvaluator {
-    fn name(&self) -> &'static str {
+    fn _name(&self) -> &'static str {
         match self {
             LeafEvaluator::Handwritten => "handwritten",
             #[cfg(feature = "onnx")]
@@ -266,6 +266,14 @@ where
             seeds.root()
         );
 
+        // rollout 期间全局静默诊断输出（RAII，Err 提前返回同样恢复）：
+        // 覆盖均匀分配 / UCB 两条路径的全部 rayon 并行段，规则层 diag! 与
+        // cfg explain 块（`if diagnostic::enabled()` 门控）一并跳过。每回合仅
+        // 一条的搜索根 debug! 在 guard 之前；失败汇总 warn_failures 虽在 guard
+        // 作用域内，但 warn! 不走 diag 开关，照常输出。多局并行
+        // （simulation_count > 1）时任一局的搜索会顺带抑制其他局真实回合的
+        // diag——已知局限，见 diagnostic.rs 模块文档。
+        let _diag_guard = crate::output::diagnostic::DiagGuard::suppress();
         let collected = if self.config.use_ucb {
             self.search_ucb(game, actions, radical_factor, &seeds, &rollout)?
         } else {

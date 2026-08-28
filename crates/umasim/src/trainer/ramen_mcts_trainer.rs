@@ -36,13 +36,14 @@
 use std::{
     collections::HashMap,
     sync::{
+        Arc,
         Mutex,
         atomic::{AtomicUsize, Ordering}
     }
 };
 
 use anyhow::{Result, anyhow, bail};
-use log::info;
+use log::{debug, info};
 use rand::prelude::StdRng;
 
 use super::RecommendedRamenTrainer;
@@ -52,6 +53,7 @@ use crate::{
         ramen::{Operation, RamenGame, RamenStage, policy::FIXED_SUPER_RAMEN_INDEX}
     },
     gamedata::{EventChoice, EventData},
+    output::reason::{NoopSink, ReasonMetric, analyze_narrow_win, render_reason_lines},
     search::{ActionResult, FlatSearch, RamenSearchOutput, SearchConfig, TerminalStats}
 };
 
@@ -236,7 +238,11 @@ pub struct RamenMctsTrainer {
     ///
     /// 用 `Mutex` 而非 `RefCell`：`Trainer` 在搜索/并行场景要求 `Sync`
     /// （与既有 `last_breakdown` 同理）。
-    pending_combined_targets: Mutex<Option<[i32; 3]>>
+    pending_combined_targets: Mutex<Option<[i32; 3]>>,
+    /// 决策理由原始数据出口（险胜局经此发出 JSON；umasim 默认接日志）
+    ///
+    /// 可读文字不走此出口，由 [`Self::emit_decision_reason`] 渲染后上屏。
+    pub reason_sink: Arc<dyn crate::output::DecisionReasonSink>
 }
 
 impl RamenMctsTrainer {
@@ -252,7 +258,8 @@ impl RamenMctsTrainer {
             last_breakdown: Mutex::new(None),
             searched: AtomicUsize::new(0),
             combined_cache_hits: AtomicUsize::new(0),
-            pending_combined_targets: Mutex::new(None)
+            pending_combined_targets: Mutex::new(None),
+            reason_sink: Arc::new(NoopSink)
         }
     }
 
@@ -290,6 +297,42 @@ impl RamenMctsTrainer {
         self
     }
 
+    /// 设置决策理由原始数据出口（默认 [`NoopSink`] 静默；需要原始 JSON 时传
+    /// [`crate::output::LogJsonSink`] 或自定义实现）
+    pub fn with_reason_sink(mut self, sink: Arc<dyn crate::output::DecisionReasonSink>) -> Self {
+        self.reason_sink = sink;
+        self
+    }
+
+    /// 输出决策理由（险胜局）：原始 JSON 经 [`Self::reason_sink`] 发出，可读文字上屏
+    ///
+    /// 门限先行（懒计算）：[`analyze_narrow_win`] 返回 `None`（悬殊局 / 门限
+    /// 为 0）时零分析开销静默。比较口径跟随 [`Self::selection`]——理由解释
+    /// 的是实际选择。终局差异日志之后调用，两段日志可互相印证。
+    fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
+        if !self.verbose {
+            return;
+        }
+        let metric = match self.selection {
+            RamenSelection::Pt => ReasonMetric::Pt,
+            RamenSelection::Score => ReasonMetric::Score
+        };
+        let Some(data) = analyze_narrow_win(
+            turn,
+            metric,
+            self.search.config().reason_gap_threshold,
+            self.search.config().reason_max_display,
+            chosen,
+            output
+        ) else {
+            return;
+        };
+        self.reason_sink.emit(&data);
+        for line in render_reason_lines(&data) {
+            info!("{line}");
+        }
+    }
+
     /// 获取搜索配置
     pub fn config(&self) -> &SearchConfig {
         self.search.config()
@@ -319,6 +362,9 @@ impl RamenMctsTrainer {
     }
 
     /// 输出终局多维记录：其余候选相对**实际选中动作**的差值
+    ///
+    /// **debug 级输出**（2026-08-29 起）：屏幕默认（info）不再显示，需要
+    /// 逐候选对照时把 log_level 调到 debug。数据本身不变。
     ///
     /// 只打差值而非绝对值：各候选的绝对面板高度相似，人眼分辨不出；
     /// 「选这个动作，最终智力会多 300」才是可读的因果陈述。
@@ -370,7 +416,9 @@ impl RamenMctsTrainer {
                 }
             });
             if !parts.is_empty() {
-                info!("[回合 {}][终局差异] {action} vs 选中: {}", turn + 1, parts.join(" "));
+                // 降级为 debug：屏幕默认（info 级）不再每候选刷一行，需要对照时
+                // 把 log_level 调到 debug 即可恢复
+                debug!("[回合 {}][终局差异] {action} vs 选中: {}", turn + 1, parts.join(" "));
             }
         }
     }
@@ -514,6 +562,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
                 }
                 self.stash_search_breakdown(&output);
                 self.log_terminal_breakdown(game.turn() as i32, idx, &output);
+                self.emit_decision_reason(game.turn() as i32, idx, &output);
                 if self.verbose {
                     let (res, _) = &output.action_results[idx];
                     info!(
@@ -553,6 +602,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
         let idx = Self::break_super_ramen_tie(game, actions, &output, self.selection, idx);
         self.stash_search_breakdown(&output);
         self.log_terminal_breakdown(game.turn() as i32, idx, &output);
+        self.emit_decision_reason(game.turn() as i32, idx, &output);
         if self.verbose {
             let (res, _) = &output.action_results[idx];
             info!(

@@ -191,7 +191,11 @@ impl DerefMut for BasicGame {
 
 impl BasicGame {
     pub fn add_person(&mut self, mut person: BasePerson) {
-        diag!("新训练角色: {}", person.explain());
+        // enabled() 包裹：person.explain() 构造 String，MCTS rollout 期间由 DiagGuard 静默
+        #[cfg(feature = "diag")]
+        if crate::output::diagnostic::enabled() {
+            diag!("新训练角色: {}", person.explain());
+        }
         person.person_index = self.persons.len() as i32;
         self.persons.push(person);
     }
@@ -390,10 +394,14 @@ impl Game for BasicGame {
         //diag!("-- Turn {}-{:?} --", self.turn, self.stage);
         match self.stage {
             TurnStage::Begin => {
+                // enabled() 包裹：explain() 构造 String，rollout 期间静默；
+                // 原先的 cfg println 分隔线一并纳入 diag!（受运行时开关管辖，
+                // 否则 rollout 时该线每回合直打 stdout，无任何开关能屏蔽）
                 #[cfg(feature = "diag")]
-                println!("-----------------------------------------");
-                #[cfg(feature = "diag")]
-                diag!("{}", self.explain()?);
+                if crate::output::diagnostic::enabled() {
+                    diag!("-----------------------------------------");
+                    diag!("{}", self.explain()?);
+                }
                 let mut events = self.generate_events(rng);
                 // 友人强制事件
                 if self.friend.out_state == FriendOutState::AfterUnlock {
@@ -423,8 +431,11 @@ impl Game for BasicGame {
                 } else {
                     self.distribute_all(rng)?;
                     self.distribute_hint(rng)?;
+                    // enabled() 包裹：explain_distribution() 构造 comfy-table，rollout 期间静默
                     #[cfg(feature = "diag")]
-                    diag!("训练:\n{}", self.explain_distribution()?);
+                    if crate::output::diagnostic::enabled() {
+                        diag!("训练:\n{}", self.explain_distribution()?);
+                    }
                 }
             }
             TurnStage::Train => {

@@ -14,11 +14,13 @@
 pub mod decision;
 pub mod decision_log;
 pub mod diagnostic;
+pub mod reason;
 pub mod turn_flow;
 pub mod view;
 
 pub use decision::DecisionInfo;
 pub use decision_log::{DecisionLog, DecisionLogRow};
+pub use reason::{DecisionReasonData, DecisionReasonSink, LogJsonSink, NoopSink};
 pub use turn_flow::{RecordingTrainer, TurnDecision};
 pub use view::GameView;
 // 注意：`#[macro_export]` 标记的 `diag!` 宏已经在 crate 根全局可见（`umasim::diag!` 可直接调用），

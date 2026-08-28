@@ -65,7 +65,21 @@ pub struct SearchConfig {
     ///
     /// 实测（onsen，回合 0 Train，7 候选 × 200 rollout）：关闭时平均配对相关 0.18、
     /// 等效 1.31 倍；开启后 0.69、等效 **3.65 倍**（区间 2.44–8.62）。
-    pub crn_stage_reseed: bool
+    pub crn_stage_reseed: bool,
+
+    /// 决策理由分差门限
+    ///
+    /// 搜索完成后，存在与选中者分差绝对值 < 门限的候选（险胜局）才输出决策
+    /// 理由（原始 JSON + 可读文字，见 `output::reason`）；悬殊局静默。
+    /// `0` 等价禁用。
+    pub reason_gap_threshold: f64,
+
+    /// 决策理由最多显示选项数
+    ///
+    /// 触发理由输出后，全部候选按评分降序只取前 N 个进入显示与分析，其余
+    /// 直接排除（不显示内容、不做原因分析）。选中者固定先行单独显示，
+    /// 一般也在前 N 内。
+    pub reason_max_display: usize
 }
 
 impl Default for SearchConfig {
@@ -80,7 +94,9 @@ impl Default for SearchConfig {
             search_group_size: 256,
             search_cpuct: 1.0,
             expected_search_stdev: 2200.0,
-            crn_stage_reseed: true
+            crn_stage_reseed: true,
+            reason_gap_threshold: 150.0,
+            reason_max_display: 5
         }
     }
 }
@@ -152,6 +168,18 @@ impl SearchConfig {
         self
     }
 
+    /// 设置决策理由分差门限（`0` 等价禁用理由输出）
+    pub fn with_reason_gap_threshold(mut self, threshold: f64) -> Self {
+        self.reason_gap_threshold = threshold;
+        self
+    }
+
+    /// 设置决策理由最多显示选项数（评分降序前 N 进入显示与分析）
+    pub fn with_reason_max_display(mut self, max_display: usize) -> Self {
+        self.reason_max_display = max_display;
+        self
+    }
+
     pub fn new_game_config(game_config: &GameConfig) -> Self {
         let search_config = SearchConfig::default()
             .with_search_n(game_config.mcts.search_n)
@@ -163,7 +191,9 @@ impl SearchConfig {
             .with_search_group_size(game_config.mcts.search_group_size)
             .with_search_cpuct(game_config.mcts.search_cpuct)
             .with_expected_search_stdev(game_config.mcts.expected_search_stdev)
-            .with_crn_stage_reseed(game_config.mcts.crn_stage_reseed);
+            .with_crn_stage_reseed(game_config.mcts.crn_stage_reseed)
+            .with_reason_gap_threshold(game_config.mcts.reason_gap_threshold)
+            .with_reason_max_display(game_config.mcts.reason_max_display);
         search_config
     }
 }

@@ -191,7 +191,19 @@ pub struct MctsConfig {
     ///
     /// 拉面规则层已由无状态流接管（RNG Refactor Plan v2 §5.2），不受此开关影响。
     #[serde(default = "default_mcts_crn_stage_reseed")]
-    pub crn_stage_reseed: bool
+    pub crn_stage_reseed: bool,
+    /// 决策理由分差门限
+    ///
+    /// 搜索完成后，存在与选中者分差绝对值 < 门限的候选（险胜局）才输出
+    /// 决策理由（可读文字；原始数据经 sink 发出）；悬殊局静默。`0` 等价禁用。
+    #[serde(default = "default_mcts_reason_gap_threshold")]
+    pub reason_gap_threshold: f64,
+    /// 决策理由最多显示选项数
+    ///
+    /// 触发理由输出后，全部候选按评分降序只取前 N 个进入显示与分析，
+    /// 其余直接排除（不显示内容、不做原因分析）。选中者始终单独一行显示。
+    #[serde(default = "default_mcts_reason_max_display")]
+    pub reason_max_display: usize
 }
 
 impl Default for MctsConfig {
@@ -208,7 +220,9 @@ impl Default for MctsConfig {
             search_group_size: default_mcts_search_group_size(),
             search_cpuct: default_mcts_search_cpuct(),
             expected_search_stdev: default_mcts_expected_search_stdev(),
-            crn_stage_reseed: default_mcts_crn_stage_reseed()
+            crn_stage_reseed: default_mcts_crn_stage_reseed(),
+            reason_gap_threshold: default_mcts_reason_gap_threshold(),
+            reason_max_display: default_mcts_reason_max_display()
         }
     }
 }
@@ -261,6 +275,16 @@ fn default_mcts_expected_search_stdev() -> f64 {
 /// [`MctsConfig::crn_stage_reseed`] 默认值
 fn default_mcts_crn_stage_reseed() -> bool {
     true
+}
+
+/// `reason_gap_threshold` 缺省值：分差 150 以内视为险胜，输出决策理由
+fn default_mcts_reason_gap_threshold() -> f64 {
+    150.0
+}
+
+/// `reason_max_display` 缺省值：理由最多显示/分析评分前 5 个选项
+fn default_mcts_reason_max_display() -> usize {
+    5
 }
 
 /// 训练数据生成（collector）配置
@@ -878,7 +902,13 @@ pub struct OverrideMctsConfig {
     pub expected_search_stdev: Option<f64>,
     /// 是否按阶段重播种 rollout 随机流（可选覆盖）
     #[serde(default)]
-    pub crn_stage_reseed: Option<bool>
+    pub crn_stage_reseed: Option<bool>,
+    /// 决策理由分差门限（可选覆盖；`0` 等价禁用理由输出）
+    #[serde(default)]
+    pub reason_gap_threshold: Option<f64>,
+    /// 决策理由最多显示选项数（可选覆盖）
+    #[serde(default)]
+    pub reason_max_display: Option<usize>
 }
 
 /// 简化的覆盖配置 - GameConfig部分
@@ -1003,6 +1033,12 @@ impl OverrideGameConfig {
         }
         if let Some(v) = m.crn_stage_reseed {
             ret.mcts.crn_stage_reseed = v;
+        }
+        if let Some(v) = m.reason_gap_threshold {
+            ret.mcts.reason_gap_threshold = v;
+        }
+        if let Some(v) = m.reason_max_display {
+            ret.mcts.reason_max_display = v;
         }
         if let Some(v) = self.ramen_region_strategy {
             ret.ramen_region_strategy = v;

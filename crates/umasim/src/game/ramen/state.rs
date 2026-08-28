@@ -352,6 +352,14 @@ impl RamenGame {
         ret.base
             .friend_event_ids
             .extend(global!(RAMENDATA).friend_events.values().map(|e| e.id));
+        // 五维属性上限：基值已由 [`BaseGame::new`] 用 [`RamenScenarioData::status_limit_base`]
+        // 初始化并叠加开局继承增量（[`InheritInfo::inherit_limit_newgame`]）。**不得**在此处
+        // 整体赋值 `five_status_limit`，那会把开局继承增量擦掉（PR #25 修复后该路径已删除）。
+        // 若基值需要修正，必须改 [`BaseGame::new`] 的构造顺序。
+        //
+        // 注意：温泉剧本对应字段（onsen/game.rs:135）有 `min(2800)` 防御性 cap，
+        // 但拉面剧本 speed 基础上限是 3100，`min(2800)` 会硬截断——把限高速玩家进 3100+
+        // 区间到不可达。两剧本基值范围不同，不能共用同一 cap：拉面无防御需要。
         // 携带4种卡以上才能分身
         ret.deck_can_split = ret.card_type_count.iter().filter(|x| **x > 0).count() >= 4;
         // 初始化人头（Game trait 方法）

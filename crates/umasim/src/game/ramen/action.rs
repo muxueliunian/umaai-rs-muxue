@@ -1055,7 +1055,7 @@ fn apply_region_selection(game: &mut super::RamenGame, regions: [usize; 3]) -> R
     game.ramen.selected_regions = regions;
     let year_idx = super::RamenState::region_archive_year_idx(game.base.turn)?;
     game.ramen.archive_selected_regions(year_idx, regions)?;
-    diag!("地区选择: {:?} (第 {} 年)", regions, year_idx + 1);
+    diag!("地区选择: {:?} (第 {} 年，手写逻辑)", regions, year_idx + 1);
     Ok(())
 }
 

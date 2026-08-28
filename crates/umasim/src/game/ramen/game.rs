@@ -856,8 +856,10 @@ impl RamenGame {
         // 3. 显示 buff + distribution（玩家在选训练前看到效果）
         // 整段 cfg(feature = "diag")：MCTS rollout 编译时关掉 diag feature 可省
         // comfy-table 构造 + ANSI 解析（最贵的展示开销）；? 在 cfg 包块内整段消失。
+        // 内层再包 enabled()：diag feature 开启的 umasim 在 MCTS rollout 期间
+        // 由 DiagGuard 全局静默，跳过 explain 系列的 String/comfy-table 构造。
         #[cfg(feature = "diag")]
-        {
+        if crate::output::diagnostic::enabled() {
             crate::diag!("---- 吃面后 ----");
             // 吃面后插入一行马娘状态（诀窍/PT 消耗后的最新状态）
             crate::diag!("{}", self.uma.explain()?);
@@ -1183,8 +1185,9 @@ impl RamenGame {
         // 回合标题（turn_flow 风格分节；每回合一次）
         // 整段 cfg(feature = "diag")：MCTS rollout 编译时关掉 diag 可省
         // self.explain() 构造 String + self.explain_ramen_info() 构造 String。
+        // 内层再包 enabled()：rollout 期间由 DiagGuard 静默（同上）。
         #[cfg(feature = "diag")]
-        {
+        if crate::output::diagnostic::enabled() {
             diag!("────────── 回合 {} · 回合开始 ──────────", self.base.turn + 1);
             diag!("{}", self.explain()?);
             // 显示拉面杯信息（剧本机制未开启或URA回合时简化显示）
@@ -1350,8 +1353,11 @@ impl RamenGame {
             }
 
             // 训练后展示（comfy-table + ANSI 解析；MCTS rollout 编译时关 diag 跳过）
+            // enabled() 包裹：rollout 期间跳过 explain_distribution 的构造（同上）
             #[cfg(feature = "diag")]
-            diag!("训练:\n{}", self.explain_distribution()?);
+            if crate::output::diagnostic::enabled() {
+                diag!("训练:\n{}", self.explain_distribution()?);
+            }
         }
         Ok(())
     }
@@ -1436,8 +1442,9 @@ impl RamenGame {
     ) -> Result<()> {
         // 事件三段展示（标题 / 选项描述 / 选择结果）—— MCTS rollout 编译时关 diag 跳过
         // Explain::event_choice() 构造 String，开销可观
+        // enabled() 包裹：rollout 期间由 DiagGuard 静默（同上）
         #[cfg(feature = "diag")]
-        {
+        if crate::output::diagnostic::enabled() {
             diag!("【事件】#{} {}", event.id, event.name);
             if event.player_select && event.choices.len() > 1 {
                 for (index, choice) in event.choices.iter().enumerate() {
