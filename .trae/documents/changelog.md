@@ -6,7 +6,8 @@
 - **MCTS rollout 诊断日志运行时屏蔽**：diagnostic 加进程级开关（DiagGuard 挂 `search_with_terminal`），`diag!` 双门控 + 8 处 explain 块补 `if enabled()`，rollout 搜索静默、业务日志不受影响，顺带拿回加速收益
 - **险胜决策理由输出**：新增 output/reason——险胜回合（门限默认 150）显中选内容 + 未中选 top-N 分差与五维/PT 子项；参数走完整覆盖链，终局差异日志 info 降 debug
 - **诊断出口整理**：basic.rs 回合分隔线 println 并入 diag!、地区选择 diag 补"手写逻辑"注记、state.rs 补五维上限初始化契约注释
-- **合入 ramen_workbench 主干修改**：squash 单提交；实验脚本 / workflow / 实验采集 bin / 过程文档不合入，tests_overview 待按 master 口径另行更新
+- **合入 ramen_workbench 主干修改**：squash 单提交；实验脚本 / workflow / 实验采集 bin / 过程文档不合入
+- **tests_overview 按 master 口径全量重写**：159→330 个测试逐条一行描述并按模块重组；旧「未来缩减参考」表随 159 口径移除
 
 ## 2026-08-27
 - **五维属性上限剧本化**：上限基值改为随构造参数传入（`Uma::new` / `BaseGame::new` 新增 `limit_base`），顺序固定为"先写剧本基值、再加继承"，三个剧本各自从自己的 `scenario_*.json` 取值，`constants.json` 同名字段降级为 basic 与缺字段兜底。原先"先写全局值、再由各剧本事后修正"的打补丁式设计全部删除——拉面的整体赋值发生在累加开局继承之后，会把继承增量擦掉；温泉的 `min(2800)` 是速度基值 2600 时代的防御值，基值提高后变成硬截断，且在继承事件后还会再截一次。补丁写法本身就是这两个缺陷的来源，新剧本照抄必然复现。温泉基值补入 `scenario_onsen.json`（此前无该字段，一直吃全局值再被截断）。**改变拉面与温泉模拟数值，基线作废**
