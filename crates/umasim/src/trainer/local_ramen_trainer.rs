@@ -1586,7 +1586,11 @@ impl LocalRamenTrainer {
 pub struct RecommendedRamenTrainer {
     years: [LocalRamenTrainer; 3],
     /// 最近一次调用落在哪一年的策略，用于把对应 breakdown 暴露给 LoggingTrainer。
-    last_year: Mutex<Option<usize>>
+    last_year: Mutex<Option<usize>>,
+    /// 是否记录 `last_year`。rollout 下关闭：24 线程共享同一实例，每次决策都抢同
+    /// 一把 `Mutex`，而 `last_year` 的唯一读者是 [`Trainer::last_breakdown`]，
+    /// 该场景下三份年策略的 `collect_breakdown` 也已关闭、必然返回 `None`。
+    record_last_year: bool
 }
 
 impl RecommendedRamenTrainer {
@@ -1695,8 +1699,34 @@ impl RecommendedRamenTrainer {
             // 30→40 总加权 +318；45 回落——门限过高休息过多）；吃面回合仅第三年放掉
             // （Y3 fail_rate_drop=100% 必成），第一/二年保留 40（Y1/Y2 吃面训练仍可能失败）。
             years: [make(16.0, 40, 40), make(64.0, 40, 40), make(64.0, 40, 0)],
-            last_year: Mutex::new(None)
+            last_year: Mutex::new(None),
+            record_last_year: true
         }
+    }
+
+    /// 创建 rollout 专用实例（关闭 breakdown 采集**与** `last_year` 记录）
+    ///
+    /// 搜索/批跑场景必须用本构造器：24 线程共享同一个 rollout trainer，
+    /// `stash` 每次决策都无条件 `format!` 出全候选分解并锁同一把 `Mutex`，
+    /// 而 rollout 内部的分解文本没有任何消费者——纯锁争用开销。
+    ///
+    /// 本构造器关掉**两样**东西：三份年策略的 `collect_breakdown`，以及本结构
+    /// 自己的 [`Self::record_last_year`]。只关前者的话，三个 `select_*` 每次决策
+    /// 仍会锁 `last_year`，锁争用只消掉一半。两者的唯一读者都是
+    /// [`Trainer::last_breakdown`]，决策链不消费，故整局逐位不变
+    /// （守门见 `recommended_for_rollout_decisions_identical`）。
+    ///
+    /// 比 [`LocalRamenTrainer::for_rollout`] / [`RamenHandwrittenTrainer::for_rollout`]
+    /// 多关一项——那两者没有 `last_year` 这层年份转发。
+    pub fn for_rollout() -> Self {
+        let mut trainer = Self::new();
+        for year in trainer.years.iter_mut() {
+            year.collect_breakdown = false;
+        }
+        // 连 last_year 的写入一并关掉：只关 collect_breakdown 的话，三个 select_*
+        // 每次决策仍会锁同一把 Mutex，「避免锁争用」只做了一半。
+        trainer.record_last_year = false;
+        trainer
     }
 
     fn year(game: &RamenGame) -> usize {
@@ -1719,16 +1749,20 @@ impl Default for RecommendedRamenTrainer {
 impl Trainer<RamenGame> for RecommendedRamenTrainer {
     fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
         let year = Self::year(game);
-        if let Ok(mut slot) = self.last_year.lock() {
-            *slot = Some(year);
+        if self.record_last_year {
+            if let Ok(mut slot) = self.last_year.lock() {
+                *slot = Some(year);
+            }
         }
         self.years[year].select_action(game, actions, rng)
     }
 
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
         let year = Self::year(game);
-        if let Ok(mut slot) = self.last_year.lock() {
-            *slot = Some(year);
+        if self.record_last_year {
+            if let Ok(mut slot) = self.last_year.lock() {
+                *slot = Some(year);
+            }
         }
         self.years[year].select_choice(game, choices, rng)
     }
@@ -1737,8 +1771,10 @@ impl Trainer<RamenGame> for RecommendedRamenTrainer {
         &self, game: &RamenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
     ) -> Result<usize> {
         let year = Self::year(game);
-        if let Ok(mut slot) = self.last_year.lock() {
-            *slot = Some(year);
+        if self.record_last_year {
+            if let Ok(mut slot) = self.last_year.lock() {
+                *slot = Some(year);
+            }
         }
         self.years[year].select_event_choice(game, event, choices, rng)
     }
@@ -1916,6 +1952,90 @@ mod tests {
             panic!("for_rollout 实例不应采集 breakdown，实际: {bd:?}");
         }
         Ok(())
+    }
+
+    /// `RecommendedRamenTrainer::for_rollout()` 只许省掉观测开销，不许改决策。
+    ///
+    /// 它关掉两样东西——三份年策略的 `collect_breakdown`、以及 `last_year` 的
+    /// `Mutex` 写入。两者的唯一读者都是 [`Trainer::last_breakdown`]，决策链
+    /// （`choose` / `select_*`）不消费任何一个，所以整局必须逐位相同。
+    /// 这条守门存在的意义：将来若有人把某个字段挪进决策路径，这里会红。
+    ///
+    /// ⚠ 单看 `last_breakdown().is_none()` **区分不出**两个开关——任一关闭它都返回
+    /// `None`（见 `last_breakdown`：先解 `last_year`，再问年策略要文本）。所以本测试
+    /// 直接读 `record_last_year` 字段，并在整局跑完后核对 `last_year` 确实没被写过。
+    #[test]
+    fn recommended_for_rollout_decisions_identical() -> Result<()> {
+        use crate::{
+            bench::seeded_rngs,
+            game::{InheritInfo, ramen::RamenGame, traits::Game},
+            gamedata::init_global,
+            utils::{Checks, get_workspace_root, init_test_logger}
+        };
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        const DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+        let inherit =
+            InheritInfo { blue_count: [15, 0, 0, 0, 3], extra_count: [10, 10, 20, 20, 20, 40] };
+
+        /// 一局跑完后的观测量：终局三项 + 两个开关的实际效果。
+        struct Observed {
+            score: i32,
+            five: [i32; 5],
+            skill_pt: i32,
+            /// 观测出口是否有内容
+            has_breakdown: bool,
+            /// 整局跑完后 `last_year` 是否被写过——直接看这局用的那个实例
+            last_year_written: bool
+        }
+
+        // 同一 base_seed / run_idx ⇒ 决策 RNG 与规则 RNG 都逐位相同
+        let run = |rollout: bool| -> Result<Observed> {
+            let (mut rng, rule_master) = seeded_rngs(61444, 0);
+            let mut game = RamenGame::newgame(102601, &DECK, inherit.clone())?;
+            game.set_rule_master(rule_master);
+            let trainer = if rollout {
+                RecommendedRamenTrainer::for_rollout()
+            } else {
+                RecommendedRamenTrainer::new()
+            };
+            game.run_full_game(&trainer, &mut rng)?;
+            let last_year_written = matches!(trainer.last_year.lock().as_deref(), Ok(Some(_)));
+            Ok(Observed {
+                score: game.uma.calc_score(),
+                five: game.uma.five_status,
+                skill_pt: game.uma.skill_pt,
+                has_breakdown: trainer.last_breakdown().is_some(),
+                last_year_written
+            })
+        };
+
+        let n = run(false)?;
+        let r = run(true)?;
+        println!(
+            "new():         评分={} 五维={:?} PT={} breakdown={} last_year 被写={}",
+            n.score, n.five, n.skill_pt, n.has_breakdown, n.last_year_written
+        );
+        println!(
+            "for_rollout(): 评分={} 五维={:?} PT={} breakdown={} last_year 被写={}",
+            r.score, r.five, r.skill_pt, r.has_breakdown, r.last_year_written
+        );
+
+        let mut c = Checks::new();
+        c.check(n.score == r.score, "整局评分逐位相同");
+        c.check(n.five == r.five, "整局五维逐位相同");
+        c.check(n.skill_pt == r.skill_pt, "整局技能点逐位相同");
+        c.check(n.has_breakdown, "new() 仍暴露 breakdown（决策日志依赖）");
+        c.check(!r.has_breakdown, "for_rollout() 不暴露 breakdown（rollout 无消费者）");
+        // 上面两条只证明「观测出口是空的」——两个开关任一关闭都会让 last_breakdown
+        // 返回 None。下面两条才区分得出「锁写入确实被跳过」。
+        c.check(n.last_year_written, "new() 整局跑完后 last_year 被写过");
+        c.check(!r.last_year_written, "for_rollout() 整局跑完后 last_year 仍为 None");
+        c.finish()
     }
 
     /// 正式 preset 必须使用 v44 同种子回归胜出的友人跨年节奏。
@@ -2464,6 +2584,144 @@ mod tests {
         }
 
         Ok(())
+    }
+
+    /// Top 函数精确 microbench
+    ///
+    /// pprof 采样给出占比估算，但单次真实耗时需 wall-clock 直测。
+    /// 在固定局面（speed build turn=30 seed=61444）下，对 sim_profiler
+    /// 测出的 top 函数逐个直接调用 N=100000 次，记总/最小/平均时间。
+    ///
+    /// 输出单位：纳秒；3 轮取 min/mean 减小调度噪声。
+    ///
+    /// 跑法：`cargo test --release microbench_top_fns -- --ignored --nocapture`
+    ///
+    /// `#[ignore]`：本测试 `set_current_dir` 改的是**进程级全局 CWD**，与并行跑的其他
+    /// 测试互相污染；且 N=100000×3 轮在 debug 下极慢。它本就是手动剖析工具，不是守门。
+    #[ignore]
+    #[test]
+    // AGENTS.md：测试内允许 unwrap，但需显式标注
+    #[allow(clippy::unwrap_used)]
+    fn microbench_top_fns() {
+        use std::{hint::black_box, time::Instant};
+
+        use crate::{
+            bench, game::{Game, InheritInfo, ramen::RamenGame}, gamedata::init_global_with_config, trainer::{
+                LoggingTrainer, RecommendedRamenTrainer
+            }, utils::{get_workspace_root, load_game_config}
+        };
+
+        const N: usize = 100_000;
+        const UMA: u32 = 102_601;
+        const DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
+        const INHERIT: InheritInfo = InheritInfo {
+            blue_count: [15, 0, 0, 0, 3],
+            extra_count: [0, 10, 30, 10, 30, 40]
+        };
+
+        let workspace_root = get_workspace_root().unwrap();
+        std::env::set_current_dir(workspace_root).unwrap();
+        init_global_with_config(&load_game_config().unwrap()).unwrap();
+
+        let (mut rng, rule_master) = bench::seeded_rngs(61444, 30);
+        let mut game = RamenGame::newgame(UMA, &DECK, INHERIT).unwrap();
+        game.set_rule_master(rule_master);
+        // 推进到 turn 30（避开 turn 0-1 边界、地区选择、第 1 年体力波动）
+        let mut trainer = LoggingTrainer::new(RecommendedRamenTrainer::new(), 30);
+        trainer.set_logging(false);
+        while game.turn() < 30 {
+            if !game.next() {
+                break;
+            }
+            game.run_stage(&trainer, &mut rng).unwrap();
+        }
+        let local = LocalRamenTrainer::new();
+        let gain_sample: [i32; 6] = [10, 5, 0, 0, 5, 0];
+
+        // 每函数：warmup + 3 轮 × N 次
+        fn run<F: FnMut()>(name: &str, mut f: F, n: usize) -> (u128, f64) {
+            // Warmup
+            for _ in 0..1000 {
+                black_box(f());
+            }
+            let mut min_total = u128::MAX;
+            let mut mean_sum = 0.0f64;
+            for round in 0..3 {
+                let start = Instant::now();
+                for _ in 0..n {
+                    black_box(f());
+                }
+                let total = start.elapsed().as_nanos();
+                min_total = min_total.min(total);
+                mean_sum += total as f64 / n as f64;
+                println!("  {} 轮 {}: total={} ns, mean={:.1} ns/call", name, round + 1, total, total as f64 / n as f64);
+            }
+            (min_total, mean_sum / 3.0)
+        }
+
+        println!("\n=== Top 函数 microbench (speed build turn=30 seed=61444) ===");
+        println!("采样函数单位：ns/op；3 轮取 min/mean\n");
+
+        // 1. reserve_penalty
+        let (min1, mean1) = run("LocalRamenTrainer::reserve_penalty", || {
+            let _ = black_box(local.reserve_penalty(&game, &gain_sample));
+        }, N);
+        println!(">>> reserve_penalty           min/单轮={} ns   mean/3轮={:.1} ns/call\n", min1, mean1);
+
+        // 2. default_calc_training_buff
+        let (min2, mean2) = run("RamenGame::default_calc_training_buff(0)", || {
+            let _ = black_box(game.default_calc_training_buff(0).unwrap());
+        }, N);
+        println!(">>> default_calc_training_buff   min/单轮={} ns   mean/3轮={:.1} ns/call\n", min2, mean2);
+
+        // 3. calc_training_value（先用 buff 准备）
+        let buffs = game.default_calc_training_buff(0).unwrap();
+        let (min3, mean3) = run("RamenGame::calc_training_value", || {
+            let _ = black_box(game.calc_training_value(&buffs, 0).unwrap());
+        }, N);
+        println!(">>> calc_training_value         min/单轮={} ns   mean/3轮={:.1} ns/call\n", min3, mean3);
+
+        // 4. SupportCard::calc_training_effect
+        let sample_card = &game.deck()[0];
+        let (min4, mean4) = run("SupportCard::calc_training_effect", || {
+            let _ = black_box(sample_card.calc_training_effect(&game, 0).unwrap());
+        }, N);
+        println!(">>> SupportCard::calc_training_effect  min/单轮={} ns   mean/3轮={:.1} ns/call\n", min4, mean4);
+
+        // 5. CardTrainingEffect::clone
+        let (min5, mean5) = run("CardTrainingEffect::clone", || {
+            let _ = black_box(buffs.clone());
+        }, N);
+        println!(">>> CardTrainingEffect::clone    min/单轮={} ns   mean/3轮={:.1} ns/call\n", min5, mean5);
+
+        // 6. Trainer::select_action（LocalRamenTrainer）—— 整段打分耗时
+        let train_actions: Vec<crate::game::ramen::RamenAction> = (0..5)
+            .map(|tr| {
+                use crate::game::ramen::{Operation, TrainingType};
+                crate::game::ramen::RamenAction::no_ramen(Operation::Train(match tr {
+                    0 => TrainingType::Speed,
+                    1 => TrainingType::Stamina,
+                    2 => TrainingType::Power,
+                    3 => TrainingType::Guts,
+                    _ => TrainingType::Wisdom,
+                }))
+            })
+            .collect();
+        use rand::SeedableRng;
+        let mut action_rng = rand::rngs::StdRng::seed_from_u64(42);
+        let (min6, mean6) = run("LocalRamenTrainer::select_action(train)", || {
+            let _ = black_box(local.select_action(&game, &train_actions, &mut action_rng).unwrap());
+        }, N);
+        println!(">>> LocalRamenTrainer::select_action  min/单轮={} ns   mean/3轮={:.1} ns/call\n", min6, mean6);
+
+        println!("\n=== 对比 pprof ticks 数据（1000 局，no diag feature）===");
+        println!("reserve_penalty:               148 ticks (~17.2%) [private, 不可直测]");
+        println!("default_calc_training_buff:     64 ticks (~7.4%) [Game trait]");
+        println!("calc_training_value:            40 ticks (~4.6%) [Game trait]");
+        println!("SupportCard::calc_training_effect: 20 ticks (~2.3%) [public]");
+        println!("LocalRamenTrainer::select_action  n/a [含整段打分链路]");
+        println!("\n注意：reserve_penalty 是 LocalRamenTrainer private 方法，从外部不可直测。");
+        println!("select_action 总耗时 - reserve_penalty 预估 ≈ 其他打分项。");
     }
 }
 

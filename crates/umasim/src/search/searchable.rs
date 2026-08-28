@@ -124,16 +124,20 @@ impl FlatSearchGame for OnsenGame {
 }
 
 impl FlatSearchGame for RamenGame {
-    // MERGE NOTE: 暂时保持RamenHandwrittenTrainer, 等手写逻辑确认后再使用RamenRecommendedTrainer
-    type RolloutTrainer = crate::trainer::RamenHandwrittenTrainer;
+    /// rollout 基策 = 正式推荐手写策略
+    ///
+    /// 2026-08-27 切换：原用 `RamenHandwrittenTrainer`（纯 RamenPolicy，缺平衡/吃面联动/
+    /// 体力门限等机制），切到 [`RecommendedRamenTrainer`] 后搜索评分与正式手写策略对齐，
+    /// 排序结果更有意义；门控全关时与纯推荐策略逐位等价。决策开销 ×6.36（RamenSelect
+    /// 预演主导），单局 ×2.10，搜索预算需相应调小或 train_only。
+    type RolloutTrainer = crate::trainer::RecommendedRamenTrainer;
 
     /// 拉面暂无 leaf 估值器，Phase 1 只允许跑到终局
     const SUPPORTS_TRUNCATED_LEAF: bool = false;
 
-    /// rollout 专用实例：关闭分解文本采集，避免 24 线程争一把 `Mutex`
+    /// rollout 专用实例：三份年的 breakdown 全部关闭
     fn default_rollout_trainer() -> Self::RolloutTrainer {
-        
-        crate::trainer::RamenHandwrittenTrainer::for_rollout()
+        crate::trainer::RecommendedRamenTrainer::for_rollout()
     }
 
     /// 拉面 stage key（保留实现仅为满足 trait；规则层接管后不再被调用）
