@@ -18,6 +18,7 @@ pub mod policy_schema;
 mod rng_consistency;
 pub mod rules;
 pub mod state;
+pub mod training_sample;
 
 pub use action::*;
 use enum_iterator::Sequence;

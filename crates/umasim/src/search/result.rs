@@ -216,7 +216,30 @@ pub struct SearchOutput<A = OnsenAction, D = NoTerminalStats> {
     pub best_action_idx: usize,
 
     /// 本次搜索使用的激进度因子
-    pub radical_factor: f64
+    pub radical_factor: f64,
+
+    /// 按 rollout 序号保留的有序原始分
+    ///
+    /// `None` 表示未开启 [`SearchConfig::record_ordered_rollouts`]（默认）。
+    /// [`Self::new`]、[`Self::with_terminals`] 与 [`Default`] 均置 `None`，
+    /// 生产路径零分配。
+    pub ordered_rollouts: Option<OrderedRollouts>
+}
+
+/// 按 rollout 序号对齐的原始分
+///
+/// 教师数据采集用：一次搜索内各候选的第 k 次 rollout 共享 CRN 种子，
+/// 只有按下标对齐才能做 cross-fitting、对抗 winner curse。
+/// 失败的序号必须留 `None`，不能从 Vec 里删掉，否则后续元素会与其他候选错位。
+#[derive(Debug, Clone)]
+pub struct OrderedRollouts {
+    /// 本次搜索的根种子（CRN 起点）
+    pub root_seed: u64,
+
+    /// 按候选下标 → 按 rollout 序号的原始分（`score` 轴，不是 `score_pt`）
+    ///
+    /// 内层 `None` 表示该次 rollout 失败。
+    pub per_candidate: Vec<Vec<Option<f64>>>
 }
 
 /// 手写而非 `derive(Default)`：后者会给泛型参数加上多余的 `A: Default` 约束，
@@ -228,7 +251,8 @@ impl<A, D> Default for SearchOutput<A, D> {
             action_results: Vec::new(),
             terminal_results: Vec::new(),
             best_action_idx: 0,
-            radical_factor: 0.0
+            radical_factor: 0.0,
+            ordered_rollouts: None
         }
     }
 }
@@ -266,7 +290,8 @@ impl<A, D> SearchOutput<A, D> {
             action_results,
             terminal_results,
             best_action_idx,
-            radical_factor
+            radical_factor,
+            ordered_rollouts: None
         }
     }
 

@@ -33,6 +33,11 @@ path = "tools/data_collection/sim_profiler.rs"
 # 在 Windows 上编译失败，故不进 default，需显式 `--features profiler`
 required-features = ["profiler"]
 
+[[bin]]
+name = "ramen_teacher_collect"
+path = "tools/data_collection/ramen_teacher_collect.rs"
+required-features = ["cli"]
+
 [features]
 default = ["cli", "diag"]
 diag = []

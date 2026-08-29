@@ -49,6 +49,7 @@
 //! 自由度只在富余部分——即「现在花万能风味、把库存诀窍省给后面的面」。
 
 use anyhow::{Result, bail, ensure};
+use serde::{Deserialize, Serialize};
 
 use super::{Operation, RamenStage, TrainingType, action::RamenAction};
 
@@ -117,7 +118,7 @@ pub const TRIPLES: [[i32; 3]; TRIPLE_NUM] = [
 /// 一个动作占用的 policy 格位
 ///
 /// `RegionSelect` 一次选 3 个地区，故不是单格；其余阶段都是单格。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PolicySlots {
     /// 单格（吃面 / 基础操作 / 超级拉面）
     One(usize),
