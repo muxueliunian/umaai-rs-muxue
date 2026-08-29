@@ -74,6 +74,18 @@ const SAMPLER_STREAM_TAG: u64 = 0x5341_4D50_4C45_5230;
 /// 截断回合频道标签
 const TURN_STREAM_TAG: u64 = 0x5455_524E_5F44_5257;
 
+/// 阶段配额频道标签
+///
+/// 与截断回合、局内种子分属三个独立频道：调整地区配额不会顺带改动落在
+/// 普通配额上的那些样本的局面，分片续跑的可复现契约因此不受影响。
+const QUOTA_STREAM_TAG: u64 = 0x5155_4F54_415F_5247;
+
+/// 第 2 年地区选择所在回合（该回合**末**的 `RegionSelect` 阶段）
+const REGION_SELECT_TURN_Y2: i32 = 23;
+
+/// 第 3 年地区选择所在回合
+const REGION_SELECT_TURN_Y3: i32 = 47;
+
 /// 按 `(基底, 序号, 频道)` 派生一个独立种子
 ///
 /// 终混合直接复用 [`crate::rng::splitmix64`] 的那一份（全仓库唯一权威实现），
@@ -240,6 +252,13 @@ pub const GEN1_SHAPES: [DeckShape; 3] = [
 ///
 /// 第 1 年地区选择已是 turn 2 的 [`RamenStage::RegionSelect`] 阶段边界，
 /// 本白名单会自动捕获它。`Begin` / `BeginAfterRegionSelect` 不是决策点，不收录。
+///
+/// **第 2/3 年的地区选择则几乎撞不到**：它们在 turn 23/47 的**回合末**，
+/// 同回合的 `RamenSelect` / `Train` 通常先命中白名单把样本截走。
+/// 实测 1200 次自由采样（`region_quota_permille = [0, 0]`）：turn 23 命中 **0** 次，
+/// turn 47 命中 9 次（占捕获样本 0.76%，且只在该回合前面的决策点恰好不合格时才轮到）。
+/// 要稳定采到它们必须走 [`SampleSpec::capture_stage`]，
+/// 见 [`SamplerConfig::region_quota_permille`]。
 fn is_capturable_stage(stage: &RamenStage) -> bool {
     matches!(
         stage,
@@ -370,8 +389,14 @@ impl SamplingSpace {
     /// 分片续跑正需要前者。截断回合与局内种子仍走哈希派生，与卡组不相关。
     pub fn spec_at(&self, config: &SamplerConfig, index: u64) -> SampleSpec {
         let plan = &self.plans[(index % self.plans.len() as u64) as usize];
-        let turn_draw = derive_seed(config.seed_base, index, TURN_STREAM_TAG);
-        let truncate_turn = (turn_draw % (config.max_turn.max(0) as u64 + 1)) as i32;
+        // 地区配额优先：命中则截断回合由配额定死，不再抽
+        let (truncate_turn, capture_stage) = match config.region_quota_turn(index) {
+            Some(turn) => (turn, Some(RamenStage::RegionSelect)),
+            None => {
+                let turn_draw = derive_seed(config.seed_base, index, TURN_STREAM_TAG);
+                ((turn_draw % (config.max_turn.max(0) as u64 + 1)) as i32, None)
+            }
+        };
         SampleSpec {
             index,
             uma: plan.uma,
@@ -379,6 +404,7 @@ impl SamplingSpace {
             shape: plan.shape,
             inherit: config.inherit.clone(),
             truncate_turn,
+            capture_stage,
             seed: derive_seed(config.seed_base, index, SAMPLER_STREAM_TAG),
             epsilon: config.epsilon,
             min_actions: config.min_actions
@@ -455,7 +481,17 @@ pub struct SamplerConfig {
     /// 截断回合的上界（含）
     pub max_turn: i32,
     /// 种子基底：换基底即得到一批全新但同样可复现的数据
-    pub seed_base: u64
+    pub seed_base: u64,
+    /// 第 2/3 年地区选择的采样配额，单位**千分之几**，`[第2年, 第3年]`
+    ///
+    /// 存在的理由是结构性的，不是调参：这两个决策点在 turn 23/47 的**回合末**，
+    /// 同回合的 `RamenSelect` / `Train` 通常先命中白名单把样本截走。实测 1200 次
+    /// 自由采样命中 turn 23 **0** 次、turn 47 9 次——`policy[214, 234)` 里属于
+    /// 第 2/3 年的 15 个格位因此拿不到可用的监督量，且这个量完全不受控。
+    ///
+    /// **第 3 年的每条样本约值 12 条普通样本的机时**（`all` 策略 120 个组合），
+    /// 故总预算倍率 ≈ `1 + q3 × 11`。默认 `[20, 30]` 对应 ≈ 1.33x。
+    pub region_quota_permille: [u32; 2]
 }
 
 impl Default for SamplerConfig {
@@ -465,8 +501,35 @@ impl Default for SamplerConfig {
             min_actions: 2,
             inherit: gen1_inherit(),
             max_turn: 77,
-            seed_base: 0x5041_5254_5F31
+            seed_base: 0x5041_5254_5F31,
+            region_quota_permille: [20, 30]
         }
+    }
+}
+
+impl SamplerConfig {
+    /// 按工作项序号判定它是否被分配给地区配额，返回该捕获哪个回合
+    ///
+    /// 走独立频道 [`QUOTA_STREAM_TAG`]，因此改配额不影响非配额样本的截断回合。
+    /// 判定顺序是**先第 3 年再第 2 年**：这样调高第 2 年配额不会重排已分配给
+    /// 第 3 年的那批 index（第 3 年样本贵 12 倍，重排的代价不对称）。
+    ///
+    /// 配额之和超过 1000‰ 时截断；`max_turn` 够不到目标回合时不分配。
+    fn region_quota_turn(&self, index: u64) -> Option<i32> {
+        let y3 = self.region_quota_permille[1].min(1000);
+        let y2 = self.region_quota_permille[0].min(1000 - y3);
+        if y2 + y3 == 0 {
+            return None;
+        }
+        let draw = (derive_seed(self.seed_base, index, QUOTA_STREAM_TAG) % 1000) as u32;
+        let turn = if draw < y3 {
+            REGION_SELECT_TURN_Y3
+        } else if draw < y3 + y2 {
+            REGION_SELECT_TURN_Y2
+        } else {
+            return None;
+        };
+        (turn <= self.max_turn).then_some(turn)
     }
 }
 
@@ -491,6 +554,16 @@ pub struct SampleSpec {
     pub inherit: InheritInfo,
     /// 截断回合：跑到该回合及之后的首个合格决策点即停
     pub truncate_turn: i32,
+    /// 只捕获该阶段（`None` = 白名单内首个合格决策点）
+    ///
+    /// 唯一用途是采到第 2/3 年地区选择：它们在 turn 23/47 的**回合末**，
+    /// 同回合的 `RamenSelect` / `Train` 通常先命中白名单，自由捕获下这两个
+    /// 决策点的样本量近乎为零（见 [`SamplerConfig::region_quota_permille`]）。
+    /// 指定阶段即跳过前面的决策点继续走。
+    ///
+    /// 与 `truncate_turn` 是**合取**：仍要求 `turn >= truncate_turn`，
+    /// 故配额样本的 `truncate_turn` 必须正好写成目标回合。
+    pub capture_stage: Option<RamenStage>,
     /// 本局主种子（决策流与规则流由它分裂而来）
     pub seed: u64,
     /// 轨迹扰动概率（随任务固化，不在执行时从配置读）
@@ -598,6 +671,8 @@ struct SamplingTrainer {
     min_actions: usize,
     /// 截断回合
     truncate_turn: i32,
+    /// 只捕获该阶段（`None` = 白名单内首个合格决策点）
+    capture_stage: Option<RamenStage>,
     /// 捕获结果
     captured: RefCell<Option<CapturedRoot>>
 }
@@ -607,6 +682,14 @@ impl SamplingTrainer {
     fn done(&self) -> bool {
         self.captured.borrow().is_some()
     }
+
+    /// 当前阶段是否是本次任务要捕获的阶段
+    fn stage_matches(&self, stage: &RamenStage) -> bool {
+        match &self.capture_stage {
+            Some(want) => stage == want,
+            None => is_capturable_stage(stage)
+        }
+    }
 }
 
 impl Trainer<RamenGame> for SamplingTrainer {
@@ -614,7 +697,7 @@ impl Trainer<RamenGame> for SamplingTrainer {
         if !self.done()
             && game.turn() >= self.truncate_turn
             && actions.len() >= self.min_actions
-            && is_capturable_stage(&game.stage)
+            && self.stage_matches(&game.stage)
         {
             *self.captured.borrow_mut() = Some(CapturedRoot {
                 game: game.clone(),
@@ -669,6 +752,7 @@ pub fn sample_from_spec(spec: SampleSpec) -> Result<SampleOutcome> {
         epsilon: spec.epsilon,
         min_actions: spec.min_actions,
         truncate_turn: spec.truncate_turn,
+        capture_stage: spec.capture_stage.clone(),
         captured: RefCell::new(None)
     };
 
@@ -1142,6 +1226,145 @@ mod tests {
                 "搜索没有产出任何有效样本"
             );
         }
+        Ok(())
+    }
+
+    // ========== 地区选择配额 ==========
+
+    /// 回归：**关掉配额后第 2/3 年地区选择的样本量近乎为零**
+    ///
+    /// 这是 [`SamplerConfig::region_quota_permille`] 存在的全部理由。自由捕获下
+    /// turn 23/47 的回合末 `RegionSelect` 通常被同回合的 `RamenSelect` / `Train`
+    /// 抢先：实测 1200 个任务里 turn 23 命中 0 次、turn 47 命中 9 次（0.76%）。
+    /// 而 `policy[214, 234)` 那 20 个地区格里，第 2/3 年占 15 个。
+    ///
+    /// 断言写成「占比 < 5%」而非「恒为 0」：turn 47 在前面的决策点恰好不合格时
+    /// 确实能被自由捕获到，写死 0 会是个会自己红掉的假命题。
+    #[test]
+    fn test_region_select_undersampled_without_quota() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::gen1()?;
+        let config = SamplerConfig {
+            region_quota_permille: [0, 0],
+            ..SamplerConfig::default()
+        };
+
+        let mut region_turns: HashMap<i32, usize> = HashMap::new();
+        let mut captured = 0usize;
+        for index in 0..1200u64 {
+            if let SampleOutcome::Captured(pos) = sample_position(&space, &config, index)? {
+                captured += 1;
+                if pos.stage == RamenStage::RegionSelect {
+                    *region_turns.entry(pos.turn).or_default() += 1;
+                }
+            }
+        }
+        println!("无配额 1200 任务：捕获 {captured} 条，RegionSelect 分布 {region_turns:?}");
+        let y1 = region_turns.get(&2).copied().unwrap_or(0);
+        let y2 = region_turns.get(&REGION_SELECT_TURN_Y2).copied().unwrap_or(0);
+        let y3 = region_turns.get(&REGION_SELECT_TURN_Y3).copied().unwrap_or(0);
+        assert!(y1 > 0, "第 1 年的 turn 2 地区选择本应能自由捕获");
+        assert!(
+            (y2 + y3) * 20 < captured,
+            "第 2/3 年地区样本占比 {}/{captured} 已超过 5%%，配额机制的前提需重新评估",
+            y2 + y3
+        );
+        Ok(())
+    }
+
+    /// 配额打开后，第 2/3 年地区选择都能采到，且候选表是完整组合枚举
+    #[test]
+    fn test_region_quota_captures_year2_and_year3() -> Result<()> {
+        setup()?;
+        // 第 3 年 `fixed` 策略**绕过 trainer** 直接落地，采不到任何样本。
+        // 测试进程走 `default_for_init()`，默认即 `All`；此处显式断言，
+        // 免得将来别处先用 toml 初始化 globals 时本测试给出误导性的失败原因。
+        use crate::gamedata::{GAMECONFIG, RamenRegionStrategy};
+        assert_eq!(
+            global!(GAMECONFIG).ramen_region_strategy,
+            RamenRegionStrategy::All,
+            "本测试要求 ramen_region_strategy = all（fixed 下第 3 年不经过 trainer）"
+        );
+        let space = SamplingSpace::gen1()?;
+        let config = SamplerConfig {
+            region_quota_permille: [500, 500],
+            ..SamplerConfig::default()
+        };
+
+        let mut by_turn: HashMap<i32, usize> = HashMap::new();
+        let mut cands: HashMap<i32, usize> = HashMap::new();
+        for index in 0..24u64 {
+            let SampleOutcome::Captured(pos) = sample_position(&space, &config, index)? else {
+                continue;
+            };
+            assert_eq!(pos.stage, RamenStage::RegionSelect, "配额样本必须停在 RegionSelect");
+            assert!(
+                matches!(pos.turn, REGION_SELECT_TURN_Y2 | REGION_SELECT_TURN_Y3),
+                "配额样本停在了非地区回合 {}",
+                pos.turn
+            );
+            *by_turn.entry(pos.turn).or_default() += 1;
+            cands.insert(pos.turn, pos.actions.len());
+        }
+        println!("配额 500/500 的 24 个任务：{by_turn:?}，候选数 {cands:?}");
+        assert!(
+            by_turn.get(&REGION_SELECT_TURN_Y2).copied().unwrap_or(0) > 0,
+            "没采到第 2 年地区选择"
+        );
+        assert!(
+            by_turn.get(&REGION_SELECT_TURN_Y3).copied().unwrap_or(0) > 0,
+            "没采到第 3 年地区选择"
+        );
+        assert_eq!(
+            cands.get(&REGION_SELECT_TURN_Y2),
+            Some(&10),
+            "第 2 年应是 C(5,3)=10 个组合"
+        );
+        assert_eq!(
+            cands.get(&REGION_SELECT_TURN_Y3),
+            Some(&120),
+            "第 3 年 all 策略应是 C(10,3)=120 个组合"
+        );
+        Ok(())
+    }
+
+    /// 配额走独立频道：调整它不改动落在普通配额上的任何一条任务
+    ///
+    /// 这条保证的是分片续跑的可复现契约——否则改一次配额，已跑完的分片全部作废。
+    #[test]
+    fn test_region_quota_does_not_perturb_other_samples() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::gen1()?;
+        let off = SamplerConfig {
+            region_quota_permille: [0, 0],
+            ..SamplerConfig::default()
+        };
+        let on = SamplerConfig {
+            region_quota_permille: [20, 30],
+            ..SamplerConfig::default()
+        };
+
+        let mut quota_hits = 0usize;
+        let total = 2000u64;
+        for index in 0..total {
+            let a = space.spec_at(&off, index);
+            let b = space.spec_at(&on, index);
+            if b.capture_stage.is_some() {
+                quota_hits += 1;
+                assert!(
+                    matches!(b.truncate_turn, REGION_SELECT_TURN_Y2 | REGION_SELECT_TURN_Y3),
+                    "配额任务的截断回合必须正好是地区回合，实际 {}",
+                    b.truncate_turn
+                );
+                continue;
+            }
+            assert_eq!(a, b, "非配额任务被配额改动了: index={index}");
+        }
+        println!("{total} 个任务中 {quota_hits} 个落入地区配额（50‰ 期望 ≈ 100）");
+        assert!(
+            (60..160).contains(&quota_hits),
+            "配额比例偏离过大: {quota_hits} / {total}"
+        );
         Ok(())
     }
 }
