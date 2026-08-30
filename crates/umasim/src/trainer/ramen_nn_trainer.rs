@@ -27,7 +27,10 @@ use crate::{
     gamedata::{EventChoice, EventData}
 };
 
-use super::{RecommendedRamenTrainer, ramen_handwritten_trainer::ramen_effective_stage};
+use super::{
+    RecommendedRamenTrainer, ramen_handwritten_trainer::ramen_effective_stage,
+    ramen_special_root::canonical_ramen_select_root
+};
 
 /// ONNX 可运行图（与温泉评估器同一套 tract 类型）
 type OnnxModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
@@ -126,6 +129,22 @@ pub struct ActionLogit {
     pub logit: f32
 }
 
+/// `SpecialSelect` 阶段的推理口径
+///
+/// 教师在 `RamenSelect` 根上搜的是联合动作（面 × 隐藏风味用法），policy 格位
+/// `[1,201)` 也是联合格，而训练集里 `SpecialSelect` 阶段样本数为 **0**。
+/// 真实对局却把决策拆成两拍，第二拍的阶段 one-hot 在全部训练样本里恒为 0。
+/// 本枚举把「第二拍读哪个状态」做成显式对照，便于量测该错位值多少分。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpecialSelectMode {
+    /// 直接用 `SpecialSelect` 局面推理（存在训练—部署语义错位）
+    Raw,
+    /// 先经 [`canonical_ramen_select_root`] 还原到联合决策根再推理
+    Canonical,
+    /// 该阶段整个交给手写策略（对照组，用于给该阶段的可恢复上限定界）
+    Handwritten
+}
+
 /// 拉面杯神经网络训练员
 ///
 /// 模型用 [`Arc`] 共享，整进程加载一次即可；事件选项走内部的手写策略。
@@ -138,7 +157,9 @@ pub struct RamenNnTrainer {
     /// choice 头未训练，事件选项全部转交给手写策略
     fallback: Arc<RecommendedRamenTrainer>,
     /// 是否启用自选比赛硬守门（见 [`Self::with_race_shield`]）
-    race_shield: bool
+    race_shield: bool,
+    /// `SpecialSelect` 阶段的推理口径（见 [`Self::with_special_mode`]）
+    special_mode: SpecialSelectMode
 }
 
 impl RamenNnTrainer {
@@ -205,7 +226,8 @@ impl RamenNnTrainer {
                 scale: meta.value_normalization.scale
             },
             fallback: Arc::new(RecommendedRamenTrainer::for_rollout()),
-            race_shield: true
+            race_shield: true,
+            special_mode: SpecialSelectMode::Canonical
         })
     }
 
@@ -248,6 +270,17 @@ impl RamenNnTrainer {
     /// 关闭后为**纯网络**策略，仅供研究「守门能否移除」，不可用于生产验收。
     pub fn with_race_shield(mut self, on: bool) -> Self {
         self.race_shield = on;
+        self
+    }
+
+    /// 选择 `SpecialSelect` 阶段的推理口径（默认 [`SpecialSelectMode::Canonical`]）
+    ///
+    /// 默认取 `Canonical` 而非保持历史行为：`Raw` 让网络在一个**训练集中从未出现**
+    /// 的阶段 one-hot 上推理（实测差异位为特征下标 8/9/140/143，其中 SpecialSelect
+    /// 位在全部 55733 条样本里恒为 0），输出属外推。`Raw` 保留仅供 A/B 对照，
+    /// `Handwritten` 用于给该阶段的可恢复上限定界。
+    pub fn with_special_mode(mut self, mode: SpecialSelectMode) -> Self {
+        self.special_mode = mode;
         self
     }
 
@@ -379,16 +412,28 @@ impl Trainer<RamenGame> for RamenNnTrainer {
     ///
     /// # 错误
     ///
-    /// 推理失败、任一候选无法落格、或候选为空时报错。
-    fn select_action(&self, game: &RamenGame, actions: &[RamenAction], _rng: &mut StdRng) -> Result<usize> {
+    /// 推理失败、任一候选无法落格、候选为空，或 [`SpecialSelectMode::Canonical`] 下
+    /// 联合决策根还原失败（阶段不对 / `pending_ramen` 为空）时报错。
+    fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
         ensure!(!actions.is_empty(), "候选动作为空");
+        let stage = ramen_effective_stage(game, actions);
         // 自选比赛硬守门优先于网络输出：不达标直接育成失败，不是可权衡的价值项
-        if self.race_shield && ramen_effective_stage(game, actions) == RamenStage::Train {
+        if self.race_shield && stage == RamenStage::Train {
             if let Some(idx) = free_race_gate_index(game, actions, RACE_GATE_SLACK) {
                 return Ok(idx);
             }
         }
-        let out = self.infer(game)?;
+        // SpecialSelect 是联合决策的第二拍，推理状态由 special_mode 决定；
+        // 候选合法性与打分一律基于**原局面**，只有喂给模型的那一份被还原
+        let out = if stage == RamenStage::SpecialSelect {
+            match self.special_mode {
+                SpecialSelectMode::Handwritten => return self.fallback.select_action(game, actions, rng),
+                SpecialSelectMode::Canonical => self.infer(&canonical_ramen_select_root(game)?)?,
+                SpecialSelectMode::Raw => self.infer(game)?
+            }
+        } else {
+            self.infer(game)?
+        };
         let scores = self.score_actions(game, actions, &out.policy)?;
         argmax_logit(&scores)
     }

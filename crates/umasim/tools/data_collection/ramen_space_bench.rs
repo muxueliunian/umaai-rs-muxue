@@ -21,7 +21,7 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use anyhow::{Context, Result, anyhow, bail};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rayon::prelude::*;
 use umasim::{
@@ -32,7 +32,7 @@ use umasim::{
     utils::{get_workspace_root, load_game_config}
 };
 #[cfg(feature = "onnx")]
-use umasim::trainer::RamenNnTrainer;
+use umasim::trainer::{RamenNnTrainer, SpecialSelectMode};
 
 /// 基准参数
 #[derive(Parser, Debug)]
@@ -64,7 +64,27 @@ struct BenchArgs {
 
     /// 关闭网络策略的自选比赛硬守门（纯网络，仅供研究守门能否移除；不作为验收口径）
     #[arg(long)]
-    no_race_shield: bool
+    no_race_shield: bool,
+
+    /// `SpecialSelect` 阶段的推理口径：`canonical`（还原到联合决策根，默认）/
+    /// `raw`（历史行为，存在训练—部署语义错位）/ `handwritten`（该阶段交给手写，对照组）
+    #[arg(long, default_value = "canonical")]
+    special_mode: String
+}
+
+/// 解析 `--special-mode`（仅 onnx 下有意义）
+///
+/// # 错误
+///
+/// 未知取值时报错——静默回退到默认会让对照组静静地变成实验组。
+#[cfg(feature = "onnx")]
+fn parse_special_mode(s: &str) -> Result<SpecialSelectMode> {
+    match s {
+        "canonical" => Ok(SpecialSelectMode::Canonical),
+        "raw" => Ok(SpecialSelectMode::Raw),
+        "handwritten" => Ok(SpecialSelectMode::Handwritten),
+        other => bail!("未知 --special-mode: {other}（可选 canonical / raw / handwritten）")
+    }
 }
 
 /// 一组分数的汇总统计
@@ -142,12 +162,16 @@ fn select_trainer(args: &BenchArgs) -> Result<SelectedTrainer> {
                 let path = args
                     .model
                     .as_ref()
-                    .ok_or_else(|| anyhow!("--trainer nn 需要同时给出 --model <onnx 路径>"))?;
-                Ok(SelectedTrainer::Nn(RamenNnTrainer::load(path)?.with_race_shield(!args.no_race_shield)))
+                    .ok_or_else(|| anyhow::anyhow!("--trainer nn 需要同时给出 --model <onnx 路径>"))?;
+                Ok(SelectedTrainer::Nn(
+                    RamenNnTrainer::load(path)?
+                        .with_race_shield(!args.no_race_shield)
+                        .with_special_mode(parse_special_mode(&args.special_mode)?)
+                ))
             }
             #[cfg(not(feature = "onnx"))]
             {
-                let _ = &args.model;
+                let _ = (&args.model, &args.special_mode);
                 bail!("--trainer nn 需要编译 feature onnx（cargo build --release --features onnx --bin ramen_space_bench）")
             }
         }
@@ -221,8 +245,12 @@ fn main() -> Result<()> {
         plans.len(),
         args.runs_per_plan,
         plans.len() as u64 * args.runs_per_plan,
-        if args.trainer == "nn" && args.no_race_shield {
-            "nn(无守门)".to_string()
+        if args.trainer == "nn" {
+            format!(
+                "nn[{}]{}",
+                args.special_mode,
+                if args.no_race_shield { "(无守门)" } else { "" }
+            )
         } else {
             args.trainer.clone()
         }

@@ -56,7 +56,9 @@ required-features = ["cli"]
 [[bin]]
 name = "ramen_advantage_probe"
 path = "tools/data_collection/ramen_advantage_probe.rs"
-required-features = ["cli"]
+# 探针整体依赖 ONNX 网络策略，无 onnx 时没有任何可用功能：
+# 让 cargo 直接跳过该目标，而不是编一个只会 bail 的空壳
+required-features = ["cli", "onnx"]
 
 [features]
 default = ["cli", "diag"]

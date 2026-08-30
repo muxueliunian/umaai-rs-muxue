@@ -17,6 +17,7 @@ pub mod logging_trainer;
 pub mod mcts_trainer;
 pub mod ramen_handwritten_trainer;
 pub mod ramen_mcts_trainer;
+pub mod ramen_special_root;
 #[cfg(feature = "onnx")]
 pub mod ramen_nn_trainer;
 //pub mod mean_filter_collector_trainer;
@@ -28,8 +29,9 @@ pub use logging_trainer::LoggingTrainer;
 pub use mcts_trainer::MctsTrainer;
 pub use ramen_handwritten_trainer::RamenHandwrittenTrainer;
 pub use ramen_mcts_trainer::{RamenMctsTrainer, RamenSearchStages, RamenSelection};
+pub use ramen_special_root::canonical_ramen_select_root;
 #[cfg(feature = "onnx")]
-pub use ramen_nn_trainer::RamenNnTrainer;
+pub use ramen_nn_trainer::{RamenNnTrainer, SpecialSelectMode};
 //pub use mean_filter_collector_trainer::MeanFilterCollectorTrainer;
 //pub use neural_net_trainer::NeuralNetTrainer;
 

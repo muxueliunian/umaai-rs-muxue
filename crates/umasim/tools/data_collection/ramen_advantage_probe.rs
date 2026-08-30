@@ -35,6 +35,8 @@
 //!
 //! # 用法
 //!
+//! # 本 bin 的 `required-features` 含 `onnx`，未开该 feature 时 cargo 直接跳过。
+//!
 //! ```text
 //! cargo run --release --features onnx -p umasim --bin ramen_advantage_probe -- \
 //!     --model saved_models/ramen_v3/model.onnx --points-per-game 8 --rollouts 256
@@ -46,8 +48,6 @@ use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::Parser;
 use rand::{Rng, SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
-#[cfg(feature = "onnx")]
-use umasim::trainer::RamenNnTrainer;
 use umasim::{
     bench,
     game::{
@@ -58,7 +58,10 @@ use umasim::{
     rng::splitmix64,
     sampler::{DeckPlan, SamplingSpace, gen1_inherit},
     search::{FlatSearch, RolloutSeeds, SearchConfig},
-    trainer::{LoggingTrainer, RecommendedRamenTrainer, ramen_handwritten_trainer::ramen_effective_stage},
+    trainer::{
+        LoggingTrainer, RamenNnTrainer, RecommendedRamenTrainer, SpecialSelectMode,
+        ramen_handwritten_trainer::ramen_effective_stage
+    },
     utils::{get_workspace_root, load_game_config}
 };
 
@@ -77,6 +80,11 @@ struct ProbeArgs {
     /// 关闭网络策略的自选比赛硬守门（与 `ramen_space_bench` 同名开关一致）
     #[arg(long)]
     no_race_shield: bool,
+
+    /// `SpecialSelect` 阶段的推理口径：`canonical`（还原到联合决策根，默认）/
+    /// `raw`（历史行为，存在训练—部署语义错位）/ `handwritten`（该阶段交给手写，对照组）
+    #[arg(long, default_value = "canonical")]
+    special_mode: String,
 
     /// 每个计划跑几局
     #[arg(long, default_value_t = 1)]
@@ -105,6 +113,20 @@ struct ProbeArgs {
     /// 把逐探针点写成 CSV
     #[arg(long)]
     csv: Option<PathBuf>
+}
+
+/// 解析 `--special-mode`
+///
+/// # 错误
+///
+/// 未知取值时报错——静默回退到默认会让对照组静静地变成实验组。
+fn parse_special_mode(s: &str) -> Result<SpecialSelectMode> {
+    match s {
+        "canonical" => Ok(SpecialSelectMode::Canonical),
+        "raw" => Ok(SpecialSelectMode::Raw),
+        "handwritten" => Ok(SpecialSelectMode::Handwritten),
+        other => bail!("未知 --special-mode: {other}（可选 canonical / raw / handwritten）")
+    }
 }
 
 /// 逐探针点 CSV 表头
@@ -152,7 +174,6 @@ struct ProbeState {
 ///
 /// 谁驱动轨迹由 `pi_drives` 决定；**不驱动的那一方用私有 RNG 提问**，
 /// 以免多消耗决策随机流、改变轨迹本身。
-#[cfg(feature = "onnx")]
 struct ProbeTrainer {
     /// 被评估策略（网络）
     pi: RamenNnTrainer,
@@ -170,7 +191,6 @@ struct ProbeTrainer {
     state: Rc<RefCell<ProbeState>>
 }
 
-#[cfg(feature = "onnx")]
 impl ProbeTrainer {
     /// 把一个分歧点按蓄水池规则纳入样本
     ///
@@ -194,7 +214,6 @@ impl ProbeTrainer {
     }
 }
 
-#[cfg(feature = "onnx")]
 impl Trainer<RamenGame> for ProbeTrainer {
     fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
         ensure!(!actions.is_empty(), "候选动作为空");
@@ -209,6 +228,13 @@ impl Trainer<RamenGame> for ProbeTrainer {
             let pi_idx = self.pi.select_action(game, actions, &mut self.aside_rng.borrow_mut())?;
             (pi_idx, h_idx)
         };
+        // 内层 trainer 返回的下标理应合法，但这里是两个独立策略的返回值交叉使用，
+        // 越界会直接 panic；显式校验把它变成可定位的错误
+        ensure!(
+            pi_idx < actions.len() && h_idx < actions.len(),
+            "策略返回越界下标: pi={pi_idx} h={h_idx}, 候选数 {}",
+            actions.len()
+        );
         let driving = if self.pi_drives { pi_idx } else { h_idx };
 
         {
@@ -318,7 +344,6 @@ fn measure_point(
 /// # 错误
 ///
 /// 任一局、任一次 rollout 失败，或探针状态无法独占取回时报错。
-#[cfg(feature = "onnx")]
 fn run_plan(
     plan: &DeckPlan, plan_index: usize, args: &ProbeArgs, nn: &RamenNnTrainer, search: &FlatSearch<RamenGame>
 ) -> Result<(Vec<GameResult>, Vec<PointResult>)> {
@@ -418,12 +443,6 @@ fn mean_stderr(xs: &[f64]) -> Result<(f64, f64)> {
     Ok((mean, (var / n).sqrt()))
 }
 
-#[cfg(not(feature = "onnx"))]
-fn main() -> Result<()> {
-    bail!("ramen_advantage_probe 需要编译 feature onnx：cargo run --release --features onnx --bin ramen_advantage_probe")
-}
-
-#[cfg(feature = "onnx")]
 fn main() -> Result<()> {
     let args = ProbeArgs::parse();
     ensure!(args.rollouts > 0, "--rollouts 必须为正");
@@ -437,7 +456,9 @@ fn main() -> Result<()> {
         .with_context(|| format!("切换到工作空间根失败: {}", workspace_root.display()))?;
     init_global_with_config(&load_game_config()?)?;
 
-    let nn = RamenNnTrainer::load(&args.model)?.with_race_shield(!args.no_race_shield);
+    let nn = RamenNnTrainer::load(&args.model)?
+        .with_race_shield(!args.no_race_shield)
+        .with_special_mode(parse_special_mode(&args.special_mode)?);
     // rollout 基策取自 `FlatSearchGame::default_rollout_trainer`（拉面 = 手写推荐策略），
     // 与教师采集同源。`max_depth` 显式置 0：拉面不支持截断估值。
     // `use_ucb` 与 `simulate_common` 无关，置 false 只为配置意图清晰。
@@ -458,9 +479,10 @@ fn main() -> Result<()> {
         args.rollouts
     );
     println!(
-        "模型 {}{}",
+        "模型 {}，special_mode = {}{}",
         args.model.display(),
-        if args.no_race_shield { "（无守门）" } else { "" }
+        args.special_mode,
+        if args.no_race_shield { "，无守门" } else { "" }
     );
 
     let start = std::time::Instant::now();

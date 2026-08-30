@@ -3,6 +3,8 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-08-31
+- **SpecialSelect 联合决策根还原**：新增 trainer/ramen_special_root——把 `SpecialSelect` 局面写回 `pending_ramen` / `pending_special_targets` / `stage` 还原成它所来自的 `RamenSelect` 联合决策根，供网络在正确状态上读联合格位。教师在 `RamenSelect` 根上搜的是联合动作（地区 × 隐藏风味用法），policy 格 `[1,201)` 也是联合格，而训练集里 `SpecialSelect` 阶段样本数为 0；真实对局却把决策拆成两拍，第二拍的阶段 one-hot 在全部训练样本里恒为 0，网络输出属外推。模块不带 onnx 门控，否则守门测试在默认 feature 下不会运行。测试断言还原后特征逐位相同、且**不还原时必须不同**——后者保证规则层新增字段时测试会红而不是静默失效
+- **NN 训练员 SpecialSelect 三档口径**：新增 `SpecialSelectMode::{Raw, Canonical, Handwritten}` 与 `with_special_mode`，默认 `Canonical`；`Raw` 保留作对照，`Handwritten` 把该阶段整个交给手写策略以给可恢复上限定界。`ramen_space_bench` 与 `ramen_advantage_probe` 都加 `--special-mode`。ramen_advantage_probe 的 required-features 补 onnx——无 onnx 时它没有任何可用功能，让 cargo 直接跳过该目标好过编一个只会报错的空壳；ramen_space_bench 仍须在默认 feature 下可构建（handwritten/random 是主用途），故其 special-mode 解析走 onnx 门控
 - **拉面 NN 策略训练员**：新增 ramen_nn_trainer——把 ONNX 模型接到 `Trainer<RamenGame>`，编码定长特征后按冻结格位表给当前候选打分 argmax；choice 头未训练，事件选项委托推荐手写策略。仅在 onnx feature 下编译
 - **自选比赛硬守门供网络复用**：`RamenPolicy::free_race_gate` 的判定本体抽成自由函数 `free_race_gate_index`，NN 训练员在 Train 阶段先过同一层守门再读网络输出。自选比赛不达标直接判育成失败，是硬性义务而非价值权衡，任何策略都要过；判定语义逐字保持不变，手写策略行为不变
 - **采样空间基准接入网络**：ramen_space_bench 新增 `--trainer nn` 与 `--model`，模型在进程启动时加载一次由各局共享而非每局重载；`--no-race-shield` 可关掉守门，仅供研究守门能否移除，不作为验收口径。策略分派由字符串匹配改为预构造枚举，未知策略名在开跑前报错而不是每局重判
