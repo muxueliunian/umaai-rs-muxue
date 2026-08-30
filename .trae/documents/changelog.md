@@ -9,6 +9,9 @@
 - **拉面版 export_sample**：搜索输出可直接导成教师样本——定长特征 + 元信息 + 按 rollout 序号对齐的候选分，不计算 policy/value 标签（标签是离线可再生的 sidecar）；未开启有序 rollout 记录时直接报错，不退化成用直方图回填
 - **教师数据采集驱动**：新增 ramen_teacher_collect bin——采样局面、搜索、导出样本、分片落盘并写 manifest。四条运行时前提（记录有序 rollout / 关闭 UCB / 显式 radical_factor_max / 地区策略 all）由 bin 强制设置，manifest 记的是它们的实际取值，另存游戏数据签名与 git 提交以便复现；支持按 manifest 断点续跑，`--count` 是从 `--start` 起算的累计目标，区间为空时报错并保持 manifest 不变
 - **教师数据 NumPy 导出**：新增 ramen_export_npy bin——把多个采集目录的 bincode 分片摊平成一组 .npy 数组供 Python 训练侧读取，候选维用 CSR 偏移表示变长。合并前校验各目录的采集配方哈希与 git 提交一致、样本 id 不重复，维度常数与本次编译不符时报错。只导原始量不导标签，软标签配方与 value 归一化留在训练侧。`--raw` 额外导出每次 rollout 的原始分数与槽位有效性。npy 头部定长占位、收尾回填行数，全程流式不驻留内存
+- **采样空间基准**：新增 ramen_space_bench bin——遍历采样空间全部 (马娘, 卡组) 计划各跑若干整局，按构成与马娘分组给出均分、标准差与标准误。此前唯一的基准 bench_base 用的马娘不在采样空间内且无自选比赛要求，测出的手写基线不能当作网络验收门槛；本 bin 与教师数据同分布，两边数字才可比
+- **导出器记录采样计划数**：manifest 增记 plan_count，训练侧据此按 (马娘, 卡组) 组合切留出集，不再在 Python 侧硬编码组合数
+- **Python 训练侧**：新增 scripts/ramen_nn——标签生成、模型、训练、评估、ONNX 导出与 mmap 多目录加载器。policy 标签取配对 Bayesian bootstrap 的最优概率而非温度化 softmax，value 走逐 rollout leave-one-out 的选择—估值以消除选择乐观偏差，地区选择按组合概率边缘化到三格，稀疏阶段用截断逆平方根加权。留出集默认按卡组组合切分而非按样本，避免同一套卡组同时进训练与验证；卡片 token 默认不加槽位 embedding——卡组顺序在游戏里没有含义，而训练数据的槽位与卡片类型完全相关，加了会让模型记顺序而非读属性
 
 ## 2026-08-29
 - **拉面 NN policy 格位表**：新增 policy_schema 模块，把动作映射到 234 维固定格位并由单一入口分派；吃面按地区 ID 而非槽位编码、吃面与万能风味用法合成联合格、地区选择纳入第一代。**格位表冻结**

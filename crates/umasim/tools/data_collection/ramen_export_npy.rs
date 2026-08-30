@@ -62,7 +62,10 @@ use umasim::{
         features::INPUT_DIM,
         policy_schema::POLICY_DIM,
         training_sample::{RamenSampleBatch, RamenTrainingSample, SAMPLE_FORMAT_VERSION, stage_of_code}
-    }
+    },
+    gamedata::init_global_with_config,
+    sampler::SamplingSpace,
+    utils::{get_workspace_root, load_game_config}
 };
 
 /// manifest 文件名，与采集端一致
@@ -428,6 +431,12 @@ struct ExportMeta {
     recipe_hash_fnv1a64: String,
     /// 采集时的 git commit
     git_commit: String,
+    /// 采样空间的计划数（(马娘, 卡组) 组合数）
+    ///
+    /// 采样器按 `index % plan_count` 轮转分配，所以 `index % plan_count` 就是
+    /// 卡组组合的标识。训练侧要按组合切留出集就得用它——随机切样本会让同一套
+    /// 卡组同时进训练与验证，泛化指标虚高。
+    plan_count: usize,
     /// 是否含 `cand_scores` / `cand_valid`
     raw: bool,
     /// 参与合并的源目录名（按序，样本按此序拼接）
@@ -476,6 +485,13 @@ fn scan_input(dir: &Path) -> Result<(SourceManifest, Vec<PathBuf>)> {
 ///
 /// 输入不一致、样本 id 重复、rollout 宽度不齐，或任一 IO 失败时报错。
 fn run(args: &ExportArgs) -> Result<()> {
+    // 采样空间需要 gamedata；切到工作空间根以便按相对路径读取
+    let workspace_root = get_workspace_root()?;
+    std::env::set_current_dir(&workspace_root)
+        .with_context(|| format!("切换到工作空间根失败: {}", workspace_root.display()))?;
+    init_global_with_config(&load_game_config()?)?;
+    let plan_count = SamplingSpace::gen1()?.len();
+
     let mut inputs = args.inputs.clone();
     inputs.sort();
     inputs.dedup();
@@ -545,6 +561,7 @@ fn run(args: &ExportArgs) -> Result<()> {
         search_n: shared.search_n,
         recipe_hash_fnv1a64: shared.recipe_hash.clone(),
         git_commit: shared.git_commit.clone(),
+        plan_count,
         raw: args.raw,
         sources: scanned.iter().map(|(d, _)| d.display().to_string()).collect(),
         stats: stats.clone()
@@ -557,6 +574,7 @@ fn run(args: &ExportArgs) -> Result<()> {
     println!("导出完成 → {}", args.output_dir.display());
     println!("  样本 {}  候选 {}  rollout 宽 {}", stats.samples, stats.candidates, stats.rollout_width);
     println!("  阶段分布 {:?}", stats.stage_names);
+    println!("  采样计划数 {plan_count}（index % {plan_count} 即卡组组合 id）");
     println!("  raw = {}", args.raw);
     Ok(())
 }
