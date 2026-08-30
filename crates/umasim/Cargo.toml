@@ -48,6 +48,11 @@ name = "ramen_space_bench"
 path = "tools/data_collection/ramen_space_bench.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "ramen_handwritten_choice"
+path = "tools/data_collection/ramen_handwritten_choice.rs"
+required-features = ["cli"]
+
 [features]
 default = ["cli", "diag"]
 diag = []
