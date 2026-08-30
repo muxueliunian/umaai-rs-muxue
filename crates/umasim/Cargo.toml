@@ -53,6 +53,11 @@ name = "ramen_handwritten_choice"
 path = "tools/data_collection/ramen_handwritten_choice.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "ramen_advantage_probe"
+path = "tools/data_collection/ramen_advantage_probe.rs"
+required-features = ["cli"]
+
 [features]
 default = ["cli", "diag"]
 diag = []

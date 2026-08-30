@@ -2,6 +2,15 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-08-31
+- **拉面 NN 策略训练员**：新增 ramen_nn_trainer——把 ONNX 模型接到 `Trainer<RamenGame>`，编码定长特征后按冻结格位表给当前候选打分 argmax；choice 头未训练，事件选项委托推荐手写策略。仅在 onnx feature 下编译
+- **自选比赛硬守门供网络复用**：`RamenPolicy::free_race_gate` 的判定本体抽成自由函数 `free_race_gate_index`，NN 训练员在 Train 阶段先过同一层守门再读网络输出。自选比赛不达标直接判育成失败，是硬性义务而非价值权衡，任何策略都要过；判定语义逐字保持不变，手写策略行为不变
+- **采样空间基准接入网络**：ramen_space_bench 新增 `--trainer nn` 与 `--model`，模型在进程启动时加载一次由各局共享而非每局重载；`--no-race-shield` 可关掉守门，仅供研究守门能否移除，不作为验收口径。策略分派由字符串匹配改为预构造枚举，未知策略名在开跑前报错而不是每局重判
+- **on-policy 配对 advantage 探针**：新增 ramen_advantage_probe bin——用指定策略跑完整局，在网络与手写选择不同的决策点上做配对 rollout（两动作共享同一张 CRN 种子表，rollout 基策为手写），按性能差分恒等式估计 `J(π) − J(H)`。两策略选同一动作的点贡献恒为 0，直接跳过不搜索；分歧点按蓄水池等概率抽样，单局估计按分歧点总数加权还原。`--rollin` 可把 roll-in 换成手写，用于量测占用分布错配。此前训练侧的 `expected_regret` 算在手写 roll-in 加扰动的分布上，与闭环结果反向，不能用来排序训练方案
+- **训练集稳定抽稀**：data.py 新增 `subsample_train_refs`，train.py 新增 `--max-train-samples`——按 `splitmix64(sample_id, seed)` 排序取前 N 条，同一种子下各数据量点严格嵌套且验证集不变，曲线上的差异只来自数据量。checkpoint 的 split 段增记 `full_train_size` 与 `max_train_samples`
+- **Train 阶段动作重加权（可选）**：train.py 新增 `--train-action-reweight`，按 policy 软标签主动作施加截断逆平方根样本权重（上限 4，归一到均值 1），只作用于 Train 阶段；权重与计数写入 run.json 与 checkpoint。默认关闭
+- **onnx feature 编译修复**：neural_net_evaluator 补 `use rand::Rng`
+
 ## 2026-08-30
 - **采样地区配额**：采样器新增地区配额与「只捕获指定阶段」开关，按工作项序号确定性分配、走独立随机频道，改配额不影响其余样本的截断回合。此前第 2/3 年的地区选择几乎采不到——它们在回合末，同回合的吃面/训练决策先命中采样白名单，实测 1200 次采样 turn 23 命中 0 条、turn 47 只有 9 条
 - **拉面教师样本容器**：新增 training_sample 模块——定长特征 + 元信息 + 变长候选表，每候选按 rollout 序号存定长分数槽位并配有效性位图，失败的 rollout 留空而不是跳过，否则候选之间的 CRN 配对会整体错位；统计量由原始 f64 累加，均值与标准差和 ActionResult 同口径；附 pilot 用的 bincode 批次落盘。PolicySlots 补 serde 派生

@@ -24,6 +24,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
+use rand::Rng;
 use rand::rngs::StdRng;
 use tract_onnx::prelude::*;
 

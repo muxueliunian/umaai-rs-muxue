@@ -33,6 +33,7 @@ try:
         fit_value_normalization,
         load_shards,
         stable_split_refs,
+        subsample_train_refs,
     )
     from .eval import evaluate_model
     from .model import POLICY_DIM, ModelConfig, RamenNetwork, model_from_checkpoint
@@ -45,11 +46,15 @@ except ImportError:
         fit_value_normalization,
         load_shards,
         stable_split_refs,
+        subsample_train_refs,
     )
     from eval import evaluate_model
     from model import POLICY_DIM, ModelConfig, RamenNetwork, model_from_checkpoint
 
 VALUE_COMPONENT_WEIGHTS = (0.2, 0.4, 0.2)
+TRAIN_STAGE = 2
+TRAIN_ACTION_START = 201
+TRAIN_ACTION_COUNT = 10
 
 
 def seed_everything(seed: int) -> None:
@@ -85,11 +90,34 @@ def value_huber_per_sample(prediction: Tensor, target: Tensor, normalization: Va
     return torch.sum(component * weights, dim=1)
 
 
+def compute_train_action_weights(shards, train_refs: np.ndarray, max_weight: float = 4.0) -> tuple[Tensor, list[int]]:
+    """按 Train 阶段标签主动作计算截断逆平方根权重，并归一到均值 1。"""
+
+    counts = np.zeros(TRAIN_ACTION_COUNT, dtype=np.int64)
+    action_end = TRAIN_ACTION_START + TRAIN_ACTION_COUNT
+    for shard_idx, local_idx in train_refs:
+        shard = shards[int(shard_idx)]
+        index = int(local_idx)
+        if int(shard.stage[index]) != TRAIN_STAGE:
+            continue
+        action = int(np.argmax(shard.policy_target[index, TRAIN_ACTION_START:action_end]))
+        counts[action] += 1
+    present = counts > 0
+    if not np.any(present):
+        return torch.ones(TRAIN_ACTION_COUNT, dtype=torch.float32), counts.tolist()
+    weights = np.full(TRAIN_ACTION_COUNT, max_weight, dtype=np.float64)
+    reference = counts[present].max()
+    weights[present] = np.minimum(np.sqrt(reference / counts[present]), max_weight)
+    weights /= np.sum(weights[present] * counts[present]) / np.sum(counts[present])
+    return torch.tensor(weights, dtype=torch.float32), counts.tolist()
+
+
 def compute_batch_loss(
     model: RamenNetwork,
     batch: dict[str, Tensor],
     normalization: ValueNormalization,
     stage_weights: Tensor,
+    train_action_weights: Tensor | None,
     value_loss_weight: float,
     device: torch.device,
 ) -> tuple[Tensor, Tensor, Tensor]:
@@ -103,7 +131,13 @@ def compute_batch_loss(
     output = model(x)
     policy, _, value = model.split_output(output)
     policy_samples = policy_kl_per_sample(policy, policy_target, legal)
-    policy_loss = torch.mean(policy_samples * stage_weights[stage])
+    sample_weights = stage_weights[stage]
+    if train_action_weights is not None:
+        action_end = TRAIN_ACTION_START + TRAIN_ACTION_COUNT
+        action = torch.argmax(policy_target[:, TRAIN_ACTION_START:action_end], dim=1)
+        action_weight = train_action_weights[action]
+        sample_weights = sample_weights * torch.where(stage == TRAIN_STAGE, action_weight, 1.0)
+    policy_loss = torch.mean(policy_samples * sample_weights)
     value_loss = torch.mean(value_huber_per_sample(value, value_target, normalization))
     total = policy_loss + value_loss * value_loss_weight
     return total, policy_loss, value_loss
@@ -114,6 +148,7 @@ def run_epoch(
     loader: DataLoader,
     normalization: ValueNormalization,
     stage_weights: Tensor,
+    train_action_weights: Tensor | None,
     value_loss_weight: float,
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
@@ -131,7 +166,7 @@ def run_epoch(
             if training:
                 optimizer.zero_grad(set_to_none=True)
             total, policy, value = compute_batch_loss(
-                model, batch, normalization, stage_weights, value_loss_weight, device
+                model, batch, normalization, stage_weights, train_action_weights, value_loss_weight, device
             )
             if training:
                 total.backward()
@@ -211,8 +246,18 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--head-lr", type=float, default=1.25e-4)
     parser.add_argument("--weight-decay", type=float, default=2e-5)
     parser.add_argument("--value-loss-weight", type=float, default=1.0)
+    parser.add_argument(
+        "--train-action-reweight",
+        action="store_true",
+        help="仅对 Train 阶段按 policy 软标签主动作施加截断逆平方根样本权重（上限 4）",
+    )
     parser.add_argument("--grad-clip", type=float, default=1.0)
     parser.add_argument("--validation-fraction", type=float, default=0.1)
+    parser.add_argument(
+        "--max-train-samples",
+        type=int,
+        help="把训练集稳定截到这么多条（数据量曲线实验用）；验证集不变，各点留出指标可比",
+    )
     parser.add_argument("--patience", type=int)
     parser.add_argument("--min-regret-improvement", type=float, default=0.5)
     parser.add_argument("--seed", type=int, default=20260830)
@@ -262,9 +307,19 @@ def main() -> None:
         # split_by 加入前的 checkpoint 一律是按样本切的
         split_by = str(saved_split.get("split_by", "sample"))
     train_refs, validation_refs = stable_split_refs(shards, split_fraction, split_seed, split_by)
+    full_train_size = int(len(train_refs))
+    if args.max_train_samples is not None:
+        # 用训练种子做抽稀哈希：同一种子下各数据量点嵌套，不同种子换一批样本，
+        # 使多种子跑出的散布同时覆盖「初始化差异」与「抽到哪批样本」两种方差
+        train_refs = subsample_train_refs(shards, train_refs, args.max_train_samples, args.seed)
     split_summary = describe_split(shards, train_refs, validation_refs)
     stage_weights, stage_counts = compute_stage_weights(shards, train_refs)
     stage_weights = stage_weights.to(device)
+    train_action_weights = None
+    train_action_counts = None
+    if args.train_action_reweight:
+        train_action_weights, train_action_counts = compute_train_action_weights(shards, train_refs)
+        train_action_weights = train_action_weights.to(device)
 
     if resume_checkpoint is not None:
         model = model_from_checkpoint(resume_checkpoint, device)
@@ -318,6 +373,8 @@ def main() -> None:
         "value_component_weights": list(VALUE_COMPONENT_WEIGHTS),
         "stage_weights": stage_weights.cpu().tolist(),
         "stage_counts": stage_counts,
+        "train_action_weights": None if train_action_weights is None else train_action_weights.cpu().tolist(),
+        "train_action_counts": train_action_counts,
         "split": split_summary,
     }
     (args.output_dir / "run.json").write_text(json.dumps(run_info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
@@ -331,6 +388,7 @@ def main() -> None:
             train_loader,
             normalization,
             stage_weights,
+            train_action_weights,
             args.value_loss_weight,
             device,
             optimizer,
@@ -341,6 +399,7 @@ def main() -> None:
             validation_loader,
             normalization,
             stage_weights,
+            train_action_weights,
             args.value_loss_weight,
             device,
             None,
@@ -380,7 +439,13 @@ def main() -> None:
             "optimizer_state": optimizer.state_dict(),
             "scheduler_state": scheduler.state_dict(),
             "value_normalization": normalization.to_dict(),
-            "split": {"validation_fraction": split_fraction, "seed": split_seed, "split_by": split_by},
+            "split": {
+                "validation_fraction": split_fraction,
+                "seed": split_seed,
+                "split_by": split_by,
+                "full_train_size": full_train_size,
+                "max_train_samples": args.max_train_samples,
+            },
             "best_regret": best_regret,
             "stale_epochs": stale_epochs,
             "run_info": run_info,

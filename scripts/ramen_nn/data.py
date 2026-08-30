@@ -213,6 +213,40 @@ def stable_split_refs(
     return np.asarray(train, dtype=np.int64), np.asarray(validation, dtype=np.int64)
 
 
+def subsample_train_refs(
+    shards: Sequence[NpyShard],
+    train_refs: np.ndarray,
+    max_samples: int,
+    seed: int,
+) -> np.ndarray:
+    """把训练引用稳定地截到 ``max_samples`` 条，用于数据量曲线实验。
+
+    按 ``splitmix64(sample_id, seed)`` 对每条训练样本排序后取前 ``max_samples`` 条。
+    这样做有三个性质：
+
+    - **确定性**：同一 ``seed`` 下结果可复现。
+    - **嵌套**：同一 ``seed`` 下 3k 的子集严格包含于 5k、8k、12k，
+      曲线上各点的差异只来自数据量本身，不来自换了一批样本。
+    - **与真实采集同分布**：按样本而非按 (马娘, 卡组) 组合抽稀——真实补数据时
+      新样本也是散落在全部组合上的，按组合抽稀会额外引入组合覆盖度的混淆。
+
+    验证集不受影响，各数据量点的留出指标因此可比。
+
+    ``max_samples >= len(train_refs)`` 时原样返回。
+    """
+
+    if max_samples <= 0:
+        raise ValueError("max_samples 必须为正")
+    if max_samples >= len(train_refs):
+        return train_refs
+    keys = np.empty(len(train_refs), dtype=np.uint64)
+    for i, (shard_idx, local_idx) in enumerate(train_refs):
+        sample_id = int(shards[int(shard_idx)].index[int(local_idx)])
+        keys[i] = _splitmix64(sample_id, seed)
+    order = np.argsort(keys, kind="stable")[:max_samples]
+    return train_refs[np.sort(order)]
+
+
 class RamenDataset(Dataset):
     """只在 ``__getitem__`` 时复制一个样本的 mmap 数据。"""
 
