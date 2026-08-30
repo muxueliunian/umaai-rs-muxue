@@ -8,6 +8,7 @@
 - **搜索层保留有序 rollout**：SearchConfig 新增 `record_ordered_rollouts` 开关，默认关闭时不分配缓冲、不改变搜索结果；开启后按 rollout 序号定长记录 score 轴原始分，随 SearchOutput 一并输出根种子。失败的 rollout 留空而不是跳过，UCB 路径同样按序号写入，否则候选之间的 CRN 配对会整体错位
 - **拉面版 export_sample**：搜索输出可直接导成教师样本——定长特征 + 元信息 + 按 rollout 序号对齐的候选分，不计算 policy/value 标签（标签是离线可再生的 sidecar）；未开启有序 rollout 记录时直接报错，不退化成用直方图回填
 - **教师数据采集驱动**：新增 ramen_teacher_collect bin——采样局面、搜索、导出样本、分片落盘并写 manifest。四条运行时前提（记录有序 rollout / 关闭 UCB / 显式 radical_factor_max / 地区策略 all）由 bin 强制设置，manifest 记的是它们的实际取值，另存游戏数据签名与 git 提交以便复现；支持按 manifest 断点续跑，`--count` 是从 `--start` 起算的累计目标，区间为空时报错并保持 manifest 不变
+- **教师数据 NumPy 导出**：新增 ramen_export_npy bin——把多个采集目录的 bincode 分片摊平成一组 .npy 数组供 Python 训练侧读取，候选维用 CSR 偏移表示变长。合并前校验各目录的采集配方哈希与 git 提交一致、样本 id 不重复，维度常数与本次编译不符时报错。只导原始量不导标签，软标签配方与 value 归一化留在训练侧。`--raw` 额外导出每次 rollout 的原始分数与槽位有效性。npy 头部定长占位、收尾回填行数，全程流式不驻留内存
 
 ## 2026-08-29
 - **拉面 NN policy 格位表**：新增 policy_schema 模块，把动作映射到 234 维固定格位并由单一入口分派；吃面按地区 ID 而非槽位编码、吃面与万能风味用法合成联合格、地区选择纳入第一代。**格位表冻结**

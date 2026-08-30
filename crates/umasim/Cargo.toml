@@ -38,6 +38,11 @@ name = "ramen_teacher_collect"
 path = "tools/data_collection/ramen_teacher_collect.rs"
 required-features = ["cli"]
 
+[[bin]]
+name = "ramen_export_npy"
+path = "tools/data_collection/ramen_export_npy.rs"
+required-features = ["cli"]
+
 [features]
 default = ["cli", "diag"]
 diag = []
