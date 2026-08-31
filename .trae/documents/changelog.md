@@ -3,6 +3,9 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-08-31
+- **闭环 bench 局号偏移**：ramen_space_bench 新增 `--run-offset`。相邻基种子会撞随机世界（`derive_seed` 是 XOR 后 splitmix，`base ^ r == base + r`），此前三个相邻种子的 12600 局实际只有 5248 个唯一世界，标准误被低估约 1.5 倍。改由固定基种子、按局号区间切分
+- **选择集 / 验收集分离**：新增 scripts/ramen_nn/compare_bench.py，按世界去重做配对比较，并断言两集零重叠。同一批对局既挑 checkpoint 又报成绩会带 winner's curse
+- **因子化吃面输出头**：model.py 新增 `factorized_eat_head`，把 `[1,201)` 联合格拆成「地区 + 用法 + 零初始化交互」。输出布局与 ONNX 算子集不变。三训练种子下无可测效果，默认关闭
 - **SpecialSelect 联合决策根还原**：新增 trainer/ramen_special_root——把 `SpecialSelect` 局面写回 `pending_ramen` / `pending_special_targets` / `stage` 还原成它所来自的 `RamenSelect` 联合决策根，供网络在正确状态上读联合格位。教师在 `RamenSelect` 根上搜的是联合动作（地区 × 隐藏风味用法），policy 格 `[1,201)` 也是联合格，而训练集里 `SpecialSelect` 阶段样本数为 0；真实对局却把决策拆成两拍，第二拍的阶段 one-hot 在全部训练样本里恒为 0，网络输出属外推。模块不带 onnx 门控，否则守门测试在默认 feature 下不会运行。测试断言还原后特征逐位相同、且**不还原时必须不同**——后者保证规则层新增字段时测试会红而不是静默失效
 - **NN 训练员 SpecialSelect 三档口径**：新增 `SpecialSelectMode::{Raw, Canonical, Handwritten}` 与 `with_special_mode`，默认 `Canonical`；`Raw` 保留作对照，`Handwritten` 把该阶段整个交给手写策略以给可恢复上限定界。`ramen_space_bench` 与 `ramen_advantage_probe` 都加 `--special-mode`。ramen_advantage_probe 的 required-features 补 onnx——无 onnx 时它没有任何可用功能，让 cargo 直接跳过该目标好过编一个只会报错的空壳；ramen_space_bench 仍须在默认 feature 下可构建（handwritten/random 是主用途），故其 special-mode 解析走 onnx 门控
 - **拉面 NN 策略训练员**：新增 ramen_nn_trainer——把 ONNX 模型接到 `Trainer<RamenGame>`，编码定长特征后按冻结格位表给当前候选打分 argmax；choice 头未训练，事件选项委托推荐手写策略。仅在 onnx feature 下编译

@@ -50,9 +50,28 @@ struct BenchArgs {
     #[arg(long, default_value_t = 8)]
     runs_per_plan: u64,
 
-    /// 基础种子；第 i 局用 `seed + i`
+    /// 基础种子。每局的随机世界由 `derive_seed(seed + plan * 1000003, [run_idx])` 决定
+    ///
+    /// ❗**不要用相邻的基种子跑多批当作独立样本**。`derive_seed` 是「XOR 后
+    /// splitmix64」，而 `base ^ r == base + r` 在低位无进位时成立，所以
+    /// `--seed 61444 --runs-per-plan 8` 与 `--seed 61445 --runs-per-plan 8`
+    /// 会大面积撞上同一批世界：实测三个相邻基种子跑出的 12600 局里只有 5248 个
+    /// 唯一世界（3152 个重复 3 次），重复局分数完全相同，白白虚增样本量、低估标准误。
+    ///
+    /// 正确做法是**固定一个基种子，用 [`BenchArgs::run_offset`] 切分世界空间**：
+    /// 同一 `seed` 下不同 `run_idx` 必然给出不同世界（splitmix64 对不同输入单射），
+    /// 且跨计划也不会撞（计划间基种子相差 1000003 的倍数，远大于 `run_idx` 的位宽）。
     #[arg(long, default_value_t = 61444)]
     seed: u64,
+
+    /// 局号起点；本次跑 `run_idx ∈ [run_offset, run_offset + runs_per_plan)`
+    ///
+    /// 用来切出**互不重叠**的世界子集，实现「选择集 / 验收集分离」：
+    /// 例如选择集用 `--run-offset 0 --runs-per-plan 1`（525 局，约 1 分钟），
+    /// 验收集用 `--run-offset 8 --runs-per-plan 24`（12600 局）。
+    /// 两者由构造保证零重叠，因此在选择集上挑 checkpoint 不会污染验收集的无偏性。
+    #[arg(long, default_value_t = 0)]
+    run_offset: u64,
 
     /// 只跑前 N 个计划（调试用，默认全跑）
     #[arg(long)]
@@ -189,7 +208,11 @@ fn run_plan(plan: &DeckPlan, plan_index: usize, args: &BenchArgs, kind: &Selecte
     // 每个计划用互不重叠的种子段，避免不同计划共用同一批随机世界
     let base_seed = args.seed.wrapping_add((plan_index as u64).wrapping_mul(1_000_003));
     let mut outcomes = Vec::with_capacity(args.runs_per_plan as usize);
-    for run_idx in 0..args.runs_per_plan {
+    let run_end = args
+        .run_offset
+        .checked_add(args.runs_per_plan)
+        .context("run_offset + runs_per_plan 溢出 u64")?;
+    for run_idx in args.run_offset..run_end {
         let outcome = match kind {
             SelectedTrainer::Random => {
                 let t = LoggingTrainer::new(RandomTrainer, base_seed + run_idx);
@@ -241,9 +264,11 @@ fn main() -> Result<()> {
         None => all_plans
     };
     println!(
-        "采样空间基准：{} 个计划 × {} 局 = {} 局，策略 = {}",
+        "采样空间基准：{} 个计划 × {} 局（局号 {}..{}）= {} 局，策略 = {}",
         plans.len(),
         args.runs_per_plan,
+        args.run_offset,
+        args.run_offset + args.runs_per_plan,
         plans.len() as u64 * args.runs_per_plan,
         if args.trainer == "nn" {
             format!(
@@ -255,6 +280,8 @@ fn main() -> Result<()> {
             args.trainer.clone()
         }
     );
+
+    println!("  基种子 {}", args.seed);
 
     let start = std::time::Instant::now();
     let mut results: Vec<PlanResult> = plans

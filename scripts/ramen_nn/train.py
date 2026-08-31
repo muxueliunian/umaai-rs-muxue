@@ -179,17 +179,30 @@ def run_epoch(
     return {"loss": float(means[0]), "policy_kl": float(means[1]), "value_huber": float(means[2])}
 
 
-def make_optimizer(model: RamenNetwork, lr: float, head_lr: float, weight_decay: float) -> torch.optim.Adam:
-    """建立 Adam；输出头低学习率且无 weight decay，使 choice 占位行保持为零。"""
+def make_optimizer(
+    model: RamenNetwork,
+    lr: float,
+    head_lr: float,
+    weight_decay: float,
+    eat_interaction_weight_decay: float,
+) -> torch.optim.Adam:
+    """建立 Adam；输出头低学习率且无 weight decay，使 choice 占位行保持为零。
 
-    head_ids = {id(parameter) for parameter in model.output.parameters()}
-    trunk = [parameter for parameter in model.parameters() if id(parameter) not in head_ids]
-    return torch.optim.Adam(
-        [
-            {"params": trunk, "lr": lr, "weight_decay": weight_decay},
-            {"params": list(model.output.parameters()), "lr": head_lr, "weight_decay": 0.0},
-        ]
-    )
+    因子化吃面头的交互项 ``w[r,t]`` 单成一组：它与其它输出头行同用 ``head_lr``，
+    但带独立（默认更强的）weight decay，把可加基线之外的自由度压向零，让稀疏的
+    联合格只有在数据真的要求时才偏离 ``u_r + v_t``。非因子化时该组为空。
+    """
+
+    head, interaction = model.head_parameters()
+    excluded = {id(parameter) for parameter in head} | {id(parameter) for parameter in interaction}
+    trunk = [parameter for parameter in model.parameters() if id(parameter) not in excluded]
+    groups: list[dict] = [
+        {"params": trunk, "lr": lr, "weight_decay": weight_decay},
+        {"params": head, "lr": head_lr, "weight_decay": 0.0},
+    ]
+    if interaction:
+        groups.append({"params": interaction, "lr": head_lr, "weight_decay": eat_interaction_weight_decay})
+    return torch.optim.Adam(groups)
 
 
 def save_checkpoint(path: Path, checkpoint: dict) -> None:
@@ -222,6 +235,7 @@ def _model_config(args: argparse.Namespace, samples: int) -> ModelConfig:
         "dropout": args.dropout,
         "attention_kind": args.attention_kind,
         "card_slot_embedding": args.card_slot_embedding or None,
+        "factorized_eat_head": args.factorized_eat_head or None,
     }
     for name, value in overrides.items():
         if value is not None:
@@ -245,6 +259,12 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--lr", type=float, default=5e-4)
     parser.add_argument("--head-lr", type=float, default=1.25e-4)
     parser.add_argument("--weight-decay", type=float, default=2e-5)
+    parser.add_argument(
+        "--eat-interaction-weight-decay",
+        type=float,
+        default=1e-3,
+        help="因子化吃面头交互项 w[r,t] 的 weight decay；仅在 --factorized-eat-head 下生效",
+    )
     parser.add_argument("--value-loss-weight", type=float, default=1.0)
     parser.add_argument(
         "--train-action-reweight",
@@ -268,6 +288,13 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--mlp-blocks", type=int)
     parser.add_argument("--dropout", type=float)
     parser.add_argument("--attention-kind", choices=("softmax", "simple"))
+    parser.add_argument(
+        "--factorized-eat-head",
+        action="store_true",
+        help="吃面联合格 [1,201) 改由 u_r + v_t + w_(r,t) 产生（地区 20 + 用法 10 + 交互 200）。"
+        "联合格监督稀疏（中位每格 17 条）而按地区聚合有 222 条，因子化让地区与用法效应"
+        "各自吃到全部数据。输出维度与布局不变，Rust 侧无需改动",
+    )
     parser.add_argument(
         "--card-slot-embedding",
         action="store_true",
@@ -329,7 +356,9 @@ def main() -> None:
         model = RamenNetwork(config).to(device)
         normalization = fit_value_normalization(shards, train_refs)
 
-    optimizer = make_optimizer(model, args.lr, args.head_lr, args.weight_decay)
+    optimizer = make_optimizer(
+        model, args.lr, args.head_lr, args.weight_decay, args.eat_interaction_weight_decay
+    )
     patience = args.patience if args.patience is not None else (20 if len(train_refs) < 25_000 else 12)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=max(2, patience // 3), min_lr=1e-6

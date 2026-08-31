@@ -24,6 +24,14 @@ CHOICE_DIM = 8
 VALUE_DIM = 3
 OUTPUT_DIM = POLICY_DIM + CHOICE_DIM + VALUE_DIM
 
+# policy 中的「吃面」联合格：EAT_BASE + region_id * TRIPLE_NUM + triple_id，
+# 地区在外层（region-major）。布局由 Rust 侧冻结，见 game/ramen/policy.rs。
+EAT_BASE = 1
+REGION_NUM = 20
+TRIPLE_NUM = 10
+EAT_DIM = REGION_NUM * TRIPLE_NUM
+EAT_END = EAT_BASE + EAT_DIM
+
 
 @dataclass(frozen=True)
 class ModelConfig:
@@ -37,6 +45,7 @@ class ModelConfig:
     dropout: float = 0.08
     attention_kind: str = "simple"
     card_slot_embedding: bool = False
+    factorized_eat_head: bool = False
 
     def validate(self) -> None:
         """检查会影响 reshape 与导出的结构不变量。"""
@@ -51,6 +60,8 @@ class ModelConfig:
             raise ValueError("attention_kind 必须是 softmax 或 simple")
         if not isinstance(self.card_slot_embedding, bool):
             raise ValueError("card_slot_embedding 必须是 bool")
+        if not isinstance(self.factorized_eat_head, bool):
+            raise ValueError("factorized_eat_head 必须是 bool")
 
     @classmethod
     def for_dataset(cls, samples: int) -> "ModelConfig":
@@ -186,7 +197,11 @@ class ResidualMlpBlock(nn.Module):
 
 
 class RamenNetwork(nn.Module):
-    """global/card/person 结构化编码器与冻结的单一 245 维输出头。"""
+    """global/card/person 结构化编码器与冻结的 245 维输出头。
+
+    输出维度与布局始终冻结；``factorized_eat_head`` 只改变 ``[1,201)`` 这段
+    吃面联合格由哪些参数产生，对 Rust 侧推理完全透明。
+    """
 
     sequence_len = 1 + CARD_COUNT + PERSON_COUNT
 
@@ -217,6 +232,21 @@ class RamenNetwork(nn.Module):
             *(ResidualMlpBlock(self.config.mlp_width, self.config.dropout) for _ in range(self.config.mlp_blocks))
         )
         self.output = nn.Linear(self.config.mlp_width, OUTPUT_DIM)
+        if self.config.factorized_eat_head:
+            # 200 个联合格里中位每格只有 17 条监督、65% 不足 30 条，而按地区聚合
+            # 中位有 222 条：地区维度监督充足，地区 x 用法的联合维度不足。把
+            # z[r,t] 拆成 u_r + v_t + w_{r,t}，让地区效应与用法效应各自吃到全部
+            # 数据，只有真正的交互项走稀疏的联合格。
+            # 前置检验（教师均分，同一决策点跨地区比较用法偏好顺序）：整体一致率
+            # 69.1%，随分差单调升到 81.1%(>=100) / 90.1%(>=200) / 96.8%(>=400)，
+            # 即用法偏好确有与地区无关的主成分，可加分解不会抹掉真实信号。
+            self.eat_region = nn.Linear(self.config.mlp_width, REGION_NUM)
+            self.eat_usage = nn.Linear(self.config.mlp_width, TRIPLE_NUM)
+            self.eat_inter = nn.Linear(self.config.mlp_width, EAT_DIM)
+        else:
+            self.eat_region = None
+            self.eat_usage = None
+            self.eat_inter = None
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
@@ -228,6 +258,15 @@ class RamenNetwork(nn.Module):
         with torch.no_grad():
             self.output.weight[POLICY_DIM : POLICY_DIM + CHOICE_DIM].zero_()
             self.output.bias[POLICY_DIM : POLICY_DIM + CHOICE_DIM].zero_()
+            if self.eat_inter is not None:
+                # 交互项从零起步：训练初期 z[r,t] 恰好等于可加基线 u_r + v_t，
+                # 稀疏的联合格只在数据真的要求时才把它推离零。
+                self.eat_inter.weight.zero_()
+                self.eat_inter.bias.zero_()
+                # `self.output` 的 [EAT_BASE, EAT_END) 行在因子化下不参与 forward，
+                # 梯度恒为零。清零只是让 checkpoint 里的死行不带随机值。
+                self.output.weight[EAT_BASE:EAT_END].zero_()
+                self.output.bias[EAT_BASE:EAT_END].zero_()
 
     def _split_input(self, x: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         """按 Rust ``features.rs`` 的冻结布局切分输入。"""
@@ -263,7 +302,33 @@ class RamenNetwork(nn.Module):
         person_pool = torch.sum(person_values, dim=1) / person_count
         hidden = self.trunk_input(torch.cat([global_pool, card_pool, person_pool], dim=1))
         hidden = self.trunk(hidden)
-        return self.output(hidden)
+        raw = self.output(hidden)
+        if self.eat_region is None:
+            return raw
+        # 只用 Gemm/Reshape/Add/Concat，保持导出算子集与非因子化版本同样保守。
+        region = self.eat_region(hidden)[:, :, None]
+        usage = self.eat_usage(hidden)[:, None, :]
+        interaction = self.eat_inter(hidden).reshape(-1, REGION_NUM, TRIPLE_NUM)
+        eat = (region + usage + interaction).reshape(-1, EAT_DIM)
+        return torch.cat([raw[:, :EAT_BASE], eat, raw[:, EAT_END:]], dim=1)
+
+    def head_parameters(self) -> tuple[list[nn.Parameter], list[nn.Parameter]]:
+        """返回 (输出头参数, 需要额外 weight decay 的交互项参数)。
+
+        交互项单列，是因为它承担的正是监督最稀疏的那部分自由度；其余输出头行
+        沿用「低学习率、无 weight decay」的既有口径，以保住 choice 占位行的零值。
+        """
+
+        interaction = list(self.eat_inter.parameters()) if self.eat_inter is not None else []
+        interaction_ids = {id(parameter) for parameter in interaction}
+        head = [
+            parameter
+            for module in (self.output, self.eat_region, self.eat_usage, self.eat_inter)
+            if module is not None
+            for parameter in module.parameters()
+            if id(parameter) not in interaction_ids
+        ]
+        return head, interaction
 
     @staticmethod
     def split_output(output: Tensor) -> tuple[Tensor, Tensor, Tensor]:
@@ -288,6 +353,8 @@ def model_from_checkpoint(checkpoint: dict, device: torch.device | str = "cpu") 
     config_values.setdefault("attention_kind", "softmax")
     # card_slot_embedding 加入前的 checkpoint 一律带槽位 embedding
     config_values.setdefault("card_slot_embedding", True)
+    # factorized_eat_head 加入前的 checkpoint 全部是单一 Linear 头
+    config_values.setdefault("factorized_eat_head", False)
     config = ModelConfig(**config_values)
     model = RamenNetwork(config)
     model.load_state_dict(checkpoint["model_state"])
