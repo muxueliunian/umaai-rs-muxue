@@ -3,6 +3,8 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-08-31
+- **训练随机轴拆分**：train.py 新增 `--split-seed`（样本身份：划分与抽稀）与 `--init-seed`（优化路径：初始化、dropout、minibatch 顺序），未给出时都回落到 `--seed`，旧命令行为逐位不变。此前两者绑在一起，每换一个种子就换掉约 10% 训练样本；实测固定 split 后闭环 sd 从 2521 降到 156
+- **早停按 optimizer step 计**：新增 `--patience-steps` 与 `--max-steps`，按每轮步数换算成轮。按轮计数时数据量翻倍会让同样的轮数变成两倍步数，学习曲线各点的训练时长口径不一致
 - **闭环 bench 局号偏移**：ramen_space_bench 新增 `--run-offset`。相邻基种子会撞随机世界（`derive_seed` 是 XOR 后 splitmix，`base ^ r == base + r`），此前三个相邻种子的 12600 局实际只有 5248 个唯一世界，标准误被低估约 1.5 倍。改由固定基种子、按局号区间切分
 - **选择集 / 验收集分离**：新增 scripts/ramen_nn/compare_bench.py，按世界去重做配对比较，并断言两集零重叠。同一批对局既挑 checkpoint 又报成绩会带 winner's curse
 - **因子化吃面输出头**：model.py 新增 `factorized_eat_head`，把 `[1,201)` 联合格拆成「地区 + 用法 + 零初始化交互」。输出布局与 ONNX 算子集不变。三训练种子下无可测效果，默认关闭

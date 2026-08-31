@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import random
 import time
@@ -280,7 +281,36 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--patience", type=int)
     parser.add_argument("--min-regret-improvement", type=float, default=0.5)
-    parser.add_argument("--seed", type=int, default=20260830)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=20260830,
+        help="总种子；--split-seed / --init-seed 未给出时两者都取它，等价于旧行为",
+    )
+    parser.add_argument(
+        "--split-seed",
+        type=int,
+        help="只决定**样本身份**：train/val 划分与 --max-train-samples 的抽稀。"
+        "把它固定住、只变 --init-seed，多次训练就跑在同一份训练集上，"
+        "散布只反映初始化与优化路径。数据集与划分是固定资产时，这才是正确的估计目标",
+    )
+    parser.add_argument(
+        "--init-seed",
+        type=int,
+        help="只决定**优化路径**：参数初始化、dropout、minibatch 顺序。不影响样本身份",
+    )
+    parser.add_argument(
+        "--patience-steps",
+        type=int,
+        help="按 optimizer step 计的早停耐心（换算成整数轮：patience_steps / 每轮步数）。"
+        "给出时覆盖 --patience。按轮计数在数据量变化时等价步数会跟着变，"
+        "学习曲线类实验必须用本参数，否则不同数据量点的训练时长口径不一致",
+    )
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        help="按 optimizer step 计的训练上限（换算成整数轮）。给出时覆盖 --epochs",
+    )
     parser.add_argument("--token-dim", type=int)
     parser.add_argument("--heads", type=int)
     parser.add_argument("--encoder-blocks", type=int)
@@ -319,12 +349,16 @@ def main() -> None:
         raise ValueError("--data 与 --labels 数量必须一致")
     if args.epochs <= 0 or args.batch_size <= 0 or args.workers < 0:
         raise ValueError("epochs/batch-size 必须为正，workers 不得为负")
-    seed_everything(args.seed)
+    # 两条随机轴分开：样本身份 vs 优化路径。未显式给出时都回落到 --seed，
+    # 因此不传新参数的旧命令行为逐位不变。
+    split_seed_arg = args.seed if args.split_seed is None else args.split_seed
+    init_seed = args.seed if args.init_seed is None else args.init_seed
+    seed_everything(init_seed)
     device = _choose_device(args.device)
     shards = load_shards(args.data, args.labels)
     resume_checkpoint = None
     split_fraction = args.validation_fraction
-    split_seed = args.seed
+    split_seed = split_seed_arg
     split_by = args.split_by
     if args.resume is not None:
         resume_checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
@@ -336,9 +370,9 @@ def main() -> None:
     train_refs, validation_refs = stable_split_refs(shards, split_fraction, split_seed, split_by)
     full_train_size = int(len(train_refs))
     if args.max_train_samples is not None:
-        # 用训练种子做抽稀哈希：同一种子下各数据量点嵌套，不同种子换一批样本，
-        # 使多种子跑出的散布同时覆盖「初始化差异」与「抽到哪批样本」两种方差
-        train_refs = subsample_train_refs(shards, train_refs, args.max_train_samples, args.seed)
+        # 抽稀属于「样本身份」，走 split_seed：固定它就能让不同 init_seed 的多次训练
+        # 落在同一份训练子集上，散布只来自优化路径。同一 split_seed 下各数据量点严格嵌套
+        train_refs = subsample_train_refs(shards, train_refs, args.max_train_samples, split_seed)
     split_summary = describe_split(shards, train_refs, validation_refs)
     stage_weights, stage_counts = compute_stage_weights(shards, train_refs)
     stage_weights = stage_weights.to(device)
@@ -359,7 +393,21 @@ def main() -> None:
     optimizer = make_optimizer(
         model, args.lr, args.head_lr, args.weight_decay, args.eat_interaction_weight_decay
     )
+    # 每轮的 optimizer step 数。DataLoader 不丢尾批，故向上取整。
+    steps_per_epoch = max(1, math.ceil(len(train_refs) / min(args.batch_size, max(1, len(train_refs)))))
     patience = args.patience if args.patience is not None else (20 if len(train_refs) < 25_000 else 12)
+    epochs = args.epochs
+    if args.patience_steps is not None:
+        # 按轮计数时，数据量翻倍会让同样的「12 轮」变成两倍的优化步数，
+        # 学习曲线上各点的训练时长口径因此不一致。换算成轮数即可对齐：
+        # 评估本来就只在每轮末做一次，耐心的分辨率上限就是一轮。
+        patience = max(1, round(args.patience_steps / steps_per_epoch))
+    if args.max_steps is not None:
+        epochs = max(1, math.ceil(args.max_steps / steps_per_epoch))
+    print(
+        f"每轮 {steps_per_epoch} 步；早停耐心 {patience} 轮（约 {patience * steps_per_epoch} 步）；"
+        f"上限 {epochs} 轮（约 {epochs * steps_per_epoch} 步）"
+    )
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=max(2, patience // 3), min_lr=1e-6
     )
@@ -374,7 +422,7 @@ def main() -> None:
         best_regret = float(resume_checkpoint.get("best_regret", best_regret))
         stale_epochs = int(resume_checkpoint.get("stale_epochs", 0))
 
-    generator = torch.Generator().manual_seed(args.seed)
+    generator = torch.Generator().manual_seed(init_seed)
     train_dataset = RamenDataset(shards, train_refs)
     validation_dataset = RamenDataset(shards, validation_refs)
     common_loader = {
@@ -405,12 +453,21 @@ def main() -> None:
         "train_action_weights": None if train_action_weights is None else train_action_weights.cpu().tolist(),
         "train_action_counts": train_action_counts,
         "split": split_summary,
+        "seeds": {"seed": args.seed, "split_seed": split_seed, "init_seed": init_seed},
+        "schedule": {
+            "steps_per_epoch": steps_per_epoch,
+            "patience_epochs": patience,
+            "patience_steps_arg": args.patience_steps,
+            "max_epochs": epochs,
+            "max_steps_arg": args.max_steps,
+            "batch_size": args.batch_size,
+        },
     }
     (args.output_dir / "run.json").write_text(json.dumps(run_info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(run_info, ensure_ascii=False, indent=2))
 
     metrics_path = args.output_dir / "metrics.jsonl"
-    for epoch in range(start_epoch, args.epochs):
+    for epoch in range(start_epoch, epochs):
         started = time.perf_counter()
         train_metrics = run_epoch(
             model,
