@@ -64,7 +64,7 @@ use umasim::{
         training_sample::{RamenSampleBatch, RamenTrainingSample, SAMPLE_FORMAT_VERSION, stage_of_code}
     },
     gamedata::init_global_with_config,
-    sampler::SamplingSpace,
+    sampler::{GEN1_SPACE_HASH_V1, SamplingSpace},
     utils::{get_workspace_root, load_game_config}
 };
 
@@ -119,7 +119,10 @@ struct SourceManifest {
     /// 采集配方哈希，跨机合并的唯一有效判据
     recipe_hash_fnv1a64: String,
     /// 采集时的 git commit
-    git_commit: String
+    git_commit: String,
+    /// 采样空间枚举指纹；本字段加入之前采的目录为 `None`，按 v1 空间处理
+    #[serde(default)]
+    sampling_space_hash: Option<String>
 }
 
 /// 所有输入目录必须一致的那部分配方
@@ -130,7 +133,9 @@ struct SharedRecipe {
     /// git commit
     git_commit: String,
     /// 每候选 rollout 次数
-    search_n: usize
+    search_n: usize,
+    /// 采样空间指纹；manifest 未记录时回落到 [`GEN1_SPACE_HASH_V1`]
+    sampling_space_hash: String
 }
 
 impl SharedRecipe {
@@ -152,7 +157,12 @@ impl SharedRecipe {
         Ok(Self {
             recipe_hash: m.recipe_hash_fnv1a64.clone(),
             git_commit: m.git_commit.clone(),
-            search_n: m.search_n
+            search_n: m.search_n,
+            // 本字段加入前采的目录一律产自 v1 空间——现存的教师数据全部如此
+            sampling_space_hash: m
+                .sampling_space_hash
+                .clone()
+                .unwrap_or_else(|| GEN1_SPACE_HASH_V1.to_string())
         })
     }
 }
@@ -431,6 +441,8 @@ struct ExportMeta {
     recipe_hash_fnv1a64: String,
     /// 采集时的 git commit
     git_commit: String,
+    /// 采样空间的枚举指纹，与 `plan_count` 取自同一个 space
+    sampling_space_hash: String,
     /// 采样空间的计划数（(马娘, 卡组) 组合数）
     ///
     /// 采样器按 `index % plan_count` 轮转分配，所以 `index % plan_count` 就是
@@ -490,7 +502,11 @@ fn run(args: &ExportArgs) -> Result<()> {
     std::env::set_current_dir(&workspace_root)
         .with_context(|| format!("切换到工作空间根失败: {}", workspace_root.display()))?;
     init_global_with_config(&load_game_config()?)?;
-    let plan_count = SamplingSpace::gen1()?.len();
+    // plan_count 与空间指纹必须成对取自同一个 space：训练侧按 `sample_id % plan_count`
+    // 切留出组合，取错了会让切分静默错位。
+    let space = SamplingSpace::gen1()?;
+    let plan_count = space.len();
+    let space_hash = space.content_hash();
 
     let mut inputs = args.inputs.clone();
     inputs.sort();
@@ -516,6 +532,21 @@ fn run(args: &ExportArgs) -> Result<()> {
         scanned.push((dir.clone(), parts));
     }
     let shared = shared.context("没有可用的输入目录")?;
+
+    // ❗本次编译的采样空间必须就是数据被采时的那个空间。卡池与构成写在 sampler.rs 里，
+    // 改动它既不会动 gamedata_sig 也不会动 recipe_hash——不做这个校验的话，扩空间之后
+    // 重导旧目录会把 plan_count 静默改写成新值，训练侧的组合切分随之整体错位，
+    // 而且没有任何一处会报错。
+    ensure!(
+        shared.sampling_space_hash == space_hash,
+        "数据采自采样空间 {}，本次编译的空间是 {}（{} 个组合）。\
+         index 的含义由空间决定，用当前空间导出旧数据会让 plan_count 与组合切分静默错位。\
+         请用采集时的代码版本导出，或为新空间新建独立的导出目录。",
+        shared.sampling_space_hash,
+        space_hash,
+        plan_count
+    );
+    println!("采样空间 {space_hash}，{plan_count} 个 (马娘, 卡组) 组合");
 
     std::fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("创建导出目录失败: {}", args.output_dir.display()))?;
@@ -561,6 +592,7 @@ fn run(args: &ExportArgs) -> Result<()> {
         search_n: shared.search_n,
         recipe_hash_fnv1a64: shared.recipe_hash.clone(),
         git_commit: shared.git_commit.clone(),
+        sampling_space_hash: space_hash.clone(),
         plan_count,
         raw: args.raw,
         sources: scanned.iter().map(|(d, _)| d.display().to_string()).collect(),
@@ -716,6 +748,38 @@ mod tests {
                 bail!("{} 条判定未通过: {:?}", self.failed.len(), self.failed)
             }
         }
+    }
+
+    /// 采样空间指纹：旧 manifest 回落到 v1，新 manifest 原样取用
+    ///
+    /// 这条护栏挡的是：扩了采样空间之后重新导出旧目录，`plan_count` 会被静默改写成
+    /// 新值，而 `recipe_hash` 与 `gamedata_sig` 都察觉不到（卡池写在代码里）。
+    #[test]
+    fn test_sampling_space_hash_fallback() -> Result<()> {
+        let mut c = Checks::new();
+        let dir = Path::new("training_data/示例");
+        let base = SourceManifest {
+            format_version: SAMPLE_FORMAT_VERSION,
+            input_dim: INPUT_DIM,
+            policy_dim: POLICY_DIM,
+            search_n: 512,
+            recipe_hash_fnv1a64: "d80184067dad807f".into(),
+            git_commit: "2f20806".into(),
+            sampling_space_hash: None
+        };
+
+        let old = SharedRecipe::from_manifest(&base, dir)?;
+        println!("旧 manifest（无字段）→ {}", old.sampling_space_hash);
+        c.check(old.sampling_space_hash == GEN1_SPACE_HASH_V1, "缺字段时回落到 GEN1_SPACE_HASH_V1");
+
+        let mut newer = base.clone();
+        newer.sampling_space_hash = Some("0123456789abcdef".into());
+        let recorded = SharedRecipe::from_manifest(&newer, dir)?;
+        println!("新 manifest（有字段）→ {}", recorded.sampling_space_hash);
+        c.check(recorded.sampling_space_hash == "0123456789abcdef", "有字段时原样取用");
+        c.check(recorded != old, "两者不相等，跨目录一致性校验能分辨出来");
+
+        c.finish()
     }
 
     /// 头部长度、对齐与 shape 串

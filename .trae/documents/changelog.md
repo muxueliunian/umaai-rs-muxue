@@ -3,6 +3,9 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-09-01
+- **预声明 LR 日程**：train.py 新增 `--lr-schedule {plateau,cosine}`（默认 plateau，不给新参数时行为逐位不变）与 `--lr-warmup-steps`、`--lr-final-factor`，cosine 按 optimizer step 走线性 warmup + 余弦退火，倍率作用于各参数组的初始 LR。原先的 ReduceLROnPlateau 由每轮的留出 regret 驱动，而 regret 同时还在挑 `best.pt`；它又按轮计数，数据量一变轮数跟着变、LR 衰减次数也跟着变，对照实验的差异因此无法归因
+- **`--max-steps` 精确截断**：此前换算成整轮并向上取整，"训同样多步"在不同数据量下并不成立。现改为在 batch 边界精确截到指定步数，`run_epoch` 增回报实跑步数、checkpoint 增记 `global_step` 以便续跑对齐
+- **采样空间指纹**：SamplingSpace 新增 `content_hash()`（覆盖马娘、卡组与构成，且对枚举顺序敏感）与钉死的 `GEN1_SPACE_HASH_V1`，采集 manifest 增记 `sampling_space_hash`，导出器校验数据所属空间与本次编译一致后才导出并写进 meta，旧 manifest 缺该字段时按 v1 空间处理。卡池与构成写在代码里，改动既不反映到 `gamedata_sig` 也不反映到 `recipe_hash`；而导出器的 `plan_count` 取自当前编译的 `gen1()`，扩空间后重导旧目录会静默改写它，训练侧按 `index % plan_count` 的组合切分随之整体错位。该字段刻意不并入 `recipe_hash`——并入会让同一空间下的新旧数据配方哈希不同、无法合并
 - **分布外采样空间**：sampler 新增 `SamplingSpace::custom`——在第一代卡池上追加支援卡并只用一种自定义构成，与 `gen1` 共用同一套枚举与合法性判据（卡类型读 cardDB、角色冲突实比对），追加的重复卡忽略。ramen_space_bench 相应新增 `--shape` 与 `--extra-card`，默认不给时行为逐位不变；`--extra-card` 必须与 `--shape` 同用，否则默认口径就不再与教师数据同分布。用于检验网络对未训练卡组流派的泛化，输出显式标注分布外、提示分数不可与默认口径直接比较
 
 ## 2026-08-31

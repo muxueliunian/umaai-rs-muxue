@@ -156,20 +156,28 @@ def run_epoch(
     optimizer: torch.optim.Optimizer | None,
     grad_clip: float,
     on_step: Callable[[], None] | None = None,
+    step_budget: int | None = None,
 ) -> dict[str, float]:
     """执行一个训练或只读验证 epoch。
 
-    ``on_step`` 在每次 ``optimizer.step()`` 之后调用一次，供权重 EMA 之类按步累积的
-    诊断使用；只读 epoch 不会触发。
+    ``on_step`` 在每次 ``optimizer.step()`` 之后调用一次，供权重 EMA、按步 LR 调度之类
+    按步推进的设施使用；只读 epoch 不会触发。
+
+    ``step_budget`` 给出本轮最多允许的 optimizer step 数，用完即在 batch 边界收尾。
+    有它才能把「训到第 N 步」执行成真正的第 N 步——按轮取整会多训小半轮，两个数据量
+    不同的 arm 因此拿到不同的优化预算。只读 epoch 忽略该参数。
     """
 
     training = optimizer is not None
     model.train(training)
     totals = np.zeros(3, dtype=np.float64)
     samples = 0
+    steps = 0
     context = torch.enable_grad() if training else torch.inference_mode()
     with context:
         for batch in loader:
+            if training and step_budget is not None and steps >= step_budget:
+                break
             if training:
                 optimizer.zero_grad(set_to_none=True)
             total, policy, value = compute_batch_loss(
@@ -179,13 +187,19 @@ def run_epoch(
                 total.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
+                steps += 1
                 if on_step is not None:
                     on_step()
             count = len(batch["stage"])
             totals += np.asarray([total.item(), policy.item(), value.item()]) * count
             samples += count
     means = totals / samples
-    return {"loss": float(means[0]), "policy_kl": float(means[1]), "value_huber": float(means[2])}
+    return {
+        "loss": float(means[0]),
+        "policy_kl": float(means[1]),
+        "value_huber": float(means[2]),
+        "steps": steps,
+    }
 
 
 def make_optimizer(
@@ -266,6 +280,40 @@ def save_checkpoint(path: Path, checkpoint: dict) -> None:
     os.replace(temporary, path)
 
 
+def make_cosine_schedule(
+    optimizer: torch.optim.Optimizer, total_steps: int, warmup_steps: int, final_factor: float
+) -> torch.optim.lr_scheduler.LambdaLR:
+    """按 optimizer step 走的线性 warmup + 余弦退火，倍率作用于各组的初始 LR。
+
+    与 ``ReduceLROnPlateau`` 的关键区别是**完全预声明**：LR 曲线只由步数决定，不读
+    任何验证指标。留出 regret 同时驱动 scheduler 与 best.pt 时，「换了数据量」会连带
+    改变 LR 下降时点，两个 arm 的差异就无法归因；而按轮计数的耐心还会让轮数不同的
+    arm 拿到不同的衰减次数。曲线里的 ``warmup_steps`` 与 ``final_factor`` 仍是超参，
+    只是预声明后不再随实验调整。
+
+    倍率乘在每个参数组各自的初始 LR 上，故 trunk 与输出头的比例关系保持不变。
+    """
+
+    if total_steps <= 0:
+        raise ValueError("余弦日程的总步数必须为正")
+    if not 0 <= warmup_steps < total_steps:
+        raise ValueError(f"warmup 步数 {warmup_steps} 必须落在 [0, {total_steps})")
+    if not 0.0 <= final_factor <= 1.0:
+        raise ValueError("末端倍率必须落在 [0, 1]")
+
+    def factor(step: int) -> float:
+        """第 ``step`` 个 optimizer step（0 基）使用的 LR 倍率。"""
+
+        if step < warmup_steps:
+            # 用 step + 1 起步，首步就有非零 LR
+            return (step + 1) / warmup_steps
+        progress = (step - warmup_steps) / max(1, total_steps - warmup_steps)
+        progress = min(1.0, max(0.0, progress))
+        return final_factor + (1.0 - final_factor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, factor)
+
+
 def _choose_device(name: str) -> torch.device:
     """解析 auto/cpu/cuda。"""
 
@@ -330,6 +378,27 @@ def _parse_args() -> argparse.Namespace:
         type=int,
         help="把训练集稳定截到这么多条（数据量曲线实验用）；验证集不变，各点留出指标可比",
     )
+    parser.add_argument(
+        "--lr-schedule",
+        choices=("plateau", "cosine"),
+        default="plateau",
+        help="plateau（默认，旧行为）：ReduceLROnPlateau，由每轮的留出 regret 驱动；"
+        "cosine：按 optimizer step 的线性 warmup + 余弦退火，完全预声明、不读验证指标。"
+        "对照实验必须用 cosine——plateau 让「数据量」与「LR 下降时点」纠缠在一起，"
+        "而且它按轮计数，轮数不同的 arm 衰减次数也不同",
+    )
+    parser.add_argument(
+        "--lr-warmup-steps",
+        type=int,
+        default=300,
+        help="--lr-schedule cosine 的线性 warmup 步数",
+    )
+    parser.add_argument(
+        "--lr-final-factor",
+        type=float,
+        default=0.02,
+        help="--lr-schedule cosine 末端 LR 相对各参数组初始 LR 的倍率",
+    )
     parser.add_argument("--patience", type=int)
     parser.add_argument("--min-regret-improvement", type=float, default=0.5)
     parser.add_argument(
@@ -391,7 +460,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-steps",
         type=int,
-        help="按 optimizer step 计的训练上限（换算成整数轮）。给出时覆盖 --epochs",
+        help="按 optimizer step 计的训练上限，**精确截到该步**（在 batch 边界收尾）。"
+        "给出时覆盖 --epochs。最后一轮通常是半轮，其 train 指标只覆盖实跑的那些 batch",
     )
     parser.add_argument("--token-dim", type=int)
     parser.add_argument("--heads", type=int)
@@ -484,16 +554,38 @@ def main() -> None:
         # 学习曲线上各点的训练时长口径因此不一致。换算成轮数即可对齐：
         # 评估本来就只在每轮末做一次，耐心的分辨率上限就是一轮。
         patience = max(1, round(args.patience_steps / steps_per_epoch))
-    if args.max_steps is not None:
-        epochs = max(1, math.ceil(args.max_steps / steps_per_epoch))
+    # step_cap 是硬上限，epochs 只是「够跑到那么多步」的轮数上界；真正的截断在 batch 边界。
+    step_cap = args.max_steps
+    if step_cap is not None:
+        if step_cap <= 0:
+            raise ValueError("--max-steps 必须为正")
+        epochs = max(1, math.ceil(step_cap / steps_per_epoch))
+    total_steps = step_cap if step_cap is not None else epochs * steps_per_epoch
     print(
         f"每轮 {steps_per_epoch} 步；早停耐心 {patience} 轮（约 {patience * steps_per_epoch} 步）；"
-        f"上限 {epochs} 轮（约 {epochs * steps_per_epoch} 步）"
+        f"上限 {epochs} 轮 / {total_steps} 步"
+        + ("（精确截断）" if step_cap is not None else "")
     )
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=max(2, patience // 3), min_lr=1e-6
-    )
+    # 两种日程互斥：plateau 每轮吃一次 regret，cosine 每步推进一格、不读任何验证指标。
+    plateau_scheduler = None
+    step_scheduler = None
+    if args.lr_schedule == "cosine":
+        step_scheduler = make_cosine_schedule(
+            optimizer, total_steps, args.lr_warmup_steps, args.lr_final_factor
+        )
+        print(
+            f"LR 日程 cosine：warmup {args.lr_warmup_steps} 步，末端倍率 {args.lr_final_factor}，"
+            f"总步数 {total_steps}"
+        )
+        if not args.no_early_stop:
+            print("⚠ cosine 与早停同用：提前停止会让曲线没退火完，对照实验请加 --no-early-stop")
+    else:
+        plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=0.5, patience=max(2, patience // 3), min_lr=1e-6
+        )
+    scheduler = step_scheduler if step_scheduler is not None else plateau_scheduler
     start_epoch = 0
+    start_step = 0
     best_regret = float("inf")
     stale_epochs = 0
     if resume_checkpoint is not None:
@@ -501,6 +593,8 @@ def main() -> None:
         if "scheduler_state" in resume_checkpoint:
             scheduler.load_state_dict(resume_checkpoint["scheduler_state"])
         start_epoch = int(resume_checkpoint["epoch"]) + 1
+        # 老 checkpoint 没记步数，只能按整轮回推（那时也确实是整轮训的）
+        start_step = int(resume_checkpoint.get("global_step", start_epoch * steps_per_epoch))
         best_regret = float(resume_checkpoint.get("best_regret", best_regret))
         stale_epochs = int(resume_checkpoint.get("stale_epochs", 0))
 
@@ -522,10 +616,12 @@ def main() -> None:
         raise ValueError("--ema-halflife-steps 目前不支持与 --resume 同用")
 
     def on_step() -> None:
-        """每个 optimizer step 后推进全部 EMA。"""
+        """每个 optimizer step 之后：推进全部 EMA，并把按步的 LR 日程推进一格。"""
 
         for ema in emas.values():
             ema.update(model)
+        if step_scheduler is not None:
+            step_scheduler.step()
 
     generator = torch.Generator().manual_seed(init_seed)
     train_dataset = RamenDataset(shards, train_refs)
@@ -565,8 +661,12 @@ def main() -> None:
             "patience_steps_arg": args.patience_steps,
             "max_epochs": epochs,
             "max_steps_arg": args.max_steps,
+            "total_steps": total_steps,
             "batch_size": args.batch_size,
             "early_stop": not args.no_early_stop,
+            "lr_schedule": args.lr_schedule,
+            "lr_warmup_steps": args.lr_warmup_steps if args.lr_schedule == "cosine" else None,
+            "lr_final_factor": args.lr_final_factor if args.lr_schedule == "cosine" else None,
         },
         "diagnostics": {
             "eval_columns": None if eval_columns is None else list(eval_columns),
@@ -578,10 +678,15 @@ def main() -> None:
     print(json.dumps(run_info, ensure_ascii=False, indent=2))
 
     metrics_path = args.output_dir / "metrics.jsonl"
-    previous_step = start_epoch * steps_per_epoch
+    completed_steps = start_step
+    previous_step = completed_steps
+    needs_on_step = bool(emas) or step_scheduler is not None
     checkpoint: dict | None = None
     for epoch in range(start_epoch, epochs):
         started = time.perf_counter()
+        budget = None if step_cap is None else step_cap - completed_steps
+        if budget is not None and budget <= 0:
+            break
         train_metrics = run_epoch(
             model,
             train_loader,
@@ -592,8 +697,10 @@ def main() -> None:
             device,
             optimizer,
             args.grad_clip,
-            on_step if emas else None,
+            on_step if needs_on_step else None,
+            budget,
         )
+        completed_steps += int(train_metrics["steps"])
         validation_loss = run_epoch(
             model,
             validation_loader,
@@ -609,7 +716,8 @@ def main() -> None:
             model, shards, validation_refs, normalization, device, args.batch_size, args.workers
         )
         regret = float(evaluation["overall"]["expected_regret"])
-        scheduler.step(regret)
+        if plateau_scheduler is not None:
+            plateau_scheduler.step(regret)
         improved = regret < best_regret - args.min_regret_improvement
         if improved:
             best_regret = regret
@@ -617,7 +725,7 @@ def main() -> None:
         else:
             stale_epochs += 1
 
-        global_step = (epoch + 1) * steps_per_epoch
+        global_step = completed_steps
         record = {
             "epoch": epoch,
             "global_step": global_step,
@@ -640,6 +748,7 @@ def main() -> None:
         checkpoint = {
             "format_version": 1,
             "epoch": epoch,
+            "global_step": global_step,
             "model_config": model.config.to_dict(),
             "model_state": model.state_dict(),
             "optimizer_state": optimizer.state_dict(),
@@ -672,6 +781,9 @@ def main() -> None:
                 )
         previous_step = global_step
 
+        if step_cap is not None and completed_steps >= step_cap:
+            print(f"已训满 --max-steps {step_cap} 步，停止。")
+            break
         if args.no_early_stop:
             continue
         if stale_epochs >= patience:

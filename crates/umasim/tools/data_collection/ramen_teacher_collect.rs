@@ -287,6 +287,13 @@ struct TeacherManifest {
     pub git_commit: Option<String>,
     /// 复现基座文件签名
     pub gamedata_sig: Vec<FileSignature>,
+    /// 采样空间的枚举指纹；本字段加入之前采的数据为 `None`
+    ///
+    /// **刻意不进 `recipe_hash`**：进了会让同一空间下的新旧数据配方哈希不同、无法合并。
+    /// 空间变化本来就会带动 git commit，这里只是把它变成可直接校验的显式指纹——
+    /// 卡池写在代码里，改它不会反映到 `gamedata_sig`。
+    #[serde(default)]
+    pub sampling_space_hash: Option<String>,
     /// 生效配方（前提 + 采样器 + search_n + 维度）的 FNV-1a
     pub recipe_hash_fnv1a64: String
 }
@@ -663,10 +670,24 @@ fn main() -> Result<()> {
     }
     let manifest_path = output_dir.join(MANIFEST_NAME);
 
+    // 采样空间指纹：卡池与构成写在代码里，改动不会反映到 gamedata_sig，只能这样记。
+    let space_hash = SamplingSpace::gen1()?.content_hash();
+
     let now = Utc::now().to_rfc3339();
     let (mut manifest, span) = if manifest_path.exists() {
         let old = TeacherManifest::load(&manifest_path)?;
         ensure_resume_compatible(&old, &recipe)?;
+        // 本字段加入前的目录留空——来路不明就保持不明，不给它盖一个当前空间的章
+        if let Some(recorded) = &old.sampling_space_hash {
+            ensure!(
+                recorded == &space_hash,
+                "{} 是在采样空间 {} 下采的，当前编译的空间是 {}。续跑会让同一目录里\
+                 混进两个空间的样本，而 index 的含义正是由空间决定的。",
+                manifest_path.display(),
+                recorded,
+                space_hash
+            );
+        }
         ensure_parts_match_disk(&output_dir, &old.parts)?;
         let progress = IndexProgress {
             index_start: old.index_start,
@@ -726,6 +747,7 @@ fn main() -> Result<()> {
             accepted: 0,
             git_commit: try_get_git_commit(&workspace_root),
             gamedata_sig: collect_gamedata_signatures()?,
+            sampling_space_hash: Some(space_hash.clone()),
             recipe_hash_fnv1a64: recipe_hash
         };
         (manifest, span)
@@ -745,6 +767,7 @@ fn main() -> Result<()> {
         "  region_quota_permille    = {:?}",
         sampler_cfg.region_quota_permille
     );
+    println!("  采样空间指纹            : {space_hash}");
     println!("  INPUT_DIM / POLICY_DIM  = {INPUT_DIM} / {POLICY_DIM}");
     println!("  format_version          = {SAMPLE_FORMAT_VERSION}");
 

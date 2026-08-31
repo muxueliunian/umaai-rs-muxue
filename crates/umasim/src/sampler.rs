@@ -47,6 +47,7 @@ use rand::{Rng, rngs::StdRng};
 
 use crate::{
     bench::seeded_rngs,
+    collector::compute_text_hash_fnv1a64,
     game::{
         Game,
         InheritInfo,
@@ -246,6 +247,19 @@ pub const GEN1_SHAPES: [DeckShape; 3] = [
     }
 ];
 
+/// 第一代采样空间（v1）的枚举指纹，见 [`SamplingSpace::content_hash`]
+///
+/// 这是一根**绊线**：改动 [`GEN1_CARD_POOL`] 或 [`GEN1_SHAPES`] 会让
+/// `test_gen1_space_hash_pinned` 失败，逼迫改动者显式处理已采数据。
+/// 已落盘的教师数据（`npy_v5` / `npy_v6` 及其全部来源目录）都产自本指纹的空间，
+/// 而它们的 manifest 里没有记录空间指纹——扩空间之后重新导出旧目录，
+/// `plan_count` 会被静默改写成新值，`recipe_hash` 完全察觉不到。
+/// 导出器因此拿本常数当旧数据的默认指纹，见 `ramen_export_npy`。
+///
+/// 真要换空间时的正确做法是：新增一个 `GEN1_SPACE_HASH_V2`，让导出器按各源
+/// manifest 里记录的指纹分别归属，而不是直接改这里的值。
+pub const GEN1_SPACE_HASH_V1: &str = "6c30529e9333fb94";
+
 /// 该阶段的决策点能否作为搜索根局面
 ///
 /// 白名单而非黑名单，因为「合法阶段」是可枚举的、而「嵌套决策」不是。
@@ -346,6 +360,22 @@ impl SamplingSpace {
     /// 组合总数
     pub fn len(&self) -> usize {
         self.plans.len()
+    }
+
+    /// 枚举内容的 FNV-1a 指纹
+    ///
+    /// 覆盖每个组合的马娘、卡组与所属构成，**且对枚举顺序敏感**——顺序就是
+    /// `index % len` 的语义，换了顺序旧样本的 `index` 就指向别的组合。
+    ///
+    /// 存在的理由：卡池与构成写在本文件里，改动**不会**反映到 `gamedata_sig`
+    /// （`cardDB.json` 一个字节都没变），只有 git commit 会动。导出器用它把
+    /// 「数据是哪个空间采的」变成可校验的显式指纹，见 [`GEN1_SPACE_HASH_V1`]。
+    pub fn content_hash(&self) -> String {
+        let mut text = String::new();
+        for plan in &self.plans {
+            text.push_str(&format!("{}|{:?}|{}\n", plan.uma, plan.deck, plan.shape));
+        }
+        compute_text_hash_fnv1a64(&text)
     }
 
     /// 是否为空（恒为 false，`gen1` 已拒绝空空间；仅为满足调用方习惯）
@@ -914,6 +944,29 @@ mod tests {
             assert_eq!(per_uma[&uma.game_id], 85, "{} 无角色冲突，应为 85 套", uma.alias);
         }
         assert_eq!(space.len(), 5 * 85 + 2 * 50);
+        Ok(())
+    }
+
+    /// 第一代空间的枚举指纹钉死在 [`GEN1_SPACE_HASH_V1`]
+    ///
+    /// 本测试失败 = 有人动了卡池或构成。已落盘的教师数据都产自旧空间，
+    /// 且它们的 manifest 没记空间指纹，重导会被静默改写 `plan_count`。
+    /// 处理办法见 [`GEN1_SPACE_HASH_V1`] 的文档，**不要直接改常数值**。
+    #[test]
+    fn test_gen1_space_hash_pinned() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::gen1()?;
+        let hash = space.content_hash();
+        println!("gen1 空间 {} 个组合，指纹 {hash}", space.len());
+        println!("钉死值 {GEN1_SPACE_HASH_V1}");
+
+        // 顺序敏感性：交换两个组合就该换指纹，否则它挡不住枚举顺序变化
+        let mut swapped = SamplingSpace::gen1()?;
+        swapped.plans.swap(0, 1);
+        println!("交换首两项后 {}", swapped.content_hash());
+
+        assert_eq!(hash, GEN1_SPACE_HASH_V1, "采样空间变了；先读 GEN1_SPACE_HASH_V1 的文档");
+        assert_ne!(swapped.content_hash(), hash, "指纹必须对枚举顺序敏感");
         Ok(())
     }
 
