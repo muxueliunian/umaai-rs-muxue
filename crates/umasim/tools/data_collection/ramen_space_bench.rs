@@ -12,22 +12,35 @@
 //! 给出与教师数据同分布的均分。它同时是第一代网络的验收口径：把 `--trainer`
 //! 换成网络策略、其余参数不动，两个数字才可比。
 //!
+//! # 分布外模式
+//!
+//! 给出 `--shape` 后切换到 [`SamplingSpace::custom`]：只枚举该构成，并可用
+//! `--extra-card` 往卡池里补卡。用途是检验网络对**未训练卡组流派**的泛化，
+//! 例如「2 速 1 耐 2 智」——池内只有一张智力卡，必须补一张才组得出来。
+//!
+//! ❗分布外模式的分数**不能**与默认口径的数字直接比较：卡组空间换了，
+//! 计划数变了，逐计划的种子段也随之不同。要下结论必须在同一模式下
+//! 跑手写基线做配对参照。
+//!
 //! # 用法
 //!
 //! ```text
 //! cargo run --release -p umasim --bin ramen_space_bench -- \
 //!     --trainer handwritten --runs-per-plan 8
+//!
+//! cargo run --release -p umasim --features onnx --bin ramen_space_bench -- \
+//!     --shape 2,1,0,0,2 --extra-card 303064 --trainer nn --model model.onnx
 //! ```
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use rayon::prelude::*;
 use umasim::{
     bench::{self, GameOutcome},
     gamedata::init_global_with_config,
-    sampler::{DeckPlan, SamplingSpace, gen1_inherit},
+    sampler::{DeckPlan, DeckShape, SamplingSpace, gen1_inherit},
     trainer::{LoggingTrainer, RandomTrainer, RecommendedRamenTrainer},
     utils::{get_workspace_root, load_game_config}
 };
@@ -36,7 +49,7 @@ use umasim::trainer::{RamenNnTrainer, SpecialSelectMode};
 
 /// 基准参数
 #[derive(Parser, Debug)]
-#[command(about = "在第一代采样空间（7 马娘 × 525 卡组组合）上测策略均分")]
+#[command(about = "在第一代采样空间（7 马娘 × 525 卡组组合）上测策略均分；--shape 可切到分布外空间")]
 struct BenchArgs {
     /// 策略：`handwritten`（手写规则）/ `random`（随机基线）/ `nn`（ONNX 网络，需 `--model`）
     #[arg(long, default_value = "handwritten")]
@@ -88,7 +101,21 @@ struct BenchArgs {
     /// `SpecialSelect` 阶段的推理口径：`canonical`（还原到联合决策根，默认）/
     /// `raw`（历史行为，存在训练—部署语义错位）/ `handwritten`（该阶段交给手写，对照组）
     #[arg(long, default_value = "canonical")]
-    special_mode: String
+    special_mode: String,
+
+    /// 卡组构成 `速,耐,力,根,智`，五项合计为 5（友人卡固定 1 张，不计入）
+    ///
+    /// 给出即切到**分布外**空间：只枚举这一种构成，用于检验网络对未训练卡组流派
+    /// 的泛化。不给时用第一代的 3 种构成，与教师数据同分布。
+    #[arg(long)]
+    shape: Option<String>,
+
+    /// 追加进卡池的支援卡 idrank（6 位 = 5 位卡 ID + 突破等级），可重复给出
+    ///
+    /// 只在有 `--shape` 时允许：默认口径必须锁死在训练分布的 11 张卡上，
+    /// 否则「同分布均分」这个名字就不成立了。
+    #[arg(long)]
+    extra_card: Vec<u32>
 }
 
 /// 解析 `--special-mode`（仅 onnx 下有意义）
@@ -104,6 +131,60 @@ fn parse_special_mode(s: &str) -> Result<SpecialSelectMode> {
         "handwritten" => Ok(SpecialSelectMode::Handwritten),
         other => bail!("未知 --special-mode: {other}（可选 canonical / raw / handwritten）")
     }
+}
+
+/// 解析 `--shape` 的 `速,耐,力,根,智`
+///
+/// # 错误
+///
+/// 项数不是 5、某项不是非负整数，或五项合计不为 5 时报错。合计不为 5 必须报错
+/// 而不是补齐：拉面杯的普通卡位恒为 5 张，猜用户想补哪一类只会静默跑错构成。
+fn parse_shape(text: &str) -> Result<[usize; 5]> {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    ensure!(parts.len() == 5, "--shape 需要 5 个数字（速,耐,力,根,智），实得 {}", parts.len());
+    let mut counts = [0usize; 5];
+    for (i, part) in parts.iter().enumerate() {
+        counts[i] = part
+            .parse::<usize>()
+            .with_context(|| format!("--shape 第 {} 项 `{part}` 不是非负整数", i + 1))?;
+    }
+    let total: usize = counts.iter().sum();
+    ensure!(total == 5, "--shape 五项合计必须为 5（友人卡固定 1 张不计入），实得 {total}");
+    Ok(counts)
+}
+
+/// 把构成计数格式化成 `2速1耐2智1友`，与 `GEN1_SHAPES` 的命名习惯一致
+fn format_shape_name(counts: &[usize; 5]) -> String {
+    const TYPE_NAMES: [&str; 5] = ["速", "耐", "力", "根", "智"];
+    let mut name = String::new();
+    for (i, &n) in counts.iter().enumerate() {
+        if n > 0 {
+            name.push_str(&n.to_string());
+            name.push_str(TYPE_NAMES[i]);
+        }
+    }
+    name.push_str("1友");
+    name
+}
+
+/// 按命令行构造采样空间：默认第一代，给了 `--shape` 则走分布外
+///
+/// # 错误
+///
+/// `--shape` 解析失败、只给 `--extra-card` 不给 `--shape`，或空间枚举失败时报错。
+fn build_space(args: &BenchArgs) -> Result<SamplingSpace> {
+    let Some(text) = &args.shape else {
+        ensure!(
+            args.extra_card.is_empty(),
+            "--extra-card 必须与 --shape 同用：默认口径要与教师数据同分布，不能私自扩卡池"
+        );
+        return SamplingSpace::gen1();
+    };
+    let counts = parse_shape(text)?;
+    // `DeckShape::name` 要求 'static。CLI 参数活到进程结束，泄漏一个短字符串
+    // 换来 CSV 与分组统计里显示真实构成名，比塞一个占位常量更有用。
+    let name: &'static str = Box::leak(format_shape_name(&counts).into_boxed_str());
+    SamplingSpace::custom(&args.extra_card, DeckShape { counts, name })
 }
 
 /// 一组分数的汇总统计
@@ -257,7 +338,7 @@ fn main() -> Result<()> {
     init_global_with_config(&load_game_config()?)?;
     let kind = select_trainer(&args)?;
 
-    let space = SamplingSpace::gen1()?;
+    let space = build_space(&args)?;
     let all_plans = space.plans();
     let plans = match args.plans {
         Some(n) => &all_plans[..n.min(all_plans.len())],
@@ -282,6 +363,13 @@ fn main() -> Result<()> {
     );
 
     println!("  基种子 {}", args.seed);
+    match &args.shape {
+        None => println!("  空间   第一代（与教师数据同分布）"),
+        Some(text) => println!(
+            "  空间   ❗分布外：构成 {}，追加卡 {:?}——分数不可与默认口径直接比较",
+            text, args.extra_card
+        )
+    }
 
     let start = std::time::Instant::now();
     let mut results: Vec<PlanResult> = plans

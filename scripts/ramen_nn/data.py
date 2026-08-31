@@ -114,7 +114,69 @@ class NpyShard:
         self.value_target = _load(self.label_dir, "value_target")
         label_index = _load(self.label_dir, "index")
         self.plan_count = _read_plan_count(self.data_dir)
+        # 原始 rollout 列只在 `--raw` 导出的目录里存在，且体积远大于其余数组，
+        # 故不在构造时打开：只有按列窗口评估时才 mmap。
+        self._cand_scores: np.ndarray | None = None
+        self._cand_valid: np.ndarray | None = None
+        self._raw_opened = False
         self._validate(label_index)
+
+    def _open_raw(self) -> None:
+        """惰性 mmap ``cand_scores``/``cand_valid``；缺失时留空并只报一次。"""
+
+        if self._raw_opened:
+            return
+        self._raw_opened = True
+        scores_path = self.data_dir / "cand_scores.npy"
+        if not scores_path.is_file():
+            return
+        scores = _load(self.data_dir, "cand_scores")
+        if scores.ndim != 2 or scores.shape[0] != len(self.cand_mean):
+            raise ValueError(f"{self.data_dir}: cand_scores 形状 {scores.shape} 与候选数不符")
+        self._cand_scores = scores
+        valid_path = self.data_dir / "cand_valid.npy"
+        if valid_path.is_file():
+            valid = _load(self.data_dir, "cand_valid")
+            if valid.shape != scores.shape:
+                raise ValueError(f"{self.data_dir}: cand_valid 与 cand_scores 形状不一致")
+            self._cand_valid = valid
+
+    @property
+    def has_raw_columns(self) -> bool:
+        """本分片是否带完整 rollout 列（`--raw` 导出）。"""
+
+        self._open_raw()
+        return self._cand_scores is not None
+
+    @property
+    def rollout_columns(self) -> int:
+        """每个候选的 rollout 列数；无原始列时为 0。"""
+
+        self._open_raw()
+        return 0 if self._cand_scores is None else int(self._cand_scores.shape[1])
+
+    def candidate_window_mean(self, local_idx: int, lo: int, hi: int) -> np.ndarray | None:
+        """只用 ``[lo, hi)`` 列重算一个样本的候选均值。
+
+        失败槽（``cand_valid`` 为 0）不计入。窗口内某候选一个有效列都没有时返回
+        ``None``——该样本在此窗口下无法评估，交由调用方计数并跳过，而不是伪造一个值。
+        """
+
+        self._open_raw()
+        if self._cand_scores is None:
+            raise ValueError(f"{self.data_dir}: 没有 cand_scores，无法按列窗口评估")
+        total = int(self._cand_scores.shape[1])
+        if not 0 <= lo < hi <= total:
+            raise ValueError(f"列窗口 [{lo}, {hi}) 越出 {total} 列")
+        begin, end = int(self.cand_ptr[local_idx]), int(self.cand_ptr[local_idx + 1])
+        block = np.asarray(self._cand_scores[begin:end, lo:hi], dtype=np.float64)
+        if self._cand_valid is None:
+            return block.mean(axis=1)
+        mask = np.asarray(self._cand_valid[begin:end, lo:hi], dtype=bool)
+        counts = mask.sum(axis=1)
+        if np.any(counts == 0):
+            return None
+        return np.where(mask, block, 0.0).sum(axis=1) / counts
 
     def _validate(self, label_index: np.ndarray) -> None:
         """校验训练时可能静默错位的全部形状和主键。"""

@@ -310,58 +310,37 @@ impl SamplingSpace {
     /// 应当报错，而不是静默产出错误卡组。同理，角色冲突由 `chara_id` 实际比对得出，
     /// 不写死「东海帝王撞 30275、杏目撞 30242」这两条已知结论。
     pub fn gen1() -> Result<Self> {
-        let data = global!(GAMEDATA);
+        let pool: Vec<u32> = GEN1_CARD_POOL.iter().map(|entry| entry.idrank).collect();
+        Ok(Self {
+            plans: enumerate_space(&pool, &GEN1_SHAPES)?
+        })
+    }
 
-        // 按类型分桶；友人卡单独拎出
-        let mut by_type: [Vec<u32>; 5] = Default::default();
-        let mut friend: Option<u32> = None;
-        for entry in GEN1_CARD_POOL.iter() {
-            let card = data.get_card(entry.card_id())?;
-            match card.card_type {
-                CARD_TYPE_FRIEND => {
-                    if friend.replace(entry.idrank).is_some() {
-                        bail!("卡池含多张友人卡，第一代构成假定恰好 1 张");
-                    }
-                }
-                t if (0..5).contains(&t) => by_type[t as usize].push(entry.idrank),
-                other => bail!(
-                    "卡池中 {} 的类型 {other} 不受支持（第一代只接受普通卡与友人卡）",
-                    entry.alias
-                )
+    /// 构造一个**分布外**空间：第一代卡池追加若干张卡，并只用一种自定义构成
+    ///
+    /// 用途是检验网络对未训练卡组流派的泛化。训练分布只覆盖 [`GEN1_SHAPES`] 的
+    /// 3 种构成与 [`GEN1_CARD_POOL`] 的 11 张卡，本入口刻意走到那之外：例如补一张
+    /// 新的智力卡即可组出「2 速 1 耐 2 智」这种池子里凑不齐的构成。
+    ///
+    /// 追加卡的类型同样从 `cardDB.json` 读出、角色冲突同样实际比对，与
+    /// [`Self::gen1`] 共用 [`enumerate_space`]——分布外空间若用另一套合法性判据
+    /// 枚举，跨空间的分数就不可比了。
+    ///
+    /// `extra` 中与卡池重复的 idrank 会被忽略，避免同一张卡在一副卡组里出现两次。
+    ///
+    /// # 错误
+    ///
+    /// 追加卡查不到、类型不受支持，或该构成组不出任何合法卡组时报错。
+    pub fn custom(extra: &[u32], shape: DeckShape) -> Result<Self> {
+        let mut pool: Vec<u32> = GEN1_CARD_POOL.iter().map(|entry| entry.idrank).collect();
+        for &idrank in extra {
+            if !pool.contains(&idrank) {
+                pool.push(idrank);
             }
         }
-        let Some(friend) = friend else {
-            bail!("卡池未包含友人卡，拉面杯必须携带新友人卡");
-        };
-
-        let mut plans = Vec::new();
-        for uma in GEN1_UMAS.iter() {
-            // 马娘与同角色支援卡不可共存
-            let mut usable: [Vec<u32>; 5] = Default::default();
-            for (t, bucket) in by_type.iter().enumerate() {
-                for &idrank in bucket {
-                    if data.get_card(idrank / 10)?.chara_id != uma.chara_id() {
-                        usable[t].push(idrank);
-                    }
-                }
-            }
-            for shape in GEN1_SHAPES.iter() {
-                for normals in enumerate_decks(&usable, &shape.counts) {
-                    let mut deck = [0u32; 6];
-                    deck[..5].copy_from_slice(&normals);
-                    deck[5] = friend;
-                    plans.push(DeckPlan {
-                        uma: uma.game_id,
-                        deck,
-                        shape: shape.name
-                    });
-                }
-            }
-        }
-        if plans.is_empty() {
-            bail!("采样空间为空：卡池与构成无法组出任何合法卡组");
-        }
-        Ok(Self { plans })
+        Ok(Self {
+            plans: enumerate_space(&pool, std::slice::from_ref(&shape))?
+        })
     }
 
     /// 组合总数
@@ -413,6 +392,70 @@ impl SamplingSpace {
 }
 
 /// 从各类型可用卡中按张数要求枚举全部普通卡组合（结果长度恒为 5）
+/// 在给定卡池与构成列表上枚举全部合法 `(马娘, 卡组)`
+///
+/// 卡片类型一律从 `cardDB.json` 读取而非硬编码——数据更新导致类型变动时应当报错，
+/// 而不是静默产出错误卡组。同理，角色冲突由 `chara_id` 实际比对得出，
+/// 不写死「东海帝王撞 30275、杏目撞 30242」这两条已知结论。
+///
+/// [`SamplingSpace::gen1`] 与 [`SamplingSpace::custom`] 共用本函数，
+/// 两个空间的合法性判据因而完全一致。
+///
+/// # 错误
+///
+/// 卡片查不到、类型不受支持、卡池的友人卡不是恰好 1 张，或组不出任何卡组时报错。
+fn enumerate_space(pool: &[u32], shapes: &[DeckShape]) -> Result<Vec<DeckPlan>> {
+    let data = global!(GAMEDATA);
+
+    // 按类型分桶；友人卡单独拎出
+    let mut by_type: [Vec<u32>; 5] = Default::default();
+    let mut friend: Option<u32> = None;
+    for &idrank in pool {
+        let card = data.get_card(idrank / 10)?;
+        match card.card_type {
+            CARD_TYPE_FRIEND => {
+                if friend.replace(idrank).is_some() {
+                    bail!("卡池含多张友人卡，拉面杯构成假定恰好 1 张");
+                }
+            }
+            t if (0..5).contains(&t) => by_type[t as usize].push(idrank),
+            other => bail!("卡池中 {idrank} 的类型 {other} 不受支持（只接受普通卡与友人卡）")
+        }
+    }
+    let Some(friend) = friend else {
+        bail!("卡池未包含友人卡，拉面杯必须携带新友人卡");
+    };
+
+    let mut plans = Vec::new();
+    for uma in GEN1_UMAS.iter() {
+        // 马娘与同角色支援卡不可共存
+        let mut usable: [Vec<u32>; 5] = Default::default();
+        for (t, bucket) in by_type.iter().enumerate() {
+            for &idrank in bucket {
+                if data.get_card(idrank / 10)?.chara_id != uma.chara_id() {
+                    usable[t].push(idrank);
+                }
+            }
+        }
+        for shape in shapes.iter() {
+            for normals in enumerate_decks(&usable, &shape.counts) {
+                let mut deck = [0u32; 6];
+                deck[..5].copy_from_slice(&normals);
+                deck[5] = friend;
+                plans.push(DeckPlan {
+                    uma: uma.game_id,
+                    deck,
+                    shape: shape.name
+                });
+            }
+        }
+    }
+    if plans.is_empty() {
+        bail!("采样空间为空：卡池与构成无法组出任何合法卡组");
+    }
+    Ok(plans)
+}
+
 fn enumerate_decks(usable: &[Vec<u32>; 5], counts: &[usize; 5]) -> Vec<[u32; 5]> {
     // 逐类型做组合，再跨类型笛卡尔积
     let mut acc: Vec<Vec<u32>> = vec![Vec::new()];
@@ -871,6 +914,70 @@ mod tests {
             assert_eq!(per_uma[&uma.game_id], 85, "{} 无角色冲突，应为 85 套", uma.alias);
         }
         assert_eq!(space.len(), 5 * 85 + 2 * 50);
+        Ok(())
+    }
+
+    /// 分布外空间：追加一张智力卡后能组出「2 速 1 耐 2 智」，且规模符合手算
+    ///
+    /// 池内只有 30289 一张智力卡，`counts[4] = 2` 在默认卡池下组不出任何卡组；
+    /// 追加 30306（智，chara 1060，与 7 个马娘均无冲突）后：
+    /// 无冲突马娘 C(6,2)×C(2,1)×C(2,2)=30，冲突马娘速池 6→5 得 C(5,2)×2=20，
+    /// 合计 5×30 + 2×20 = 190。
+    #[test]
+    fn test_custom_space_two_wisdom() -> Result<()> {
+        setup()?;
+        let shape = DeckShape {
+            counts: [2, 1, 0, 0, 2],
+            name: "2速1耐2智1友"
+        };
+
+        println!("默认卡池只有 1 张智力卡，2 智构成应当组不出卡组：");
+        match SamplingSpace::custom(&[], shape) {
+            Ok(space) => println!("  ❌ 意外组出了 {} 套", space.len()),
+            Err(e) => println!("  ✅ 如期报错：{e}")
+        }
+
+        let space = SamplingSpace::custom(&[303064], shape)?;
+        let mut per_uma: HashMap<u32, usize> = HashMap::new();
+        for plan in space.plans() {
+            *per_uma.entry(plan.uma).or_default() += 1;
+        }
+        for uma in GEN1_UMAS.iter() {
+            println!("{} ({}) -> {} 套卡组", uma.alias, uma.game_id, per_uma[&uma.game_id]);
+        }
+        println!("合计 {} 套 (马娘, 卡组)", space.len());
+
+        // 每套卡组都必须同时带上两张智力卡，且构成名与友人卡正确
+        for plan in space.plans() {
+            assert!(plan.deck.contains(&302894), "缺少池内智力卡 302894");
+            assert!(plan.deck.contains(&303064), "缺少追加的智力卡 303064");
+            assert_eq!(plan.deck[5], 303054, "友人卡应固定为 303054");
+            assert_eq!(plan.shape, "2速1耐2智1友");
+        }
+        assert_eq!(per_uma[&112901], 20, "杏目与 30242 同角色，速池应缩到 5");
+        assert_eq!(per_uma[&100301], 20, "东海帝王与 30275 同角色，速池应缩到 5");
+        assert_eq!(space.len(), 5 * 30 + 2 * 20);
+        Ok(())
+    }
+
+    /// 重复的追加卡不会让同一张卡在卡组里出现两次
+    #[test]
+    fn test_custom_space_ignores_duplicate_extra() -> Result<()> {
+        setup()?;
+        let shape = DeckShape {
+            counts: [3, 1, 0, 0, 1],
+            name: "3速1耐1智1友"
+        };
+        // 302894 本就在池内，再追加一次应被忽略
+        let space = SamplingSpace::custom(&[302894, 302894], shape)?;
+        println!("追加池内卡后规模 {} 套（应与第一代该构成一致）", space.len());
+        for plan in space.plans() {
+            let mut seen = plan.deck.to_vec();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), 6, "卡组出现重复卡: {:?}", plan.deck);
+        }
+        assert_eq!(space.len(), 5 * 40 + 2 * 20);
         Ok(())
     }
 

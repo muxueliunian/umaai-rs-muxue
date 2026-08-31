@@ -2,7 +2,13 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-01
+- **分布外采样空间**：sampler 新增 `SamplingSpace::custom`——在第一代卡池上追加支援卡并只用一种自定义构成，与 `gen1` 共用同一套枚举与合法性判据（卡类型读 cardDB、角色冲突实比对），追加的重复卡忽略。ramen_space_bench 相应新增 `--shape` 与 `--extra-card`，默认不给时行为逐位不变；`--extra-card` 必须与 `--shape` 同用，否则默认口径就不再与教师数据同分布。用于检验网络对未训练卡组流派的泛化，输出显式标注分布外、提示分数不可与默认口径直接比较
+
 ## 2026-08-31
+- **评估列窗口**：eval.py 的 `evaluate_model` 与命令行新增 `--eval-columns LO HI`，候选价值只用该段 rollout 列重算（data.py 的 NpyShard 相应惰性 mmap `cand_scores`/`cand_valid`，窗口内无有效列的样本整条跳过并计数）。原先只有全列 `cand_mean` 一个口径，而 `best.pt` 正是按它挑的，被结算的列因此参与了模型选择
+- **eval.py 沿用 checkpoint 的切分粒度**：独立评估此前恒按默认的 combo 重切，按 sample 训练的模型会被静默换成另一套留出集
+- **训练侧诊断设施**：train.py 新增 `--eval-columns`（每轮额外记一份限定列的留出指标到 `evaluation_a`，不参与早停与 LR 调度）、`--checkpoint-steps`（在指定 optimizer step 处存 `step_XXXXXX.pt`）、`--ema-halflife-steps`（按步维护带偏差校正的权重 EMA 并一并存盘）、`--no-early-stop`（训满轮数上限）。metrics 增记 `global_step`，run.json 增记 `diagnostics` 段。四项都不改变梯度，不给新参数时逐位复现旧结果
 - **训练随机轴拆分**：train.py 新增 `--split-seed`（样本身份：划分与抽稀）与 `--init-seed`（优化路径：初始化、dropout、minibatch 顺序），未给出时都回落到 `--seed`，旧命令行为逐位不变。此前两者绑在一起，每换一个种子就换掉约 10% 训练样本；实测固定 split 后闭环 sd 从 2521 降到 156
 - **早停按 optimizer step 计**：新增 `--patience-steps` 与 `--max-steps`，按每轮步数换算成轮。按轮计数时数据量翻倍会让同样的轮数变成两倍步数，学习曲线各点的训练时长口径不一致
 - **闭环 bench 局号偏移**：ramen_space_bench 新增 `--run-offset`。相邻基种子会撞随机世界（`derive_seed` 是 XOR 后 splitmix，`base ^ r == base + r`），此前三个相邻种子的 12600 局实际只有 5248 个唯一世界，标准误被低估约 1.5 倍。改由固定基种子、按局号区间切分

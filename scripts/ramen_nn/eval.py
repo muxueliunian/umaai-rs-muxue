@@ -95,14 +95,22 @@ def evaluate_model(
     device: torch.device,
     batch_size: int = 1024,
     workers: int = 0,
+    columns: tuple[int, int] | None = None,
 ) -> dict:
-    """计算按阶段 top-1、期望后悔值和三路 value MAE。"""
+    """计算按阶段 top-1、期望后悔值和三路 value MAE。
+
+    ``columns`` 给出 ``[lo, hi)`` 时，候选价值只用这段 rollout 列重算，而不是用
+    全列的 ``cand_mean``。用途是把「挑 checkpoint 用的列」与「结算用的列」分开：
+    默认的全列口径会让被结算的列参与模型选择。窗口内无有效列的样本整条跳过，
+    计入返回值的 ``window_skipped``。
+    """
 
     model.eval()
     dataset = RamenDataset(shards, refs)
     loader = DataLoader(dataset, batch_size=min(batch_size, len(dataset)), shuffle=False, num_workers=workers)
     accumulators = {stage: MetricAccumulator() for stage in STAGE_NAMES}
     overall = MetricAccumulator()
+    window_skipped = 0
     offset = 0
     center = np.asarray(normalization.center, dtype=np.float32)
     scale = np.asarray(normalization.scale, dtype=np.float32)
@@ -120,7 +128,14 @@ def evaluate_model(
             shard_idx, local_idx = (int(v) for v in refs[offset + row])
             shard = shards[shard_idx]
             begin, end = int(shard.cand_ptr[local_idx]), int(shard.cand_ptr[local_idx + 1])
-            means = np.asarray(shard.cand_mean[begin:end], dtype=np.float64)
+            if columns is None:
+                means = np.asarray(shard.cand_mean[begin:end], dtype=np.float64)
+            else:
+                windowed = shard.candidate_window_mean(local_idx, columns[0], columns[1])
+                if windowed is None:
+                    window_skipped += 1
+                    continue
+                means = windowed
             selected, invalid = select_candidate(logits_batch[row], shard, local_idx)
             best = float(np.max(means))
             chosen = float(means[selected])
@@ -134,10 +149,14 @@ def evaluate_model(
                 accumulator.invalid_region_combo += int(invalid)
         offset += len(stages)
 
-    return {
+    report = {
         "overall": overall.report(),
         "by_stage": {STAGE_NAMES[stage]: accumulators[stage].report() for stage in STAGE_NAMES},
     }
+    if columns is not None:
+        report["columns"] = [int(columns[0]), int(columns[1])]
+        report["window_skipped"] = window_skipped
+    return report
 
 
 def _parse_args() -> argparse.Namespace:
@@ -151,6 +170,14 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--workers", type=int, default=0)
     parser.add_argument("--device", default="auto")
+    parser.add_argument(
+        "--eval-columns",
+        type=int,
+        nargs=2,
+        metavar=("LO", "HI"),
+        help="只用 rollout 列 [LO, HI) 重算候选价值（需要 --raw 导出的数据目录）。"
+        "不给时用全列 cand_mean，与旧行为一致",
+    )
     return parser.parse_args()
 
 
@@ -172,7 +199,11 @@ def main() -> None:
     split = checkpoint.get("split", {})
     validation_fraction = float(split.get("validation_fraction", 0.1))
     split_seed = int(split.get("seed", 20260830))
-    train_refs, validation_refs = stable_split_refs(shards, validation_fraction, split_seed)
+    # 必须复用 checkpoint 记录的切分粒度，否则 combo 训练的模型会被按 sample 重切，
+    # 「验证集」里混进训练过的卡组，指标静默偏乐观。加入 split_by 之前的 checkpoint
+    # 一律是按样本切的，与 train.py 的回退口径一致。
+    split_by = str(split.get("split_by", "sample"))
+    train_refs, validation_refs = stable_split_refs(shards, validation_fraction, split_seed, split_by)
     if args.split == "train":
         refs = train_refs
     elif args.split == "validation":
@@ -181,8 +212,13 @@ def main() -> None:
         refs = np.concatenate([train_refs, validation_refs], axis=0)
     normalization = ValueNormalization.from_dict(checkpoint["value_normalization"])
     model = model_from_checkpoint(checkpoint, device)
-    report = evaluate_model(model, shards, refs, normalization, device, args.batch_size, args.workers)
-    report.update({"split": args.split, "checkpoint": str(args.checkpoint), "device": str(device)})
+    columns = None if args.eval_columns is None else (int(args.eval_columns[0]), int(args.eval_columns[1]))
+    report = evaluate_model(
+        model, shards, refs, normalization, device, args.batch_size, args.workers, columns
+    )
+    report.update(
+        {"split": args.split, "split_by": split_by, "checkpoint": str(args.checkpoint), "device": str(device)}
+    )
     print(json.dumps(report, ensure_ascii=False, indent=2))
 
 

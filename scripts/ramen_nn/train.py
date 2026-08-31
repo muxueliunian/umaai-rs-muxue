@@ -16,6 +16,7 @@ import math
 import os
 import random
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -154,8 +155,13 @@ def run_epoch(
     device: torch.device,
     optimizer: torch.optim.Optimizer | None,
     grad_clip: float,
+    on_step: Callable[[], None] | None = None,
 ) -> dict[str, float]:
-    """执行一个训练或只读验证 epoch。"""
+    """执行一个训练或只读验证 epoch。
+
+    ``on_step`` 在每次 ``optimizer.step()`` 之后调用一次，供权重 EMA 之类按步累积的
+    诊断使用；只读 epoch 不会触发。
+    """
 
     training = optimizer is not None
     model.train(training)
@@ -173,6 +179,8 @@ def run_epoch(
                 total.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
                 optimizer.step()
+                if on_step is not None:
+                    on_step()
             count = len(batch["stage"])
             totals += np.asarray([total.item(), policy.item(), value.item()]) * count
             samples += count
@@ -204,6 +212,49 @@ def make_optimizer(
     if interaction:
         groups.append({"params": interaction, "lr": head_lr, "weight_decay": eat_interaction_weight_decay})
     return torch.optim.Adam(groups)
+
+
+class WeightEma:
+    """按 optimizer step 维护的指数滑动平均权重（带偏差校正）。
+
+    ``halflife_steps`` 步之后，旧权重的贡献衰减一半。影子权重从零开始累加，取用时
+    除以 ``1 - decay ** t``，因此不残留初始化权重，步数还很少时也是无偏的。
+    非浮点张量（若有）不参与平均，取用时直接复制当前值。
+    """
+
+    def __init__(self, model: RamenNetwork, halflife_steps: int) -> None:
+        if halflife_steps <= 0:
+            raise ValueError("EMA 半衰期必须为正")
+        self.halflife_steps = int(halflife_steps)
+        self.decay = 0.5 ** (1.0 / self.halflife_steps)
+        self.steps = 0
+        self.shadow = {
+            name: torch.zeros_like(tensor, dtype=torch.float32)
+            for name, tensor in model.state_dict().items()
+            if tensor.is_floating_point()
+        }
+
+    @torch.no_grad()
+    def update(self, model: RamenNetwork) -> None:
+        """吃掉一个 optimizer step 之后的权重。"""
+
+        self.steps += 1
+        for name, tensor in model.state_dict().items():
+            shadow = self.shadow.get(name)
+            if shadow is not None:
+                shadow.mul_(self.decay).add_(tensor.detach().to(torch.float32), alpha=1.0 - self.decay)
+
+    def model_state(self, model: RamenNetwork) -> dict:
+        """产出可直接喂给 ``model_from_checkpoint`` 的权重字典。"""
+
+        if self.steps == 0:
+            raise ValueError("EMA 还没有吃到任何 optimizer step")
+        correction = 1.0 - self.decay**self.steps
+        state = {}
+        for name, tensor in model.state_dict().items():
+            shadow = self.shadow.get(name)
+            state[name] = tensor.detach().clone() if shadow is None else (shadow / correction).to(tensor.dtype)
+        return state
 
 
 def save_checkpoint(path: Path, checkpoint: dict) -> None:
@@ -281,6 +332,37 @@ def _parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--patience", type=int)
     parser.add_argument("--min-regret-improvement", type=float, default=0.5)
+    parser.add_argument(
+        "--no-early-stop",
+        action="store_true",
+        help="不因留出后悔值停滞而提前停止，一直训到轮数上限。方差实验要求每个种子跑"
+        "同样的步数，否则「只换初始化」的对照里混进了不同长度的训练日程",
+    )
+    parser.add_argument(
+        "--eval-columns",
+        type=int,
+        nargs=2,
+        metavar=("LO", "HI"),
+        help="每轮额外算一遍只用 rollout 列 [LO, HI) 的留出指标，记进 metrics.jsonl 的"
+        "`evaluation_a`。**只记录，不参与早停与 LR 调度**——默认的全列口径会让被结算的"
+        "列参与模型选择，这个字段是用来量化那件事有多严重的",
+    )
+    parser.add_argument(
+        "--checkpoint-steps",
+        type=int,
+        nargs="+",
+        metavar="STEP",
+        help="在这些 optimizer step 处额外存 `step_XXXXXX.pt`（落到刚跨过该步数的轮末）。"
+        "用于在同一条训练轨迹上取多个点，把「同种子内的抖动」与「种子间的差异」分开",
+    )
+    parser.add_argument(
+        "--ema-halflife-steps",
+        type=int,
+        nargs="+",
+        metavar="STEP",
+        help="维护这些半衰期（按 optimizer step）的权重 EMA，在 --checkpoint-steps 处与"
+        "训练结束时一并存成 `*_ema<半衰期>.pt`。不影响训练本身",
+    )
     parser.add_argument(
         "--seed",
         type=int,
@@ -422,6 +504,29 @@ def main() -> None:
         best_regret = float(resume_checkpoint.get("best_regret", best_regret))
         stale_epochs = int(resume_checkpoint.get("stale_epochs", 0))
 
+    # 以下三项都是诊断设施：不改变梯度、不参与早停与 LR 调度，只是多记录/多存盘。
+    eval_columns = None
+    if args.eval_columns is not None:
+        eval_columns = (int(args.eval_columns[0]), int(args.eval_columns[1]))
+        available = min(shard.rollout_columns for shard in shards)
+        if available == 0:
+            raise ValueError("--eval-columns 需要 --raw 导出的数据目录（缺少 cand_scores.npy）")
+        if not 0 <= eval_columns[0] < eval_columns[1] <= available:
+            raise ValueError(f"--eval-columns {eval_columns} 越出可用的 {available} 列")
+    checkpoint_steps = sorted({int(v) for v in (args.checkpoint_steps or [])})
+    if any(step <= 0 for step in checkpoint_steps):
+        raise ValueError("--checkpoint-steps 必须为正")
+    emas = {int(h): WeightEma(model, int(h)) for h in sorted({int(v) for v in (args.ema_halflife_steps or [])})}
+    if emas and args.resume is not None:
+        # EMA 状态不进 checkpoint，续训会从零重新累积，与一次跑完的轨迹不同。
+        raise ValueError("--ema-halflife-steps 目前不支持与 --resume 同用")
+
+    def on_step() -> None:
+        """每个 optimizer step 后推进全部 EMA。"""
+
+        for ema in emas.values():
+            ema.update(model)
+
     generator = torch.Generator().manual_seed(init_seed)
     train_dataset = RamenDataset(shards, train_refs)
     validation_dataset = RamenDataset(shards, validation_refs)
@@ -461,12 +566,20 @@ def main() -> None:
             "max_epochs": epochs,
             "max_steps_arg": args.max_steps,
             "batch_size": args.batch_size,
+            "early_stop": not args.no_early_stop,
+        },
+        "diagnostics": {
+            "eval_columns": None if eval_columns is None else list(eval_columns),
+            "checkpoint_steps": checkpoint_steps,
+            "ema_halflife_steps": sorted(emas),
         },
     }
     (args.output_dir / "run.json").write_text(json.dumps(run_info, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(run_info, ensure_ascii=False, indent=2))
 
     metrics_path = args.output_dir / "metrics.jsonl"
+    previous_step = start_epoch * steps_per_epoch
+    checkpoint: dict | None = None
     for epoch in range(start_epoch, epochs):
         started = time.perf_counter()
         train_metrics = run_epoch(
@@ -479,6 +592,7 @@ def main() -> None:
             device,
             optimizer,
             args.grad_clip,
+            on_step if emas else None,
         )
         validation_loss = run_epoch(
             model,
@@ -503,8 +617,10 @@ def main() -> None:
         else:
             stale_epochs += 1
 
+        global_step = (epoch + 1) * steps_per_epoch
         record = {
             "epoch": epoch,
+            "global_step": global_step,
             "seconds": time.perf_counter() - started,
             "lr": [group["lr"] for group in optimizer.param_groups],
             "train": train_metrics,
@@ -513,6 +629,10 @@ def main() -> None:
             "best_regret": best_regret,
             "stale_epochs": stale_epochs,
         }
+        if eval_columns is not None:
+            record["evaluation_a"] = evaluate_model(
+                model, shards, validation_refs, normalization, device, args.batch_size, args.workers, eval_columns
+            )
         with metrics_path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(record, ensure_ascii=False) + "\n")
         print(json.dumps(record, ensure_ascii=False), flush=True)
@@ -539,9 +659,31 @@ def main() -> None:
         save_checkpoint(args.output_dir / "last.pt", checkpoint)
         if improved:
             save_checkpoint(args.output_dir / "best.pt", checkpoint)
+
+        # 定步 checkpoint：落到刚跨过该步数的轮末，文件名仍用请求的步数，
+        # 使不同数据量/批大小下的同名文件对应同样的优化步数。
+        due = [step for step in checkpoint_steps if previous_step < step <= global_step]
+        for step in due:
+            save_checkpoint(args.output_dir / f"step_{step:06d}.pt", checkpoint)
+            for halflife, ema in emas.items():
+                save_checkpoint(
+                    args.output_dir / f"step_{step:06d}_ema{halflife}.pt",
+                    {**checkpoint, "model_state": ema.model_state(model), "ema": {"halflife_steps": halflife, "steps": ema.steps}},
+                )
+        previous_step = global_step
+
+        if args.no_early_stop:
+            continue
         if stale_epochs >= patience:
             print(f"验证集期望后悔值连续 {patience} 轮未改善，提前停止。")
             break
+
+    if checkpoint is not None:
+        for halflife, ema in emas.items():
+            save_checkpoint(
+                args.output_dir / f"last_ema{halflife}.pt",
+                {**checkpoint, "model_state": ema.model_state(model), "ema": {"halflife_steps": halflife, "steps": ema.steps}},
+            )
 
 
 if __name__ == "__main__":
