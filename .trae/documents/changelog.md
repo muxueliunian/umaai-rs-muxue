@@ -3,6 +3,8 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-09-01
+- **MCTS pprof-rs profiler bin 固化**：sim_profiler 模板的 MCTS 版（pprof-rs 用户态采样，输出 .pb 给 go tool pprof / inferno-flamegraph）
+- **性能分析指南文档**：新增 perf_profiling.md，记录 cargo flamegraph / pprof-rs 工具选择准则与 MCTS hot path 数据
 - **决策理由输出按分排序 + 分差着色**：移除险胜门限触发，每回合都输出决策理由；"中选"改"首选"并固定亮绿色，其余按评分降序编号 `#2` 起，颜色按与**首选**差距分档（`<30` 亮绿 / `<100` 绿 / `<300` 黄 / 其余真彩色灰，与文本内 `±分差` 同源）；`reason_gap_threshold` 字段保留兼容但不再用作触发器；`test_color_thresholds` 在 `--features no-color` 下自动跳过
 - **决策理由模块索引入项目文档**：`project_context.md` 新增"输出与决策理由"节，记录 `reason_color` 阈值调整位置（`reason.rs:107`）与 no-color feature 兼容性
 - **拉面在线对接计划**：新增 `.trae/documents/ramen_online_integration_plan.md`——文件通道 thisTurn.json + scenarioId 分发、两阶段决策吃面前/吃面后、C# 端先行冻结协议再 Rust 接入

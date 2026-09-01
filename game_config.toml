@@ -24,7 +24,7 @@ num_threads = 16
 
 # 训练员类型（可选覆盖 default_config.toml 的 trainer）
 # "manual" | "random" | "handwritten" | "collector" | "neuralnet" | "mcts"
-trainer = "mcts"
+trainer = "handwritten"
 
 # 温泉选择是否允许蒙特卡洛自由发挥（安卓马建议 false 减少世界线；须写在本段内才生效）
 mcts_selected_onsen = true
