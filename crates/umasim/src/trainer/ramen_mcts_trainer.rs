@@ -239,7 +239,7 @@ pub struct RamenMctsTrainer {
     /// 用 `Mutex` 而非 `RefCell`：`Trainer` 在搜索/并行场景要求 `Sync`
     /// （与既有 `last_breakdown` 同理）。
     pending_combined_targets: Mutex<Option<[i32; 3]>>,
-    /// 决策理由原始数据出口（险胜局经此发出 JSON；umasim 默认接日志）
+    /// 决策理由原始数据出口（每回合都发出 JSON；umasim 默认接日志）
     ///
     /// 可读文字不走此出口，由 [`Self::emit_decision_reason`] 渲染后上屏。
     pub reason_sink: Arc<dyn crate::output::DecisionReasonSink>
@@ -304,11 +304,11 @@ impl RamenMctsTrainer {
         self
     }
 
-    /// 输出决策理由（险胜局）：原始 JSON 经 [`Self::reason_sink`] 发出，可读文字上屏
+    /// 输出决策理由：原始 JSON 经 [`Self::reason_sink`] 发出，可读文字上屏
     ///
-    /// 门限先行（懒计算）：[`analyze_narrow_win`] 返回 `None`（悬殊局 / 门限
-    /// 为 0）时零分析开销静默。比较口径跟随 [`Self::selection`]——理由解释
-    /// 的是实际选择。终局差异日志之后调用，两段日志可互相印证。
+    /// 每回合都调用 [`analyze_narrow_win`]；当前不再用分差门限决定是否输出，
+    /// 分差仅用于着色档位。比较口径跟随 [`Self::selection`]——理由解释的是
+    /// 实际选择。终局差异日志之后调用，两段日志可互相印证。
     fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
         if !self.verbose {
             return;

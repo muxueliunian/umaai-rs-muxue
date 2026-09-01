@@ -2,6 +2,12 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-01
+- **决策理由输出按分排序 + 分差着色**：移除险胜门限触发，每回合都输出决策理由；"中选"改"首选"并固定亮绿色，其余按评分降序编号 `#2` 起，颜色按与**首选**差距分档（`<30` 亮绿 / `<100` 绿 / `<300` 黄 / 其余真彩色灰，与文本内 `±分差` 同源）；`reason_gap_threshold` 字段保留兼容但不再用作触发器；`test_color_thresholds` 在 `--features no-color` 下自动跳过
+- **决策理由模块索引入项目文档**：`project_context.md` 新增"输出与决策理由"节，记录 `reason_color` 阈值调整位置（`reason.rs:107`）与 no-color feature 兼容性
+- **拉面在线对接计划**：新增 `.trae/documents/ramen_online_integration_plan.md`——文件通道 thisTurn.json + scenarioId 分发、两阶段决策吃面前/吃面后、C# 端先行冻结协议再 Rust 接入
+- **用户配置调整**：`game_config.toml` 切马娘 101901（stamina build）+ 卡组/蓝因子/extra_count 微调；`gamedata/default_config.toml` 同思路调 102601 + `ramen_region_strategy` 由 `"fixed"` 改 `"all"`
+
 ## 2026-08-28
 - **MCTS rollout 诊断日志运行时屏蔽**：diagnostic 加进程级开关（DiagGuard 挂 `search_with_terminal`），`diag!` 双门控 + 8 处 explain 块补 `if enabled()`，rollout 搜索静默、业务日志不受影响，顺带拿回加速收益
 - **险胜决策理由输出**：新增 output/reason——险胜回合（门限默认 150）显中选内容 + 未中选 top-N 分差与五维/PT 子项；参数走完整覆盖链，终局差异日志 info 降 debug

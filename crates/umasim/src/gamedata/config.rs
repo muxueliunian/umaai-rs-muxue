@@ -192,16 +192,18 @@ pub struct MctsConfig {
     /// 拉面规则层已由无状态流接管（RNG Refactor Plan v2 §5.2），不受此开关影响。
     #[serde(default = "default_mcts_crn_stage_reseed")]
     pub crn_stage_reseed: bool,
-    /// 决策理由分差门限
+    /// 决策理由分差门限（保留字段，不再用作触发器）
     ///
-    /// 搜索完成后，存在与选中者分差绝对值 < 门限的候选（险胜局）才输出
-    /// 决策理由（可读文字；原始数据经 sink 发出）；悬殊局静默。`0` 等价禁用。
+    /// 当前每回合都输出决策理由；分差仅用于选择其他候选的显示颜色档位
+    ///（与最优项的差距 <30/<100/<300/其余 → 亮绿/绿/黄/灰）。字段值仍
+    /// 写入 [`DecisionReasonData::threshold`]，供下游兼容与对照。
     #[serde(default = "default_mcts_reason_gap_threshold")]
     pub reason_gap_threshold: f64,
     /// 决策理由最多显示选项数
     ///
-    /// 触发理由输出后，全部候选按评分降序只取前 N 个进入显示与分析，
-    /// 其余直接排除（不显示内容、不做原因分析）。选中者始终单独一行显示。
+    /// 全部候选按评分降序只取前 N 个进入显示与分析，其余**直接排除**：
+    /// 不显示内容、不做原因分析。中选者一般也在前 N 内；若不在，渲染时
+    /// 仍按"首选"在第 1 行单独显示。
     #[serde(default = "default_mcts_reason_max_display")]
     pub reason_max_display: usize
 }
@@ -277,7 +279,8 @@ fn default_mcts_crn_stage_reseed() -> bool {
     true
 }
 
-/// `reason_gap_threshold` 缺省值：分差 150 以内视为险胜，输出决策理由
+/// `reason_gap_threshold` 缺省值：保留兼容值，分差档位（<30/<100/<300/其余）
+/// 在 `reason.rs` 内硬编码；颜色档位不再依赖此门限
 fn default_mcts_reason_gap_threshold() -> f64 {
     150.0
 }

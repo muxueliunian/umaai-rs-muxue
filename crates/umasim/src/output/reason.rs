@@ -4,24 +4,24 @@
 //! `explanation` 契约）：**原始数据与可读文字面向不同场景，走不同出口**。
 //!
 //! ```text
-//! analyze_narrow_win（纯函数，门限先行懒计算）
+//! analyze_narrow_win（纯函数，按分排序懒计算）
 //!   ├─ DecisionReasonData（原始数据，Serialize，schema 稳定）
 //!   │    └─ DecisionReasonSink 接口发出
 //!   │         └─ umasim 默认实现 [`NoopSink`]（静默丢弃——屏幕只要可读文字）；
 //!   │            下游程序可实现自己的通道（[`LogJsonSink`] 接日志 / 文件 / socket）
 //!   └─ render_reason_lines（可读文字，数据驱动渲染）
-//!        └─ info! 直接上屏（措辞固定：中选 / 简称维度，子项条数 REASON_TOP_DIMS）
+//!        └─ info! 直接上屏（措辞固定：首选 / 简称维度，子项条数 REASON_TOP_DIMS）
 //! ```
 //!
 //! 两者都**不是** [`DecisionInfo`](crate::output::decision::DecisionInfo) 协议
 //! 格式：协议 schema 冻结留待协议接入时从本结构映射，不被屏幕日志需求绑架。
 //!
-//! 输出频率由**分差门限**控制：只有存在与选中者分差 < `threshold` 的候选
-//! （险胜局）才产生理由；悬殊局返回 `None` 完全静默——门限判断在终局维度
-//! 分析**之前**，不浪费悬殊局的分析开销。`threshold = 0` 恒无接近组，等价禁用。
+//! 搜索完成后始终按比较口径从高到低排序，最多取 `max_display` 个结果；不
+//! 再以分差门限决定是否输出。分差仅用于选择其他候选的显示颜色。
 
 use std::collections::HashMap;
 
+use colored::Colorize;
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -90,6 +90,46 @@ pub struct DimDelta {
     pub delta: f64
 }
 
+/// 决策理由候选显示样式
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ReasonColor {
+    /// 与首选差距绝对值小于 30
+    BrightGreen,
+    /// 与首选差距绝对值小于 100
+    Green,
+    /// 与首选差距绝对值小于 300
+    Yellow,
+    /// 与首选差距绝对值达到 300
+    Grey
+}
+
+/// 为候选分差选择终端显示颜色。
+fn reason_color(gap: f64) -> ReasonColor {
+    if gap.abs() < 30.0 {
+        ReasonColor::BrightGreen
+    } else if gap.abs() < 100.0 {
+        ReasonColor::Green
+    } else if gap.abs() < 300.0 {
+        ReasonColor::Yellow
+    } else {
+        ReasonColor::Grey
+    }
+}
+
+/// 按与首选的分差为已格式化的单行着色
+///
+/// 文本在 [`render_reason_lines`] 内已拼好（prefix + 排名 + 描述 + 分差
+/// + 子项），这里只挂颜色。`gap` 即文本里展示的 `±分差` 字段——候选相
+/// 对首选（中选者）的差——保持颜色与字段同源，扫视与解读一致。
+fn format_reason_line(text: String, gap: f64) -> String {
+    match reason_color(gap) {
+        ReasonColor::BrightGreen => text.bright_green().to_string(),
+        ReasonColor::Green => text.green().to_string(),
+        ReasonColor::Yellow => text.yellow().to_string(),
+        ReasonColor::Grey => text.truecolor(128, 128, 128).to_string()
+    }
+}
+
 /// 一个未中选候选（评分前 N 内）与选中者的对比（原始数据）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RivalReason {
@@ -121,7 +161,8 @@ pub struct DecisionReasonData {
     pub turn: i32,
     /// 比较口径（`"score"` / `"pt"`）
     pub metric: String,
-    /// 本次生效的分差门限（下游可复现"为什么这回合算险胜"）
+    /// 本次生效的分差门限（保留字段，记录到原始数据供下游对照；
+    /// 当前不再用作触发判断）
     pub threshold: f64,
     /// 本次生效的最多显示选项数（rivals 即评分降序前 N 中排除选中者）
     pub max_display: usize,
@@ -265,13 +306,15 @@ fn dim_deltas(chosen: &RamenTerminalStats, rival: &RamenTerminalStats, top_dims:
     (pros, cons)
 }
 
-/// 险胜分析：门限先行，悬殊局（无接近候选）返回 `None`
+/// 决策理由分析：按口径评分取前 N，返回完整结果
 ///
 /// - `metric`：比较口径，应与 trainer 的 selection 一致
-/// - `threshold`：分差门限，仅作**输出触发**；`0` 等价禁用
-/// - `max_display`：最多显示/分析的选项数——触发后，全部候选按口径评分
-///   降序只取前 N 个（一般含中选者），其余**直接排除**：不显示内容、
-///   不做原因分析。中选者固定由调用方先行单独显示，不在本集合内。
+/// - `threshold`：保留参数，仅作为数据记录写入 [`DecisionReasonData::threshold`]
+///   供下游兼容；当前**不再**用作触发判断——每回合都输出，便于统一观察
+///   决策；分差仅用于选择其他候选的显示颜色。
+/// - `max_display`：最多显示/分析的选项数——全部候选按口径评分降序只取前
+///   N 个进入显示与分析，其余**直接排除**：不显示内容、不做原因分析。中
+///   选者一般也在前 N 内；若不在，渲染时仍按"首选"在第 1 行单独显示。
 ///
 /// 终局维度分析（较贵）只对进入前 N 的未中选候选执行（懒计算）。
 pub fn analyze_narrow_win(
@@ -282,21 +325,13 @@ pub fn analyze_narrow_win(
         return None;
     }
     let chosen_mean = metric.mean_of(&output.action_results[chosen]);
-    // 第一遍：全部候选的口径评分，门限触发判断 + 排序
+    // 全部候选按口径评分，降序取前 N（含中选者；N=0 时取 1）
     let mut order: Vec<(usize, f64)> = output
         .action_results
         .iter()
         .enumerate()
         .map(|(i, pair)| (i, metric.mean_of(pair)))
         .collect();
-    // 门限触发：存在与中选者接近的候选（险胜局）；悬殊局静默
-    let near_exists = order
-        .iter()
-        .any(|&(i, mean)| i != chosen && (mean - chosen_mean).abs() < threshold);
-    if !near_exists {
-        return None;
-    }
-    // 评分降序取前 N（N 含中选者；中选者不在前 N 的极端情况不做特殊处理）
     order.sort_by(|a, b| b.1.total_cmp(&a.1));
     order.truncate(max_display.max(1));
     let mut rivals: Vec<RivalReason> = order
@@ -358,17 +393,19 @@ fn render_gap(gap: f64) -> String {
 
 /// 渲染可读文字（数据驱动，每行一条，直接供 `info!` 上屏）
 ///
-/// 行 1 = 选中候选（只显示选项内容，无分数无置信度）；行 2.. = 评分前 N 中
-/// 的未中选候选：`±分差 （优势子项, ✗劣势子项）`，帮助调参者判断
-/// "险胜选对了吗"。置信度只在原始数据里，不上屏。
+/// 行 1 = 首选（中选者，固定亮绿色，方便一眼定位）；
+/// 行 2.. = 评分前 N 中的未中选候选：`±分差 （优势子项, ✗劣势子项）`，按
+/// 评分降序编号 `#2`, `#3`, ...；颜色按与首选的差距分档（即文本里展示的
+/// `±分差` 字段同源，便于扫视与解读一致）——`首选` 永远亮绿色，其余按
+/// `|gap|` `<30` / `<100` / `<300` / 其余 → 亮绿 / 绿 / 黄 / 灰。置信度
+/// 只在原始数据里，不上屏。
 pub fn render_reason_lines(d: &DecisionReasonData) -> Vec<String> {
-    let mut lines = vec![format!(
-        "[回合 {}][决策理由] 中选: {}",
-        d.turn + 1,
-        d.chosen_desc
-    )];
-    for r in &d.rivals {
-        // 维度子项：优势打钩、劣势打叉，按 |delta| 降序
+    let prefix = format!("[回合 {}]", d.turn + 1);
+    let mut lines = Vec::new();
+    // 行 1：首选（中选者），固定亮绿色——即使它不是评分最高者，也优先定位
+    lines.push(format!("{prefix} 首选: {}", d.chosen_desc).bright_green().to_string());
+    for (i, r) in d.rivals.iter().enumerate() {
+        let rank = format!("#{}", i + 2);
         let mut dims: Vec<String> = r.pros.iter().map(render_dim).collect();
         dims.extend(r.cons.iter().map(render_dim));
         let detail = if dims.is_empty() {
@@ -376,14 +413,9 @@ pub fn render_reason_lines(d: &DecisionReasonData) -> Vec<String> {
         } else {
             format!(" （{}）", dims.join(", "))
         };
-        lines.push(format!(
-            "[回合 {}][决策理由] #{} {}: {}{}",
-            d.turn + 1,
-            r.index,
-            r.desc,
-            render_gap(r.gap),
-            detail
-        ));
+        // 颜色直接用 r.gap（候选 − 首选），与文本内显示的 ±分差 同源
+        let raw = format!("{prefix} {rank} {}: {}{}", r.desc, render_gap(r.gap), detail);
+        lines.push(format_reason_line(raw, r.gap));
     }
     lines
 }
@@ -455,20 +487,22 @@ mod tests {
         RamenSearchOutput::with_terminals(actions, pairs, terminals, 10.0)
     }
 
-    /// 门限先行：悬殊局返回 None，不产生理由数据
+    /// 悬殊局：门限不再用作触发器，每回合都返回数据
     #[test]
-    fn test_landslide_silent() {
-        // 门限 200：#1 差 250、#2 差 2000 均不在门限内 → 悬殊静默
-        let out = analyze_narrow_win(22, ReasonMetric::Score, 200.0, 5, 0, &sample_output());
-        println!("门限 200: {out:?}");
-        assert!(out.is_none(), "无接近候选时应返回 None");
+    fn test_landslide_still_emits() {
+        // 即便门限设为 200（最小分差 250 已超出），仍正常生成理由数据——分差仅用于着色
+        let data = analyze_narrow_win(22, ReasonMetric::Score, 200.0, 5, 0, &sample_output())
+            .expect("门限不再触发静默，每回合都应输出");
+        println!("悬殊局仍输出 rivals={}", data.rivals.len());
+        assert_eq!(data.rivals.len(), 2);
+        assert_eq!(data.threshold, 200.0, "门限值仍写入原始数据供下游兼容");
     }
 
-    /// 险胜局：rivals = 评分降序前 N 的未中选（按评分降序；允许分差为正）
+    /// 评分排序：rivals = 评分降序前 N 中排除中选（按评分降序；允许分差为正）
     #[test]
-    fn test_narrow_win_analysis() {
+    fn test_ranking_by_score() {
         let data = analyze_narrow_win(22, ReasonMetric::Score, 300.0, 5, 0, &sample_output())
-            .expect("存在差 250 的接近候选，不应为 None");
+            .expect("每回合都应输出");
         println!("chosen = {} ({})", data.chosen_index, data.chosen_desc);
         for r in &data.rivals {
             println!("#{} gap={:+.0} conf={:.2}", r.index, r.gap, r.confidence);
@@ -502,7 +536,7 @@ mod tests {
     #[test]
     fn test_pt_metric() {
         let data = analyze_narrow_win(22, ReasonMetric::Pt, 300.0, 5, 0, &sample_output())
-            .expect("PT 口径下 #1 差 100 仍应触发");
+            .expect("每回合都应输出");
         println!("metric = {}", data.metric);
         for r in &data.rivals {
             println!("#{} gap={:+.0}", r.index, r.gap);
@@ -519,22 +553,28 @@ mod tests {
     fn test_max_display_truncate() {
         // 一般情形（N 含中选者）：max_display=3 = 全部候选，rivals = 2 个未中选
         let data = analyze_narrow_win(22, ReasonMetric::Score, 300.0, 3, 0, &sample_output())
-            .expect("#1 差 250 < 300，门限触发");
+            .expect("每回合都应输出");
         println!("max_display=3 rivals = {}", data.rivals.len());
         assert_eq!(data.rivals.len(), 2);
         assert_eq!(data.max_display, 3);
         // N 截断：max_display=2 时前 2 = #2/#1（本样例中选者均值最低、不在前 N，
         // 属约定的"不考虑"情形——行为为前 N 中全部非中选者都显示）
         let narrow = analyze_narrow_win(22, ReasonMetric::Score, 300.0, 2, 0, &sample_output())
-            .expect("门限触发");
+            .expect("每回合都应输出");
         println!("max_display=2 rivals = {}", narrow.rivals.len());
         assert_eq!(narrow.rivals.len(), 2, "前 2 = #2/#1 均非中选，全部显示");
-        // 门限仍作触发器：无接近候选时即使 N 很大也静默
-        let silent = analyze_narrow_win(22, ReasonMetric::Score, 200.0, 5, 0, &sample_output());
-        assert!(silent.is_none(), "门限未触发（最小分差 250 > 200）应静默");
+        // 门限不再触发：设很大门限（远超分差）也照常输出
+        let huge = analyze_narrow_win(22, ReasonMetric::Score, 9_999.0, 5, 0, &sample_output())
+            .expect("门限不再决定是否输出");
+        assert_eq!(huge.rivals.len(), 2);
+        // N=0 退化：max_display.max(1) 兜底取 1，前 1 名 = 评分最高的 #2（非中选）
+        // 进入 rivals，rivals.len() = 1；首选行由渲染单独加上去
+        let one = analyze_narrow_win(22, ReasonMetric::Score, 300.0, 0, 0, &sample_output())
+            .expect("max_display=0 也兜底输出（首选必出）");
+        assert_eq!(one.rivals.len(), 1, "max=1 兜底：前 1 名 #2 入 rivals");
     }
 
-    /// 可读渲染：中选行只显内容 + 未中选 ±分差与 ✓✗ 子项
+    /// 可读渲染：首选行 + 未中选 ±分差与子项；编号从 #2 起
     #[test]
     fn test_render_lines() {
         let data = analyze_narrow_win(22, ReasonMetric::Score, 300.0, 5, 0, &sample_output()).unwrap();
@@ -543,17 +583,70 @@ mod tests {
         for l in &lines {
             println!("{l}");
         }
-        // 中选 1 行 + 未中选 2 行（#2、#1）
+        // 首选 1 行 + 未中选 2 行（#2、#1）
         assert_eq!(lines.len(), 3);
-        assert!(lines[0].contains("中选"), "中选行含风格 chosen_word");
-        assert!(!lines[0].contains("置信"), "中选行不显示置信度");
-        assert!(lines[0].contains(&data.chosen_desc), "中选行只显示选项内容");
-        assert!(lines[1].contains("#2"), "第二行是评分最高的未中选 #2");
+        assert!(lines[0].contains("首选"), "首行固定标 '首选'");
+        assert!(lines[0].contains(&data.chosen_desc), "首行只显示中选内容");
+        assert!(!lines[0].contains("置信"), "首行不显示置信度");
+        // 首行格式 "首选: 描述"，不含分差符号 `+/-` 和子项括号
+        assert!(!lines[0].contains('+') && !lines[0].contains("（"), "首行不带分差和子项");
+        assert!(lines[1].contains("#2"), "第二行显示排名 #2（评分最高的未中选）");
         assert!(lines[1].contains("+2200"), "分差带符号显示（允许为正）");
-        assert!(lines[2].contains("#1") && lines[2].contains("+250"));
+        assert!(lines[2].contains("#3"), "第三行显示排名 #3（评分次高）");
+        assert!(lines[2].contains("+250"));
         assert!(lines[2].contains("智+200"), "优势子项（简称）");
         assert!(lines[2].contains("PT-33"), "劣势子项且 PT 已还原点数");
         assert!(!lines.iter().any(|l| l.contains("置信")), "置信度不再上屏（只在原始数据）");
+    }
+
+    /// 着色档位：与首选差距 `<30`/`<100`/`<300`/其余 → 亮绿/绿/黄/灰
+    ///
+    /// 测文本内是否嵌入对应 ANSI 真彩色码：`bright_green`=`\e[92m`，
+    /// `green`=`\e[32m`，`yellow`=`\e[33m`，自定义灰=`\e[38;2;128;128;128m`。
+    /// `no-color` feature 下 colored 编译期禁用颜色，无法覆盖，测试跳过。
+    #[test]
+    fn test_color_thresholds() {
+        if cfg!(feature = "no-color") {
+            println!("跳过：no-color feature 下 ANSI 序列被编译期禁用");
+            return;
+        }
+        colored::control::SHOULD_COLORIZE.set_override(true);
+        let cases = [
+            (10.0, "\u{1b}[92m"),    // |gap|<30：亮绿
+            (29.9, "\u{1b}[92m"),    // 边界内侧：亮绿
+            (30.0, "\u{1b}[32m"),    // 边界外侧（|gap| 恰为 30）：绿
+            (50.0, "\u{1b}[32m"),    // |gap|<100：绿
+            (200.0, "\u{1b}[33m"),   // |gap|<300：黄
+            (500.0, "\u{1b}[38;2;128;128;128m") // |gap|>=300：真彩色灰
+        ];
+        for (gap, want_ansi) in cases {
+            let line = format_reason_line(format!("rival {gap}"), gap);
+            println!("gap={gap:+}: {line:?}");
+            assert!(line.contains(want_ansi), "gap={gap} 应嵌入 {want_ansi:?}，实际 {line:?}");
+        }
+        colored::control::SHOULD_COLORIZE.unset_override();
+    }
+
+    /// 唯一候选：首选行仍输出，rivals 为空，渲染只产 1 行
+    #[test]
+    fn test_render_only_chosen() {
+        let chosen_desc = "only".to_string();
+        let data = DecisionReasonData {
+            turn: 0,
+            metric: "score".to_string(),
+            threshold: 150.0,
+            max_display: 5,
+            chosen_index: 0,
+            chosen_desc: chosen_desc.clone(),
+            chosen_mean: 65000.0,
+            chosen_n: 8,
+            rivals: vec![]
+        };
+        let lines = render_reason_lines(&data);
+        println!("only chosen: {lines:?}");
+        assert_eq!(lines.len(), 1);
+        assert!(lines[0].contains("首选"));
+        assert!(lines[0].contains(&chosen_desc));
     }
 
     /// 置信度边界：合成标准误为 0 时按分差退化到 1.0 / 0.5
