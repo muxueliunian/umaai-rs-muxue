@@ -3842,6 +3842,44 @@
     ],
     "star": 5
   },
+  "104302": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      8,
+      0,
+      8,
+      14,
+      0
+    ],
+    "fiveStatusInitial": [
+      120,
+      103,
+      117,
+      111,
+      99
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 24,
+        "count": 1
+      }
+    ],
+    "gameId": 104302,
+    "name": "[嗷呜嗷呜☆捣蛋鬼]新光风",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      35,
+      36,
+      49,
+      51,
+      59,
+      70
+    ],
+    "star": 5
+  },
   "104401": {
     "bonusData": [],
     "fiveStatusBonus": [
@@ -9255,6 +9293,41 @@
     "freeRaces": [],
     "gameId": 112701,
     "name": "[义心之黑焰]超常骏骥",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      23,
+      31,
+      33,
+      43,
+      45,
+      53,
+      55,
+      59,
+      71
+    ],
+    "star": 5
+  },
+  "112702": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      10,
+      10,
+      0,
+      10,
+      0
+    ],
+    "fiveStatusInitial": [
+      97,
+      133,
+      110,
+      107,
+      103
+    ],
+    "freeRaces": [],
+    "gameId": 112702,
+    "name": "[刚毅之紫焰]超常骏骥",
     "preferRaces": [],
     "preferReds": [],
     "races": [
