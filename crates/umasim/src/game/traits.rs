@@ -2,7 +2,7 @@ use std::fmt::{Debug, Display};
 
 use anyhow::{Result, anyhow};
 use rand::{Rng, rngs::StdRng};
-use rand_distr::{Distribution, weighted::WeightedIndex};
+use rand_distr::{Distribution, Uniform};
 
 use super::PersonType;
 use crate::{
@@ -231,8 +231,10 @@ pub trait Game: Clone {
     /// 追加分配一个在persons里已经存在的人头, -1为不在
     /// 如果要新加角色 需要手动添加到persons里
     fn distribute_person(&mut self, person_index: i32, allow_absent: bool, rng: &mut impl Rng) -> Result<i32> {
-        let person = self.persons()[person_index as usize].clone();
-        let train_type = person.train_type() as usize;
+        // 只需两个标量，直接取值避免 clone 整个 Person（也避开与后续
+        // deyilv(&mut self) 的借用冲突）。
+        let train_type = self.persons()[person_index as usize].train_type() as usize;
+        let is_friend = self.persons()[person_index as usize].is_friend();
         // 不在权重按人头类型（见 absent_weight）：记者/理事长固定 200 不受 drop 影响，
         // NPC 必定出现。追加分配（allow_absent=false）时不判不在。
         let absent_rate = if allow_absent { self.absent_weight(person_index as usize) } else { 0 };
@@ -244,26 +246,28 @@ pub trait Game: Clone {
             self.record_absent_person(person_index);
             return Ok(-1);
         }
-        // 第二步：已判定出现，按训练位权重（含得意率）随机分配位置
+        // 第二步：已判定出现，按训练位权重（含得意率）随机分配位置。
+        // 固定 4×100 + 至多一个得意率加权位，用零分配分桶采样替代
+        // `WeightedIndex`（其 new 有 Vec 堆分配），抽样序列与 rand 整数
+        // `WeightedIndex` 逐位一致（等价性守门见 `sample_bucket` 处测试）。
         let mut weights = [100, 100, 100, 100, 100];
         if train_type <= 4 {
             weights[train_type] += self.deyilv(person_index) as i32;
         }
-        let dist = WeightedIndex::new(&weights)?;
         // 尝试分配
         let d = self.distribution();
         let mut ok = false;
         let mut retries = 0;
         let mut train = 0;
         while !ok && retries < 10 {
-            train = dist.sample(rng);
+            train = sample_bucket(&weights, rng)?;
             retries += 1;
             // 不能多于5人或出现同样人头
             if d[train].len() >= 5 || d[train].contains(&person_index) {
                 continue;
             }
             // 每个训练只能出现一个友人
-            if person.is_friend() && d[train].iter().any(|index| self.persons()[*index as usize].is_friend()) {
+            if is_friend && d[train].iter().any(|index| self.persons()[*index as usize].is_friend()) {
                 continue;
             }
             ok = true;
@@ -545,6 +549,30 @@ pub trait Game: Clone {
     }
 }
 
+/// 5 元素 i32 权重加权采样，返回桶下标
+///
+/// 与 `rand` 整数 [`WeightedIndex`](rand_distr::weighted::WeightedIndex) 抽样序列
+/// **逐位一致**：内部走同一条 `Uniform::new(0, total).sample(rng)`（Lemire 无偏
+/// 路径，rng 消费相同），桶归属用线性前缀和替代 `partition_point`（取首个累积
+/// 权重 > 采样值的下标，与 rand 的 `cumulative_weights.partition_point(|w| w <=
+/// chosen)` 同语义，末桶由 `chosen < total` 恒真兜底）。
+///
+/// 与 `WeightedIndex` 的差异仅在性能面：5 元素栈数组零堆分配（`WeightedIndex::new`
+/// 每次构造 Vec + 前缀和），并省略负权重/溢出检查——调用方保证权重非负
+/// （得意率业务上 >= 0，见 `distribute_person` 第二步）。
+fn sample_bucket(weights: &[i32; 5], rng: &mut impl Rng) -> Result<usize> {
+    let uniform = Uniform::new(0, weights.iter().sum::<i32>())?;
+    let chosen = uniform.sample(rng);
+    let mut acc = 0;
+    for (i, &w) in weights.iter().enumerate() {
+        acc += w;
+        if chosen < acc {
+            return Ok(i);
+        }
+    }
+    Ok(weights.len() - 1) // 兜底：chosen < total 恒成立，末桶必然命中
+}
+
 pub trait Trainer<G: Game> {
     /// 选择动作
     fn select_action(&self, game: &G, actions: &[<G as Game>::Action], rng: &mut StdRng) -> Result<usize>;
@@ -575,5 +603,100 @@ pub trait Trainer<G: Game> {
     /// 内容可随意演进（候选数/维度分解/守门原因），不承诺 schema 稳定。
     fn last_breakdown(&self) -> Option<String> {
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand::rngs::StdRng;
+    use rand_distr::weighted::WeightedIndex;
+
+    use crate::utils::Checks;
+
+    /// 零分配分桶采样与 rand 整数 `WeightedIndex` 逐位等价
+    ///
+    /// 覆盖 5 个权重位的典型组合（无加权 / 加权位在首中末 / 高权重 / 低权重），
+    /// 同种子喂给新旧两条采样路径各 5 万次，输出必须逐次一致——
+    /// 守住「替换后拉面模拟数值逐位不变」这个前提。
+    #[test]
+    fn test_sample_bucket_matches_weighted_index() -> Result<()> {
+        let mut c = Checks::new();
+        let cases: &[[i32; 5]] = &[
+            [100, 100, 100, 100, 100], // 无得意率加权（train_type > 4 或 deyilv=0）
+            [100, 150, 100, 100, 100], // 得意率 +50，加权位 1
+            [250, 100, 100, 100, 100], // 得意率 +150，加权位 0（首位）
+            [100, 100, 100, 100, 350], // 加权位 4（末桶）
+            [100, 100, 30, 100, 100],  // 低权重位 2（<100）
+            [140, 100, 100, 60, 100],  // 双位异常权重（防御性覆盖）
+            [100, 100, 100, 100, 100],
+        ];
+        for (ci, weights) in cases.iter().enumerate() {
+            let mut rng_new = StdRng::seed_from_u64(42);
+            let mut rng_old = rng_new.clone();
+            let dist = WeightedIndex::new(weights).unwrap();
+            let mut matched = 0usize;
+            for _ in 0..50_000 {
+                let new_bucket = sample_bucket(weights, &mut rng_new)?;
+                let old_bucket = dist.sample(&mut rng_old);
+                matched += usize::from(new_bucket == old_bucket);
+            }
+            c.check(
+                matched == 50_000,
+                &format!("case {ci}: {weights:?} 5 万次采样逐位一致 ({matched}/50000)"),
+            );
+        }
+        c.finish()
+    }
+
+    /// 进程内对照 microbench：新分桶采样 vs 旧 `WeightedIndex` 完整调用路径
+    ///
+    /// 旧路径按真实行为模拟——每次调用都 `WeightedIndex::new`（含 Vec 堆分配）
+    /// 再 `sample`；新路径每次 `sample_bucket`（`Uniform::new` + sample + 分桶）。
+    /// 同一进程内交替测，排除机器状态差异（跨次运行的 microbench 数字不可比）。
+    /// 仅微基准用途，`#[ignore]` 手动执行：`-- --ignored --nocapture`。
+    #[test]
+    #[ignore]
+    fn bench_sample_bucket_vs_weighted_index() -> Result<()> {
+        use std::time::Instant;
+
+        let cases: &[[i32; 5]] = &[
+            [100, 100, 100, 100, 100],
+            [100, 150, 100, 100, 100],
+            [250, 100, 100, 100, 100],
+            [100, 100, 150, 100, 100],
+            [100, 100, 100, 100, 250],
+        ];
+        const N: usize = 200_000;
+        for weights in cases {
+            // warmup
+            let mut rng = StdRng::seed_from_u64(7);
+            for _ in 0..10_000 {
+                let _ = sample_bucket(weights, &mut rng)?;
+            }
+
+            let mut rng = StdRng::seed_from_u64(7);
+            let t0 = Instant::now();
+            for _ in 0..N {
+                let _ = sample_bucket(weights, &mut rng)?;
+            }
+            let new_dur = t0.elapsed().as_nanos() as f64 / N as f64;
+
+            let mut rng = StdRng::seed_from_u64(7);
+            let t1 = Instant::now();
+            for _ in 0..N {
+                let dist = WeightedIndex::new(weights).unwrap(); // 每次 new = 一次 Vec 分配
+                let _ = dist.sample(&mut rng);
+            }
+            let old_dur = t1.elapsed().as_nanos() as f64 / N as f64;
+
+            println!(
+                "weights={weights:?}: new {new_dur:.1} ns/call | old {old_dur:.1} ns/call | Δ {:.1} ns (-{:.0}%)",
+                old_dur - new_dur,
+                (old_dur - new_dur) / old_dur * 100.0
+            );
+        }
+        Ok(())
     }
 }

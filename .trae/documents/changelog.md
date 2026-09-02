@@ -12,6 +12,7 @@
 - **`perf_profiling.md` 旧描述清理 / 重写**：§1 改"两类"为"三类"性能工具（加 calc_training_value_microbench）；§2 工具选择经验法则加 microbench 决策行；§3.1 重写过期 "12ms/1000局 / 8.5ms / 5ms / 4.45ms" + "改动 d" 描述为 d10872a commit hash + 实测 ns/call 数字；§3.3 旧优先级保留并加 "（原列表，与 §7.6 互为补充）"；§5 工具固化扩为 §5.1 三个 bin 列表 + §5.2 三个 bin 对比表；§6.4 新增 microbench 复现 command
 - **`perf_profiling.md` 文档用清理后多轮均值基线替换旧 pprof 单局数据**：§3 改为"性能分析结论（当前方法论）"指标化（microbench × N std ≤ 2.5%）；§3.2 旧"次要发现"标为已弃用；附录 B 旧 pprof Top20 单局数据 + 附录 C 旧 cargo flamegraph 100 局数据整体删除（噪声盖住信号，已被 §7 microbench + 附录 B 多轮均值替代）；新增 §7.2/§7.3 用 7 段 × 3 轮均值（800.97 / 260.20 / 270.39 / 1398.90 / 449.82 / 4175.40 / 9.63 ns/iter）+ 附录 B 用 6 函数 × 3 轮均值（3.93 / 12.47 / 33.30 / 13.77 / 2.30 / 24.57 ns/call）；附录 D/E 顺序上移成 C/D
 - **`perf_profiling.md` 重复内容整合**：原 §7 6 子节合并为 3 子节（§7.1 7 段设计 / §7.2 新基线 / §7.3 关键观察）；原 §7.5 复现命令与 §6.4 重复，删除并改为 §6.4 引用附录 E；原 §7.6 优化优先级与 §3.3 重复，整合到 §3.3 为 8 条（6 pprof + 2 microbench 新增），文档统一在 §3.3 一处呈现优化优先级
+- **`distribute_person` 采样改零分配**：`WeightedIndex::new`（每次 Vec 堆分配 + 前缀和）换成 `Uniform::new + sample` + 5 元素线性分桶（新 `sample_bucket`），顺势消除 person clone 与负权重检查（得意率业务非负）；与 rand 整数 WeightedIndex 抽样序列逐位等价（新增 7 组合 × 5 万次守门测试 + 全量测试数值逐位不变），进程内对照每次采样 -31~-42%，distribute_all 为最大杠杆段（A/D ≈ 53%）
 
 ## 2026-09-01
 - **MCTS pprof-rs profiler bin 固化**：sim_profiler 模板的 MCTS 版（pprof-rs 用户态采样，输出 .pb 给 go tool pprof / inferno-flamegraph）

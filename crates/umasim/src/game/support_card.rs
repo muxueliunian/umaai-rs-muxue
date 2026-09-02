@@ -257,24 +257,6 @@ impl SupportCard {
         })
     }
     /// 计算支援卡当前 buff（基础面板 + 已触发的 unique_effect 词条）。
-    ///
-    /// 简化历史：原本签名返回 `Result<(CardTrainingEffect, bool)>`，第二个元素
-    /// "是否已锁定"标志位用于 Game impl override 回写 `is_locked = true`。
-    /// 对照实验（见 `perf_profiling.md` / `calc_training_value_microbench`）表明这条
-    /// 缓存路径 ROI 极低，且 `is_locked` 字段也因 `features.rs` NN 输入维度而保留，
-    /// 这里直接去掉锁定分支并简化签名：
-    ///
-    /// - 函数体总是执行 unique_effect match（无 `if !self.is_locked` 短路）
-    /// - 起点是**基础面板**（`data.card_value[rank]`），不读 `self.effect`
-    ///   —— 保证每次返回独立的 fresh cumulative effect，避免锁回写后的叠加
-    /// - 调用者拿到的 `CardTrainingEffect` 总包含已触发的词条
-    /// - `is_locked: bool` 字段保留（Game impl override 在 deyilv 中仍写
-    ///   `true`，features.rs 当 NN 输入读；语义从"已锁定计算"简化为"走过此函数"标记）
-    ///
-    /// 不传 `Result`：函数体内无 fail 路径（`add_effect_line` 的 `diag!` 不 panic，
-    /// `shining_count` 返回 `usize`），与上层 `calc_training_value` 保留
-    /// `Result`（防御 `train >= 5` 历史错误）形成清晰的错误边界划分：
-    /// 「低层 effect 永不错；上层 value / buff 的 train 范围错误仍 Result」。
     pub fn calc_training_effect<G: Game>(&self, game: &G, train: i32) -> CardTrainingEffect {
         // 起点是基础面板，确保每次返回 fresh cumulative，
         // 不会被 Game impl override 的 lock 回写后多次累加 unique_effect 词条
