@@ -653,7 +653,7 @@ impl RamenAction {
             let shining_at = game.is_shining_at(pidx as usize, train);
             if pidx < 6 {
                 // 支援卡：重新计算卡效果原始值（不应用 youqing 清零），方便对比
-                let (raw_effect, _) = game.deck[pidx as usize].calc_training_effect(game, train as i32)?;
+                let raw_effect = game.deck[pidx as usize].calc_training_effect(game, train as i32);
                 let raw_youqing = raw_effect.youqing;
                 let final_youqing = if shining_at { raw_youqing } else { 0.0 };
                 diag!(

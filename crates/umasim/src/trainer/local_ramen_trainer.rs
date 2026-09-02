@@ -575,7 +575,11 @@ impl LocalRamenTrainer {
             0.15
         }
     }
-    fn reserve_penalty(&self, g: &RamenGame, gain: &[i32; 6]) -> f32 {
+    /// 预留门限（与 `dynamic_status_adjustment` 一对；同 microbench 用）
+    ///
+    /// 注：原为私有方法，提升为 `pub` 是给 `tools/data_collection/calc_training_value_microbench.rs`
+    /// 性能调优工具用的。
+    pub fn reserve_penalty(&self, g: &RamenGame, gain: &[i32; 6]) -> f32 {
         if self.config.status_reserve_max <= 0. {
             return 0.;
         }
@@ -590,7 +594,9 @@ impl LocalRamenTrainer {
         }
         p * 6.
     }
-    fn dynamic_status_adjustment(&self, g: &RamenGame, gain: &[i32; 6]) -> f32 {
+    /// 注：原为私有方法，提升为 `pub` 是给 `tools/data_collection/calc_training_value_microbench.rs`
+    /// 性能调优工具用的。
+    pub fn dynamic_status_adjustment(&self, g: &RamenGame, gain: &[i32; 6]) -> f32 {
         if !self.config.dynamic_status_balance {
             return 0.0;
         }
@@ -816,7 +822,11 @@ impl LocalRamenTrainer {
         Ok((choice, values.get(choice).copied().unwrap_or(0.0)))
     }
 
-    fn decide_train(&self, g: &RamenGame, a: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
+    /// 整回合 Train 阶段打分（5 train 候选 + 修复路径）
+    ///
+    /// 注：原为私有方法，提升为 `pub` 是给 `tools/data_collection/calc_training_value_microbench.rs`
+    /// 性能调优工具用的；产品路径仍走 `select_action`。
+    pub fn decide_train(&self, g: &RamenGame, a: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         let (mut guard, mut out) = self.policy.decide_train(g, a)?;
         let recovery_guard = self.config.friend_outing_replaces_rest
             && a.get(guard).is_some_and(|x| x.operation == Operation::Rest)
@@ -2681,10 +2691,10 @@ mod tests {
         }, N);
         println!(">>> calc_training_value         min/单轮={} ns   mean/3轮={:.1} ns/call\n", min3, mean3);
 
-        // 4. SupportCard::calc_training_effect
+        // 4. SupportCard::calc_training_effect（已简化签名，去 Result 包裹）
         let sample_card = &game.deck()[0];
         let (min4, mean4) = run("SupportCard::calc_training_effect", || {
-            let _ = black_box(sample_card.calc_training_effect(&game, 0).unwrap());
+            let _ = black_box(sample_card.calc_training_effect(&game, 0));
         }, N);
         println!(">>> SupportCard::calc_training_effect  min/单轮={} ns   mean/3轮={:.1} ns/call\n", min4, mean4);
 

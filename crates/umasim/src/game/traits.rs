@@ -189,7 +189,12 @@ pub trait Game: Clone {
     /// absent_rate_drop getter
     fn absent_rate_drop(&self) -> i32;
     /// 计算得意率，同时修改卡片计算状态所以要mut
-    fn deyilv(&mut self, person_index: i32) -> Result<f32>;
+    ///
+    /// 不传 `Result`：函数体内无 fail 路径（`person_index < 6` 走计算返回 f32，
+    /// `>= 6` 返回 0.0；底层 `calc_training_effect` 也已去掉 Result 包裹）。
+    /// 与 `calc_training_value`/`calc_training_buff` 保留 `Result` 形成清晰分工：
+    /// 后者带 `train >= 5` 防御性 Err（历史错误），deyilv 内无 fail 来源。
+    fn deyilv(&mut self, person_index: i32) -> f32;
     /// 团队卡是否可以闪彩，不考虑多个团卡的情况
     fn has_group_buff(&self) -> bool;
     /// 显示分布信息
@@ -242,7 +247,7 @@ pub trait Game: Clone {
         // 第二步：已判定出现，按训练位权重（含得意率）随机分配位置
         let mut weights = [100, 100, 100, 100, 100];
         if train_type <= 4 {
-            weights[train_type] += self.deyilv(person_index)? as i32;
+            weights[train_type] += self.deyilv(person_index) as i32;
         }
         let dist = WeightedIndex::new(&weights)?;
         // 尝试分配
@@ -425,7 +430,10 @@ pub trait Game: Clone {
                     continue;
                 };
                 let card = &self.deck()[deck_index];
-                let (mut effect, _) = card.calc_training_effect(self, train as i32)?;
+                // `calc_training_effect` 已去掉 `Result` 包裹（lowest layer，函数体内
+                // 无 fail 路径）。上层 `calc_training_value` 仍保留 `Result` 防御
+                // `train >= 5`，与这里清晰分工。
+                let mut effect = card.calc_training_effect(self, train as i32);
                 // 闪彩判定用人头下标，不能用卡组下标
                 if !self.is_shining_at(person_index, train) {
                     effect.youqing = 0.0;

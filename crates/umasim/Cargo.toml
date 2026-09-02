@@ -33,6 +33,10 @@ path = "tools/data_collection/sim_profiler.rs"
 # 在 Windows 上编译失败，故不进 default，需显式 `--features profiler`
 required-features = ["profiler"]
 
+[[bin]]
+name = "calc_training_value_microbench"
+path = "tools/data_collection/calc_training_value_microbench.rs"
+
 [features]
 default = ["cli", "diag"]
 diag = []

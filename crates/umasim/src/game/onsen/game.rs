@@ -1541,16 +1541,19 @@ impl Game for OnsenGame {
         Ok(())
     }
 
-    fn deyilv(&mut self, person_index: i32) -> Result<f32> {
+    fn deyilv(&mut self, person_index: i32) -> f32 {
         if person_index < 6 {
-            let (eff, lock) = self.deck[person_index as usize].calc_training_effect(self, 0)?;
-            self.deck[person_index as usize].effect = eff.clone();
-            if lock {
-                self.deck[person_index as usize].is_locked = true;
-            }
-            Ok(eff.deyilv + self.scenario_buff.hotel.deyilv as f32)
+            // `calc_training_effect` 返回 owned cumulative effect——先取出 `deyilv`
+            // 后直接 `move` 进 `self.deck[i].effect`（避免 `.clone()`）。features.rs
+            // NN 输入读 `card.effect` 取累计 deyilv 与此一致。
+            let eff = self.deck[person_index as usize].calc_training_effect(self, 0);
+            let deyilv = eff.deyilv;
+            self.deck[person_index as usize].effect = eff;
+            // is_locked 字段保留（NN feature 兼容），每次 deyilv 调用都标记
+            self.deck[person_index as usize].is_locked = true;
+            deyilv + self.scenario_buff.hotel.deyilv as f32
         } else {
-            Ok(0.0)
+            0.0
         }
     }
 

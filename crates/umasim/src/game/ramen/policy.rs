@@ -604,7 +604,10 @@ impl RamenPolicy {
     // ========== Train 动作打分 ==========
 
     /// 对单个 Train 阶段动作打分
-    fn score_train_action(&self, game: &RamenGame, a: &RamenAction) -> Result<RamenPolicyOutput> {
+    ///
+    /// 注：原为私有方法，提升为 `pub` 是给 `tools/data_collection/calc_training_value_microbench.rs`
+    /// 性能调优工具用的，没有硬性私有限制；产品路径仍走 `score_train_actions` / `decide_train`。
+    pub fn score_train_action(&self, game: &RamenGame, a: &RamenAction) -> Result<RamenPolicyOutput> {
         let mut out = RamenPolicyOutput::default();
         match a.operation {
             Operation::Train(t) => {
@@ -705,7 +708,10 @@ impl RamenPolicy {
     }
 
     /// 单维属性增量的评分（按 five_status_final_score 差分）
-    fn status_gain(&self, game: &RamenGame, i: usize, inc: i32) -> f32 {
+    ///
+    /// 注：原为私有方法，提升为 `pub` 是给 `tools/data_collection/calc_training_value_microbench.rs`
+    /// 性能调优工具用的。
+    pub fn status_gain(&self, game: &RamenGame, i: usize, inc: i32) -> f32 {
         let cons = global!(GAMECONSTANTS);
         // `inc` 取 i32：负值若直接 `as usize` 会回绕成天文数字，debug 下加法直接溢出 panic。
         // 当前训练增量恒为正打不到，这里显式夹到 0 以免将来引入负增量时静默炸掉。
