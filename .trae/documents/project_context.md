@@ -156,6 +156,23 @@
 - **定义位置**：`crates/umasim/src/trainer/handwritten_trainer.rs`、`mcts_trainer.rs`
 - 当前实现仍绑定旧温泉杯（`impl Trainer<OnsenGame>`），尚未适配 RamenGame；拉面杯决策粒度设计：HandwrittenTrainer 走三阶段（RamenSelect→SpecialSelect→Train），MctsTrainer 走合并决策路径（`list_combined_ramen_select_actions` + `apply_combined_ramen_decision`，方案 E）
 
+## 输出与决策理由
+
+### 决策理由模块（output/reason.rs）
+- **定义位置**：`crates/umasim/src/output/reason.rs`
+- **核心 API**：
+  - `analyze_narrow_win(turn, metric, threshold, max_display, chosen, output) -> Option<DecisionReasonData>`：按评分降序取前 N，构造理由数据
+  - `render_reason_lines(data) -> Vec<String>`：渲染可读文字（直接 `info!` 上屏）
+  - `DecisionReasonSink` trait + `NoopSink` / `LogJsonSink` 实现：原始数据出口（`NoopSink` 为 umasim 默认）
+- **触发逻辑**：每回合都输出；`reason_gap_threshold` / `SearchConfig::reason_gap_threshold` / `MctsConfig::reason_gap_threshold` 字段保留兼容值但不再用作触发器
+- **行结构**：
+  - 行 1：`[回合 N] 首选: <描述>`，固定亮绿色
+  - 行 2..：`[回合 N] #K <描述>: ±分差 （优势/劣势子项）`，按评分降序编号，K = 2, 3, ...
+- **颜色档位**：与首选差距 `<30` / `<100` / `<300` / 其余 → 亮绿 / 绿 / 黄 / 真彩色灰
+- **调整阈值位置**：`reason.rs` 的 `reason_color(gap)` 函数（约 L107）—— 唯一一处，改完跑 `cargo test -p umasim --release --lib output::reason` 验证
+- **口径**：颜色与文本内显示的 `±分差` 同源于 `r.gap`（候选 − 首选），避免撕裂（之前按"候选 − 最优项"曾出现"-95 黄、-96 绿"）
+- **no-color feature**：`--features no-color` 或 `--no-default-features --features no-color` 编译通过，输出无 ANSI 序列；`test_color_thresholds` 在该 feature 下自动跳过
+
 ## 配置系统（Phase 2 已完成）
 
 ### 配置加载入口

@@ -43,6 +43,12 @@
 - **拉面 NN policy 格位表**：新增 policy_schema 模块，把动作映射到 234 维固定格位并由单一入口分派；吃面按地区 ID 而非槽位编码、吃面与万能风味用法合成联合格、地区选择纳入第一代。**格位表冻结**
 - **格位表与规则层的耦合回归**：原有测试只拿本文件常量自洽验证，规则层一改不会变红；补测试用采样器把真实候选（含合并决策形态）与规则层用法表全过一遍格位映射。顺带修合并决策的「不吃面」落格失败——原先只接受空 targets，实际每个吃面决策点都会漏掉该候选
 - **NN 管线计划文档同步现状**：Phase 1/2 标完成；教师数据预算改按 search_n=1024 重算；拉面 CRN 机制更正为共享 rule_master（阶段重播种仅 onsen），配套作废一处无效测量；补 Phase 3 开跑前待办
+- **MCTS pprof-rs profiler bin 固化**：sim_profiler 模板的 MCTS 版（pprof-rs 用户态采样，输出 .pb 给 go tool pprof / inferno-flamegraph）
+- **性能分析指南文档**：新增 perf_profiling.md，记录 cargo flamegraph / pprof-rs 工具选择准则与 MCTS hot path 数据
+- **决策理由输出按分排序 + 分差着色**：移除险胜门限触发，每回合都输出决策理由；"中选"改"首选"并固定亮绿色，其余按评分降序编号 `#2` 起，颜色按与**首选**差距分档（`<30` 亮绿 / `<100` 绿 / `<300` 黄 / 其余真彩色灰，与文本内 `±分差` 同源）；`reason_gap_threshold` 字段保留兼容但不再用作触发器；`test_color_thresholds` 在 `--features no-color` 下自动跳过
+- **决策理由模块索引入项目文档**：`project_context.md` 新增"输出与决策理由"节，记录 `reason_color` 阈值调整位置（`reason.rs:107`）与 no-color feature 兼容性
+- **拉面在线对接计划**：新增 `.trae/documents/ramen_online_integration_plan.md`——文件通道 thisTurn.json + scenarioId 分发、两阶段决策吃面前/吃面后、C# 端先行冻结协议再 Rust 接入
+- **用户配置调整**：`game_config.toml` 切马娘 101901（stamina build）+ 卡组/蓝因子/extra_count 微调；`gamedata/default_config.toml` 同思路调 102601 + `ramen_region_strategy` 由 `"fixed"` 改 `"all"`（❗本分支合并时保留我方版本：`ramen_space_bench` 不覆盖 `ramen_region_strategy`，改成 `all` 会静默作废已有基线）
 
 ## 2026-08-28
 - **MCTS rollout 诊断日志运行时屏蔽**：diagnostic 加进程级开关（DiagGuard 挂 `search_with_terminal`），`diag!` 双门控 + 8 处 explain 块补 `if enabled()`，rollout 搜索静默、业务日志不受影响，顺带拿回加速收益
