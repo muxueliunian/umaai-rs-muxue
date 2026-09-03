@@ -16,7 +16,6 @@ use crate::{
             RamenAction,
             RamenGame,
             RamenStage,
-            effects::calc_ramen_training_effect,
             policy::{RamenPolicy, RamenPolicyConfig, RamenPolicyOutput},
             rules::{
                 calc_ramen_pt_gain, calc_region_bonus, consume_for_ramen, get_recipe, get_turn_special_feeling,
@@ -827,13 +826,16 @@ impl LocalRamenTrainer {
     /// 注：原为私有方法，提升为 `pub` 是给 `tools/data_collection/calc_training_value_microbench.rs`
     /// 性能调优工具用的；产品路径仍走 `select_action`。
     pub fn decide_train(&self, g: &RamenGame, a: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
-        let (mut guard, mut out) = self.policy.decide_train(g, a)?;
+        // B2 单源评估缓存：policy 打分与下方 local 调整层共用同一份 eval，
+        // 消除同回合同 train 的 calc_training_buff/value/failure/ramen_effect 重复计算。
+        let mut eval_cache = crate::game::ramen::policy::EMPTY_TRAIN_EVAL_CACHE;
+        let (mut guard, mut out) = self.policy.decide_train_cached(g, a, &mut eval_cache)?;
         let recovery_guard = self.config.friend_outing_replaces_rest
             && a.get(guard).is_some_and(|x| x.operation == Operation::Rest)
             && out.len() != a.len();
         if recovery_guard && a.iter().any(|x| x.operation == Operation::FriendOuting) {
             // 展开完整候选以便真正执行五段动态估值；最终仍只允许休息/友人恢复动作获胜。
-            out = self.policy.score_train_actions(g, a)?;
+            out = self.policy.score_train_actions_cached(g, a, &mut eval_cache)?;
             guard = a.iter().position(|x| x.operation == Operation::Rest).unwrap_or(guard);
         }
         if out.len() != a.len() {
@@ -846,7 +848,7 @@ impl LocalRamenTrainer {
             }
             // 已吃面但旧硬守门想休息/外出：重新计算全部候选，并只允许五种训练。
             // 生病/自选比赛通常不会经过吃面前门控；这里仍以“拉面只为训练使用”为最终不变量。
-            out = self.policy.score_train_actions(g, a)?;
+            out = self.policy.score_train_actions_cached(g, a, &mut eval_cache)?;
             let _ = out
                 .iter()
                 .enumerate()
@@ -869,8 +871,9 @@ impl LocalRamenTrainer {
         for (act, o) in a.iter().zip(out.iter_mut()) {
             let Operation::Train(tt) = act.operation else { continue };
             let tr = tt as usize;
-            let buffs = g.calc_training_buff(tr)?;
-            let val = g.calc_training_value(&buffs, tr)?;
+            // B2：复用 policy 层已算好的 eval（`decide_train_cached` 首次求值）
+            let eval = eval_cache[tr].as_ref().expect("Train eval 应由 policy 层预填");
+            let val = &eval.value;
             let people = g
                 .distribution()
                 .get(tr)
@@ -942,8 +945,8 @@ impl LocalRamenTrainer {
                 o.score += z;
                 o.add("dynamic_vital", z)
             }
-            let base_fr = g.calc_training_failure_rate(&buffs, tr);
-            let ramen_effect = calc_ramen_training_effect(g, tr, g.shining_count(tr) > 0);
+            let base_fr = eval.fail_rate;
+            let ramen_effect = &eval.ramen_effect;
             let fr = if self.config.effective_ramen_failure {
                 (base_fr * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0).clamp(0.0, 100.0)
             } else {

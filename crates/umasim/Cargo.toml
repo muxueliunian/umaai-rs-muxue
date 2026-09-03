@@ -37,6 +37,13 @@ required-features = ["profiler"]
 name = "calc_training_value_microbench"
 path = "tools/data_collection/calc_training_value_microbench.rs"
 
+[[bin]]
+name = "mcts_profiler"
+path = "src/bin/mcts_profiler.rs"
+# 顶层 `#![cfg(feature = "profiler")]`：无 profiler feature 时整个文件为空，
+# 不注册 required-features 会在默认 check/build 时报 "main function not found"。
+required-features = ["profiler"]
+
 [features]
 default = ["cli", "diag"]
 diag = []

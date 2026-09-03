@@ -2,6 +2,12 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-03
+- **训练评估单源化（B2）消除 policy↔local 双重计算**：新增 `RamenTrainEval`（buffs/value/ramen_effect/fail_rate/shining 五件套）+ `RamenPolicy::eval_train` 单源评估，`score_train_action` 拆为 eval/other 两分支，`score_train_actions`/`decide_train` 新增 cached 变体（`TrainEvalCache` 按 train 位缓存）；`LocalRamenTrainer::decide_train` 跨 policy 打分与 local 调整层共享同一份 eval，同一回合同 train 的 `calc_training_buff`/`calc_training_value`/`calc_training_failure_rate`/`calc_ramen_training_effect`（原本最多算 3 遍）收口成 1 遍；`RamenGame` 新增 `calc_training_value_with_effect`（trait 方法保持完整单函数实现避免跨 impl 边界内联损失）。microbench 7 段 F（decide_train 整回合）4238→~3650 ns/iter（**-14%**），其余段回落基线 ±5% 内；sim_profiler 500 局整局 CPU ~1.25s→1.13s（**-10%**）；平均分逐位一致 64871
+- **训练评估确定性守门**：`test_train_eval_deterministic_and_cached_consistent` 三条——同局面两次 `eval_train` 逐位一致（缓存可复用前提）/ cached 与 uncached 决策逐项一致（含非 Train 候选）/ trait `calc_training_value` 与 `with_effect` 双路径逐位等价（防重复代码漂移）
+- **mcts_profiler bin 注册补 `required-features=["profiler"]`**：顶层 `#![cfg(feature = "profiler")]` 未注册导致默认 check/build 报 `main function not found`（与 muxue fork 同款坑，修复入主仓库）
+- **UCB search_group_size 默认值 2048→512（用户手动调整）**：`default_config.toml` 改值 + `test_mcts_override_daily_path_keeps_production` 断言同步更新
+
 ## 2026-09-02
 - **`SupportCard::calc_training_effect` 简化签名 + 起点改基础面板**：去掉 `Result<(CardTrainingEffect, bool)>` 的 Result 包裹与 bool 返回值，去掉 `if !self.is_locked` 短路；起点从 `self.effect.clone()` 改 `CardTrainingEffect::from(&self.data.card_value[self.rank])` 保证每次返回 fresh cumulative 不被 Game impl override 写回的 cumulative 叠加；`is_locked: bool` 字段保留（Game impl override 中 `is_locked = true` 赋值保留——NN feature 兼容），`game.deck[di].effect = eff.clone()` 回写保留（features.rs 读 effect 拿 cumulative 不变）。d10872a microbench 实测 SupportCard::calc_training_effect 102→14 ns/call、default_calc_training_buff 73→13 ns/call、calc_training_value 104→34 ns/call（手写策略/MCTS 训练计算循环相关 self time 大幅下降）；pprof Top20 中 SupportCard::calc_training_effect 比例预计从 1.83% 量级显著回落
 - **deyilv 路径去掉 `eff.clone()` 与 microbench burn-in 清理**：`base/basic.rs`、`onsen/game.rs`、`ramen/game.rs` 三处 deyilv override 把 `let eff = ...; effect = eff.clone(); Ok(eff.deyilv)` 改为先 `let deyilv = eff.deyilv;` 再 `effect = eff;`（move 而非 clone），与 `calc_training_effect` 简化后 owned 返回值配套；同时删除 microbench 中已无意义的 `burn_in_lock_cards` helper 与 `CT_MICROBENCH_LOCKED` env var（lock 概念退化为 NN 标记后对照组实验失效）。**代码风格清理为主，pprof 单点影响有限**（deyilv 调用频次 × 30ns 估算）；calc_training_value_microbench 与 d10872a microbench 数据基本不变

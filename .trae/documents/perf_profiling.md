@@ -65,6 +65,29 @@ cleanup 三连改动的具体内容（变更轨迹）：
 2. **deyilv 路径去掉 `eff.clone()`**（owned 链一致性）
 3. **`Game::deyilv` trait `Result<f32>` → `f32`**（减少分支预测 + Result 链一致性）
 
+### 3.1b 训练评估单源化（B2，2026-09-03）：policy ↔ local 双重计算消除
+
+第二轮优化：手写策略 **policy 打分层 ↔ local 调整层对同一回合同一 train 的计算重复**（`calc_training_buff` / `calc_training_value` 各 2 遍、`calc_ramen_training_effect` 高达 3 遍——`calc_training_value` 内部 1 遍 + `score_train_action` 1 遍 + local `decide_train` 1 遍）。
+
+方案落地：
+
+| 项 | 内容 |
+|---|---|
+| 单源评估 | 新增 `RamenTrainEval`（buffs/value/ramen_effect/fail_rate/shining 五件套）+ `RamenPolicy::eval_train`，一次调用算全 |
+| 拆分 | `score_train_action` 拆成 `_eval`（Train，用 eval 组装）/ `_other`（非 Train）两分支 |
+| 缓存 | `score_train_actions_cached` / `decide_train_cached`（`TrainEvalCache` 按 train 位缓存），local `decide_train` 跨 policy↔local 共享同一份 eval |
+| 底层 | `RamenGame::calc_training_value_with_effect` 复用已算好的 ramen_effect（trait 方法保持完整单函数实现，避免跨 impl 边界内联损失——拆薄壳会让 microbench C/D 段带回 +15ns/train 测量退化） |
+| 守门 | `test_train_eval_deterministic_and_cached_consistent` 三条：eval 确定性 / cached≡uncached / trait 双路径逐位等价 |
+
+实测（2026-09-03，与 7/2 同口径）：
+
+- **段 F（decide_train 整回合 7 候选）4238 → ~3650 ns/iter（-14%）**——重复计算收口最直接受益段
+- 段 B/C/D/E 回落基线 ±5%（B 257→260、C 265→276、D 1210→1214、E 446→451，负载漂移范围内）
+- **sim_profiler 500 局整局 CPU ~1.25s → 1.13s（-10%）**，平均分逐位一致（64871）
+- pprof self time：`default_calc_training_buff` 30→10 ticks（-67%），`calc_training_value` 21→不再进 Top（合并进单源 eval）
+
+注意：d10872a 6 函数 microbench 的 `calc_training_value`/`select_action` 两段在 B2 后出现 +20% 异常（40/30 ns vs 33/24.5），但同函数的 7 段 C 段（+4%）与整局（-10%）均正常，且 A/B stash 对照显示该两项随 policy/local 改动漂移——判定为单函数 microbench 对代码布局/缓存状态敏感的口径退化，不构成真实回退（以整合视角 F 段与整局 CPU 为锚）。
+
 ### 3.2 已淘汰结论
 
 §3.x 的旧"次要发现"与 §3.3 的旧"优化优先级"基于 `cargo flamegraph` + 单局 pprof，单 RUNS=1 抖动无法给出对照结论，已整体弃用——其在 noise level 之上**反复跳动**，本轮三改动后 pprof 单局抽样未给出一致下降方向（SupportCard::calc_training_effect、calc_training_value 微降 5%；dynamic_status_adjustment 降 45% / score_train_action 涨 92% 同时出现，明显非代码因素）。
@@ -89,7 +112,7 @@ cleanup 三连改动的具体内容（变更轨迹）：
 | `mcts_profiler` | `mcts_profiler.rs` | `--features profiler` | MCTS 单局全栈 pprof（附录 B 同源）|
 | `calc_training_value_microbench` | `calc_training_value_microbench.rs` | 无 | **calc / policy 链路按段 ns/op 拆解（§7，按段优化回归用）** |
 
-`sim_profiler` 与 `mcts_profiler` 在源文件顶部带 `#![cfg(feature = "profiler")]`——cfg gate 在编译时跳过，与 `required-features` 等价；`calc_training_value_microbench` 不依赖 pprof-rs，所有平台默认可跑。
+`sim_profiler` 与 `mcts_profiler` 在源文件顶部带 `#![cfg(feature = "profiler")]`，并已在 `Cargo.toml` 注册 `required-features = ["profiler"]`——**两者缺一不可**：cfg gate 在编译时跳过内容，但若只写 cfg 不注册 required-features，`cargo check`/`build`（默认 features）会因整个文件为空报 `main function not found`（2026-09-03 修复，见 changelog）；`calc_training_value_microbench` 不依赖 pprof-rs，所有平台默认可跑。
 
 ### 5.2 三个 bin 对比
 
@@ -227,6 +250,21 @@ D − (A+B+C) ≈ D − 1156.2 = 53.4 ns（占 D 4.4%）——分桶测 cache �
 
 > 注：口径 = 第三次重测 Run 2/3 均值（cold Run 1 剔除，原始值见附录 B.3）。对照段（B/C/F/G，本次未动代码）回落上午 cleanup 基线 ±2%，判定测量环境可比；可比口径下段 A 800.97 → 633.9 ≈ **-21%**（采样替换端到端收益，与 §7.3 进程内对照交叉验证吻合）。同日另有两次漂移样本（798.7 / 907.0），见 B.3 注③。
 
+**B2 复测（2026-09-03，训练评估单源化后，§3.1b）**：
+
+```
+段                              B2 后稳定均值   vs 基线
+A.distribute_all                     ~640        +1%
+B.calc_training_buff ×5              ~260        +1%
+C.calc_training_value ×5             ~270        +2%
+D.端到端一回合(5train)              ~1214        +0.4%
+E.score_train_action x1              ~451        +1%
+F.decide_train(7 候选)              ~3650       **-14%**
+G.calc_ramen_training_effect x1       ~10        +4%
+```
+
+F 段降幅与 §3.1b 预估（policy↔local 重复计算 ≈ F 的 14-15%）吻合；其余段回落基线 ±5% 内（机器漂移范围）。
+
 ### 7.3 关键观察（清理后多轮均值）
 
 | 观察 | 数字 | 说明 |
@@ -234,6 +272,7 @@ D − (A+B+C) ≈ D − 1156.2 = 53.4 ns（占 D 4.4%）——分桶测 cache �
 | A 占比 52.4% | A/D = 633.9/1209.6 | distribute_all 仍是最大单一杠杆（与 §3.1 一致） |
 | **A 段采样替换已落地** | WeightedIndex → 零分配分桶采样（`sample_bucket`）| 与 rand 整数 WeightedIndex 逐位等价（`traits.rs` 守门测试 7 权重组合 × 5 万次全一致 + 全量测试数值不变）；进程内对照每次采样 **-31~-42%（7-11 ns/call）**，可比口径整段 **-21%** |
 | F ≈ 4.24 μs / 7 candidates | 4238 ns/iter | 整回合策略决策成本；与 1 局手写策略 mean 2.36 ms 的 ~77 个决策回合同数量级 |
+| **F 段 B2 后 -14%** | 4238 → ~3650 ns/iter | 训练评估单源化（§3.1b）收口 policy↔local 双重计算：`calc_training_buff`/`calc_training_value` 从 2-3 遍降到 1 遍；整局幅度 sim_profiler 500 局 1.25s → 1.13s（-10%），平均分逐位一致 |
 | G = 9.6 ns | 拉面 buff 累乘路径已轻 | 内联到上层不进 Top |
 | D − (A+B+C) ≈ 53.4 ns | 边界 4.4% | cache miss / cache 边界，正常 |
 
@@ -314,6 +353,22 @@ cargo run --release --bin calc_training_value_microbench
 > 注① Run 1 为进程冷启动（全段偏高，B 段最甚 530.6），仅参考，**总均不含**。
 > 注② 总均 = Run 2/3 均值。对照段（本次未触碰代码）B/C/F/G 回落上午 cleanup 基线 ±2%（257.2/265.1/4237.8/9.6 vs 260.20/270.39/4175.40/9.63）→ 测量环境与上午可比；可比口径下段 A 800.97 → 633.9 ≈ **-21%**（采样替换端到端收益，与 §7.3 进程内对照 -31~-42%/次 交叉验证吻合）。
 > 注③ 机器性能漂移现象（2026-09-02 同 commit 连续 4 次重测）：段 A 漂移 634~907（±18%），未动代码的对照段同向漂移（B 255~382、F 4175~5662），每轮 Run 1 恒为冷启动峰值；G 相对稳定（9.4~13.7）。应对：**跨次数字不可直接对比**，先以「对照段是否回落基线」判可比性，定量一律以进程内对照为准。
+
+### B.4 2026-09-03 复测（训练评估单源化后，§3.1b）
+
+测量方法同 B.3（`calc_training_value_microbench` 默认参数）；机器当日仍处漂移窗口（load 0.7~2.5 波动，与注③同型）。取稳定轮次（RUN 3 等、对照组 B/C 回落基线时）：
+
+| 段 | 基线（B.3 总均） | B2 后稳定均值 | Δ |
+|---|---:|---:|---:|
+| A. distribute_all | 633.9 | ~640 | +1% |
+| B. calc_training_buff ×5 | 257.2 | ~260 | +1% |
+| C. calc_training_value ×5 | 265.1 | ~270 | +2% |
+| D. 端到端一回合(5train) | 1209.6 | ~1214 | +0.4% |
+| E. score_train_action ×1 | 446.3 | ~451 | +1% |
+| F. decide_train(整回合) | 4237.8 | ~3650 | **-14%** |
+| G. calc_ramen_training_effect ×1 | 9.6 | ~10 | +4% |
+
+> 注④ 6 函数 microbench（d10872a 口径）的 `calc_training_value`/`select_action` 两项在 B2 后同轮出现 +20% 漂移（40/30 ns），但同函数的 7 段 C 段（+2%）与整局 sim_profiler 500 局（1.25s → 1.13s，-10%）均正常，stash A/B 对照确认随 policy/local 代码布局漂移——单函数 microbench 对代码布局/缓存状态敏感，**以整合视角（F 段 + 整局 CPU）为锚**，不更新 B.1 基线。
 
 ## 附录 C：mcts_profiler env vars
 
