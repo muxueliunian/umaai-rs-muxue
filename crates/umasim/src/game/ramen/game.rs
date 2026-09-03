@@ -20,7 +20,7 @@ use super::{
     RamenAction,
     RamenGame,
     RamenStage,
-    effects::calc_ramen_training_effect,
+    effects::{RamenTrainingEffect, calc_ramen_training_effect},
     events::assign_train_feeling_type,
     rules::{self, get_turn_special_feeling}
 };
@@ -506,22 +506,25 @@ impl Game for RamenGame {
         &self.deck
     }
 
-    fn deyilv(&mut self, person_index: i32) -> Result<f32> {
+    fn deyilv(&mut self, person_index: i32) -> f32 {
         // 人头下标 ≠ 卡组下标：负数、越界、无卡人头（理事长 / 记者 / NPC）一律返回 0
         let Ok(person_index) = usize::try_from(person_index) else {
-            return Ok(0.0);
+            return 0.0;
         };
         let Some(di) = Game::deck_index_of(self, person_index) else {
-            return Ok(0.0);
+            return 0.0;
         };
-        let (eff, lock) = self.deck[di].calc_training_effect(self, 0)?;
-        self.deck[di].effect = eff.clone();
-        if lock {
-            self.deck[di].is_locked = true;
-        }
+        // `calc_training_effect` 返回 owned cumulative effect——先取出 `deyilv` 后直接
+        // `move` 进 `self.deck[i].effect`（避免 `.clone()`）。features.rs NN 输入读
+        // `card.effect` 取累计 deyilv 与此一致。
+        let eff = self.deck[di].calc_training_effect(self, 0);
+        let deyilv = eff.deyilv;
+        self.deck[di].effect = eff;
+        // is_locked 字段保留（NN feature 兼容），每次 deyilv 调用都标记
+        self.deck[di].is_locked = true;
         // 卡得意率 + 剧本得意率总加成（参见 calc_scenario_deyilv）
         let scenario_deyilv = super::effects::calc_scenario_deyilv(self);
-        Ok(eff.deyilv + scenario_deyilv as f32)
+        deyilv + scenario_deyilv as f32
     }
 
     fn has_group_buff(&self) -> bool {
@@ -649,6 +652,11 @@ impl Game for RamenGame {
         if train > 5 {
             return Err(anyhow!("训练类型错误"));
         }
+        // 完整实现（与 `calc_training_value_with_effect` 逐位等价，见守门测试
+        // `test_train_eval_deterministic_and_cached_consistent` 守门 3）：
+        // trait 方法保持单函数体——拆成"薄壳→inherent"会让 microbench C/D 段
+        // （走 trait 路径）因跨 impl 边界未内联带回 +15ns/train 的测量口径退化；
+        // eval_train 走 `with_effect` 并行路径复用已算好的拉面效果。
         // 两阶段计算：参考 OnsenGame 的实现
         // 1. 下层值：default_calc_training_value 应用卡 buff（友情/训练/干劲/人数/成长率），
         //    然后约束 status_pt 各元素 ≤ 100（剧本规则：下层不超过 100）
@@ -750,6 +758,51 @@ impl Game for RamenGame {
 }
 
 impl RamenGame {
+    /// 上层拉面效果已算好时直接复用（`RamenPolicy::eval_train` 单源评估用，
+    /// 避免同一回合同一 train 三次重算 `calc_ramen_training_effect`）
+    ///
+    /// `#[inline]`：本方法是 `calc_training_value`（trait impl）与 `eval_train` 的
+    /// 公共底层，跨模块被频繁调用；不内联会让 microbench 的 value 主路径
+    /// 多一层函数调用开销（实测 +25%）。
+    #[inline(always)]
+    pub fn calc_training_value_with_effect(
+        &self, buffs: &crate::game::CardTrainingEffect, train: usize, ramen_effect: &RamenTrainingEffect
+    ) -> Result<ActionValue> {
+        if train > 5 {
+            return Err(anyhow!("训练类型错误"));
+        }
+        // 两阶段计算：参考 OnsenGame 的实现
+        // 1. 下层值：default_calc_training_value 应用卡 buff（友情/训练/干劲/人数/成长率），
+        //    然后约束 status_pt 各元素 ≤ 100（剧本规则：下层不超过 100）
+        let mut base_value = self.default_calc_training_value(buffs, train)?;
+        for i in 0..6 {
+            base_value.status_pt[i] = base_value.status_pt[i].min(100);
+        }
+        // 2. 拉面 buff：累乘到下层值上（不合并到 buffs，避免累乘 vs 加法混淆）
+        let xunlian_mult = (100 + ramen_effect.xunlian) as f64 / 100.0;
+        let youqing_mult = (100 + ramen_effect.youqing) as f64 / 100.0;
+        let pt_bonus_mult = (100 + ramen_effect.pt_bonus) as f64 / 100.0;
+        let status_limit = 100 + ramen_effect.status_limit;
+        let pt_limit = 100 + ramen_effect.status_limit + ramen_effect.pt_limit;
+        // 3. 上层值：拉面 buff 带来的增量
+        // - xunlian × youqing 对 status_pt[0..4]（5 个属性训练值，含副属性加成 buff.bonus）都生效
+        // - pt_bonus 仅对 status_pt[5]（PT）单独生效
+        for i in 0..5 {
+            if base_value.status_pt[i] > 0 {
+                let upper_raw =
+                    (base_value.status_pt[i] as f64 * xunlian_mult * youqing_mult) as i32 - base_value.status_pt[i];
+                let upper = upper_raw.min(status_limit).max(0);
+                base_value.status_pt[i] += upper;
+            }
+        }
+        // PT 部分额外乘 pt_bonus
+        let pt_upper_raw = (base_value.status_pt[5] as f64 * xunlian_mult * youqing_mult * pt_bonus_mult) as i32
+            - base_value.status_pt[5];
+        let pt_upper = pt_upper_raw.min(pt_limit).max(0);
+        base_value.status_pt[5] += pt_upper;
+        Ok(base_value)
+    }
+
     /// 友人解锁事件判定（策略相关随机 → 策略流，v2 §4.3）
     //
     // 从 `generate_events` 移出：触发条件依赖 `friend.out_state`（是否点击友人，
@@ -2765,7 +2818,7 @@ struct AlwaysTrueRng;
         // 卡 deyilv 来自 calc_training_effect，剧本 deyilv = pt(1000档=63) + rmj_success[0]=80 = 143
         let person_idx = 0;
         let card_deyilv_only = game.deck[person_idx].effect.deyilv;
-        let actual_deyilv = game.deyilv(person_idx as i32)?;
+        let actual_deyilv = game.deyilv(person_idx as i32);
         println!(
             "year2, PT=1000, RMJ成功: card_deyilv_only={} 实际 deyilv={}",
             card_deyilv_only, actual_deyilv
@@ -2781,7 +2834,7 @@ struct AlwaysTrueRng;
         game2.ramen.rmj_results = vec![true, true, true];
 
         let card_deyilv_only2 = game2.deck[person_idx].effect.deyilv;
-        let actual_deyilv2 = game2.deyilv(person_idx as i32)?;
+        let actual_deyilv2 = game2.deyilv(person_idx as i32);
         println!(
             "超级拉面, PT=5000, RMJ都成功: card_deyilv_only={} 实际 deyilv={}",
             card_deyilv_only2, actual_deyilv2
@@ -2797,7 +2850,7 @@ struct AlwaysTrueRng;
             .iter()
             .position(|p| p.person_type == PersonType::Yayoi)
             .ok_or_else(|| anyhow!("找不到理事长人头"))?;
-        let yayoi_deyilv = game2.deyilv(yayoi_idx as i32)?;
+        let yayoi_deyilv = game2.deyilv(yayoi_idx as i32);
         println!(
             "[{}] 理事长(人头 {yayoi_idx}) 无卡，deyilv 应为 0：实际 {yayoi_deyilv}",
             check(yayoi_deyilv == 0.0)
@@ -2810,7 +2863,7 @@ struct AlwaysTrueRng;
             .ok_or_else(|| anyhow!("找不到友人卡人头"))?;
         let friend_deck_idx = Game::deck_index_of(&game2, friend_idx).ok_or_else(|| anyhow!("友人卡反查卡组失败"))?;
         let friend_card_deyilv = game2.deck[friend_deck_idx].effect.deyilv;
-        let friend_deyilv = game2.deyilv(friend_idx as i32)?;
+        let friend_deyilv = game2.deyilv(friend_idx as i32);
         println!(
             "[{}] 友人卡(人头 {friend_idx} -> 卡组 {friend_deck_idx}): 期望 {} 实际 {friend_deyilv}",
             check(friend_deyilv == friend_card_deyilv + 330.0),
@@ -2818,7 +2871,7 @@ struct AlwaysTrueRng;
         );
 
         // 负数人头下标不再 panic
-        println!("deyilv(-1)={}", game2.deyilv(-1)?);
+        println!("deyilv(-1)={}", game2.deyilv(-1));
 
         Ok(())
     }
@@ -4118,7 +4171,7 @@ struct AlwaysTrueRng;
 
         // 回归校验 2：友人卡的 buff 必须等于它自己那张卡（deck[5]）算出的效果
         // 注意：走一遍 `CardTrainingEffect::add` 才能和聚合结果对齐（deyilv 不参与聚合）
-        let (mut friend_effect, _) = game.deck[5].calc_training_effect(&game, 0)?;
+        let mut friend_effect = game.deck[5].calc_training_effect(&game, 0);
         if !game.is_shining_at(6, 0) {
             friend_effect.youqing = 0.0;
         }
@@ -4126,7 +4179,7 @@ struct AlwaysTrueRng;
         println!("[{}] 友人卡(人头6) 的 buff 应来自 deck[5]", check(buff_friend == expect_friend));
 
         // 回归校验 3：训练卡对照组不受影响
-        let (mut card1_effect, _) = game.deck[1].calc_training_effect(&game, 0)?;
+        let mut card1_effect = game.deck[1].calc_training_effect(&game, 0);
         if !game.is_shining_at(1, 0) {
             card1_effect.youqing = 0.0;
         }

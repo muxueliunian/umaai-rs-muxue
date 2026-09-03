@@ -10,7 +10,7 @@ use crate::{gamedata::ramen::RAMENDATA, global};
 ///
 /// 由 `calc_ramen_training_effect` 根据当前游戏状态计算得出，
 /// 包含所有生效的剧本加成词条的合并结果。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RamenTrainingEffect {
     /// 训练加成（百分比）
     pub xunlian: i32,

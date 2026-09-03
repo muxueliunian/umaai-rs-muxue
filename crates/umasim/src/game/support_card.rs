@@ -256,77 +256,69 @@ impl SupportCard {
             total_hints: 0
         })
     }
-    /// 计算当前卡在指定位置时, 考虑固有的实际面板  
-    /// 返回true为已经锁定，调用者可以把值更新到self.effect上
-    pub fn calc_training_effect<G: Game>(&self, game: &G, train: i32) -> Result<(CardTrainingEffect, bool)> {
-        let mut ret = self.effect.clone();
-        let mut locking = false;
-        if !self.is_locked {
-            // locked就不计算，节省时间
-            let param = &self.data.unique_effect_param;
-            match self.data.unique_effect_type {
-                0 => {
-                    locking = true;
-                }
-                1 | 2 => {
-                    // 羁绊>args[1]时触发词条args[2] = args[3]
-                    if self.friendship >= param[1] {
-                        debug!("{} 羁绊>{}, 触发固有: {:?}", self.data.short_name(), param[1], param);
-                        if param[2] > 0 {
-                            ret.add_effect_line(param[2], param[3]);
-                        }
-                        if param[4] > 0 {
-                            ret.add_effect_line(param[4], param[5]);
-                        }
-                        locking = true;
+    /// 计算支援卡当前 buff（基础面板 + 已触发的 unique_effect 词条）。
+    pub fn calc_training_effect<G: Game>(&self, game: &G, train: i32) -> CardTrainingEffect {
+        // 起点是基础面板，确保每次返回 fresh cumulative，
+        // 不会被 Game impl override 的 lock 回写后多次累加 unique_effect 词条
+        let mut ret = CardTrainingEffect::from(&self.data.card_value[self.rank as usize]);
+        let param = &self.data.unique_effect_param;
+        match self.data.unique_effect_type {
+            0 => {}
+            1 | 2 => {
+                // 羁绊>args[1]时触发词条args[2] = args[3]
+                if self.friendship >= param[1] {
+                    debug!("{} 羁绊>{}, 触发固有: {:?}", self.data.short_name(), param[1], param);
+                    if param[2] > 0 {
+                        ret.add_effect_line(param[2], param[3]);
+                    }
+                    if param[4] > 0 {
+                        ret.add_effect_line(param[4], param[5]);
                     }
                 }
-                13 => {
-                    // b95 参与友情训练时触发
-                    if game.shining_count(train as usize) > 0 {
-                        ret.add_effect_line(param[1], param[2]);
-                    }
+            }
+            13 => {
+                // b95 参与友情训练时触发
+                if game.shining_count(train as usize) > 0 {
+                    ret.add_effect_line(param[1], param[2]);
                 }
-                20 => {
-                    // 巨匠: 羁绊>80时根据卡组决定加成
-                    if self.friendship >= param[2] {
-                        let mut card_type_count = vec![0, 0, 0, 0, 0, 0];
-                        for c in game.deck() {
-                            if c.card_type >= 5 {
-                                card_type_count[5] += 1;
-                            } else {
-                                card_type_count[c.card_type as usize] += 1;
-                            }
+            }
+            20 => {
+                // 巨匠: 羁绊>80时根据卡组决定加成
+                if self.friendship >= param[2] {
+                    let mut card_type_count = vec![0, 0, 0, 0, 0, 0];
+                    for c in game.deck() {
+                        if c.card_type >= 5 {
+                            card_type_count[5] += 1;
+                        } else {
+                            card_type_count[c.card_type as usize] += 1;
                         }
-                        debug!(
-                            "{} 羁绊>{}, 副属性加成(最大+2): {:?}",
-                            self.data.short_name(),
-                            param[2],
-                            card_type_count
-                        );
-                        for i in 0..5 {
-                            if card_type_count[i] > 0 {
-                                // 0-4对应副属性词条#3-7
-                                ret.add_effect_line((i + 3) as i32, card_type_count[i].max(2));
-                            }
-                        }
-                        if card_type_count[5] > 0 {
-                            ret.add_effect_line(30, card_type_count[5].max(2));
-                        }
-                        locking = true;
                     }
-                }
-                _ => {
-                    diag!(
-                        "未实现固有逻辑: #{} - {}",
-                        self.data.unique_effect_type,
-                        self.short_name()
+                    debug!(
+                        "{} 羁绊>{}, 根据卡组决定加成(最大+2): {:?}",
+                        self.data.short_name(),
+                        param[2],
+                        card_type_count
                     );
-                    locking = true;
+                    for i in 0..5 {
+                        if card_type_count[i] > 0 {
+                            // 0-4对应副属性词条#3-7
+                            ret.add_effect_line((i + 3) as i32, card_type_count[i].max(2));
+                        }
+                    }
+                    if card_type_count[5] > 0 {
+                        ret.add_effect_line(30, card_type_count[5].max(2));
+                    }
                 }
-            } // match unique_effect_type
-        }
-        Ok((ret, locking))
+            }
+            _ => {
+                diag!(
+                    "未实现固有逻辑: #{} - {}",
+                    self.data.unique_effect_type,
+                    self.short_name()
+                );
+            }
+        } // match unique_effect_type
+        ret
     }
 }
 

@@ -16,15 +16,16 @@
 use anyhow::Result;
 
 use super::{
-    effects::calc_ramen_training_effect,
+    effects::{RamenTrainingEffect, calc_ramen_training_effect},
     rules::{calc_ramen_pt_gain, get_region_range, get_super_ramen_clone_train_options},
 };
 use crate::{
     game::{
         ramen::{Operation, RamenAction, RamenGame},
-        traits::Game
+        traits::Game,
+        CardTrainingEffect
     },
-    gamedata::{EventChoice, FreeRaceData, GAMECONSTANTS, ramen::RAMENDATA},
+    gamedata::{ActionValue, EventChoice, FreeRaceData, GAMECONSTANTS, ramen::RAMENDATA},
     global,
     utils::system_event
 };
@@ -225,6 +226,35 @@ impl RamenPolicyOutput {
     }
 }
 
+/// 单个训练位的「一次调用」评估结果（B2 单源评估）
+///
+/// 五个计算在同一回合状态下彼此独立且结果确定，`decide_train`/`score_train_action`
+/// 应共用同一份 eval 而非各自重算——`calc_training_buff`/`calc_training_value` 全链
+/// （含 `SupportCard::calc_training_effect` 与浮点乘）在 policy ↔ local 双层中原本
+/// 最多重复 3 遍，本结构作为唯一数据源收口成 1 遍。
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct RamenTrainEval {
+    /// 支援卡聚合 buff（`calc_training_buff` 结果）
+    pub buffs: CardTrainingEffect,
+    /// 训练数值（`calc_training_value` 结果，含拉面 buff 上层加成）
+    pub value: ActionValue,
+    /// 拉面效果（`calc_ramen_training_effect` 结果，与 `value` 内部同源）
+    pub ramen_effect: RamenTrainingEffect,
+    /// 原始失败率（未乘 `fail_rate_drop`，消费方各自折算）
+    pub fail_rate: f32,
+    /// 该训练位的闪彩人数
+    pub shining: usize,
+}
+
+/// Train 阶段「一次调用」的 eval 缓存（B2，`decide_train` 整轮共享）
+///
+/// 索引 = 训练位下标（0..5）。`RamenPolicy::eval_train` 首次求值后填入，
+/// local 调整层与 policy 打分层从同一份缓存取，避免同回合同 train 重复计算。
+pub type TrainEvalCache = [Option<RamenTrainEval>; 5];
+
+/// 空缓存（`decide_train`/`score_train_actions` 无缓存入口用）
+pub const EMPTY_TRAIN_EVAL_CACHE: TrainEvalCache = [None, None, None, None, None];
+
 /// 手写策略核心：各阶段确定性打分与选择
 ///
 /// 纯策略层：不持有可变状态、不修改 game，相同局面必然给出相同索引。
@@ -259,6 +289,15 @@ impl RamenPolicy {
     /// 返回 `(选中索引, 各候选评分分解)`——评分供决策日志 breakdown 列（调参用）；
     /// 守门触发时评分列表为单元素（记录守门原因），不重复打分。
     pub fn decide_train(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
+        let mut cache = EMPTY_TRAIN_EVAL_CACHE;
+        self.decide_train_cached(game, actions, &mut cache)
+    }
+
+    /// [`decide_train`](Self::decide_train) 的缓存版：`eval_cache` 由调用方（如
+    /// `LocalRamenTrainer::decide_train`）跨整轮传入，守门与打分共用同一份 eval。
+    pub fn decide_train_cached(
+        &self, game: &RamenGame, actions: &[RamenAction], eval_cache: &mut TrainEvalCache
+    ) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         if actions.is_empty() {
             anyhow::bail!("Train 阶段候选为空");
         }
@@ -327,15 +366,33 @@ impl RamenPolicy {
         }
 
         // 打分选择
-        let scores = self.score_train_actions(game, actions)?;
+        let scores = self.score_train_actions_cached(game, actions, eval_cache)?;
         Ok((argmax_index(&scores), scores))
     }
 
     /// 对所有 Train 阶段候选打分（守门通过后调用）
     pub fn score_train_actions(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<Vec<RamenPolicyOutput>> {
+        let mut cache = EMPTY_TRAIN_EVAL_CACHE;
+        self.score_train_actions_cached(game, actions, &mut cache)
+    }
+
+    /// [`score_train_actions`](Self::score_train_actions) 的缓存版：Train 候选复用
+    /// `eval_cache` 中已算好的 eval（`eval_train` 首次求值后填入），非 Train 候选
+    /// 直接走 `score_train_action_other`，不产生 eval。
+    pub fn score_train_actions_cached(
+        &self, game: &RamenGame, actions: &[RamenAction], eval_cache: &mut TrainEvalCache
+    ) -> Result<Vec<RamenPolicyOutput>> {
         let mut scores: Vec<RamenPolicyOutput> = Vec::with_capacity(actions.len());
         for a in actions {
-            scores.push(self.score_train_action(game, a)?);
+            if let Operation::Train(t) = a.operation {
+                let train = t as usize;
+                if eval_cache[train].is_none() {
+                    eval_cache[train] = Some(self.eval_train(game, train)?);
+                }
+                scores.push(self.score_train_action_eval(game, a, eval_cache[train].as_ref().unwrap())?);
+            } else {
+                scores.push(self.score_train_action_other(game, a)?);
+            }
         }
         Ok(scores)
     }
@@ -585,70 +642,113 @@ impl RamenPolicy {
 
     // ========== Train 动作打分 ==========
 
+    /// 单个训练位的「一次调用」评估：buff + value + 拉面效果 + 失败率 + 闪彩
+    ///
+    /// 唯一数据源（B2）：`score_train_action` / `decide_train` 双层共享这一份，
+    /// 消除同回合同 train 的重复计算。内部通过 `calc_training_value_with_effect`
+    /// 复用自己算好的 `ramen_effect`，`calc_ramen_training_effect` 全链只调一次。
+    ///
+    /// 注：原为私有方法，提升为 `pub` 是给性能调优工具与守门测试用的。
+    pub fn eval_train(&self, game: &RamenGame, train: usize) -> Result<RamenTrainEval> {
+        let buffs = game.calc_training_buff(train)?;
+        let shining = game.shining_count(train);
+        let ramen_effect = calc_ramen_training_effect(game, train, shining > 0);
+        let value = game.calc_training_value_with_effect(&buffs, train, &ramen_effect)?;
+        let fail_rate = game.calc_training_failure_rate(&buffs, train);
+        Ok(RamenTrainEval {
+            buffs,
+            value,
+            ramen_effect,
+            fail_rate,
+            shining
+        })
+    }
+
     /// 对单个 Train 阶段动作打分
-    fn score_train_action(&self, game: &RamenGame, a: &RamenAction) -> Result<RamenPolicyOutput> {
-        let mut out = RamenPolicyOutput::default();
+    ///
+    /// 注：原为私有方法，提升为 `pub` 是给 `tools/data_collection/calc_training_value_microbench.rs`
+    /// 性能调优工具用的，没有硬性私有限制；产品路径仍走 `score_train_actions` / `decide_train`。
+    pub fn score_train_action(&self, game: &RamenGame, a: &RamenAction) -> Result<RamenPolicyOutput> {
         match a.operation {
             Operation::Train(t) => {
-                let train = t as usize;
-                let buffs = game.calc_training_buff(train)?;
-                let value = game.calc_training_value(&buffs, train)?;
-                let base_fail_rate = game.calc_training_failure_rate(&buffs, train);
-                let ramen_effect = calc_ramen_training_effect(game, train, game.shining_count(train) > 0);
-                // fail_rate_drop is a relative percentage reduction shared by every training
-                // while eating: Y1 30%, Y2 50%, Y3 100%.
-                let fail_rate = if self.config.effective_ramen_failure {
-                    (base_fail_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0).clamp(0.0, 100.0)
-                } else {
-                    base_fail_rate
-                };
-                // 属性增益（five_status_final_score 差分，与 calc_score 一致）
-                // 方案 E：主属性快满时副属性按有效比率打折（残余收益折扣），提前分流——
-                // 已满位的主属性差分收益趋近 0（status_gain 截断），副属性仍全额会把
-                // 训练吸在已满位、冷落卡少属性（2026-08-26 实测 turn65 耐已满 attr=0）。
-                // PT 不打折：PT 是独立追求目标，为拿 PT 继续训练已满位是正当行为。
-                let inc_main = value.status_pt[train].max(0);
-                let cap_left = (game.uma().five_status_limit[train] - game.uma().five_status[train]).max(0);
-                let ratio = if self.config.cap_discount_weight > 0.0 && inc_main > 0 {
-                    (cap_left as f32 / (inc_main as f32 * 3.0)).clamp(0.0, 1.0)
-                } else {
-                    1.0
-                };
-                let mut attr_gain = 0.0;
-                for i in 0..5 {
-                    let inc_i = if i == train {
-                        value.status_pt[i]
-                    } else {
-                        (value.status_pt[i] as f32 * ratio) as i32
-                    };
-                    attr_gain += self.status_gain(game, i, inc_i);
-                }
-                let pt_gain = value.status_pt[5] as f32;
-                // 注：`status_gain` 内部已乘 status_rate，此处不可再乘（否则成平方）
-                let attr = attr_gain;
-                // PT 不打折：PT 是独立追求目标（终局 skill_pt 直接计分），
-                // 为拿 PT 继续训练已满位是正当行为；打折只会扭曲"PT vs 属性"的取舍
-                // （训练等级成长等跨回合前瞻留给 MCTS 搜索，单点启发式承认上限）。
-                let pt = pt_gain * self.config.pt_rate;
-                // 体力成本（消耗按 train_vital_value 折算）
-                let vital_cost = (-value.vital).max(0) as f32 * self.config.train_vital_value;
-                let shining = game.shining_count(train) as f32 * self.config.shining_bonus;
-                // 失败的期望损失：成功时才有的收益 × 失败率 + 固定失败惩罚 × 失败率
-                let fail_p = fail_rate / 100.0;
-                let gross = attr + pt - vital_cost + shining;
-                let fail_adj = -(gross * fail_p + self.config.failure_penalty * fail_p);
-                // breakdown 各项之和 == score（调参日志需自洽，见 test_breakdown_sums_to_score）
-                out.add("attr", attr);
-                out.add("pt", pt);
-                out.add("vital_cost", -vital_cost);
-                out.add("shining", shining);
-                out.add("fail_adj", fail_adj);
-                out.score = gross + fail_adj;
-                out.reason = format!(
-                    "{}训练 失败率{fail_rate:.0}% 属性+{attr_gain:.0} PT+{pt_gain:.0}",
-                    global!(GAMECONSTANTS).train_names[train]
-                );
+                let eval = self.eval_train(game, t as usize)?;
+                self.score_train_action_eval(game, a, &eval)
             }
+            _ => self.score_train_action_other(game, a),
+        }
+    }
+
+    /// Train 分支：用已算好的 eval 组装打分（[`eval_train`](Self::eval_train) 单源）
+    fn score_train_action_eval(&self, game: &RamenGame, a: &RamenAction, eval: &RamenTrainEval) -> Result<RamenPolicyOutput> {
+        let mut out = RamenPolicyOutput::default();
+        let train = match a.operation {
+            Operation::Train(t) => t as usize,
+            _ => anyhow::bail!("score_train_action_eval 仅接受 Train 动作")
+        };
+        let value = &eval.value;
+        let base_fail_rate = eval.fail_rate;
+        let ramen_effect = &eval.ramen_effect;
+        // fail_rate_drop is a relative percentage reduction shared by every training
+        // while eating: Y1 30%, Y2 50%, Y3 100%.
+        let fail_rate = if self.config.effective_ramen_failure {
+            (base_fail_rate * (100.0 - ramen_effect.fail_rate_drop as f32) / 100.0).clamp(0.0, 100.0)
+        } else {
+            base_fail_rate
+        };
+        // 属性增益（five_status_final_score 差分，与 calc_score 一致）
+        // 方案 E：主属性快满时副属性按有效比率打折（残余收益折扣），提前分流——
+        // 已满位的主属性差分收益趋近 0（status_gain 截断），副属性仍全额会把
+        // 训练吸在已满位、冷落卡少属性（2026-08-26 实测 turn65 耐已满 attr=0）。
+        // PT 不打折：PT 是独立追求目标，为拿 PT 继续训练已满位是正当行为。
+        let inc_main = value.status_pt[train].max(0);
+        let cap_left = (game.uma().five_status_limit[train] - game.uma().five_status[train]).max(0);
+        let ratio = if self.config.cap_discount_weight > 0.0 && inc_main > 0 {
+            (cap_left as f32 / (inc_main as f32 * 3.0)).clamp(0.0, 1.0)
+        } else {
+            1.0
+        };
+        let mut attr_gain = 0.0;
+        for i in 0..5 {
+            let inc_i = if i == train {
+                value.status_pt[i]
+            } else {
+                (value.status_pt[i] as f32 * ratio) as i32
+            };
+            attr_gain += self.status_gain(game, i, inc_i);
+        }
+        let pt_gain = value.status_pt[5] as f32;
+        // 注：`status_gain` 内部已乘 status_rate，此处不可再乘（否则成平方）
+        let attr = attr_gain;
+        // PT 不打折：PT 是独立追求目标（终局 skill_pt 直接计分），
+        // 为拿 PT 继续训练已满位是正当行为；打折只会扭曲"PT vs 属性"的取舍
+        // （训练等级成长等跨回合前瞻留给 MCTS 搜索，单点启发式承认上限）。
+        let pt = pt_gain * self.config.pt_rate;
+        // 体力成本（消耗按 train_vital_value 折算）
+        let vital_cost = (-value.vital).max(0) as f32 * self.config.train_vital_value;
+        let shining = eval.shining as f32 * self.config.shining_bonus;
+        // 失败的期望损失：成功时才有的收益 × 失败率 + 固定失败惩罚 × 失败率
+        let fail_p = fail_rate / 100.0;
+        let gross = attr + pt - vital_cost + shining;
+        let fail_adj = -(gross * fail_p + self.config.failure_penalty * fail_p);
+        // breakdown 各项之和 == score（调参日志需自洽，见 test_breakdown_sums_to_score）
+        out.add("attr", attr);
+        out.add("pt", pt);
+        out.add("vital_cost", -vital_cost);
+        out.add("shining", shining);
+        out.add("fail_adj", fail_adj);
+        out.score = gross + fail_adj;
+        out.reason = format!(
+            "{}训练 失败率{fail_rate:.0}% 属性+{attr_gain:.0} PT+{pt_gain:.0}",
+            global!(GAMECONSTANTS).train_names[train]
+        );
+        Ok(out)
+    }
+
+    /// 非 Train 分支（Race/Rest/Outing/Clinic 等）——不涉及 calc 链，原样打分
+    fn score_train_action_other(&self, game: &RamenGame, a: &RamenAction) -> Result<RamenPolicyOutput> {
+        let mut out = RamenPolicyOutput::default();
+        match a.operation {
+            Operation::Train(_) => anyhow::bail!("score_train_action_other 不接受 Train 动作"),
             Operation::Race => {
                 let (val, reason) = self.score_race(game)?;
                 out.add("race", val);
@@ -687,7 +787,10 @@ impl RamenPolicy {
     }
 
     /// 单维属性增量的评分（按 five_status_final_score 差分）
-    fn status_gain(&self, game: &RamenGame, i: usize, inc: i32) -> f32 {
+    ///
+    /// 注：原为私有方法，提升为 `pub` 是给 `tools/data_collection/calc_training_value_microbench.rs`
+    /// 性能调优工具用的。
+    pub fn status_gain(&self, game: &RamenGame, i: usize, inc: i32) -> f32 {
         let cons = global!(GAMECONSTANTS);
         // `inc` 取 i32：负值若直接 `as usize` 会回绕成天文数字，debug 下加法直接溢出 panic。
         // 当前训练增量恒为正打不到，这里显式夹到 0 以免将来引入负增量时静默炸掉。
@@ -1861,5 +1964,83 @@ mod tests {
         println!("status_rate=1 → attr={a1:.3}；status_rate=2 → attr={a2:.3}（期望恰好 2 倍）");
         assert!((a2 - a1 * 2.0).abs() < 1e-2);
         Ok(())
+    }
+
+    /// B2 单源评估的两条守门：
+    /// 1. 同一回合状态（同 `&game`）连续两次 `eval_train` 逐位一致——缓存可复用前提；
+    /// 2. `score_train_actions`（无缓存入口）与 `score_train_actions_cached`（跨轮共享缓存，
+    ///    policy 层预填 + 非 Train 候选混排）输出逐项一致——缓存不改变决策语义。
+    #[test]
+    fn test_train_eval_deterministic_and_cached_consistent() -> anyhow::Result<()> {
+        use crate::utils::Checks;
+        use crate::game::ramen::policy::{EMPTY_TRAIN_EVAL_CACHE, TrainEvalCache};
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = make_game()?;
+        game.uma.vital = 60;
+        // 让多个训练位有非零分布与闪彩，覆盖 is_shining 分支
+        if let Some(dist) = game.distribution_mut().get_mut(0) {
+            dist.extend([0, 1]);
+        }
+        let policy = RamenPolicy::default();
+        let mut c = Checks::new();
+
+        // 守门 1：eval 确定性（同 game、同 train 两次求值逐位一致）
+        // ——B2 缓存可复用的前提：同一 &game 下 calc 链是纯只读、逐位确定
+        for tr in 0..5 {
+            let e1 = policy.eval_train(&game, tr)?;
+            let e2 = policy.eval_train(&game, tr)?;
+            c.check(
+                e1 == e2,
+                &format!("eval_train(train={tr}) 同局面两次求值逐位一致"),
+            );
+            println!(
+                "  train={tr}: value={:?} ramen.xunlian={} fail_rate={:.2} shining={}",
+                e1.value.status_pt, e1.ramen_effect.xunlian, e1.fail_rate, e1.shining
+            );
+        }
+
+        // 守门 2：cached 与 uncached 决策一致（含非 Train 候选混排）
+        let actions = train_actions_with_race();
+        let uncached = policy.score_train_actions(&game, &actions)?;
+        let mut cache: TrainEvalCache = EMPTY_TRAIN_EVAL_CACHE;
+        let cached = policy.score_train_actions_cached(&game, &actions, &mut cache)?;
+        c.check(
+            uncached.len() == cached.len(),
+            "cached/uncached 候选数一致",
+        );
+        for (i, (u, cc)) in uncached.iter().zip(cached.iter()).enumerate() {
+            c.check(
+                u == cc,
+                &format!("候选 {i} ({}) cached/uncached 输出一致", actions[i].to_string()),
+            );
+            println!(
+                "  候选 {i} ({:<12}) uncached={:>8.2} cached={:>8.2}",
+                actions[i].to_string(),
+                u.score,
+                cc.score
+            );
+        }
+
+        // 守门 3：value 双路径等价——trait `calc_training_value` 完整实现 vs
+        // inherent `calc_training_value_with_effect`（eval_train 用）必须逐位一致，
+        // 否则重复代码漂移会让 eval 单源偷偷偏离 trait 路径语义。
+        for tr in 0..5 {
+            let buffs = game.calc_training_buff(tr)?;
+            let via_trait = game.calc_training_value(&buffs, tr)?;
+            let shining = game.shining_count(tr);
+            let ramen_effect = calc_ramen_training_effect(&game, tr, shining > 0);
+            let via_with_effect = game.calc_training_value_with_effect(&buffs, tr, &ramen_effect)?;
+            c.check(
+                via_trait == via_with_effect,
+                &format!("calc_training_value train={tr} trait/with_effect 逐位一致"),
+            );
+        }
+
+        c.finish()
     }
 }

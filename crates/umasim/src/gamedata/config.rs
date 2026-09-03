@@ -1273,7 +1273,7 @@ radical_factor_max = 1.4
         let merged = ov.merge(&base);
         dump_mcts("日常路径 merge 后", &merged.mcts);
         let mut c = Checks::new();
-        c.check(merged.mcts.search_group_size == 2048, "search_group_size == 2048");
+        c.check(merged.mcts.search_group_size == 512, "search_group_size == 512");
         c.check(
             merged.mcts.expected_search_stdev == 15000.0,
             "expected_search_stdev == 15000.0"

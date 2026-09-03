@@ -4,19 +4,23 @@
 
 ## 1. 背景
 
-项目当前两类 CPU 性能分析：
+项目当前三类 CPU 性能 / 延迟分析工具（覆盖全栈 vs 按段 vs 全局三层视角）：
 
-1. **手写策略批量火焰图**——`RecommendedRamenTrainer`，单线程跑批便于横向对比，结论与改动 d的 pprof + microbench 基线一致
-2. **MCTS 单局性能剖面**——`RamenMctsTrainer`，多线程 + 闭包 + inline 优化导致传统 perf 栈展开质量差，需要换工具
+1. **手写策略批量火焰图**——`RecommendedRamenTrainer`，单线程跑批便于横向对比；走 `cargo flamegraph`（见附录 C）
+2. **MCTS / 手写策略单局性能剖面**——`RamenMctsTrainer`，多线程 + 闭包 + inline 优化导致传统 perf 栈展开质量差；走 `pprof-rs` 用户态采样（`mcts_profiler` / `sim_profiler`，见附录 B）
+3. **calc 链路按段拆解的 microbench**——不依赖栈展开，按数据流依赖链分桶测 ns/op（`calc_training_value_microbench`，见 §7）
 
-两类分析的工具选择与命令各不相同。本文给出明确决策准则，避免下次重复踩坑。
+工具选择与命令各不相同。本文给出明确决策准则，避免下次重复踩坑。
 
 ## 2. 工具选择：先选对，再开跑
 
 **经验法则**：
 
-- 单线程 / 闭包少 / inline 温和（手写策略 / 规则层 / 业务逻辑）→ `cargo flamegraph`
-- 多线程 rayon / 闭包深度嵌套 / opt-level 任意档（MCTS / 搜索调度 / 高频 hot path）→ `pprof-rs` 用户态采样（`mcts_profiler` / `sim_profiler`）
+| 场景 | 工具 | 输出 |
+|---|---|---|
+| 单线程 / 闭包少 / inline 温和（手写策略批量 / 业务逻辑全栈） | `cargo flamegraph` | SVG 火焰图 |
+| 多线程 rayon / 闭包深度嵌套 / opt-level 任意档（MCTS / 搜索调度 / 高频 hot path 全栈） | `pprof-rs` 用户态采样（`mcts_profiler` / `sim_profiler`） | .pb protobuf → `go tool pprof` |
+| 单函数 / 按段 ns/op + 占比 + 逐段优化回归（**calc / policy 链路定点打击**） | `calc_training_value_microbench` | stdout 表格（见 §7）|
 
 为什么这样分？`cargo flamegraph` 走 perf + inferno，栈展开依赖 dwarf unwind tables。多线程场景下 perf.data 容易膨胀到几 GB + 大量子子 samples lost；MCTS 闭包密集，inline 后看到的都是 `closure_env#0` / `impl#N` / `[unknown]` 这样的代号，看不到真正的 hot path 函数名。
 
@@ -26,70 +30,102 @@
 
 **所以**：
 
-- 看到手写策略 / 业务逻辑 →`cargo flamegraph`
-- 看到 MCTS / 搜索 / 任何"inline 重灾区"→ 直接 pprof-rs，不要在 cargo flamegraph 上浪费时间
+- 看到手写策略 / 业务逻辑全栈 → `cargo flamegraph`
+- 看到 MCTS / 搜索 / 任何"inline 重灾区"全栈 → 直接 `pprof-rs`，不要在 `cargo flamegraph` 上浪费时间
+- 优化单函数 / 验证 calc 链路某段是否变小 → `calc_training_value_microbench`（pprof self time 给"占比"但给不出"绝对 ns/op"和"占比依赖关系"；microbench 补这块缺口）
 
-## 3. MCTS 性能分析结论
+## 3. 性能分析结论（当前方法论）
 
-### 3.1 关键发现：手写策略本体是 MCTS 的真正热点**
+本节基于 microbench 多轮均值（§7 / 附录 B）替换 2026-09-01 的 pprof-flamagraph 基线——后者单局 RUNS=1 抖动盖住信号，已整体弃用（旧数据删于附录 B/C）。
 
-MCTS 单局（release + num_threads=1 + search_n=64 + train,ramen,special）耗时约 61.6s，其中 pprof 1kHz 采样开销约 27%。手写策略本体在 rollout 中被反复调用，**总占比约 22%**——是 MCTS 性能的最大单一杠杆点：
+### 3.1 关键发现：手写策略本体是 MCTS 的真正热点
 
-- `default_calc_training_value` / `default_calc_training_buff` / `calc_training_value`：训练数值计算三件套，每次 rollout 起点调用一次
-- `SupportCard::calc_training_effect`：每张支援卡的 buff 计算，每次 rollout 调多次
-- `RamenPolicy::score_train_action` + `RamenPolicy::status_gain`：候选打分与状态增益
-- `LocalRamenTrainer::dynamic_status_adjustment` + `LocalRamenTrainer::reserve_penalty`：手写策略里的动态平衡与预留门限
-- `RamenTrainingEffect::default` + `CardTrainingEffect::add`：训练效果结构体的默认初始化与累加
+当前测量手段（详见 §7 与附录 B）：
 
-这与改动 d的 microbench baseline（`calc_training_value` 12ms/1000局 > `select_action` 8.5ms > `SupportCard::calc_training_effect` 5ms > `default_calc_training_buff` 4.45ms）一致——但 MCTS rollout 把这些热点的总采样放大了 N×M 倍（N 局 × 每局多次 rollout），优化手写策略任一 hot path 都会在 MCTS 路径上有乘法收益。
+| 测量对象 | 工具 | N | 统计稳定性 |
+|---|---|---|---|
+| **单函数 NS/call** | d10872a microbench test | 100k × 3 round | std/mean ≤ 2.5% |
+| **7 段整 Round NS/iter** | `calc_training_value_microbench` bin | 1000 × 3 round | std/mean ≤ 13%（B 段 warm-up 漂移） |
 
-### 3.2 次要发现
+附录 B 显示手写策略 hot path 5 个核心函数全部 **NS/call 下降 50-90%**（vs d10872a 附录 C 同口径基线）：
 
-**`f32::powi` 大整数运算占 ~6%**。`Big32x40::mul_pow2` + `Big32x40::div_rem_small` 共约 6%。这是 `f32::powi` 内部用 Big32x40 算法算 `2^n` 的开销，来源是手写策略里训练等级 / PT 增益的指数计算。**优化方向**：能换成整数乘法（如 `1.0 + level * 0.05` 代替 `1.05_f32.powi(level)`）的话可省约 6%。
+| 函数 | d10872a 基线 | cleanup 后多轮均 | Δ |
+|---|---:|---:|---:|
+| `SupportCard::calc_training_effect` | ~102 | 13.77 | **-87%** |
+| `default_calc_training_buff` | ~73 | 12.47 | **-83%** |
+| `calc_training_value` | ~104 | 33.30 | **-68%** |
+| `LocalRamenTrainer::select_action` | ~59 | 24.57 | **-59%** |
+| `reserve_penalty` | ~8 | 3.93 | **-51%** |
 
-**Vec 分配与 push 写入占 ~7%**。`score_train_action` 内部构造 `(String, f32)` 元组列表（`core::ptr::write<(String, f32)>` 2.77%）+ RamenAction 构造（0.76%）+ RamenPolicyOutput 构造（0.69%）+ RawVec deallocate/try_allocate_in/grow_amortized/finish_grow 合计约 3.9%。**优化方向**：`Vec::with_capacity` 预分配 + ActionResult 池化，能省约 3-4%。
+加上 §7 段 F 实测（整回合打分 4177 ns/iter，冷 run + 稳态），与"手写策略本体是 MCTS 性能最大杠杆点"的历史结论一致——只是基线数字已是 cleanup 后新基线。
 
-**`f32 → String` 转换占 ~5%**。`flt2dec::format_exact_opt` + `cached_power` + `decoder::decode<f32>` + `String::write_str` + `core::fmt::write` 合计约 4.7%。主要来自 `println!` 输出与 pprof protobuf 序列化。
+cleanup 三连改动的具体内容（变更轨迹）：
 
-**`?` 运算符 unwrap 占 ~3.3%**。`Result<ActionValue, Error>::branch` 1.72% + `Result<(CardTrainingEffect, bool), Error>::branch` 1.10% + `Result<RamenPolicyOutput, Error>::branch` 0.53%。**优化方向**：hot path 里用 `let Ok(x) = ... else { unreachable!() }` 避免 branch 预测开销。
+1. **`SupportCard::calc_training_effect` 简化签名 + 起点改基础面板**（最大单点改动）
+2. **deyilv 路径去掉 `eff.clone()`**（owned 链一致性）
+3. **`Game::deyilv` trait `Result<f32>` → `f32`**（减少分支预测 + Result 链一致性）
 
-**`f32::clamp` / `f32::max` 占 ~3%**。多在 `calc_training_value` 内部做状态约束。
+### 3.1b 训练评估单源化（B2，2026-09-03）：policy ↔ local 双重计算消除
 
-### 3.3 优化优先级
+第二轮优化：手写策略 **policy 打分层 ↔ local 调整层对同一回合同一 train 的计算重复**（`calc_training_buff` / `calc_training_value` 各 2 遍、`calc_ramen_training_effect` 高达 3 遍——`calc_training_value` 内部 1 遍 + `score_train_action` 1 遍 + local `decide_train` 1 遍）。
 
-按杠杆降序：
+方案落地：
 
-1. **【最高】继续优化手写策略 hot path**——`default_calc_training_value` / `default_calc_training_buff` / `calc_training_value` / `score_train_action` / `SupportCard::calc_training_effect`。MCTS × N 局 × rollout 的乘法效应，远超单局手写策略的收益。
-2. **【高】`f32::powi` → 整数乘法**。手写策略里等级加成 / PT 加成用整数乘法代替 `1.05_f32.powi(level)`，省约 6%。
-3. **【中】`Vec::with_capacity` 预分配 + ActionResult 池化**。省约 3-4%。
-4. **【中】消除 `?` branch**。hot path 里用 `let Ok(x) = ... else { unreachable!() }`，省约 3%。
-5. **【低-中】`f32::clamp` → 手写比较 + 赋值**。省约 1.5%。
-6. **【低】减少 `println!` 频率**。省约 5%（含 pprof 序列化）。
+| 项 | 内容 |
+|---|---|
+| 单源评估 | 新增 `RamenTrainEval`（buffs/value/ramen_effect/fail_rate/shining 五件套）+ `RamenPolicy::eval_train`，一次调用算全 |
+| 拆分 | `score_train_action` 拆成 `_eval`（Train，用 eval 组装）/ `_other`（非 Train）两分支 |
+| 缓存 | `score_train_actions_cached` / `decide_train_cached`（`TrainEvalCache` 按 train 位缓存），local `decide_train` 跨 policy↔local 共享同一份 eval |
+| 底层 | `RamenGame::calc_training_value_with_effect` 复用已算好的 ramen_effect（trait 方法保持完整单函数实现，避免跨 impl 边界内联损失——拆薄壳会让 microbench C/D 段带回 +15ns/train 测量退化） |
+| 守门 | `test_train_eval_deterministic_and_cached_consistent` 三条：eval 确定性 / cached≡uncached / trait 双路径逐位等价 |
+
+实测（2026-09-03，与 7/2 同口径）：
+
+- **段 F（decide_train 整回合 7 候选）4238 → ~3650 ns/iter（-14%）**——重复计算收口最直接受益段
+- 段 B/C/D/E 回落基线 ±5%（B 257→260、C 265→276、D 1210→1214、E 446→451，负载漂移范围内）
+- **sim_profiler 500 局整局 CPU ~1.25s → 1.13s（-10%）**，平均分逐位一致（64871）
+- pprof self time：`default_calc_training_buff` 30→10 ticks（-67%），`calc_training_value` 21→不再进 Top（合并进单源 eval）
+
+注意：d10872a 6 函数 microbench 的 `calc_training_value`/`select_action` 两段在 B2 后出现 +20% 异常（40/30 ns vs 33/24.5），但同函数的 7 段 C 段（+4%）与整局（-10%）均正常，且 A/B stash 对照显示该两项随 policy/local 改动漂移——判定为单函数 microbench 对代码布局/缓存状态敏感的口径退化，不构成真实回退（以整合视角 F 段与整局 CPU 为锚）。
+
+### 3.2 已淘汰结论
+
+§3.x 的旧"次要发现"与 §3.3 的旧"优化优先级"基于 `cargo flamegraph` + 单局 pprof，单 RUNS=1 抖动无法给出对照结论，已整体弃用——其在 noise level 之上**反复跳动**，本轮三改动后 pprof 单局抽样未给出一致下降方向（SupportCard::calc_training_effect、calc_training_value 微降 5%；dynamic_status_adjustment 降 45% / score_train_action 涨 92% 同时出现，明显非代码因素）。
+
+替代方法见 §7 / 附录 B 的 multi-run microbench 实测统计显著（std ≤ 2.5%）。未来 hot path 优化以 §3.1 / 附录 B 数字为锚定标准。
 
 ## 4. 试验历史：为什么 cargo flamegraph 对 MCTS 不可用
 
-多次试验得到的明确结论：MCTS 这种多线程 + 闭包 + inline 重灾区，cargo flamegraph 在 opt-level 任意档、profile 任意档下都难以给出有用信息。要走 pprof-rs。
+多次试验得到的明确结论：MCTS 这种多线程 + 闭包 + inline 重灾区，cargo flamegraph 在 opt-level 任意档、profile 任意档下都难以给出有用信息。要走 microbench × N（统计显著）或当前基线的 microbench 多轮均值。
 
 详见文末附录 A。
 
-## 5. 工具固化：mcts_profiler
+## 5. 工具固化：三个 bin 互相补充
 
 ### 5.1 路径与依赖
 
-- `crates/umasim/src/bin/mcts_profiler.rs`：MCTS pprof-rs profiler bin（d10872a `sim_profiler` 模板）
-- 注册：放 `src/bin/` 自动注册为 bin target `mcts_profiler`
-- 特性：`#![cfg(feature = "profiler")]`——Windows 不编译 pprof-rs，与 `sim_profiler` 同构
-- 不需要 `[[bin`]` 显式 required-features：cfg gate 在源文件顶部，编译时直接跳过
+`crates/umasim/tools/data_collection/` 下三个 bin 工具，统一约定 `cargo run --release --bin <name>`（无 required-features，由各自 cfg gate 决定可选编译）：
 
-### 5.2 与 sim_profiler 区别
+| Bin | 文件路径 | 必要性 | 何时用 |
+|---|---|---|---|
+| `sim_profiler` | `sim_profiler.rs` | `--features profiler`（Windows 不编译 pprof-rs） | 手写策略全栈 pprof（附录 C 同源，但 pprof 更准）|
+| `mcts_profiler` | `mcts_profiler.rs` | `--features profiler` | MCTS 单局全栈 pprof（附录 B 同源）|
+| `calc_training_value_microbench` | `calc_training_value_microbench.rs` | 无 | **calc / policy 链路按段 ns/op 拆解（§7，按段优化回归用）** |
 
-| 维度 | sim_profiler | mcts_profiler |
-|---|---|---|
-| Trainer | `RecommendedRamenTrainer` | `RamenMctsTrainer` |
-| rayon 线程数 | 全局默认（由 `game_config.toml` 的 `num_threads` 控制） | `MCTS_PROFILER_NUM_THREADS` 强制（默认 1） |
-| SearchConfig | 无 | `search_n` / `stages` / `selection` / `ucb` / `radical_factor_max` 全套 |
-| 跑批种子 | 与 `SIM_PROFILER_RUNS` 等 env vars 联动 | 与 `MCTS_PROFILER_*` env vars 联动 |
-| 输出标签 | `SIM_PROFILER_LABEL`（默认 "baseline"） | `MCTS_PROFILER_LABEL`（默认 "mcts"） |
+`sim_profiler` 与 `mcts_profiler` 在源文件顶部带 `#![cfg(feature = "profiler")]`，并已在 `Cargo.toml` 注册 `required-features = ["profiler"]`——**两者缺一不可**：cfg gate 在编译时跳过内容，但若只写 cfg 不注册 required-features，`cargo check`/`build`（默认 features）会因整个文件为空报 `main function not found`（2026-09-03 修复，见 changelog）；`calc_training_value_microbench` 不依赖 pprof-rs，所有平台默认可跑。
+
+### 5.2 三个 bin 对比
+
+| 维度 | sim_profiler | mcts_profiler | calc_training_value_microbench |
+|---|---|---|---|
+| 训练员 | `RecommendedRamenTrainer` | `RamenMctsTrainer` | （不调训练员，直接调 game calc / policy 层）|
+| 测量视角 | 整局全栈 self time | 整局全栈 self time | **按段 ns/op**（7 段分桶）|
+| 输出 | .pb protobuf → `go tool pprof` | .pb protobuf → `go tool pprof` | **stdout 表格** |
+| rayon 线程数 | 全局默认（由 `game_config.toml` 的 `num_threads` 控制） | `MCTS_PROFILER_NUM_THREADS` 强制（默认 1） | 单线程（无 rayon） |
+| SearchConfig | 无 | `search_n` / `stages` / `selection` / `ucb` / `radical_factor_max` 全套 | 无 |
+| env vars | `SIM_PROFILER_RUNS` / `LABEL` / `FREQ` | `MCTS_PROFILER_RUNS` / `LABEL` / `FREQ` / `SEARCH_N` / `STAGES` / `NUM_THREADS` | `CT_MICROBENCH_RUNS` / `CT_MICROBENCH_WARMUP` |
+| 输出文件 | `logs/profile/<label>.pb` | `logs/profile/<label>.pb` | （stdout） |
+| 复现章节 | §6.1 + 附录 C | §6.2 + 附录 B | **§7 + 附录 E** |
 
 ### 5.3 pprof-rs 产物解读
 
@@ -155,6 +191,95 @@ inferno-flamegraph logs/profile/mcts.pb > logs/profile/mcts_flame.svg
 - `logs/profile/<label>.pb`：保留作为基线对比
 - `logs/<...>.bak.flamegraph.<时间戳>`：保留作为回滚证据
 
+### 6.4 重测 calc_training_value_microbench
+
+```bash
+# 默认 1000 iter / 段，warmup 1000
+cd umaai-rs
+cargo run --release --bin calc_training_value_microbench
+
+# 小用例（验证可行性，~1.5 ms 墙钟）
+CT_MICROBENCH_RUNS=100 CT_MICROBENCH_WARMUP=100 \
+  cargo run --release --bin calc_training_value_microbench
+```
+
+结果以 stdout 表格输出（§7.2 格式），无中间产物文件。env vars 见附录 E。
+
+---
+
+## 7. 按段拆解的最坏路径基线（calc_training_value_microbench）
+
+不替代附录 B/C 的全栈基线，而是按数据流依赖链分桶测 calc / policy 链路各段的 ns/op——本工具能给出 pprof self time 给不出的"绝对 ns"和"占比依赖关系"。
+
+### 7.1 7 段设计（vs d10872a microbench）
+
+| 维度 | d10872a microbench | 当前 microbench |
+|---|---|---|
+| 卡组 | speed build + 推 turn=30 | **speed build + friendship 全 100 + turn=30 + 拉面 buff 全开** |
+| 单 / 5 train | 单 train=0 一次 | **5 train 一回合循环**（对齐 `LocalRamenTrainer::score_train_action`）|
+| 拉面 buff | 自然 turn=30 state（可能不吃面） | **current_ramen=Some(5) + selected_regions=[5,7,9]，中山-全 region 命中全部 5 train** |
+| 段数 | 6（reserve_penalty/calc_buff/calc_value/effect/clone/select_action） | **7**（A.distribute_all / B.calc_buff ×5 / C.calc_value ×5 / D.端到端 / E.score_train_action / F.decide_train 整回合 / G.calc_ramen_training_effect）|
+| 私有方法可见性 | 同 crate 内联测试 | **`RamenPolicy::score_train_action` / `status_gain`，`LocalRamenTrainer::decide_train` / `dynamic_status_adjustment` / `reserve_penalty` 提到 pub**（产品路径不变）|
+
+7 段各自测的对象与 pprof 对应：
+
+| 段 | 函数 | 包含子操作 | pprof 对应 |
+|---|---|---|---|
+| **A** | `distribute_all` | reset + iterate persons + 多次 `distribute_person`（absent 判定 + 零分配分桶采样 + retry）| 内联未单独报 |
+| **B** | 5 train × `default_calc_training_buff` | 遍历 dist[t] + `SupportCard::calc_training_effect` + `CardTrainingEffect::add` | 3.28% + 1.83% + 1.10% |
+| **C** | 5 train × `calc_training_value` | `default_calc_training_value` 下层 + `calc_ramen_training_effect` + 上下层 clamp | 2.58% + 3.16% |
+| **D** | 端到端一回合 = A + B + C | 完整 calc 链路（无 policy 层）| — |
+| **E** | `RamenPolicy::score_train_action` ×1 | B + C + `calc_training_failure_rate` + 5 × `status_gain` + score 拆解 | 1.61% |
+| **F** | `LocalRamenTrainer::decide_train`（7 candidates）| score_train_actions + 修复路径 + choose + phase + reserve_penalty/dynamic_status_adjustment 调整 | 0.54% + 2.54% + 1.68% |
+| **G** | `calc_ramen_training_effect` ×1 | 拉面 buff 累乘（calc_normal_effect / calc_finals_effect） | 内联于 C 2.58% |
+
+### 7.2 新基线（2026-09-02 采样替换后，可比口径 Run 2/3 均值，mean ns/iter）
+
+```
+段                              mean ns/iter  per-train  占 D
+A.distribute_all                     633.9        —       52.4%
+B.calc_training_buff ×5               257.2       51.4     21.3%
+C.calc_training_value ×5              265.1       53.0     21.9%
+D.端到端一回合(5train)                1209.6        —      100%
+E.score_train_action x1              446.3        —       —
+F.decide_train(7 候选)              4237.8        —       —
+G.calc_ramen_training_effect x1       9.6        —       —
+```
+
+D − (A+B+C) ≈ D − 1156.2 = 53.4 ns（占 D 4.4%）——分桶测 cache 热、组合测 cache miss 边界，正常。
+
+> 注：口径 = 第三次重测 Run 2/3 均值（cold Run 1 剔除，原始值见附录 B.3）。对照段（B/C/F/G，本次未动代码）回落上午 cleanup 基线 ±2%，判定测量环境可比；可比口径下段 A 800.97 → 633.9 ≈ **-21%**（采样替换端到端收益，与 §7.3 进程内对照交叉验证吻合）。同日另有两次漂移样本（798.7 / 907.0），见 B.3 注③。
+
+**B2 复测（2026-09-03，训练评估单源化后，§3.1b）**：
+
+```
+段                              B2 后稳定均值   vs 基线
+A.distribute_all                     ~640        +1%
+B.calc_training_buff ×5              ~260        +1%
+C.calc_training_value ×5             ~270        +2%
+D.端到端一回合(5train)              ~1214        +0.4%
+E.score_train_action x1              ~451        +1%
+F.decide_train(7 候选)              ~3650       **-14%**
+G.calc_ramen_training_effect x1       ~10        +4%
+```
+
+F 段降幅与 §3.1b 预估（policy↔local 重复计算 ≈ F 的 14-15%）吻合；其余段回落基线 ±5% 内（机器漂移范围）。
+
+### 7.3 关键观察（清理后多轮均值）
+
+| 观察 | 数字 | 说明 |
+|---|---|---|
+| A 占比 52.4% | A/D = 633.9/1209.6 | distribute_all 仍是最大单一杠杆（与 §3.1 一致） |
+| **A 段采样替换已落地** | WeightedIndex → 零分配分桶采样（`sample_bucket`）| 与 rand 整数 WeightedIndex 逐位等价（`traits.rs` 守门测试 7 权重组合 × 5 万次全一致 + 全量测试数值不变）；进程内对照每次采样 **-31~-42%（7-11 ns/call）**，可比口径整段 **-21%** |
+| F ≈ 4.24 μs / 7 candidates | 4238 ns/iter | 整回合策略决策成本；与 1 局手写策略 mean 2.36 ms 的 ~77 个决策回合同数量级 |
+| **F 段 B2 后 -14%** | 4238 → ~3650 ns/iter | 训练评估单源化（§3.1b）收口 policy↔local 双重计算：`calc_training_buff`/`calc_training_value` 从 2-3 遍降到 1 遍；整局幅度 sim_profiler 500 局 1.25s → 1.13s（-10%），平均分逐位一致 |
+| G = 9.6 ns | 拉面 buff 累乘路径已轻 | 内联到上层不进 Top |
+| D − (A+B+C) ≈ 53.4 ns | 边界 4.4% | cache miss / cache 边界，正常 |
+
+> 注：cleanup 后 cross-validate 见附录 B.2——3 个 hot path 函数 d10872a microbench 单测全部下降 50-90%（统计显著）。
+
+优化优先级合入 §3.1，不在重复。
+
 ---
 
 ## 附录 A：试验历史（MCTS cargo flamegraph 失败记录）
@@ -165,105 +290,87 @@ inferno-flamegraph logs/profile/mcts.pb > logs/profile/mcts_flame.svg
 | v2 | release profile + 临时改 `Cargo.toml` opt-level=3, num_threads=1, search_n=256 | opt-level=3 让函数边界稍微清晰，`search_uniform` 7.41% 出现，但手写策略 hot path 函数（`default_calc_training_value` / `calc_training_value` 等）仍被 inline 吃掉；`RamenAction` 16.11% / `ActionResult` 11.10% 这些"类型相关帧"占据了真正 hot path 的位置 |
 | v3 | **debug profile**（`cargo flamegraph --dev`）, num_threads=1, search_n=128 | **失败**——Rust dev profile 默认没有 unwind tables，79.99% 样本 `[unknown]`；perf.data 38.75 GB（debug 模式 binary 体积大）+ 9.13% samples lost |
 | v4（成功）| pprof-rs（`mcts_profiler`）, num_threads=1, search_n=64 | 完美——手写策略 hot path 全部浮出水面：`default_calc_training_value` 3.16% / `default_calc_training_buff` 3.28% / `dynamic_status_adjustment` 2.54% / `reserve_penalty` 1.68% 等清晰可见 |
+| v5（当前）| microbench × 多轮 mean (d10872a + calc_training_value_microbench) | **替代 v4 的 pprof 单局数据**：单 RUNS=1 pprof 抖动盖住真实信号，已弃用。本节值只保留 pprof 历史样例（不能作 cleanup 后对照基线）。§3.1 / 附录 B 为当前对照基准 |
 
-## 附录 B：MCTS pprof-rs 单局实测数据（2026-09-01）
+## 附录 B：d10872a microbench 多轮均值基线（2026-09-02 cleanup 后）
 
-### B.1 配置
-
-- profile：release（opt-level='z'，项目预设）
-- rayon 线程数：1
-- search_n：64
-- search_stages：train,ramen,special
-- Trainer：`RamenMctsTrainer`（fallback = `RecommendedRamenTrainer`）
-- Uma：美浦波旁（102601）+ speed build（速3 耐1 智1 + 友人 303054）
-- base_seed：61444
-
-### B.2 跑分
-
-- 单局耗时：**61.6s**（含 pprof 1kHz backtrace 开销约 27%）
-- pprof 采样：44599 ticks, 11252 stacks
-- CPU 时间 ≈ 44.6s（与 wall-clock 61.6s 的差距是 pprof-rs 自身采样信号 handler 占用）
-- 分数：67522（UA9）
-- RMJ：3/3，自选比赛达标
-
-### B.3 Top 函数（self time 聚合）
-
-| ticks | % | 函数 |
-|---:|---:|---|
-| 1749 | 3.92 | `core::num::imp::bignum::Big32x40::mul_pow2` |
-| 1464 | 3.28 | `RamenGame::default_calc_training_buff` |
-| 1412 | 3.16 | `RamenGame::default_calc_training_value` |
-| 1234 | 2.77 | `core::ptr::write<(String, f32)>` |
-| 1152 | 2.58 | `RamenGame::calc_training_value` |
-| 1132 | 2.54 | `LocalRamenTrainer::dynamic_status_adjustment` |
-| 927 | 2.08 | `Big32x40::div_rem_small` |
-| 814 | 1.83 | `SupportCard::calc_training_effect<RamenGame>` |
-| 786 | 1.76 | `f32::clamp` |
-| 765 | 1.72 | `Result<ActionValue, Error>::branch` |
-| 749 | 1.68 | `LocalRamenTrainer::reserve_penalty` |
-| 719 | 1.61 | `RamenPolicy::score_train_action` |
-| 648 | 1.45 | `RamenPolicy::status_gain` |
-| 578 | 1.30 | `RawVec::deallocate` |
-| 554 | 1.24 | `RawVec::try_allocate_in` |
-| 541 | 1.21 | `f32::max` |
-| 513 | 1.15 | `RamenTrainingEffect::default` |
-| 512 | 1.15 | `flt2dec::strategy::grisu::format_exact_opt` |
-| 493 | 1.10 | `CardTrainingEffect::add` |
-| 489 | 1.10 | `Result<(CardTrainingEffect, bool), Error>::branch` |
-| 467 | 1.05 | `Option<Ordering>::is_some_and` |
-| 366 | 0.82 | `Zip<IterMut<u32>, Iter<u32>>::next` |
-| 363 | 0.81 | `flt2dec::cached_power` |
-| 353 | 0.79 | `atomic_add<usize, usize>` |
-| 339 | 0.76 | `core::ptr::write<RamenAction>` |
-| 335 | 0.75 | `RawVec::grow_amortized` |
-| 334 | 0.75 | `calc_normal_effect` |
-| 330 | 0.74 | `flt2dec::decoder::decode<f32>` |
-| 317 | 0.71 | `core::fmt::write` |
-| 310 | 0.69 | `core::ptr::write<RamenPolicyOutput>` |
-| 289 | 0.65 | `core::ptr::read<u8>` |
-| 287 | 0.64 | `String::write_str` |
-| 285 | 0.64 | `GameConstants::status_final_score` |
-| 282 | 0.63 | `flt2dec::to_exact_fixed_str<f32>` |
-| 277 | 0.62 | `usize::max` |
-| 270 | 0.61 | `RawVec::finish_grow` |
-| 251 | 0.56 | `RamenGame::is_shining_at` |
-| 246 | 0.55 | `*mut u32::add` |
-| 242 | 0.54 | `LocalRamenTrainer::decide_train` |
-| 236 | 0.53 | `Result<RamenPolicyOutput, Error>::branch` |
-
-## 附录 C：手写策略 100 局 cargo flamegraph 基线（2026-09-01）
-
-### C.1 命令
+测量方法：
 
 ```bash
-cd umaai-rs
-cargo flamegraph --release --no-default-features --bin bench_base -- --trainer handwritten
+cargo test --release -p umasim --lib \
+  trainer::local_ramen_trainer::tests::microbench_top_fns \
+  -- --ignored --nocapture
 ```
 
-### C.2 实测基线
+- 单函数 100,000 iter × 3 round = 300,000 sample
+- round-min + round-mean 抓取
+- 取 3 次完整运行的总 mean 进一步平均
 
-- 单局 mean **2.359ms**（p50 2.297 / p90 2.480 / p99 3.715）
-- 吞吐 **424 局/s**
-- 分数 mean 56687 std 2286，RMJ 2.38/3，自选比赛达标 100%
+### B.1 实测基线（3 次外部运行）
 
-### C.3 关键前提
+| 函数 | Run 1 | Run 2 | Run 3 | **总 mean** |
+|---|---:|---:|---:|---:|
+| `reserve_penalty` | 3.9 | 3.9 | 4.0 | **3.93** |
+| `default_calc_training_buff` | 12.2 | 12.8 | 12.4 | **12.47** |
+| `calc_training_value` | 32.9 | 33.5 | 33.5 | **33.30** |
+| `SupportCard::calc_training_effect` | 13.6 | 13.8 | 13.9 | **13.77** |
+| `CardTrainingEffect::clone` | 2.3 | 2.3 | 2.3 | **2.30** |
+| `LocalRamenTrainer::select_action` | 24.5 | 24.5 | 24.7 | **24.57** |
 
-- `perf_event_paranoid` ≤ 2（本机默认 = 4，需 `sudo sysctl -w kernel.perf_event_paranoid=2`，临时）
-- 项目 `profile.release opt-level='z'` 是项目预设，cargo flamegraph 默认沿用
+std/mean ≤ 2.5%（最高 `default_calc_training_buff` 的 2.5%，其余 ≤ 1.5%）。统计显著，**可直接作 cleanup 后对照基线**。
 
-### C.4 与 MCTS pprof-rs 对比
+### B.2 vs d10872a 原 commit（commit d10872a 测得，未 cleanup）
 
-| 函数 | 手写策略 100 局 cargo flamegraph | MCTS 1 局 pprof-rs |
-|---|---|---|
-| `default_calc_training_value` | 4.85% | 3.16% |
-| `calc_training_value` | 2.42% | 2.58% |
-| `score_train_action` | 2.44% | 1.61% |
-| `distribute_person` | 2.41% | < 0.5% |
-| `apply_event` | 2.35% | < 0.5% |
+| 函数 | d10872a 基线 | B.1 总 mean | Δ | 备注 |
+|---|---:|---:|---:|---|
+| `reserve_penalty` | 7.7 | 3.93 | **-49%** | early-return 路径 + cache-friendly |
+| `default_calc_training_buff` | 72.5 | 12.47 | **-83%** | cleanup 最大单点收益 |
+| `calc_training_value` | 104.3 | 33.30 | **-68%** | |
+| `SupportCard::calc_training_effect` | 101.7 | 13.77 | **-86%** | 起点改基础面板（不变叠加） |
+| `CardTrainingEffect::clone` | 29.8 | 2.30 | **-92%** | |
+| `LocalRamenTrainer::select_action` | 59.4 | 24.57 | **-59%** | 下游 calc_buff 受益传递 |
 
-pprof-rs 让手写策略 hot path 函数名**真正浮出水面**——之前 cargo flamegraph 把这些帧全部算成 inline closure 消失了。
+注意：d10872a commit 上的数字是单次跑（与 B.1 三次平均不可严格比对），但数量级差距足够大（-49%~-92%）说明 cleanup 是真实的优化，不是测量噪声。
 
-## 附录 D：mcts_profiler env vars
+### B.3 calc_training_value_microbench × 3（7 段 ns/iter，2026-09-02 第三次重测、可比口径）
+
+测量方法：
+
+```bash
+cargo run --release --bin calc_training_value_microbench
+```
+
+| 段 | Run 1¹ | Run 2 | Run 3 | **总均²** | spread |
+|---|---:|---:|---:|---:|---:|
+| A. distribute_all | 797.5 | 631.7 | 636.0 | **633.9** | 0.7% |
+| B. calc_training_buff ×5 | 530.6 | 255.6 | 258.7 | **257.2** | 1.2% |
+| C. calc_training_value ×5 | 310.7 | 265.8 | 264.3 | **265.1** | 0.6% |
+| D. 端到端一回合(5train) | 1814.5 | 1210.4 | 1208.8 | **1209.6** | 0.1% |
+| E. score_train_action ×1 | 703.0 | 443.7 | 448.8 | **446.3** | 1.1% |
+| F. decide_train(整回合) | 4169.1 | 4216.9 | 4258.6 | **4237.8** | 1.0% |
+| G. calc_ramen_training_effect ×1 | 9.4 | 9.5 | 9.7 | **9.6** | 2.1% |
+
+> 注① Run 1 为进程冷启动（全段偏高，B 段最甚 530.6），仅参考，**总均不含**。
+> 注② 总均 = Run 2/3 均值。对照段（本次未触碰代码）B/C/F/G 回落上午 cleanup 基线 ±2%（257.2/265.1/4237.8/9.6 vs 260.20/270.39/4175.40/9.63）→ 测量环境与上午可比；可比口径下段 A 800.97 → 633.9 ≈ **-21%**（采样替换端到端收益，与 §7.3 进程内对照 -31~-42%/次 交叉验证吻合）。
+> 注③ 机器性能漂移现象（2026-09-02 同 commit 连续 4 次重测）：段 A 漂移 634~907（±18%），未动代码的对照段同向漂移（B 255~382、F 4175~5662），每轮 Run 1 恒为冷启动峰值；G 相对稳定（9.4~13.7）。应对：**跨次数字不可直接对比**，先以「对照段是否回落基线」判可比性，定量一律以进程内对照为准。
+
+### B.4 2026-09-03 复测（训练评估单源化后，§3.1b）
+
+测量方法同 B.3（`calc_training_value_microbench` 默认参数）；机器当日仍处漂移窗口（load 0.7~2.5 波动，与注③同型）。取稳定轮次（RUN 3 等、对照组 B/C 回落基线时）：
+
+| 段 | 基线（B.3 总均） | B2 后稳定均值 | Δ |
+|---|---:|---:|---:|
+| A. distribute_all | 633.9 | ~640 | +1% |
+| B. calc_training_buff ×5 | 257.2 | ~260 | +1% |
+| C. calc_training_value ×5 | 265.1 | ~270 | +2% |
+| D. 端到端一回合(5train) | 1209.6 | ~1214 | +0.4% |
+| E. score_train_action ×1 | 446.3 | ~451 | +1% |
+| F. decide_train(整回合) | 4237.8 | ~3650 | **-14%** |
+| G. calc_ramen_training_effect ×1 | 9.6 | ~10 | +4% |
+
+> 注④ 6 函数 microbench（d10872a 口径）的 `calc_training_value`/`select_action` 两项在 B2 后同轮出现 +20% 漂移（40/30 ns），但同函数的 7 段 C 段（+2%）与整局 sim_profiler 500 局（1.25s → 1.13s，-10%）均正常，stash A/B 对照确认随 policy/local 代码布局漂移——单函数 microbench 对代码布局/缓存状态敏感，**以整合视角（F 段 + 整局 CPU）为锚**，不更新 B.1 基线。
+
+## 附录 C：mcts_profiler env vars
 
 | 变量 | 默认值 | 说明 |
 |---|---|---|
@@ -273,3 +380,14 @@ pprof-rs 让手写策略 hot path 函数名**真正浮出水面**——之前 ca
 | `MCTS_PROFILER_SEARCH_N` | 64 | 每候选 rollout 数 |
 | `MCTS_PROFILER_STAGES` | "train,ramen,special" | 搜索阶段（逗号分隔） |
 | `MCTS_PROFILER_NUM_THREADS` | 1 | rayon 线程数（1 = 单线程，栈最干净） |
+
+## 附录 D：calc_training_value_microbench env vars
+
+| 变量 | 默认值 | 说明 |
+|---|---|---|
+| `CT_MICROBENCH_RUNS` | 1000 | 每段 iter 次数（每段内部 = 1 iter，对应 5 train 一回合 / 1 candidate 打分 / 1 distribute_all 等含义见 §7.2 表） |
+| `CT_MICROBENCH_WARMUP` | 1000 | 每段 warmup 次数（让分配器 / cache 稳定，与 d10872a microbench 模板一致） |
+
+**注**：本工具**没有** `LABEL` / `OUTPUT_PATH` env vars——与 `mcts_profiler` 不同，仅以表格形式 stdout 输出，墙钟总耗时也打屏，不需要落盘文件（每次跑直接对比数字即可）。
+
+复现命令见 §6.4。

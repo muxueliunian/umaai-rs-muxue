@@ -70,7 +70,7 @@ log_level = "info"
 search_n = 12288
 
 # UCB 每组搜索次数
-search_group_size = 2048
+search_group_size = 512
 
 # 激进度上限（越大越重视胡局；0=平均，>4=只考虑最好局面）
 radical_factor_max = 1.4
