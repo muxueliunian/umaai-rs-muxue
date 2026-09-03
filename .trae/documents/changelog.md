@@ -3,6 +3,9 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-09-03
+- **`ramen_space_bench` 固定地区策略为 `all`**：与 `bench_base`、`ramen_teacher_collect` 一致，不再跟随 `game_config.toml`。此前跟随 toml 时，只要有人为手动模式把 `ramen_region_strategy` 改成 `fixed`，基准就会静默换成另一个分布（第 3 年由 120 组合枚举变成写死单组合并跳过 trainer），此前记下的全部均分基线一并作废，而输出里看不出任何区别。只改 strategy 不碰 `ramen_region_fixed`——后者仅在 `fixed` 下被读，清空它是空操作
+- **`ramen_handwritten_choice` 补转发 `select_event_choice`**：包装用的 `RecordingTrainer` 只实现了 `select_action` / `select_choice`，`select_event_choice` 落到 trait 默认实现，绕过了手写策略重写的友人事件特例——重放出的轨迹因此可能与采集时不是同一条
+- **若干健壮性与文档修正**：`.npy` 头部读取补长度检查（截断文件原会在切片处 panic）；删除 `ChoiceRow` 中只写不读的阶段字段（消除默认 `cargo check` 的 dead_code 警告）；NN 训练员的模型测试在 `saved_models/` 缺模型时跳过而非失败（该目录不入库）；修正 `enumerate_space` 误用 `enumerate_decks` 文档摘要与 `ramen_special_root` 指向 `#[cfg(test)]` 的 rustdoc 死链；`CandidateAccum::push` 的有序槽位判空合并为一次
 - **训练评估单源化（B2）消除 policy↔local 双重计算**：新增 `RamenTrainEval`（buffs/value/ramen_effect/fail_rate/shining 五件套）+ `RamenPolicy::eval_train` 单源评估，`score_train_action` 拆为 eval/other 两分支，`score_train_actions`/`decide_train` 新增 cached 变体（`TrainEvalCache` 按 train 位缓存）；`LocalRamenTrainer::decide_train` 跨 policy 打分与 local 调整层共享同一份 eval，同一回合同 train 的 `calc_training_buff`/`calc_training_value`/`calc_training_failure_rate`/`calc_ramen_training_effect`（原本最多算 3 遍）收口成 1 遍；`RamenGame` 新增 `calc_training_value_with_effect`（trait 方法保持完整单函数实现避免跨 impl 边界内联损失）。microbench 7 段 F（decide_train 整回合）4238→~3650 ns/iter（**-14%**），其余段回落基线 ±5% 内；sim_profiler 500 局整局 CPU ~1.25s→1.13s（**-10%**）；平均分逐位一致 64871
 - **训练评估确定性守门**：`test_train_eval_deterministic_and_cached_consistent` 三条——同局面两次 `eval_train` 逐位一致（缓存可复用前提）/ cached 与 uncached 决策逐项一致（含非 Train 候选）/ trait `calc_training_value` 与 `with_effect` 双路径逐位等价（防重复代码漂移）
 - **mcts_profiler bin 注册补 `required-features=["profiler"]`**：顶层 `#![cfg(feature = "profiler")]` 未注册导致默认 check/build 报 `main function not found`（与 muxue fork 同款坑，修复入主仓库）
@@ -66,7 +69,7 @@
 - **决策理由输出按分排序 + 分差着色**：移除险胜门限触发，每回合都输出决策理由；"中选"改"首选"并固定亮绿色，其余按评分降序编号 `#2` 起，颜色按与**首选**差距分档（`<30` 亮绿 / `<100` 绿 / `<300` 黄 / 其余真彩色灰，与文本内 `±分差` 同源）；`reason_gap_threshold` 字段保留兼容但不再用作触发器；`test_color_thresholds` 在 `--features no-color` 下自动跳过
 - **决策理由模块索引入项目文档**：`project_context.md` 新增"输出与决策理由"节，记录 `reason_color` 阈值调整位置（`reason.rs:107`）与 no-color feature 兼容性
 - **拉面在线对接计划**：新增 `.trae/documents/ramen_online_integration_plan.md`——文件通道 thisTurn.json + scenarioId 分发、两阶段决策吃面前/吃面后、C# 端先行冻结协议再 Rust 接入
-- **用户配置调整**：`game_config.toml` 切马娘 101901（stamina build）+ 卡组/蓝因子/extra_count 微调；`gamedata/default_config.toml` 同思路调 102601 + `ramen_region_strategy` 由 `"fixed"` 改 `"all"`（❗本分支合并时保留我方版本：`ramen_space_bench` 不覆盖 `ramen_region_strategy`，改成 `all` 会静默作废已有基线）
+- **用户配置调整**：`game_config.toml` 切马娘 101901（stamina build）+ 卡组/蓝因子/extra_count 微调；`gamedata/default_config.toml` 同思路调 102601 + `ramen_region_strategy` 由 `"fixed"` 改 `"all"`
 
 ## 2026-08-28
 - **MCTS rollout 诊断日志运行时屏蔽**：diagnostic 加进程级开关（DiagGuard 挂 `search_with_terminal`），`diag!` 双门控 + 8 处 explain 块补 `if enabled()`，rollout 搜索静默、业务日志不受影响，顺带拿回加速收益

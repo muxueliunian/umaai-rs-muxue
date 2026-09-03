@@ -19,7 +19,7 @@ use crate::{
         ramen::{
             RamenAction, RamenGame, RamenStage,
             features::{self, encode},
-            policy::free_race_gate_index,
+            policy::{RamenPolicyConfig, free_race_gate_index},
             policy_schema::{POLICY_DIM, PolicySlots, slots_of},
             rules::list_special_targets_for
         }
@@ -41,8 +41,14 @@ const CHOICE_DIM: usize = 8;
 /// value 头宽度：mean / stdev / 高分位
 const VALUE_DIM: usize = 3;
 
-/// 自选比赛硬守门的宽裕度，与 `RamenPolicyConfig::race_gate_slack` 的正式取值一致
-const RACE_GATE_SLACK: u32 = 1;
+/// 自选比赛硬守门的宽裕度
+///
+/// 单源取自 [`RamenPolicyConfig::race_gate_slack`] 的正式默认值，**不再硬编码**：
+/// 手写策略与网络策略必须用同一个宽裕度，否则日后调这个参数时两边会静默分叉。
+/// 该 `Default` 全为常量字面量，release 下会被常量折叠。
+fn race_gate_slack() -> u32 {
+    RamenPolicyConfig::default().race_gate_slack
+}
 
 /// 模型总输出维度：policy + choice + value
 const OUTPUT_DIM: usize = POLICY_DIM + CHOICE_DIM + VALUE_DIM;
@@ -419,7 +425,7 @@ impl Trainer<RamenGame> for RamenNnTrainer {
         let stage = ramen_effective_stage(game, actions);
         // 自选比赛硬守门优先于网络输出：不达标直接育成失败，不是可权衡的价值项
         if self.race_shield && stage == RamenStage::Train {
-            if let Some(idx) = free_race_gate_index(game, actions, RACE_GATE_SLACK) {
+            if let Some(idx) = free_race_gate_index(game, actions, race_gate_slack()) {
                 return Ok(idx);
             }
         }
@@ -510,6 +516,10 @@ mod tests {
     }
 
     /// 加载 pilot 模型，在开局第一决策点跑一次 select_action
+    ///
+    /// `saved_models/` 在 `.gitignore` 里，模型不随仓库分发。缺模型时本测试
+    /// **跳过而不是失败**——否则任何没跑过训练管线的机器上
+    /// `cargo test --features onnx` 都会红，而红的原因与代码无关。
     #[test]
     fn test_ramen_nn_select_action_opening() -> Result<()> {
         let root = get_workspace_root()?;
@@ -519,6 +529,10 @@ mod tests {
 
         let model_path = root.join("saved_models").join("ramen_pilot").join("model.onnx");
         println!("模型路径: {}", model_path.display());
+        if !model_path.is_file() {
+            println!("跳过：模型不存在（saved_models 不入库，需先跑 scripts/ramen_nn 导出）");
+            return Ok(());
+        }
         let trainer = RamenNnTrainer::load(&model_path)?;
 
         let (mut rng, rule_master) = crate::bench::seeded_rngs(42, 0);

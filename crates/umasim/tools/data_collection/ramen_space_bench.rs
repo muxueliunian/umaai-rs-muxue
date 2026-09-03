@@ -12,6 +12,11 @@
 //! 给出与教师数据同分布的均分。它同时是第一代网络的验收口径：把 `--trainer`
 //! 换成网络策略、其余参数不动，两个数字才可比。
 //!
+//! ❗`ramen_region_strategy` 由本 bin 强制为 `all`（与 `bench_base`、
+//! `ramen_teacher_collect` 一致），不跟随 `game_config.toml`。跟随 toml 会让
+//! 有人为手动模式改成 `fixed` 时，基准静默换成另一个分布，此前记下的全部均分
+//! 基线一并作废，而输出里看不出任何区别。
+//!
 //! # 分布外模式
 //!
 //! 给出 `--shape` 后切换到 [`SamplingSpace::custom`]：只枚举该构成，并可用
@@ -39,7 +44,7 @@ use clap::Parser;
 use rayon::prelude::*;
 use umasim::{
     bench::{self, GameOutcome},
-    gamedata::init_global_with_config,
+    gamedata::{RamenRegionStrategy, init_global_with_config},
     sampler::{DeckPlan, DeckShape, SamplingSpace, gen1_inherit},
     trainer::{LoggingTrainer, RandomTrainer, RecommendedRamenTrainer},
     utils::{get_workspace_root, load_game_config}
@@ -335,7 +340,22 @@ fn main() -> Result<()> {
     let workspace_root = get_workspace_root()?;
     std::env::set_current_dir(&workspace_root)
         .with_context(|| format!("切换到工作空间根失败: {}", workspace_root.display()))?;
-    init_global_with_config(&load_game_config()?)?;
+    // Y3 地区选择必须交回策略（All 枚举），与 `bench_base` / `ramen_teacher_collect`
+    // 同一条前提：教师数据就是在 all 下采的，基准若跟着 toml 走 fixed，测的不再是
+    // 同一个分布，而此前记下的全部均分基线会被静默作废。
+    //
+    // 只改 strategy，不碰 `ramen_region_fixed`：后者仅在 `strategy == Fixed` 时被读
+    // （`action.rs::region_select_combos` 与 `game.rs` 的 Y3 分支各一处，都带该守卫），
+    // 在 All 下清空它是空操作，写出来只会让人误以为它参与了结果。
+    let mut game_config = load_game_config()?;
+    if game_config.ramen_region_strategy != RamenRegionStrategy::All {
+        println!(
+            "已将 ramen_region_strategy 从 {:?} 强制改为 All（基准须与教师数据同分布）",
+            game_config.ramen_region_strategy
+        );
+        game_config.ramen_region_strategy = RamenRegionStrategy::All;
+    }
+    init_global_with_config(&game_config)?;
     let kind = select_trainer(&args)?;
 
     let space = build_space(&args)?;

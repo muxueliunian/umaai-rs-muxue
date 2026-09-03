@@ -421,7 +421,6 @@ impl SamplingSpace {
     }
 }
 
-/// 从各类型可用卡中按张数要求枚举全部普通卡组合（结果长度恒为 5）
 /// 在给定卡池与构成列表上枚举全部合法 `(马娘, 卡组)`
 ///
 /// 卡片类型一律从 `cardDB.json` 读取而非硬编码——数据更新导致类型变动时应当报错，
@@ -486,6 +485,7 @@ fn enumerate_space(pool: &[u32], shapes: &[DeckShape]) -> Result<Vec<DeckPlan>> 
     Ok(plans)
 }
 
+/// 从各类型可用卡中按张数要求枚举全部普通卡组合（结果长度恒为 5）
 fn enumerate_decks(usable: &[Vec<u32>; 5], counts: &[usize; 5]) -> Vec<[u32; 5]> {
     // 逐类型做组合，再跨类型笛卡尔积
     let mut acc: Vec<Vec<u32>> = vec![Vec::new()];
@@ -563,7 +563,13 @@ pub struct SamplerConfig {
     /// 第 2/3 年的 15 个格位因此拿不到可用的监督量，且这个量完全不受控。
     ///
     /// **第 3 年的每条样本约值 12 条普通样本的机时**（`all` 策略 120 个组合），
-    /// 故总预算倍率 ≈ `1 + q3 × 11`。默认 `[20, 30]` 对应 ≈ 1.33x。
+    /// 故总预算倍率 ≈ `1 + q3 × 11`，`[20, 30]` 对应 ≈ 1.33x。
+    ///
+    /// 默认 `[0, 0]`（关闭）：配额会改写 [`SampleSpec::truncate_turn`] 并强制
+    /// [`SampleSpec::capture_stage`]，是教师数据采集的专用需求，不应让
+    /// `SamplerConfig::default()` 的既有调用方跟着改变样本分布。采集侧由
+    /// `ramen_teacher_collect` / `ramen_handwritten_choice` 的
+    /// `--region-quota-permille` 显式给出。
     pub region_quota_permille: [u32; 2]
 }
 
@@ -575,7 +581,7 @@ impl Default for SamplerConfig {
             inherit: gen1_inherit(),
             max_turn: 77,
             seed_base: 0x5041_5254_5F31,
-            region_quota_permille: [20, 30]
+            region_quota_permille: [0, 0]
         }
     }
 }

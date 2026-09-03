@@ -996,11 +996,13 @@ pub(crate) fn remaining_race_slots(turn: i32, free: &FreeRaceData) -> u32 {
 
 /// 自选比赛硬守门的判定本体（不依赖 [`RamenPolicy`] 实例）
 ///
-/// 抽成自由函数是为了让**神经网络策略**复用同一份守门逻辑：自选比赛不达标会在
-/// `BaseGame::check_free_race` 判定育成失败，这是硬性义务而非价值权衡，任何策略
-/// 都必须过这一层。判定语义见 [`RamenPolicy::free_race_gate`]，此处逐字保持一致。
+/// 自选比赛不达标会在 `BaseGame::check_free_race` 判定育成失败，这是**硬性义务
+/// 而非价值权衡**，任何决策器都必须过这一层。判定本身只读局面与候选、不读策略参数，
+/// 故抽成自由函数供任意决策器复用同一份逻辑，避免各自实现出现分歧。
+/// 判定语义见 [`RamenPolicy::free_race_gate`]，此处逐字保持一致。
 ///
-/// `slack` 对应 [`RamenPolicyConfig::race_gate_slack`]，正式配置恒为 1。
+/// `slack` 对应 [`RamenPolicyConfig::race_gate_slack`]，调用方一律取该配置值，
+/// 不要另行硬编码。
 ///
 /// 返回候选中「比赛」动作的下标；`None` 表示无需干预
 /// （无要求 / 已达标 / 仍宽裕 / 本回合等级不满足 / 剩余有效回合不足而摆烂 /

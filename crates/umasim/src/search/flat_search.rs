@@ -96,8 +96,12 @@ impl<D> CandidateAccum<D> {
         self.score.add(outcome.score.score);
         self.score_pt.add(outcome.score.score_pt);
         outcome.terminal.accumulate_into(&mut self.terminal);
-        self.ensure_ordered_slot(idx);
+        // 单次判空即完成「补齐槽位 + 写入」：开关关闭时（生产路径）这里只剩一次
+        // 恒假的 Option 判别，与合并前同构；写在两个方法里会白白多一次分支
         if let Some(ordered) = self.ordered.as_mut() {
+            if ordered.len() <= idx {
+                ordered.resize(idx + 1, None);
+            }
             ordered[idx] = Some(outcome.score.score);
         }
     }

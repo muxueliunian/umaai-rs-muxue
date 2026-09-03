@@ -24,8 +24,8 @@
 //! 还原是对 `RamenSelect → SpecialSelect` 过渡的逆操作，依赖「该过渡只写这三处」
 //! 这一事实。规则层若新增字段，本函数会**静默变错**。
 //!
-//! 守门手段是 [`tests::test_canonical_special_root_matches_ramen_select`]：它走真实的
-//! [`Game::next`] 完成过渡，再断言还原后的 754 维特征与联合根**逐位相同**。
+//! 守门手段是本文件的 `tests::test_canonical_special_root_matches_ramen_select`：
+//! 它走真实的 `Game::next` 完成过渡，再断言还原后的 754 维特征与联合根**逐位相同**。
 //!
 //! ⚠ 守门范围有限：**只有进入特征编码的字段才会被抓住**。过渡若写脏一个不进特征的
 //! 字段（例如 `combined_decision`），特征逐位比较不会变红。故测试另行直接比对

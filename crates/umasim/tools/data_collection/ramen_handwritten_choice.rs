@@ -34,7 +34,7 @@ use std::{
     sync::Mutex
 };
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use clap::Parser;
 use rand::rngs::StdRng;
 use rayon::prelude::*;
@@ -50,7 +50,7 @@ use umasim::{
             training_sample::stage_of_code
         }
     },
-    gamedata::{EventChoice, RamenRegionStrategy, init_global_with_config},
+    gamedata::{EventChoice, EventData, RamenRegionStrategy, init_global_with_config},
     sampler::{SampleOutcome, SamplerConfig, SamplingSpace, sample_position},
     trainer::RecommendedRamenTrainer,
     game::traits::Trainer,
@@ -73,7 +73,15 @@ struct ChoiceArgs {
 
     /// 输出目录
     #[arg(long)]
-    output_dir: PathBuf
+    output_dir: PathBuf,
+
+    /// 第 2/3 年地区选择采样配额（千分之几），逗号分隔 `Y2,Y3`
+    ///
+    /// ❗**必须与采集该数据集时 `ramen_teacher_collect` 用的值相同**：配额会改写
+    /// 截断回合与捕获阶段，取值不一致会让重放出的局面与数据集对不上（`choice_at`
+    /// 的阶段核对会直接报错，不会静默出错）。默认值与采集侧的默认值一致。
+    #[arg(long, value_delimiter = ',', num_args = 1, default_value = "20,30")]
+    region_quota_permille: Vec<u32>
 }
 
 /// 一个样本上手写策略的选择结果
@@ -84,9 +92,7 @@ struct ChoiceRow {
     /// 样本 id
     index: u64,
     /// 手写策略选择所落的格位，不足补 `-1`
-    slots: [i32; SLOTS_PER_CAND],
-    /// 重放出的阶段编码，用于与数据集核对
-    stage: u8
+    slots: [i32; SLOTS_PER_CAND]
 }
 
 /// 记录首次决策的包装训练员
@@ -131,6 +137,18 @@ impl Trainer<RamenGame> for RecordingTrainer<'_> {
 
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
         self.inner.select_choice(game, choices, rng)
+    }
+
+    // 必须显式转发：trait 的默认实现会回落到 `select_choice`，而手写策略**重写了**
+    // 本方法（友人事件特例）。不转发就等于在重放里换掉了被记录的那个策略。
+    fn select_event_choice(
+        &self, game: &RamenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
+    ) -> Result<usize> {
+        self.inner.select_event_choice(game, event, choices, rng)
+    }
+
+    fn last_breakdown(&self) -> Option<String> {
+        self.inner.last_breakdown()
     }
 }
 
@@ -197,11 +215,12 @@ fn choice_at(space: &SamplingSpace, config: &SamplerConfig, order: usize, index:
         slots_of(pos.stage.clone(), action)?
     };
 
+    // 阶段不另存进行：`want_stage` 已在上面与重放结果核对过，存一份只会多出
+    // 一处可以和数据集不一致的地方
     Ok(ChoiceRow {
         order,
         index,
-        slots: slots_to_row(&slots)?,
-        stage: want_stage
+        slots: slots_to_row(&slots)?
     })
 }
 
@@ -271,7 +290,18 @@ fn main() -> Result<()> {
     println!("重放 {} 条局面…", index.len());
 
     let space = SamplingSpace::gen1()?;
-    let config = SamplerConfig::default();
+    ensure!(
+        args.region_quota_permille.len() == 2,
+        "--region-quota-permille 需要恰好 2 个整数（Y2,Y3），实得 {}",
+        args.region_quota_permille.len()
+    );
+    let y2 = *args.region_quota_permille.first().ok_or_else(|| anyhow!("缺少 Y2 配额"))?;
+    let y3 = *args.region_quota_permille.get(1).ok_or_else(|| anyhow!("缺少 Y3 配额"))?;
+    let config = SamplerConfig {
+        region_quota_permille: [y2, y3],
+        ..SamplerConfig::default()
+    };
+    println!("采样配额 region_quota_permille = [{y2}, {y3}]（须与采集时一致）");
     let start = std::time::Instant::now();
     let mut rows: Vec<ChoiceRow> = (0..index.len())
         .into_par_iter()
@@ -302,14 +332,32 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// 读出 `.npy` 的定长头部文本
+///
+/// 单独成函数是为了让「文件比头部还短」在这里被拦成 `Result`，
+/// 而不是在切片处 panic——输入目录由用户给出，截断/空文件是可预期的。
+///
+/// # 错误
+///
+/// 文件短于 [`NPY_HEADER_LEN`] 时报错。
+fn npy_head_text(bytes: &[u8], path: &Path) -> Result<String> {
+    ensure!(
+        bytes.len() >= NPY_HEADER_LEN,
+        "{} 只有 {} 字节，不足一个 {NPY_HEADER_LEN} 字节的 npy 头部",
+        path.display(),
+        bytes.len()
+    );
+    Ok(String::from_utf8_lossy(&bytes[10..NPY_HEADER_LEN]).to_string())
+}
+
 /// 读一维 `u64` 的 `.npy`
 ///
 /// # 错误
 ///
-/// 文件缺失或头部不是预期 dtype 时报错。
+/// 文件缺失、被截断，或头部不是预期 dtype 时报错。
 fn read_u64_npy(path: &Path) -> Result<Vec<u64>> {
     let bytes = std::fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
-    let head = String::from_utf8_lossy(&bytes[10..NPY_HEADER_LEN]).to_string();
+    let head = npy_head_text(&bytes, path)?;
     ensure!(head.contains("'<u8'"), "{} 不是 u64 数组", path.display());
     let body = &bytes[NPY_HEADER_LEN..];
     ensure!(body.len().is_multiple_of(8), "{} 长度不是 8 的倍数", path.display());
@@ -320,10 +368,10 @@ fn read_u64_npy(path: &Path) -> Result<Vec<u64>> {
 ///
 /// # 错误
 ///
-/// 文件缺失或头部不是预期 dtype 时报错。
+/// 文件缺失、被截断，或头部不是预期 dtype 时报错。
 fn read_u8_npy(path: &Path) -> Result<Vec<u8>> {
     let bytes = std::fs::read(path).with_context(|| format!("读取 {} 失败", path.display()))?;
-    let head = String::from_utf8_lossy(&bytes[10..NPY_HEADER_LEN]).to_string();
+    let head = npy_head_text(&bytes, path)?;
     if !head.contains("'|u1'") {
         bail!("{} 不是 u8 数组", path.display());
     }
