@@ -39,13 +39,13 @@
 
 use std::{collections::BTreeMap, path::PathBuf};
 
-use anyhow::{Context, Result, bail, ensure};
+use anyhow::{Context, Result, bail};
 use clap::Parser;
 use rayon::prelude::*;
 use umasim::{
     bench::{self, GameOutcome},
     gamedata::{RamenRegionStrategy, init_global_with_config},
-    sampler::{DeckPlan, DeckShape, SamplingSpace, gen1_inherit},
+    sampler::{DeckPlan, SamplingSpace, gen1_inherit, space_from_cli},
     trainer::{LoggingTrainer, RandomTrainer, RecommendedRamenTrainer},
     utils::{get_workspace_root, load_game_config}
 };
@@ -142,58 +142,13 @@ fn parse_special_mode(s: &str) -> Result<SpecialSelectMode> {
     }
 }
 
-/// 解析 `--shape` 的 `速,耐,力,根,智`
-///
-/// # 错误
-///
-/// 项数不是 5、某项不是非负整数，或五项合计不为 5 时报错。合计不为 5 必须报错
-/// 而不是补齐：拉面杯的普通卡位恒为 5 张，猜用户想补哪一类只会静默跑错构成。
-fn parse_shape(text: &str) -> Result<[usize; 5]> {
-    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
-    ensure!(parts.len() == 5, "--shape 需要 5 个数字（速,耐,力,根,智），实得 {}", parts.len());
-    let mut counts = [0usize; 5];
-    for (i, part) in parts.iter().enumerate() {
-        counts[i] = part
-            .parse::<usize>()
-            .with_context(|| format!("--shape 第 {} 项 `{part}` 不是非负整数", i + 1))?;
-    }
-    let total: usize = counts.iter().sum();
-    ensure!(total == 5, "--shape 五项合计必须为 5（友人卡固定 1 张不计入），实得 {total}");
-    Ok(counts)
-}
-
-/// 把构成计数格式化成 `2速1耐2智1友`，与 `GEN1_SHAPES` 的命名习惯一致
-fn format_shape_name(counts: &[usize; 5]) -> String {
-    const TYPE_NAMES: [&str; 5] = ["速", "耐", "力", "根", "智"];
-    let mut name = String::new();
-    for (i, &n) in counts.iter().enumerate() {
-        if n > 0 {
-            name.push_str(&n.to_string());
-            name.push_str(TYPE_NAMES[i]);
-        }
-    }
-    name.push_str("1友");
-    name
-}
-
 /// 按命令行构造采样空间：默认第一代，给了 `--shape` 则走分布外
 ///
 /// # 错误
 ///
-/// `--shape` 解析失败、只给 `--extra-card` 不给 `--shape`，或空间枚举失败时报错。
+/// 见 [`space_from_cli`]。
 fn build_space(args: &BenchArgs) -> Result<SamplingSpace> {
-    let Some(text) = &args.shape else {
-        ensure!(
-            args.extra_card.is_empty(),
-            "--extra-card 必须与 --shape 同用：默认口径要与教师数据同分布，不能私自扩卡池"
-        );
-        return SamplingSpace::gen1();
-    };
-    let counts = parse_shape(text)?;
-    // `DeckShape::name` 要求 'static。CLI 参数活到进程结束，泄漏一个短字符串
-    // 换来 CSV 与分组统计里显示真实构成名，比塞一个占位常量更有用。
-    let name: &'static str = Box::leak(format_shape_name(&counts).into_boxed_str());
-    SamplingSpace::custom(&args.extra_card, DeckShape { counts, name })
+    space_from_cli(args.shape.as_deref(), &args.extra_card)
 }
 
 /// 一组分数的汇总统计

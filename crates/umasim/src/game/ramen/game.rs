@@ -1193,6 +1193,13 @@ impl RamenGame {
             }
         };
 
+        // 观测：合并决策路径（NN / MCTS）与三阶段路径记同一笔账，否则两条路径的
+        // 统计不可比。守门同 `list_actions` 的拉面回合判据。
+        if self.base.turn >= 2 && !self.is_super_ramen_turn() {
+            let regions = self.ramen.selected_regions;
+            super::rules::record_ramen_select(&mut self.ramen, &regions, ramen.is_some());
+        }
+
         self.ramen.pending_ramen = ramen;
         self.ramen.pending_special_targets = targets;
         self.ramen.combined_decision = true;

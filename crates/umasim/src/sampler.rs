@@ -42,12 +42,12 @@
 
 use std::cell::RefCell;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rand::{Rng, rngs::StdRng};
 
 use crate::{
     bench::seeded_rngs,
-    collector::compute_text_hash_fnv1a64,
+    collector::{compute_text_hash_fnv1a64, fnv1a64},
     game::{
         Game,
         InheritInfo,
@@ -300,6 +300,84 @@ pub struct DeckPlan {
     pub deck: [u32; 6],
     /// 所属构成名
     pub shape: &'static str
+}
+
+impl DeckPlan {
+    /// (马娘, 卡组) 的稳定组合键
+    ///
+    /// **只由马娘与卡组决定，与采样空间无关**——这正是它存在的理由。组合身份此前靠
+    /// `index % plan_count` 推导，那个口径绑死在某一个空间上：换空间、扩卡池之后
+    /// 同一个 `index` 指向的组合就变了，新旧数据因此无法合并按组合切分留出集。
+    /// 本键把身份改成直接量，同一副卡组在任何空间下都得到同一个值。
+    ///
+    /// `deck` 是规范序（前 5 张普通卡按类型序、末位友人卡），故同一副卡组不会因
+    /// 枚举顺序不同而算出两个键。
+    pub fn combo_key(&self) -> u64 {
+        let mut bytes = [0u8; 28];
+        bytes[..4].copy_from_slice(&self.uma.to_le_bytes());
+        for (i, card) in self.deck.iter().enumerate() {
+            let off = 4 + i * 4;
+            bytes[off..off + 4].copy_from_slice(&card.to_le_bytes());
+        }
+        fnv1a64(&bytes)
+    }
+}
+
+/// 解析命令行的构成串 `速,耐,力,根,智`
+///
+/// # 错误
+///
+/// 项数不是 5、某项不是非负整数，或五项合计不为 5 时报错。合计不为 5 必须报错
+/// 而不是补齐：拉面杯的普通卡位恒为 5 张，猜用户想补哪一类只会静默跑错构成。
+pub fn parse_shape(text: &str) -> Result<[usize; 5]> {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    ensure!(parts.len() == 5, "构成需要 5 个数字（速,耐,力,根,智），实得 {}", parts.len());
+    let mut counts = [0usize; 5];
+    for (i, part) in parts.iter().enumerate() {
+        counts[i] = part
+            .parse::<usize>()
+            .with_context(|| format!("构成第 {} 项 `{part}` 不是非负整数", i + 1))?;
+    }
+    let total: usize = counts.iter().sum();
+    ensure!(total == 5, "构成五项合计必须为 5（友人卡固定 1 张不计入），实得 {total}");
+    Ok(counts)
+}
+
+/// 把构成计数格式化成 `2速1耐2智1友`，与 [`GEN1_SHAPES`] 的命名习惯一致
+pub fn format_shape_name(counts: &[usize; 5]) -> String {
+    const TYPE_NAMES: [&str; 5] = ["速", "耐", "力", "根", "智"];
+    let mut name = String::new();
+    for (i, &n) in counts.iter().enumerate() {
+        if n > 0 {
+            name.push_str(&n.to_string());
+            name.push_str(TYPE_NAMES[i]);
+        }
+    }
+    name.push_str("1友");
+    name
+}
+
+/// 按「构成 + 追加卡」的命令行口径构造采样空间
+///
+/// `shape` 为 `None` 时返回第一代空间；给了 `shape` 则走 [`SamplingSpace::custom`]，
+/// 只枚举该构成并可追加卡池。采集与基准共用本函数，两边的分布外口径不能各写一份。
+///
+/// # 错误
+///
+/// 构成解析失败、只给追加卡不给构成，或空间枚举失败时报错。
+pub fn space_from_cli(shape: Option<&str>, extra_cards: &[u32]) -> Result<SamplingSpace> {
+    let Some(text) = shape else {
+        ensure!(
+            extra_cards.is_empty(),
+            "追加卡必须与构成同用：默认口径要与教师数据同分布，不能私自扩卡池"
+        );
+        return SamplingSpace::gen1();
+    };
+    let counts = parse_shape(text)?;
+    // `DeckShape::name` 要求 'static。CLI 参数活到进程结束，泄漏一个短字符串
+    // 换来输出里显示真实构成名，比塞一个占位常量更有用。
+    let name: &'static str = Box::leak(format_shape_name(&counts).into_boxed_str());
+    SamplingSpace::custom(extra_cards, DeckShape { counts, name })
 }
 
 /// 第一代继承因子（沿用 `bench_config.toml` 现值，第一代固定不随机）
@@ -860,7 +938,7 @@ pub fn sample_from_spec(spec: SampleSpec) -> Result<SampleOutcome> {
 mod tests {
     use std::collections::{BTreeSet, HashMap};
 
-    use anyhow::{Result, anyhow, bail};
+    use anyhow::{Result, anyhow, bail, ensure};
 
     use super::*;
     use crate::{
@@ -950,6 +1028,53 @@ mod tests {
             assert_eq!(per_uma[&uma.game_id], 85, "{} 无角色冲突，应为 85 套", uma.alias);
         }
         assert_eq!(space.len(), 5 * 85 + 2 * 50);
+        Ok(())
+    }
+
+    /// 组合键跨空间稳定，且在第一代空间内无碰撞
+    ///
+    /// 这是新旧数据共存的全部依据：换空间、扩卡池之后，同一副卡组必须仍算出同一个键，
+    /// 否则合并训练时同一套卡组会被劈到留出集两边，验证指标静默偏乐观。
+    #[test]
+    fn test_combo_key_stable_across_spaces() -> Result<()> {
+        setup()?;
+        let gen1 = SamplingSpace::gen1()?;
+
+        // 无碰撞：525 个组合必须给出 525 个不同的键
+        let keys: BTreeSet<u64> = gen1.plans().iter().map(|p| p.combo_key()).collect();
+        println!("gen1 {} 个组合 → {} 个不同的键", gen1.len(), keys.len());
+        ensure!(keys.len() == gen1.len(), "组合键在第一代空间内发生碰撞");
+
+        // 跨空间稳定：只枚举 gen1 某一种构成的子空间，其卡组是 gen1 的子集，
+        // 同一副卡组在两个空间里必须得到同一个键
+        let shape = GEN1_SHAPES[0];
+        let sub = SamplingSpace::custom(&[], shape)?;
+        let by_deck: HashMap<(u32, [u32; 6]), u64> =
+            gen1.plans().iter().map(|p| ((p.uma, p.deck), p.combo_key())).collect();
+        let mut checked = 0usize;
+        for plan in sub.plans() {
+            let expect = by_deck
+                .get(&(plan.uma, plan.deck))
+                .ok_or_else(|| anyhow!("子空间卡组 {:?} 不在 gen1 里", plan.deck))?;
+            ensure!(
+                plan.combo_key() == *expect,
+                "卡组 {:?} 跨空间的组合键不同: {} vs {}",
+                plan.deck,
+                plan.combo_key(),
+                expect
+            );
+            checked += 1;
+        }
+        println!("子空间「{}」{checked} 个组合的键与 gen1 逐个相同", shape.name);
+
+        // 追加卡产生的新组合不得撞上旧键
+        let ext = SamplingSpace::custom(&[303064], DeckShape {
+            counts: [2, 1, 0, 0, 2],
+            name: "2速1耐2智1友"
+        })?;
+        let overlap = ext.plans().iter().filter(|p| keys.contains(&p.combo_key())).count();
+        println!("分布外空间 {} 个组合，与 gen1 键重合 {overlap} 个", ext.len());
+        ensure!(overlap == 0, "分布外组合的键撞上了第一代组合");
         Ok(())
     }
 

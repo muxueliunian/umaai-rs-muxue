@@ -95,6 +95,33 @@ pub struct RamenState {
     /// 写入点在 `add_feeling` 丢弃分支。**纯观测**。
     #[serde(default)]
     pub yearly_gauge_overflow: [i32; 3],
+    /// 观测用：逐年吃面决策点数（`RamenSelect` 阶段真正给出选择的回合）。
+    ///
+    /// 写入点在 [`super::rules::record_ramen_select`]。回合 0-1 与超级拉面回合
+    /// 没有面可选，由调用侧过滤、不计入。**纯观测**。
+    #[serde(default)]
+    pub yearly_ramen_offers: [i32; 3],
+    /// 观测用：逐年「三个候选地区里至少有一碗做得出来」的决策点数。
+    ///
+    /// 与 [`Self::yearly_ramen_offers`] 之差即「想吃也吃不成」的回合数。**纯观测**。
+    #[serde(default)]
+    pub yearly_ramen_cookable: [i32; 3],
+    /// 观测用：逐年「做得出来却选了不吃面」的决策点数。
+    ///
+    /// 这是策略主动放弃的部分。与 [`Self::yearly_gauge_overflow`] 对照可把诀窍丢弃
+    /// 拆成「没料」「型不对」「有得做但不做」三种成因。**纯观测**。
+    #[serde(default)]
+    pub yearly_ramen_skipped: [i32; 3],
+    /// 观测用：逐年决策点上的诀窍库存总量之和（÷ offers = 平均库存）。
+    ///
+    /// 长期贴近 [`FEELING_LIMIT`] 说明库存顶格、溢出不可避免。**纯观测**。
+    #[serde(default)]
+    pub yearly_stock_sum: [i32; 3],
+    /// 观测用：逐年决策点上的诀窍型别偏斜之和（三型 max − min，÷ offers = 平均偏斜）。
+    ///
+    /// 偏斜大说明库存压在单一类型上、凑不齐配方要的另外两型。**纯观测**。
+    #[serde(default)]
+    pub yearly_stock_skew_sum: [i32; 3],
     /// 诀窍角标分配（回合 2-71 时每个训练随机分配一个诀窍类型）
     pub train_feeling_type: Option<[FeelingType; 5]>,
 

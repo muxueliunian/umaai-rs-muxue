@@ -14,6 +14,8 @@ pub const FEELING_LIMIT: i32 = 10;
 pub const GAUGE_LIMIT: i32 = 7;
 /// 做面消耗的诀窍点数
 pub const RAMEN_COST: i32 = 5;
+/// 单次做面最多使用的隐藏风味数
+pub const SPECIAL_TARGET_LIMIT: i32 = 2;
 
 // ========== 诀窍槽基础值分配 ==========
 
@@ -145,8 +147,8 @@ pub fn add_feeling(state: &mut RamenState, feeling_type: FeelingType, count: i32
 /// - `sum(special_targets) <= 2`（单次做面最多用 2 个隐藏风味）
 fn validate_special_targets(recipe: &[i32; 3], special_targets: &[i32; 3]) -> Result<()> {
     let total: i32 = special_targets.iter().sum();
-    if total > 2 {
-        anyhow::bail!("隐藏风味使用总数不能超过 2，实际: {total}");
+    if total > SPECIAL_TARGET_LIMIT {
+        anyhow::bail!("隐藏风味使用总数不能超过 {SPECIAL_TARGET_LIMIT}，实际: {total}");
     }
     for i in 0..3 {
         if special_targets[i] < 0 {
@@ -204,6 +206,71 @@ pub fn can_make_ramen(state: &RamenState, recipe: &[i32; 3], special_targets: &[
     }
     let net = calc_net_recipe(recipe, special_targets);
     (0..3).all(|i| state.feeling_stock[i] >= net[i])
+}
+
+// ========== 吃面决策点观测（纯采集） ==========
+
+/// 一个 `RamenSelect` 决策点上的诀窍侧观测量。
+///
+/// 用途是把「诀窍被丢弃」拆成三种成因：库存不够（`stock_sum` 低）、型别凑不齐
+/// （`stock_skew` 高但 `cookable` 为假）、以及做得出来却主动放弃（`cookable` 为真而不吃）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RamenSelectObs {
+    /// 三型诀窍库存合计
+    pub stock_sum: i32,
+    /// 型别偏斜：三型库存的最大值减最小值
+    pub stock_skew: i32,
+    /// 三个候选地区里是否至少有一碗做得出来
+    pub cookable: bool
+}
+
+/// 判断某配方在当前资源下**存不存在**一组合法隐藏风味用法使其可做。
+///
+/// 与 [`can_make_ramen`] 的分工：后者要求调用方先给定 `special_targets`，本函数直接
+/// 回答可达性，省掉为了观测去枚举 `list_special_targets_for` 的开销（该枚举在
+/// 每回合每次 rollout 上都会跑，不能为埋点付这笔钱）。
+///
+/// 判据：缺口 `Σ max(0, recipe[i] − stock[i])` 不超过 `min(隐藏风味存量,
+/// [`SPECIAL_TARGET_LIMIT`])`。`validate_special_targets` 的另一条约束
+/// `targets[i] <= recipe[i]` 恒可满足——库存非负，故单型缺口不会超过该型配方消耗。
+pub fn recipe_reachable(state: &RamenState, recipe: &[i32; 3]) -> bool {
+    let deficit: i32 = (0..3).map(|i| (recipe[i] - state.feeling_stock[i]).max(0)).sum();
+    deficit <= state.special_feeling.min(SPECIAL_TARGET_LIMIT)
+}
+
+/// 采集一个 `RamenSelect` 决策点的诀窍侧观测量。
+pub fn observe_ramen_select(state: &RamenState, selected_regions: &[usize; 3]) -> RamenSelectObs {
+    let stock = &state.feeling_stock;
+    let max = stock.iter().copied().max().unwrap_or(0);
+    let min = stock.iter().copied().min().unwrap_or(0);
+    // 配方查表失败按「做不出来」处理：观测不得因数据异常打断对局
+    let cookable = selected_regions
+        .iter()
+        .any(|&rid| get_recipe(rid).map(|recipe| recipe_reachable(state, recipe)).unwrap_or(false));
+    RamenSelectObs { stock_sum: stock.iter().sum(), stock_skew: max - min, cookable }
+}
+
+/// 把一个 `RamenSelect` 决策点记进逐年观测数组。
+///
+/// `ate` 为该点是否选择了吃面。**纯观测**，不改变任何规则状态。
+///
+/// 调用侧须自行排除没有面可选的回合（回合 0-1 与超级拉面回合 72-77）——那些回合
+/// `Game::next()` 直接跳到 `Train`，计进来会把「没得选」混进「不想吃」。
+pub fn record_ramen_select(state: &mut RamenState, selected_regions: &[usize; 3], ate: bool) {
+    let year = state.obs_year;
+    if year >= state.yearly_ramen_offers.len() {
+        return;
+    }
+    let obs = observe_ramen_select(state, selected_regions);
+    state.yearly_ramen_offers[year] += 1;
+    state.yearly_stock_sum[year] += obs.stock_sum;
+    state.yearly_stock_skew_sum[year] += obs.stock_skew;
+    if obs.cookable {
+        state.yearly_ramen_cookable[year] += 1;
+        if !ate {
+            state.yearly_ramen_skipped[year] += 1;
+        }
+    }
 }
 
 /// 消耗诀窍做面，返回实际消耗的隐藏风味数量。
@@ -290,7 +357,7 @@ pub fn list_special_targets_for(state: &RamenState, ramen_idx: usize) -> Result<
         (recipe[2] - state.feeling_stock[2]).max(0)
     ];
     let need_sum: i32 = min_needed.iter().sum();
-    let budget = 2.min(state.special_feeling) - need_sum;
+    let budget = SPECIAL_TARGET_LIMIT.min(state.special_feeling) - need_sum;
     if budget < 0 {
         return Ok(Vec::new());
     }
@@ -578,11 +645,103 @@ pub fn fill_gauge_after_non_train(state: &mut RamenState, base_dist: &[i32; 3], 
 
 #[cfg(test)]
 mod tests {
+    use anyhow::ensure;
+
     use super::*;
     use crate::{
         gamedata::init_global,
         utils::{get_workspace_root, init_test_logger}
     };
+
+    #[test]
+    fn test_recipe_reachable_matches_enumeration() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+        // 埋点用的快速判据必须与真正的 `list_special_targets_for` 枚举逐位同真假：
+        // 一旦发散，「有得做却不吃」的计数就会静默偏掉。
+        let region_num = global!(RAMENDATA).region_feeling.len();
+        let mut state = RamenState::default();
+        let (mut checked, mut mismatch) = (0u32, 0u32);
+        for rid in 0..region_num {
+            for a in 0..=6 {
+                for b in 0..=6 {
+                    for c in 0..=6 {
+                        for special in 0..=4 {
+                            state.feeling_stock = [a, b, c];
+                            state.special_feeling = special;
+                            let recipe = get_recipe(rid)?;
+                            let fast = recipe_reachable(&state, recipe);
+                            let slow = !list_special_targets_for(&state, rid)?.is_empty();
+                            checked += 1;
+                            if fast != slow {
+                                mismatch += 1;
+                                println!(
+                                    "  不一致: 地区{rid} 配方{recipe:?} 库存[{a},{b},{c}]                                      隐藏{special} 快速={fast} 枚举={slow}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        println!("穷举 {checked} 组 (地区 x 库存 0..=6^3 x 隐藏风味 0..=4)");
+        println!("与 list_special_targets_for 不一致: {mismatch} 组");
+        ensure!(mismatch == 0, "recipe_reachable 与枚举判据发散 {mismatch} 组");
+        Ok(())
+    }
+
+    #[test]
+    fn test_record_ramen_select_three_way_split() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+        // 三种成因各造一个决策点，检查分账落到正确的计数器上
+        let regions = [0usize, 1, 2];
+        let mut state = RamenState::default();
+        state.obs_year = 2; // 记到第 3 年
+
+        // 1) 空库存 + 无隐藏风味：做不出来 -> 只加 offers
+        state.feeling_stock = [0, 0, 0];
+        state.special_feeling = 0;
+        record_ramen_select(&mut state, &regions, false);
+        println!(
+            "没料:     offers={} cookable={} skipped={}",
+            state.yearly_ramen_offers[2], state.yearly_ramen_cookable[2], state.yearly_ramen_skipped[2]
+        );
+
+        // 2) 库存充足但选了不吃 -> offers + cookable + skipped 各加 1
+        state.feeling_stock = [5, 5, 5];
+        record_ramen_select(&mut state, &regions, false);
+        println!(
+            "有得做不吃: offers={} cookable={} skipped={}",
+            state.yearly_ramen_offers[2], state.yearly_ramen_cookable[2], state.yearly_ramen_skipped[2]
+        );
+
+        // 3) 库存充足且吃了 -> offers + cookable 加 1，skipped 不动
+        record_ramen_select(&mut state, &regions, true);
+        println!(
+            "有得做且吃: offers={} cookable={} skipped={}",
+            state.yearly_ramen_offers[2], state.yearly_ramen_cookable[2], state.yearly_ramen_skipped[2]
+        );
+        println!(
+            "库存合计累加={} 型别偏斜累加={}",
+            state.yearly_stock_sum[2], state.yearly_stock_skew_sum[2]
+        );
+        // 偏斜：[0,0,0] 与两次 [5,5,5] 全为 0；库存合计 = 0 + 15 + 15
+        ensure!(state.yearly_ramen_offers[2] == 3, "offers 应为 3");
+        ensure!(state.yearly_ramen_cookable[2] == 2, "cookable 应为 2");
+        ensure!(state.yearly_ramen_skipped[2] == 1, "skipped 应为 1");
+        ensure!(state.yearly_stock_sum[2] == 30, "库存合计应为 30");
+        ensure!(state.yearly_stock_skew_sum[2] == 0, "型别偏斜应为 0");
+        ensure!(
+            state.yearly_ramen_offers[0] == 0 && state.yearly_ramen_offers[1] == 0,
+            "不应记到其他年份"
+        );
+        Ok(())
+    }
 
     #[test]
     fn test_gauge_base_distribution() -> anyhow::Result<()> {

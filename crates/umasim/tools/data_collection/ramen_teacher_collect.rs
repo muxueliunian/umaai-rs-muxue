@@ -41,7 +41,7 @@ use umasim::{
         }
     },
     gamedata::{GAMECONFIG, RamenRegionStrategy, init_global_with_config},
-    sampler::{SampledPosition, SamplerConfig, SamplingSpace, sample_position},
+    sampler::{SampledPosition, SamplerConfig, sample_position, space_from_cli},
     search::{FlatSearch, SearchConfig},
     utils::{get_workspace_root, init_logger, load_game_config}
 };
@@ -80,6 +80,21 @@ struct CollectArgs {
     /// 起始采样序号
     #[arg(long, default_value_t = 0)]
     start: u64,
+
+    /// 卡组构成 `速,耐,力,根,智`，五项合计为 5（友人卡固定 1 张，不计入）
+    ///
+    /// 给出即切到**分布外**空间：只枚举这一种构成，用于给训练分布补缺口。
+    /// 不给时用第一代的 3 种构成。与 `ramen_space_bench` 同名参数同口径。
+    ///
+    /// ❗换空间等于换 `index` 的含义，采集器会用空间指纹拦住同一目录混采两个空间。
+    #[arg(long)]
+    shape: Option<String>,
+
+    /// 追加进卡池的支援卡 idrank（6 位 = 5 位卡 ID + 突破等级），可重复给出
+    ///
+    /// 只在有 `--shape` 时允许：默认口径必须锁死在训练分布的 11 张卡上。
+    #[arg(long)]
+    extra_card: Vec<u32>,
 
     /// 每个候选的搜索次数
     #[arg(long)]
@@ -671,7 +686,9 @@ fn main() -> Result<()> {
     let manifest_path = output_dir.join(MANIFEST_NAME);
 
     // 采样空间指纹：卡池与构成写在代码里，改动不会反映到 gamedata_sig，只能这样记。
-    let space_hash = SamplingSpace::gen1()?.content_hash();
+    let space = space_from_cli(args.shape.as_deref(), &args.extra_card)?;
+    let space_hash = space.content_hash();
+    println!("采样空间 {space_hash}，{} 个 (马娘, 卡组) 组合", space.len());
 
     let now = Utc::now().to_rfc3339();
     let (mut manifest, span) = if manifest_path.exists() {
@@ -778,7 +795,6 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let space = SamplingSpace::gen1()?;
     let search: FlatSearch<RamenGame> = FlatSearch::new(search_cfg);
     let mut batch = RamenSampleBatch::new();
     let mut next_part_index = manifest.parts.len();

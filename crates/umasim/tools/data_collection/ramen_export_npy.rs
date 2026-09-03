@@ -64,7 +64,7 @@ use umasim::{
         training_sample::{RamenSampleBatch, RamenTrainingSample, SAMPLE_FORMAT_VERSION, stage_of_code}
     },
     gamedata::init_global_with_config,
-    sampler::{GEN1_SPACE_HASH_V1, SamplingSpace},
+    sampler::{GEN1_SPACE_HASH_V1, space_from_cli},
     utils::{get_workspace_root, load_game_config}
 };
 
@@ -95,7 +95,18 @@ struct ExportArgs {
 
     /// 额外导出 `cand_scores` / `cand_valid`（体积约为 reduced 的 150 倍）
     #[arg(long, default_value_t = false)]
-    raw: bool
+    raw: bool,
+
+    /// 采集时用的卡组构成 `速,耐,力,根,智`；与 `ramen_teacher_collect` 同名参数必须一致
+    ///
+    /// 不给时按第一代空间导出。给错会被空间指纹校验挡下——`index` 的含义由空间决定，
+    /// 用错空间导出会让组合键整体指向别的卡组。
+    #[arg(long)]
+    shape: Option<String>,
+
+    /// 采集时追加进卡池的支援卡 idrank；与 `--shape` 同用
+    #[arg(long)]
+    extra_card: Vec<u32>
 }
 
 // ============================================================================
@@ -332,6 +343,8 @@ struct ArraySet {
     turn: NpyWriter<i16>,
     /// 样本 id
     index: NpyWriter<u64>,
+    /// (马娘, 卡组) 组合键，见 `DeckPlan::combo_key`
+    combo_key: NpyWriter<u64>,
     /// 合法格位掩码
     legal_mask: NpyWriter<u8>,
     /// CSR 偏移
@@ -364,6 +377,7 @@ impl ArraySet {
             stage: NpyWriter::create(dir, "stage", None)?,
             turn: NpyWriter::create(dir, "turn", None)?,
             index: NpyWriter::create(dir, "index", None)?,
+            combo_key: NpyWriter::create(dir, "combo_key", None)?,
             legal_mask: NpyWriter::create(dir, "legal_mask", Some(POLICY_DIM))?,
             cand_ptr: NpyWriter::create(dir, "cand_ptr", None)?,
             cand_slots: NpyWriter::create(dir, "cand_slots", Some(SLOTS_PER_CAND))?,
@@ -393,6 +407,7 @@ impl ArraySet {
         self.stage.finish()?;
         self.turn.finish()?;
         self.index.finish()?;
+        self.combo_key.finish()?;
         self.legal_mask.finish()?;
         self.cand_ptr.finish()?;
         self.cand_slots.finish()?;
@@ -504,7 +519,7 @@ fn run(args: &ExportArgs) -> Result<()> {
     init_global_with_config(&load_game_config()?)?;
     // plan_count 与空间指纹必须成对取自同一个 space：训练侧按 `sample_id % plan_count`
     // 切留出组合，取错了会让切分静默错位。
-    let space = SamplingSpace::gen1()?;
+    let space = space_from_cli(args.shape.as_deref(), &args.extra_card)?;
     let plan_count = space.len();
     let space_hash = space.content_hash();
 
@@ -560,6 +575,10 @@ fn run(args: &ExportArgs) -> Result<()> {
         rollout_width,
         ..Default::default()
     };
+    // 组合键表：每个采样计划一个，供样本按 `index % plan_count` 查表。
+    // 它替代「训练侧自己算 index % plan_count」这一步——那个口径绑死在单一空间上，
+    // 换空间后同一 index 指向别的组合，新旧数据因此无法合并按组合切分。
+    let combo_keys: Vec<u64> = space.plans().iter().map(|plan| plan.combo_key()).collect();
     let mut seen: HashSet<u64> = HashSet::new();
     let mut cursor: i64 = 0;
     arrays.cand_ptr.push(cursor)?;
@@ -570,7 +589,16 @@ fn run(args: &ExportArgs) -> Result<()> {
         for part in parts {
             let batch = RamenSampleBatch::load_binary(part)?;
             for sample in &batch.samples {
-                write_sample(&mut arrays, sample, rollout_width, args.raw, &mut cursor, &mut seen, &mut stats)?;
+                write_sample(
+                    &mut arrays,
+                    sample,
+                    &combo_keys,
+                    rollout_width,
+                    args.raw,
+                    &mut cursor,
+                    &mut seen,
+                    &mut stats
+                )?;
                 in_dir += 1;
             }
         }
@@ -638,6 +666,7 @@ fn first_rollout_width(scanned: &[(PathBuf, Vec<PathBuf>)]) -> Result<usize> {
 fn write_sample(
     arrays: &mut ArraySet,
     sample: &RamenTrainingSample,
+    combo_keys: &[u64],
     rollout_width: usize,
     raw: bool,
     cursor: &mut i64,
@@ -663,6 +692,12 @@ fn write_sample(
     arrays.stage.push(sample.meta.stage)?;
     arrays.turn.push(i16::try_from(sample.meta.turn).context("回合号溢出 i16")?)?;
     arrays.index.push(sample.meta.index)?;
+    // 组合键取自空间的计划表，与 `SamplingSpace::spec_at` 的 `index % len` 分层同口径。
+    // 空 `combo_keys` 在本函数被调用前已排除（空间非空是 SamplingSpace 的不变量）。
+    let plan = combo_keys
+        .get((sample.meta.index % combo_keys.len() as u64) as usize)
+        .ok_or_else(|| anyhow::anyhow!("组合键表为空，无法定位样本 index={}", sample.meta.index))?;
+    arrays.combo_key.push(*plan)?;
 
     let mut mask = vec![0u8; POLICY_DIM];
     let mut scores = vec![0f32; rollout_width];

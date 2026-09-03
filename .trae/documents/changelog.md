@@ -2,6 +2,14 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-04
+- **吃面决策点埋点**：`RamenState` 新增 5 组逐年纯观测（决策点数 / 可做点数 / 有得做却不吃的点数 / 库存合计 / 型别偏斜合计），`rules.rs` 新增 `recipe_reachable` 与 `record_ramen_select`，三阶段与合并决策两条路径各挂一次；bench CSV 相应扩 15 列。用于把诀窍丢弃拆成「没料」「型别凑不齐」「有得做但不做」三种成因
+- **组合身份改为直接量 `combo_key`**：`DeckPlan::combo_key()` 由 (马娘, 卡组) 直接算出，导出器新写 `combo_key.npy`，`data.py` 按组合切分时优先用它、缺失才回落 `index % plan_count`。旧口径绑死在单一采样空间上，换空间后同一 `index` 指向别的组合，新旧数据因此无法合并；新键与空间无关，故不同空间采的目录可以合并训练
+- **采集器与导出器接通分布外空间**：`ramen_teacher_collect` / `ramen_export_npy` 新增 `--shape` / `--extra-card`，与 `ramen_space_bench` 同口径；三处共用的空间构造下沉为 `sampler::space_from_cli`，`parse_shape` / `format_shape_name` 一并移入
+- **组合键守门**：第一代 525 个组合键互不碰撞；子空间的 240 个组合与 gen1 逐个相同（跨空间稳定）；分布外 190 个组合与 gen1 零重合
+- **`SPECIAL_TARGET_LIMIT` 常量化**：隐藏风味单次用量上限 2 由字面量收口为常量
+- **埋点守门**：`recipe_reachable` 与 `list_special_targets_for` 在 17150 组上逐位同真假；4200 局 A/B 原有列逐局一致、均分逐位相同、耗时无可测差异
+
 ## 2026-09-03
 - **EXP-006h 复现合并**：handwritten token 入口接通 bench、闭环 Δ+67 t+4 显著，本地分支留档
 - **`bench_compositions` 改加权口径**：满破面板「友情×2 + 干劲×0.5 + 训练」加权和，默认 pool_size=10 / min_panel=80（最新 10 张候选池留 5 张缓冲），池内加权降序、并列按 card_id 倒序取前 3

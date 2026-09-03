@@ -258,6 +258,12 @@ impl ActionEnum for RamenAction {
                     game.stage = RamenStage::AfterTrain;
                     return Ok(());
                 }
+                // 观测：本决策点的诀窍库存与可做性（纯采集，不影响逻辑）。守门与
+                // `list_actions` 的拉面回合判据一致，避免把「没得选」记成「不想吃」。
+                if game.base.turn >= 2 && !game.is_super_ramen_turn() {
+                    let regions = game.ramen.selected_regions;
+                    super::rules::record_ramen_select(&mut game.ramen, &regions, self.ramen.is_some());
+                }
                 // 中间步骤：仅承载面选择，写 pending；Game::next() 会按 pending_ramen 推 SpecialSelect 或 Train
                 game.ramen.pending_ramen = self.ramen;
                 game.ramen.pending_special_targets = [0, 0, 0];
