@@ -99,6 +99,10 @@ struct BenchArgs {
     #[arg(long)]
     csv: Option<PathBuf>,
 
+    /// EXP-006c 手写变体 token 串（如 `wisf0-capd0`）；仅 trainer=handwritten 时生效
+    #[arg(long)]
+    variant: Option<String>,
+
     /// 关闭网络策略的自选比赛硬守门（纯网络，仅供研究守门能否移除；不作为验收口径）
     #[arg(long)]
     no_race_shield: bool,
@@ -247,6 +251,8 @@ enum SelectedTrainer {
     Random,
     /// 手写规则
     Handwritten,
+    /// 手写规则 EXP-006c token 变体（trainer 按 --variant 现场构造，无需 Clone）
+    HandwrittenVariant,
     /// 神经网络策略
     #[cfg(feature = "onnx")]
     Nn(RamenNnTrainer)
@@ -260,7 +266,11 @@ enum SelectedTrainer {
 fn select_trainer(args: &BenchArgs) -> Result<SelectedTrainer> {
     match args.trainer.as_str() {
         "random" => Ok(SelectedTrainer::Random),
-        "handwritten" => Ok(SelectedTrainer::Handwritten),
+        "handwritten" => Ok(if args.variant.as_deref().is_some_and(|v| v != "base") {
+            SelectedTrainer::HandwrittenVariant
+        } else {
+            SelectedTrainer::Handwritten
+        }),
         "nn" => {
             #[cfg(feature = "onnx")]
             {
@@ -306,6 +316,11 @@ fn run_plan(plan: &DeckPlan, plan_index: usize, args: &BenchArgs, kind: &Selecte
             }
             SelectedTrainer::Handwritten => {
                 let t = LoggingTrainer::new(RecommendedRamenTrainer::new(), base_seed + run_idx);
+                bench::run_seeded(plan.uma, &plan.deck, &inherit, base_seed, run_idx, &t)?
+            }
+            SelectedTrainer::HandwrittenVariant => {
+                let tokens = args.variant.as_deref().unwrap_or("base");
+                let t = LoggingTrainer::new(RecommendedRamenTrainer::with_tokens(tokens)?, base_seed + run_idx);
                 bench::run_seeded(plan.uma, &plan.deck, &inherit, base_seed, run_idx, &t)?
             }
             #[cfg(feature = "onnx")]

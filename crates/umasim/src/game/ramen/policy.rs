@@ -43,6 +43,11 @@ pub struct RamenPolicyConfig {
     /// 体力门限可以放掉（回合级差异化，workbench_improve_1 §2）。`0` 表示
     /// 吃面回合不因体力强制休息；不吃面回合仍用 [`vital_rest`](Self::vital_rest)。
     pub vital_rest_eating: i32,
+    /// 智力训练体力豁免下限（EXP-006c）：vital >= 此值时，智力训练不受
+    /// [`vital_rest`](Self::vital_rest) 强制休息。智力是唯一体力增量为正（+5）
+    /// 的训练位，且失败率体力阈值（~32）远低于其他位（~50-54）——低体力下
+    /// 智力训练近乎零风险。`i32::MAX`（默认）= 不豁免，行为与旧版逐位一致。
+    pub wisdom_vital_floor: i32,
     /// 心情低于此值强制外出（经验：<3 训练数值损失大）
     pub motivation_outing: i32,
     /// 生病时治病（Clinic）优先级权重（守门直通，无需打分）
@@ -166,6 +171,7 @@ impl Default for RamenPolicyConfig {
         Self {
             vital_rest: 45,
             vital_rest_eating: 0,
+            wisdom_vital_floor: i32::MAX,
             motivation_outing: 3,
             status_rate: 1.0,
             pt_rate: 8.0,
@@ -342,7 +348,16 @@ impl RamenPolicy {
         } else {
             self.config.vital_rest
         };
-        if uma.vital < rest_threshold {
+        // 智力体力豁免（EXP-006c）：智力是唯一体力增量为正（+5）的训练位，且失败率
+        // 体力阈值（~32）远低于其他位（~50-54）——低体力下智力训练近乎零风险，
+        // 无需为省体力放弃智力回合去休息/外出。仅 vital >= wisdom_vital_floor 时豁免
+        // （默认 i32::MAX = 永不豁免，行为与旧版逐位一致）。
+        let wisdom_exempt = uma.vital < rest_threshold
+            && uma.vital >= self.config.wisdom_vital_floor
+            && actions
+                .iter()
+                .any(|a| matches!(&a.operation, Operation::Train(t) if *t as usize == 4));
+        if uma.vital < rest_threshold && !wisdom_exempt {
             if let Some(idx) = actions.iter().position(|a| a.operation == Operation::Rest) {
                 return Ok((idx, vec![RamenPolicyOutput {
                     score: f32::MAX,

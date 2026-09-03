@@ -92,6 +92,15 @@ pub struct LocalRamenConfig {
     /// 近上限衰减强度。属性完成度超过 70% 后按平方曲线增长，并受同类型卡过量系数放大。
     pub status_overflow_strength: f32,
 
+    /// EXP-006e：power（i==2）专属近上限衰减强度覆盖。
+    /// `f32::NAN` = 不覆盖（用统一 [`Self::status_overflow_strength`]）。
+    /// 诊断依据：EXP-006d 盘面 P90−P10 power=−204 唯一负值 ⇒ 力量过度喂养。
+    pub power_overflow_strength: f32,
+
+    /// EXP-006e：power（i==2）专属短板追赶强度覆盖（可为负=允许更落后）。
+    /// `f32::NAN` = 不覆盖（用统一 [`Self::status_gap_strength`]）。
+    pub power_gap_strength: f32,
+
     /// 是否使用随回合变化的体力成本模型。
     ///
     /// `true` 时前期体力消耗更贵，终盘体力价值逐渐降低，并只补上相对基础策略
@@ -335,6 +344,8 @@ impl Default for LocalRamenConfig {
             dynamic_status_balance: false,
             status_gap_strength: 0.0,
             status_overflow_strength: 0.0,
+            power_overflow_strength: f32::NAN,
+            power_gap_strength: f32::NAN,
             dynamic_vital: false,
             probabilistic_hint: false,
             expected_fail: false,
@@ -613,10 +624,21 @@ impl LocalRamenTrainer {
             let cur_score = cons.status_final_score(cur as i32) as f32;
             let next_score = cons.status_final_score(next as i32) as f32;
             let exact_margin = (next_score - cur_score) * self.policy.config.status_rate;
-            let gap_bonus = self.config.status_gap_strength * (leading - completion[i]).max(0.0);
+            // EXP-006e：power 位用专属覆盖（NAN=回退统一值，base 逐位不变）
+            let gap_strength = if i == 2 && !self.config.power_gap_strength.is_nan() {
+                self.config.power_gap_strength
+            } else {
+                self.config.status_gap_strength
+            };
+            let overflow_strength = if i == 2 && !self.config.power_overflow_strength.is_nan() {
+                self.config.power_overflow_strength
+            } else {
+                self.config.status_overflow_strength
+            };
+            let gap_bonus = gap_strength * (leading - completion[i]).max(0.0);
             let near_cap = ((completion[i] - 0.70) / 0.30).clamp(0.0, 1.0);
             let excess_cards = (g.card_type_count[i] - 2).max(0) as f32;
-            let overflow = self.config.status_overflow_strength
+            let overflow = overflow_strength
                 * near_cap
                 * near_cap
                 * (1.0 + 0.5 * excess_cards);
@@ -1640,6 +1662,92 @@ impl RecommendedRamenTrainer {
             year.config.eat_requires_covered_train = eat_requires_covered_train;
         }
         trainer
+    }
+
+    /// EXP-006c：从 token 串构造 preset 变体（逐 token 覆盖三年同配置）。
+    ///
+    /// - `wisfN`：智力训练体力豁免下限 = N（见 [`RamenPolicyConfig::wisdom_vital_floor`]）
+    /// - `capdN`：副属性残余收益折扣 = N/100（[`RamenPolicyConfig::cap_discount_weight`]）
+    /// - `ckN`：剧本 PT 档位前瞻倍率 = N/100（[`LocalRamenConfig::checkpoint_scale`]；preset 现值 0=关闭）
+    /// - `cookN`：诀窍边际库存权重 = N（[`LocalRamenConfig::cook2_stock_weight`]；调高=材料更保守）
+    /// - `g1N/g2N/g3N`：第 1/2/3 年短板追赶强度 = N/100（分年动态属性平衡）
+    /// - `o1N/o2N/o3N`：第 1/2/3 年近上限衰减强度 = N/100
+    /// - `poN`：power 近上限衰减统一覆盖 = N/100（EXP-006e）；`p1o/p2o/p3oN` 分年
+    /// - `pg[m]N`：power 短板追赶覆盖 = ±N/100（m 前缀=负号，'-' 是 token 分隔符不能用；EXP-006e）
+    /// - `base`：无覆盖（对照）
+    ///
+    /// 未识别 token 直接报错，防止实验名拼错静默跑成 base。
+    pub fn with_tokens(tokens: &str) -> Result<Self> {
+        let mut trainer = Self::new();
+        for token in tokens.split('-') {
+            if token == "base" {
+                continue;
+            } else if let Some(v) = token.strip_prefix("wisf") {
+                let floor: i32 = v.parse()?;
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.wisdom_vital_floor = floor;
+                }
+            } else if let Some(v) = token.strip_prefix("capd") {
+                let weight: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.cap_discount_weight = weight;
+                }
+            } else if let Some(v) = token.strip_prefix("ck") {
+                let scale: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.config.checkpoint_scale = scale;
+                }
+            } else if let Some(v) = token.strip_prefix("cook") {
+                let w: f32 = v.parse()?;
+                for year in trainer.years.iter_mut() {
+                    year.config.cook2_stock_weight = w;
+                }
+            } else if let Some(v) = token.strip_prefix("g1") {
+                let s: f32 = v.parse::<f32>()? / 100.0;
+                trainer.years[0].config.status_gap_strength = s;
+            } else if let Some(v) = token.strip_prefix("g2") {
+                let s: f32 = v.parse::<f32>()? / 100.0;
+                trainer.years[1].config.status_gap_strength = s;
+            } else if let Some(v) = token.strip_prefix("g3") {
+                let s: f32 = v.parse::<f32>()? / 100.0;
+                trainer.years[2].config.status_gap_strength = s;
+            } else if let Some(v) = token.strip_prefix("o1") {
+                let s: f32 = v.parse::<f32>()? / 100.0;
+                trainer.years[0].config.status_overflow_strength = s;
+            } else if let Some(v) = token.strip_prefix("o2") {
+                let s: f32 = v.parse::<f32>()? / 100.0;
+                trainer.years[1].config.status_overflow_strength = s;
+            } else if let Some(v) = token.strip_prefix("o3") {
+                let s: f32 = v.parse::<f32>()? / 100.0;
+                trainer.years[2].config.status_overflow_strength = s;
+            } else if let Some(v) = token.strip_prefix("po") {
+                // EXP-006e：power 近上限衰减，全部年统一覆盖（po150 → 1.50）
+                let s: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.config.power_overflow_strength = s;
+                }
+            } else if let Some(v) = token.strip_prefix("p1o") {
+                trainer.years[0].config.power_overflow_strength = v.parse::<f32>()? / 100.0;
+            } else if let Some(v) = token.strip_prefix("p2o") {
+                trainer.years[1].config.power_overflow_strength = v.parse::<f32>()? / 100.0;
+            } else if let Some(v) = token.strip_prefix("p3o") {
+                trainer.years[2].config.power_overflow_strength = v.parse::<f32>()? / 100.0;
+            } else if let Some(v) = token.strip_prefix("pg") {
+                // EXP-006e：power 短板追赶覆盖。负值用 'm' 前缀编码（'-' 是 token
+                // 分隔符）：pgm30 → −0.30，pg30 → +0.30。
+                let (sign, digits) = match v.strip_prefix('m') {
+                    Some(d) => (-1.0f32, d),
+                    None => (1.0f32, v)
+                };
+                let s: f32 = sign * digits.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.config.power_gap_strength = s;
+                }
+            } else {
+                anyhow::bail!("未知 token: {token}（完整: {tokens}）");
+            }
+        }
+        Ok(trainer)
     }
 
     /// 构造当前正式推荐 preset。
