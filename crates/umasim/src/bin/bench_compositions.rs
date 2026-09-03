@@ -2,8 +2,11 @@
 //!
 //! 枚举速/耐/力/根/智各 0..=3 张、普通卡合计 5 张的全部 101 种构成，
 //! 再加入一张固定友人卡。每种类型使用 [`bench::select_representatives`] 选出的
-//! 代表性满破 SSR（最新候选池 + 面板阈值过滤弱卡），也可用 `--cards-file` 手动指定；
+//! 代表性满破 SSR（最新候选池 + 加权面板阈值过滤弱卡），也可用 `--cards-file` 手动指定；
 //! 该选择只用于比较类型构成，不表示支援卡强度排名。
+//!
+//! 加权口径（2026-09）：满破面板「友情×2 + 干劲×0.5 + 训练」加权和，默认阈值 80，
+//! 默认 pool_size=10（最新 10 张满破 SSR 候选池，留 5 张缓冲应对新卡）。
 //!
 //! 运行设施（固定种子双 RNG、单局运行、统计、CSV）复用 [`umasim::bench`]。
 //!
@@ -274,7 +277,7 @@ fn run_composition<T: Trainer<RamenGame>>(
 /// 将代表卡说明输出到终端（含被阈值跳过的弱卡）。
 fn print_representatives(set: &bench::RepresentativeSet, opts: &CardPickOpts) {
     println!(
-        "代表卡规则：各类型取最新 {} 张满破 SSR，友情+干劲+训练低于阈值{} 视为弱卡跳过；仅为确定性样本，不是强度排名",
+        "代表卡规则：各类型取最新 {} 张满破 SSR，按「友情×2 + 干劲×0.5 + 训练」加权和 {} 视为弱卡跳过，候选池内按加权降序、同分按 card_id 倒序取代表；仅为确定性样本，不是强度排名",
         opts.pool_size, opts.min_panel
     );
     for (card_type, cards) in set.picked.iter().enumerate() {

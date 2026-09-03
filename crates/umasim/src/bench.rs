@@ -302,7 +302,7 @@ pub struct CardRep {
 pub struct CardPickOpts {
     /// 候选池：每种类型按 card_id 倒序取最新 N 张。
     pub pool_size: usize,
-    /// 弱卡阈值：满破面板「友情+干劲+训练」低于此值视为弱卡。
+    /// 弱卡阈值：满破面板「友情×2 + 干劲×0.5 + 训练」加权和低于此值视为弱卡。
     pub min_panel: f32,
     /// 每种类型选取张数。
     pub pick: usize
@@ -310,29 +310,32 @@ pub struct CardPickOpts {
 
 impl Default for CardPickOpts {
     fn default() -> Self {
-        // 阈值经 cardDB 探索（2026-08）：最新 5 张内各类型均可凑满 3 张 ≥70 的强卡。
+        // 阈值经 cardDB 探索（2026-09，加权口径）：最新 10 张池内各类型均可凑 3 张 ≥80，
+        // 留 5 张缓冲应对后续新卡可能落在 70~80 区间。命中失败时按
+        // select_representatives 的 ensure! 提示扩大 pool_size 或使用 --cards-file 手动指定。
         Self {
-            pool_size: 5,
-            min_panel: 70.0,
+            pool_size: 10,
+            min_panel: 80.0,
             pick: 3
         }
     }
 }
 
-/// 代表卡选择结果：入选卡与因「友情+干劲+训练」低于阈值被跳过的弱卡。
+/// 代表卡选择结果：入选卡与因加权和低于阈值被跳过的弱卡。
 #[derive(Debug)]
 pub struct RepresentativeSet {
-    /// 各类型选出的代表卡（按 card_id 倒序）。
+    /// 各类型选出的代表卡（在候选池内按加权降序、card_id 倒序取前 pick）。
     pub picked: [Vec<CardRep>; 5],
-    /// 候选池中友情+干劲+训练低于阈值的弱卡。
+    /// 候选池中加权和低于阈值的弱卡。
     pub skipped: [Vec<CardRep>; 5]
 }
 
 /// 选取各类型的代表性支援卡。
 ///
-/// 规则：每种类型取满破 SSR 中最新 `pool_size` 张作为候选池，跳过满破面板
-/// 「友情+干劲+训练」低于 `min_panel` 的弱卡，再按 card_id 倒序取前 `pick` 张。
-/// 被跳过的弱卡一并返回（见 [`RepresentativeSet::skipped`]）。
+/// 规则：每种类型取满破 SSR 中最新 `pool_size` 张作为候选池，跳过满破面板加权和
+/// 「友情×2 + 干劲×0.5 + 训练」低于 `min_panel` 的弱卡，再在通过的卡内按加权和
+/// 降序、并列时 card_id 倒序取前 `pick` 张。被跳过的弱卡一并返回
+/// （见 [`RepresentativeSet::skipped`]）。
 ///
 /// 注意：面板和值只是 bench 专用的粗略强度代理（不看技能/事件/得意率），
 /// 仅用于比较类型构成，不表示支援卡强度排名。
@@ -347,18 +350,31 @@ pub fn select_representatives(opts: &CardPickOpts) -> Result<RepresentativeSet> 
     let mut picked: [Vec<CardRep>; 5] = std::array::from_fn(|_| Vec::new());
     let mut skipped: [Vec<CardRep>; 5] = std::array::from_fn(|_| Vec::new());
     for (card_type, cards) in pools.iter_mut().enumerate() {
+        // 候选池：先按 card_id 倒序取最新 pool_size 张
         cards.sort_by_key(|card| std::cmp::Reverse(card.card_id));
-        let panel_score = |card: &&SupportCardData| -> f32 {
+        let panel_score = |card: &SupportCardData| -> f32 {
             let value = &card.card_value[4]; // 满破面板 rank=4
-            value.youqing + value.ganjing as f32 + value.xunlian as f32
+            value.youqing * 2.0 + value.ganjing as f32 * 0.5 + value.xunlian as f32
         };
-        for card in cards.iter().take(opts.pool_size) {
-            if panel_score(card) >= opts.min_panel && picked[card_type].len() < opts.pick {
+        // 收集候选池内的卡，附带加权得分
+        let mut candidates: Vec<(&SupportCardData, f32)> = cards
+            .iter()
+            .take(opts.pool_size)
+            .map(|card| (*card, panel_score(card)))
+            .collect();
+        // 优先按加权降序、并列时按 card_id 倒序（确定性）
+        candidates.sort_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then_with(|| b.0.card_id.cmp(&a.0.card_id))
+        });
+        for (card, score) in candidates {
+            if score >= opts.min_panel && picked[card_type].len() < opts.pick {
                 picked[card_type].push(CardRep {
                     idrank: card.card_id * 10 + 4,
                     name: card.card_name.clone()
                 });
-            } else if panel_score(card) < opts.min_panel {
+            } else if score < opts.min_panel {
                 skipped[card_type].push(CardRep {
                     idrank: card.card_id * 10 + 4,
                     name: card.card_name.clone()
@@ -367,7 +383,7 @@ pub fn select_representatives(opts: &CardPickOpts) -> Result<RepresentativeSet> 
         }
         ensure!(
             picked[card_type].len() == opts.pick,
-            "{} 类型最新 {} 张满破 SSR 中友情+干劲+训练≥{} 的卡只有 {} 张（需 {}），请调低 min-panel 或使用 --cards-file 手动指定",
+            "{} 类型最新 {} 张满破 SSR 中加权和≥{} 的卡只有 {} 张（需 {}），请调低 min-panel、扩大 pool-size 或使用 --cards-file 手动指定",
             type_name_zh(card_type),
             opts.pool_size,
             opts.min_panel,
@@ -567,17 +583,25 @@ mod tests {
         );
     }
 
-    /// 集成验证：真实 cardDB 上默认参数能选出每类型 3 张、idrank 严格倒序的代表卡。
+    /// 集成验证：真实 cardDB 上默认参数能选出每类型 3 张、按加权得分降序的代表卡。
+    /// 排序口径（2026-09）：加权和 DESC，并列时 card_id DESC；picked 与 skipped 不重叠。
     #[test]
     fn test_select_representatives_live_data() -> Result<()> {
         use crate::{
-            gamedata::{GameConfig, init_global_with_config},
+            gamedata::{GameConfig, init_global_with_config, GAMEDATA},
+            global,
             utils::get_workspace_root
         };
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(&workspace_root)?;
         init_global_with_config(&GameConfig::default_for_init())?;
-        let set = select_representatives(&CardPickOpts::default())?;
+        let opts = CardPickOpts::default();
+        let set = select_representatives(&opts)?;
+        let panel_score = |idrank: u32| -> anyhow::Result<f32> {
+            let card = global!(GAMEDATA).get_card(idrank / 10)?;
+            let value = &card.card_value[4];
+            Ok(value.youqing * 2.0 + value.ganjing as f32 * 0.5 + value.xunlian as f32)
+        };
         for (card_type, cards) in set.picked.iter().enumerate() {
             let detail = cards
                 .iter()
@@ -585,10 +609,43 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(" / ");
             println!("{}: {detail}", type_name_zh(card_type));
-            ensure!(cards.len() == 3, "{} 类型代表卡不是 3 张", type_name_zh(card_type));
             ensure!(
-                cards.windows(2).all(|pair| pair[0].idrank > pair[1].idrank),
-                "{} 类型代表卡未按 card_id 倒序",
+                cards.len() == opts.pick,
+                "{} 类型代表卡不是 {} 张",
+                type_name_zh(card_type),
+                opts.pick
+            );
+            let unique: std::collections::HashSet<_> = cards.iter().map(|c| c.idrank).collect();
+            ensure!(unique.len() == cards.len(), "{} 类型代表卡有重复", type_name_zh(card_type));
+            for card in cards {
+                let score = panel_score(card.idrank)?;
+                ensure!(
+                    score >= opts.min_panel,
+                    "{} 类型入选卡 {} 加权得分 {} 低于阈值 {}",
+                    type_name_zh(card_type),
+                    card.name,
+                    score,
+                    opts.min_panel
+                );
+            }
+            for pair in cards.windows(2) {
+                let s0 = panel_score(pair[0].idrank)?;
+                let s1 = panel_score(pair[1].idrank)?;
+                ensure!(
+                    s0 > s1 || (s0 == s1 && pair[0].idrank > pair[1].idrank),
+                    "{} 类型代表卡未按 (加权 DESC, card_id DESC) 排序：{} (score={}) 在前、{} (score={}) 在后",
+                    type_name_zh(card_type),
+                    pair[0].name,
+                    s0,
+                    pair[1].name,
+                    s1
+                );
+            }
+            let skipped_ids: std::collections::HashSet<_> =
+                set.skipped[card_type].iter().map(|c| c.idrank).collect();
+            ensure!(
+                cards.iter().all(|c| !skipped_ids.contains(&c.idrank)),
+                "{} 类型 picked 与 skipped 有重叠",
                 type_name_zh(card_type)
             );
         }

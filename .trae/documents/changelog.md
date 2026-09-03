@@ -4,6 +4,7 @@
 
 ## 2026-09-03
 - **EXP-006h 复现合并**：handwritten token 入口接通 bench、闭环 Δ+67 t+4 显著，本地分支留档
+- **`bench_compositions` 改加权口径**：满破面板「友情×2 + 干劲×0.5 + 训练」加权和，默认 pool_size=10 / min_panel=80（最新 10 张候选池留 5 张缓冲），池内加权降序、并列按 card_id 倒序取前 3
 - **`ramen_space_bench` 固定地区策略为 `all`**：与 `bench_base`、`ramen_teacher_collect` 一致，不再跟随 `game_config.toml`，避免基线静默换分布
 - **`ramen_handwritten_choice` 补转发 `select_event_choice`**：避免重放轨迹与采集时不一致
 - **若干健壮性与文档修正**：补 `.npy` 长度检查、删 `ChoiceRow` 阶段字段 dead_code、NN 测试在 `saved_models/` 缺模型时跳过、修 `ramen_special_root` 死链等
