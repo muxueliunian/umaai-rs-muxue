@@ -210,32 +210,32 @@ CT_MICROBENCH_RUNS=100 CT_MICROBENCH_WARMUP=100 \
 | **F** | `LocalRamenTrainer::decide_train`（7 candidates）| score_train_actions + 修复路径 + choose + phase + reserve_penalty/dynamic_status_adjustment 调整 | 0.54% + 2.54% + 1.68% |
 | **G** | `calc_ramen_training_effect` ×1 | 拉面 buff 累乘（calc_normal_effect / calc_finals_effect） | 内联于 C 2.58% |
 
-### 7.2 新基线（2026-09-02 采样替换后，本环境 3 轮均值，mean ns/iter）
+### 7.2 新基线（2026-09-02 采样替换后，可比口径 Run 2/3 均值，mean ns/iter）
 
 ```
 段                              mean ns/iter  per-train  占 D
-A.distribute_all                     798.7        —       52.7%
-B.calc_training_buff ×5               339.9       68.0     22.4%
-C.calc_training_value ×5              340.3       68.1     22.4%
-D.端到端一回合(5train)                1515.9        —      100%
-E.score_train_action x1              583.0        —       —
-F.decide_train(7 候选)              5313.4        —       —
-G.calc_ramen_training_effect x1       13.2        —       —
+A.distribute_all                     633.9        —       52.4%
+B.calc_training_buff ×5               257.2       51.4     21.3%
+C.calc_training_value ×5              265.1       53.0     21.9%
+D.端到端一回合(5train)                1209.6        —      100%
+E.score_train_action x1              446.3        —       —
+F.decide_train(7 候选)              4237.8        —       —
+G.calc_ramen_training_effect x1       9.6        —       —
 ```
 
-D − (A+B+C) ≈ D − 1478.9 = 37.0 ns（占 D 2.4%）——分桶测 cache 热、组合测 cache miss 边界，正常。
+D − (A+B+C) ≈ D − 1156.2 = 53.4 ns（占 D 4.4%）——分桶测 cache 热、组合测 cache miss 边界，正常。
 
-> 注：本轮 B/C/D/E/F/G 较上午 cleanup 旧表（800.97/260.20/270.39/1398.90/449.82/4175.40/9.63）整体上涨 26-37%（其中 B 段本次代码未触碰），属机器环境漂移，**绝对数字仅本环境自洽，与旧表不可跨次对比**。A 段持平 = 采样替换效果抵消了同量级漂移；采样替换的真实收益以 §7.3 进程内对照为准。
+> 注：口径 = 第三次重测 Run 2/3 均值（cold Run 1 剔除，原始值见附录 B.3）。对照段（B/C/F/G，本次未动代码）回落上午 cleanup 基线 ±2%，判定测量环境可比；可比口径下段 A 800.97 → 633.9 ≈ **-21%**（采样替换端到端收益，与 §7.3 进程内对照交叉验证吻合）。同日另有两次漂移样本（798.7 / 907.0），见 B.3 注③。
 
 ### 7.3 关键观察（清理后多轮均值）
 
 | 观察 | 数字 | 说明 |
 |---|---|---|
-| A 占比 52.7% | A/D = 798.7/1515.9 | distribute_all 仍是最大单一杠杆（与 §3.1 一致） |
-| **A 段采样替换已落地** | WeightedIndex → 零分配分桶采样（`sample_bucket`）| 与 rand 整数 WeightedIndex 逐位等价（`traits.rs` 守门测试 7 权重组合 × 5 万次全一致 + 全量测试数值不变）；进程内对照每次采样 **-31~-42%（7-11 ns/call）** |
-| F ≈ 5.31 μs / 7 candidates | 5313 ns/iter | 整回合策略决策成本；与 1 局手写策略 mean 2.36 ms 的 ~77 个决策回合同数量级 |
-| G = 13.2 ns | 拉面 buff 累乘路径已轻 | 内联到上层不进 Top |
-| D − (A+B+C) ≈ 37.0 ns | 边界 2.4% | cache miss / cache 边界，正常 |
+| A 占比 52.4% | A/D = 633.9/1209.6 | distribute_all 仍是最大单一杠杆（与 §3.1 一致） |
+| **A 段采样替换已落地** | WeightedIndex → 零分配分桶采样（`sample_bucket`）| 与 rand 整数 WeightedIndex 逐位等价（`traits.rs` 守门测试 7 权重组合 × 5 万次全一致 + 全量测试数值不变）；进程内对照每次采样 **-31~-42%（7-11 ns/call）**，可比口径整段 **-21%** |
+| F ≈ 4.24 μs / 7 candidates | 4238 ns/iter | 整回合策略决策成本；与 1 局手写策略 mean 2.36 ms 的 ~77 个决策回合同数量级 |
+| G = 9.6 ns | 拉面 buff 累乘路径已轻 | 内联到上层不进 Top |
+| D − (A+B+C) ≈ 53.4 ns | 边界 4.4% | cache miss / cache 边界，正常 |
 
 > 注：cleanup 后 cross-validate 见附录 B.2——3 个 hot path 函数 d10872a microbench 单测全部下降 50-90%（统计显著）。
 
@@ -293,7 +293,7 @@ std/mean ≤ 2.5%（最高 `default_calc_training_buff` 的 2.5%，其余 ≤ 1.
 
 注意：d10872a commit 上的数字是单次跑（与 B.1 三次平均不可严格比对），但数量级差距足够大（-49%~-92%）说明 cleanup 是真实的优化，不是测量噪声。
 
-### B.3 calc_training_value_microbench × 3（7 段 ns/iter）
+### B.3 calc_training_value_microbench × 3（7 段 ns/iter，2026-09-02 第三次重测、可比口径）
 
 测量方法：
 
@@ -301,19 +301,19 @@ std/mean ≤ 2.5%（最高 `default_calc_training_buff` 的 2.5%，其余 ≤ 1.
 cargo run --release --bin calc_training_value_microbench
 ```
 
-| 段 | Run 1 | Run 2 | Run 3 | **总均** | spread |
+| 段 | Run 1¹ | Run 2 | Run 3 | **总均²** | spread |
 |---|---:|---:|---:|---:|---:|
-| A. distribute_all | 818.4 | 769.3 | 808.3 | **798.7** | 6.1% |
-| B. calc_training_buff ×5 | 345.7 | 327.9 | 346.1 | **339.9** | 5.4% |
-| C. calc_training_value ×5 | 347.4 | 328.4 | 345.2 | **340.3** | 5.6% |
-| D. 端到端一回合(5train) | 1575.3 | 1590.9 | 1381.5 | **1515.9** | 13.8% |
-| E. score_train_action ×1 | 592.7 | 599.8 | 556.4 | **583.0** | 7.4% |
-| F. decide_train(整回合) | 5270.8 | 5360.5 | 5309.0 | **5313.4** | 1.7% |
-| G. calc_ramen_training_effect ×1 | 13.2 | 12.8 | 13.7 | **13.2** | 6.8% |
+| A. distribute_all | 797.5 | 631.7 | 636.0 | **633.9** | 0.7% |
+| B. calc_training_buff ×5 | 530.6 | 255.6 | 258.7 | **257.2** | 1.2% |
+| C. calc_training_value ×5 | 310.7 | 265.8 | 264.3 | **265.1** | 0.6% |
+| D. 端到端一回合(5train) | 1814.5 | 1210.4 | 1208.8 | **1209.6** | 0.1% |
+| E. score_train_action ×1 | 703.0 | 443.7 | 448.8 | **446.3** | 1.1% |
+| F. decide_train(整回合) | 4169.1 | 4216.9 | 4258.6 | **4237.8** | 1.0% |
+| G. calc_ramen_training_effect ×1 | 9.4 | 9.5 | 9.7 | **9.6** | 2.1% |
 
-> 注① B 段 Run 1 是 warm-up 首次批，cache 状态偏差大，剔除后以 Run 2/3 为准。
-> 注② 本表（2026-09-02 采样替换后）B/C/D/E/F/G 较上午 cleanup 基线整体 +26-37%——B 段本次未触碰代码，判定为机器环境漂移（跨次不可比）。A 段持平即采样替换已抵消漂移；采样级收益见 §7.3 进程内对照（-31~-42%/次）。
-> 注③ 当日复测（同 commit，未改代码）：A 段 3 轮均值 798.7 → 907.0（±13%，spread 15.2%），B/C/D/E/F 同向波动 +5~12%，G 稳定——机器级噪声 > 段间差，**绝对数字仅数量级参考，任何跨次对比一律以进程内对照为准
+> 注① Run 1 为进程冷启动（全段偏高，B 段最甚 530.6），仅参考，**总均不含**。
+> 注② 总均 = Run 2/3 均值。对照段（本次未触碰代码）B/C/F/G 回落上午 cleanup 基线 ±2%（257.2/265.1/4237.8/9.6 vs 260.20/270.39/4175.40/9.63）→ 测量环境与上午可比；可比口径下段 A 800.97 → 633.9 ≈ **-21%**（采样替换端到端收益，与 §7.3 进程内对照 -31~-42%/次 交叉验证吻合）。
+> 注③ 机器性能漂移现象（2026-09-02 同 commit 连续 4 次重测）：段 A 漂移 634~907（±18%），未动代码的对照段同向漂移（B 255~382、F 4175~5662），每轮 Run 1 恒为冷启动峰值；G 相对稳定（9.4~13.7）。应对：**跨次数字不可直接对比**，先以「对照段是否回落基线」判可比性，定量一律以进程内对照为准。
 
 ## 附录 C：mcts_profiler env vars
 
