@@ -22,7 +22,7 @@ pub(crate) mod terminal;
 pub use config::SearchConfig;
 pub use flat_search::FlatSearch;
 pub use ramen_terminal::{FROZEN_DIM_KEYS, RamenTerminal, RamenTerminalStats};
-pub use result::{ActionResult, SearchOutput};
+pub use result::{ActionResult, OrderedRollouts, SearchOutput};
 
 /// 拉面搜索输出
 ///

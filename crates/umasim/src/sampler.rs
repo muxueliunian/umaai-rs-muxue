@@ -47,6 +47,7 @@ use rand::{Rng, rngs::StdRng};
 
 use crate::{
     bench::seeded_rngs,
+    collector::compute_text_hash_fnv1a64,
     game::{
         Game,
         InheritInfo,
@@ -73,6 +74,18 @@ const SAMPLER_STREAM_TAG: u64 = 0x5341_4D50_4C45_5230;
 
 /// 截断回合频道标签
 const TURN_STREAM_TAG: u64 = 0x5455_524E_5F44_5257;
+
+/// 阶段配额频道标签
+///
+/// 与截断回合、局内种子分属三个独立频道：调整地区配额不会顺带改动落在
+/// 普通配额上的那些样本的局面，分片续跑的可复现契约因此不受影响。
+const QUOTA_STREAM_TAG: u64 = 0x5155_4F54_415F_5247;
+
+/// 第 2 年地区选择所在回合（该回合**末**的 `RegionSelect` 阶段）
+const REGION_SELECT_TURN_Y2: i32 = 23;
+
+/// 第 3 年地区选择所在回合
+const REGION_SELECT_TURN_Y3: i32 = 47;
 
 /// 按 `(基底, 序号, 频道)` 派生一个独立种子
 ///
@@ -234,12 +247,32 @@ pub const GEN1_SHAPES: [DeckShape; 3] = [
     }
 ];
 
+/// 第一代采样空间（v1）的枚举指纹，见 [`SamplingSpace::content_hash`]
+///
+/// 这是一根**绊线**：改动 [`GEN1_CARD_POOL`] 或 [`GEN1_SHAPES`] 会让
+/// `test_gen1_space_hash_pinned` 失败，逼迫改动者显式处理已采数据。
+/// 已落盘的教师数据（`npy_v5` / `npy_v6` 及其全部来源目录）都产自本指纹的空间，
+/// 而它们的 manifest 里没有记录空间指纹——扩空间之后重新导出旧目录，
+/// `plan_count` 会被静默改写成新值，`recipe_hash` 完全察觉不到。
+/// 导出器因此拿本常数当旧数据的默认指纹，见 `ramen_export_npy`。
+///
+/// 真要换空间时的正确做法是：新增一个 `GEN1_SPACE_HASH_V2`，让导出器按各源
+/// manifest 里记录的指纹分别归属，而不是直接改这里的值。
+pub const GEN1_SPACE_HASH_V1: &str = "6c30529e9333fb94";
+
 /// 该阶段的决策点能否作为搜索根局面
 ///
 /// 白名单而非黑名单，因为「合法阶段」是可枚举的、而「嵌套决策」不是。
 ///
 /// 第 1 年地区选择已是 turn 2 的 [`RamenStage::RegionSelect`] 阶段边界，
 /// 本白名单会自动捕获它。`Begin` / `BeginAfterRegionSelect` 不是决策点，不收录。
+///
+/// **第 2/3 年的地区选择则几乎撞不到**：它们在 turn 23/47 的**回合末**，
+/// 同回合的 `RamenSelect` / `Train` 通常先命中白名单把样本截走。
+/// 实测 1200 次自由采样（`region_quota_permille = [0, 0]`）：turn 23 命中 **0** 次，
+/// turn 47 命中 9 次（占捕获样本 0.76%，且只在该回合前面的决策点恰好不合格时才轮到）。
+/// 要稳定采到它们必须走 [`SampleSpec::capture_stage`]，
+/// 见 [`SamplerConfig::region_quota_permille`]。
 fn is_capturable_stage(stage: &RamenStage) -> bool {
     matches!(
         stage,
@@ -291,63 +324,58 @@ impl SamplingSpace {
     /// 应当报错，而不是静默产出错误卡组。同理，角色冲突由 `chara_id` 实际比对得出，
     /// 不写死「东海帝王撞 30275、杏目撞 30242」这两条已知结论。
     pub fn gen1() -> Result<Self> {
-        let data = global!(GAMEDATA);
+        let pool: Vec<u32> = GEN1_CARD_POOL.iter().map(|entry| entry.idrank).collect();
+        Ok(Self {
+            plans: enumerate_space(&pool, &GEN1_SHAPES)?
+        })
+    }
 
-        // 按类型分桶；友人卡单独拎出
-        let mut by_type: [Vec<u32>; 5] = Default::default();
-        let mut friend: Option<u32> = None;
-        for entry in GEN1_CARD_POOL.iter() {
-            let card = data.get_card(entry.card_id())?;
-            match card.card_type {
-                CARD_TYPE_FRIEND => {
-                    if friend.replace(entry.idrank).is_some() {
-                        bail!("卡池含多张友人卡，第一代构成假定恰好 1 张");
-                    }
-                }
-                t if (0..5).contains(&t) => by_type[t as usize].push(entry.idrank),
-                other => bail!(
-                    "卡池中 {} 的类型 {other} 不受支持（第一代只接受普通卡与友人卡）",
-                    entry.alias
-                )
+    /// 构造一个**分布外**空间：第一代卡池追加若干张卡，并只用一种自定义构成
+    ///
+    /// 用途是检验网络对未训练卡组流派的泛化。训练分布只覆盖 [`GEN1_SHAPES`] 的
+    /// 3 种构成与 [`GEN1_CARD_POOL`] 的 11 张卡，本入口刻意走到那之外：例如补一张
+    /// 新的智力卡即可组出「2 速 1 耐 2 智」这种池子里凑不齐的构成。
+    ///
+    /// 追加卡的类型同样从 `cardDB.json` 读出、角色冲突同样实际比对，与
+    /// [`Self::gen1`] 共用 [`enumerate_space`]——分布外空间若用另一套合法性判据
+    /// 枚举，跨空间的分数就不可比了。
+    ///
+    /// `extra` 中与卡池重复的 idrank 会被忽略，避免同一张卡在一副卡组里出现两次。
+    ///
+    /// # 错误
+    ///
+    /// 追加卡查不到、类型不受支持，或该构成组不出任何合法卡组时报错。
+    pub fn custom(extra: &[u32], shape: DeckShape) -> Result<Self> {
+        let mut pool: Vec<u32> = GEN1_CARD_POOL.iter().map(|entry| entry.idrank).collect();
+        for &idrank in extra {
+            if !pool.contains(&idrank) {
+                pool.push(idrank);
             }
         }
-        let Some(friend) = friend else {
-            bail!("卡池未包含友人卡，拉面杯必须携带新友人卡");
-        };
-
-        let mut plans = Vec::new();
-        for uma in GEN1_UMAS.iter() {
-            // 马娘与同角色支援卡不可共存
-            let mut usable: [Vec<u32>; 5] = Default::default();
-            for (t, bucket) in by_type.iter().enumerate() {
-                for &idrank in bucket {
-                    if data.get_card(idrank / 10)?.chara_id != uma.chara_id() {
-                        usable[t].push(idrank);
-                    }
-                }
-            }
-            for shape in GEN1_SHAPES.iter() {
-                for normals in enumerate_decks(&usable, &shape.counts) {
-                    let mut deck = [0u32; 6];
-                    deck[..5].copy_from_slice(&normals);
-                    deck[5] = friend;
-                    plans.push(DeckPlan {
-                        uma: uma.game_id,
-                        deck,
-                        shape: shape.name
-                    });
-                }
-            }
-        }
-        if plans.is_empty() {
-            bail!("采样空间为空：卡池与构成无法组出任何合法卡组");
-        }
-        Ok(Self { plans })
+        Ok(Self {
+            plans: enumerate_space(&pool, std::slice::from_ref(&shape))?
+        })
     }
 
     /// 组合总数
     pub fn len(&self) -> usize {
         self.plans.len()
+    }
+
+    /// 枚举内容的 FNV-1a 指纹
+    ///
+    /// 覆盖每个组合的马娘、卡组与所属构成，**且对枚举顺序敏感**——顺序就是
+    /// `index % len` 的语义，换了顺序旧样本的 `index` 就指向别的组合。
+    ///
+    /// 存在的理由：卡池与构成写在本文件里，改动**不会**反映到 `gamedata_sig`
+    /// （`cardDB.json` 一个字节都没变），只有 git commit 会动。导出器用它把
+    /// 「数据是哪个空间采的」变成可校验的显式指纹，见 [`GEN1_SPACE_HASH_V1`]。
+    pub fn content_hash(&self) -> String {
+        let mut text = String::new();
+        for plan in &self.plans {
+            text.push_str(&format!("{}|{:?}|{}\n", plan.uma, plan.deck, plan.shape));
+        }
+        compute_text_hash_fnv1a64(&text)
     }
 
     /// 是否为空（恒为 false，`gen1` 已拒绝空空间；仅为满足调用方习惯）
@@ -370,8 +398,14 @@ impl SamplingSpace {
     /// 分片续跑正需要前者。截断回合与局内种子仍走哈希派生，与卡组不相关。
     pub fn spec_at(&self, config: &SamplerConfig, index: u64) -> SampleSpec {
         let plan = &self.plans[(index % self.plans.len() as u64) as usize];
-        let turn_draw = derive_seed(config.seed_base, index, TURN_STREAM_TAG);
-        let truncate_turn = (turn_draw % (config.max_turn.max(0) as u64 + 1)) as i32;
+        // 地区配额优先：命中则截断回合由配额定死，不再抽
+        let (truncate_turn, capture_stage) = match config.region_quota_turn(index) {
+            Some(turn) => (turn, Some(RamenStage::RegionSelect)),
+            None => {
+                let turn_draw = derive_seed(config.seed_base, index, TURN_STREAM_TAG);
+                ((turn_draw % (config.max_turn.max(0) as u64 + 1)) as i32, None)
+            }
+        };
         SampleSpec {
             index,
             uma: plan.uma,
@@ -379,11 +413,76 @@ impl SamplingSpace {
             shape: plan.shape,
             inherit: config.inherit.clone(),
             truncate_turn,
+            capture_stage,
             seed: derive_seed(config.seed_base, index, SAMPLER_STREAM_TAG),
             epsilon: config.epsilon,
             min_actions: config.min_actions
         }
     }
+}
+
+/// 在给定卡池与构成列表上枚举全部合法 `(马娘, 卡组)`
+///
+/// 卡片类型一律从 `cardDB.json` 读取而非硬编码——数据更新导致类型变动时应当报错，
+/// 而不是静默产出错误卡组。同理，角色冲突由 `chara_id` 实际比对得出，
+/// 不写死「东海帝王撞 30275、杏目撞 30242」这两条已知结论。
+///
+/// [`SamplingSpace::gen1`] 与 [`SamplingSpace::custom`] 共用本函数，
+/// 两个空间的合法性判据因而完全一致。
+///
+/// # 错误
+///
+/// 卡片查不到、类型不受支持、卡池的友人卡不是恰好 1 张，或组不出任何卡组时报错。
+fn enumerate_space(pool: &[u32], shapes: &[DeckShape]) -> Result<Vec<DeckPlan>> {
+    let data = global!(GAMEDATA);
+
+    // 按类型分桶；友人卡单独拎出
+    let mut by_type: [Vec<u32>; 5] = Default::default();
+    let mut friend: Option<u32> = None;
+    for &idrank in pool {
+        let card = data.get_card(idrank / 10)?;
+        match card.card_type {
+            CARD_TYPE_FRIEND => {
+                if friend.replace(idrank).is_some() {
+                    bail!("卡池含多张友人卡，拉面杯构成假定恰好 1 张");
+                }
+            }
+            t if (0..5).contains(&t) => by_type[t as usize].push(idrank),
+            other => bail!("卡池中 {idrank} 的类型 {other} 不受支持（只接受普通卡与友人卡）")
+        }
+    }
+    let Some(friend) = friend else {
+        bail!("卡池未包含友人卡，拉面杯必须携带新友人卡");
+    };
+
+    let mut plans = Vec::new();
+    for uma in GEN1_UMAS.iter() {
+        // 马娘与同角色支援卡不可共存
+        let mut usable: [Vec<u32>; 5] = Default::default();
+        for (t, bucket) in by_type.iter().enumerate() {
+            for &idrank in bucket {
+                if data.get_card(idrank / 10)?.chara_id != uma.chara_id() {
+                    usable[t].push(idrank);
+                }
+            }
+        }
+        for shape in shapes.iter() {
+            for normals in enumerate_decks(&usable, &shape.counts) {
+                let mut deck = [0u32; 6];
+                deck[..5].copy_from_slice(&normals);
+                deck[5] = friend;
+                plans.push(DeckPlan {
+                    uma: uma.game_id,
+                    deck,
+                    shape: shape.name
+                });
+            }
+        }
+    }
+    if plans.is_empty() {
+        bail!("采样空间为空：卡池与构成无法组出任何合法卡组");
+    }
+    Ok(plans)
 }
 
 /// 从各类型可用卡中按张数要求枚举全部普通卡组合（结果长度恒为 5）
@@ -455,7 +554,23 @@ pub struct SamplerConfig {
     /// 截断回合的上界（含）
     pub max_turn: i32,
     /// 种子基底：换基底即得到一批全新但同样可复现的数据
-    pub seed_base: u64
+    pub seed_base: u64,
+    /// 第 2/3 年地区选择的采样配额，单位**千分之几**，`[第2年, 第3年]`
+    ///
+    /// 存在的理由是结构性的，不是调参：这两个决策点在 turn 23/47 的**回合末**，
+    /// 同回合的 `RamenSelect` / `Train` 通常先命中白名单把样本截走。实测 1200 次
+    /// 自由采样命中 turn 23 **0** 次、turn 47 9 次——`policy[214, 234)` 里属于
+    /// 第 2/3 年的 15 个格位因此拿不到可用的监督量，且这个量完全不受控。
+    ///
+    /// **第 3 年的每条样本约值 12 条普通样本的机时**（`all` 策略 120 个组合），
+    /// 故总预算倍率 ≈ `1 + q3 × 11`，`[20, 30]` 对应 ≈ 1.33x。
+    ///
+    /// 默认 `[0, 0]`（关闭）：配额会改写 [`SampleSpec::truncate_turn`] 并强制
+    /// [`SampleSpec::capture_stage`]，是教师数据采集的专用需求，不应让
+    /// `SamplerConfig::default()` 的既有调用方跟着改变样本分布。采集侧由
+    /// `ramen_teacher_collect` / `ramen_handwritten_choice` 的
+    /// `--region-quota-permille` 显式给出。
+    pub region_quota_permille: [u32; 2]
 }
 
 impl Default for SamplerConfig {
@@ -465,8 +580,35 @@ impl Default for SamplerConfig {
             min_actions: 2,
             inherit: gen1_inherit(),
             max_turn: 77,
-            seed_base: 0x5041_5254_5F31
+            seed_base: 0x5041_5254_5F31,
+            region_quota_permille: [0, 0]
         }
+    }
+}
+
+impl SamplerConfig {
+    /// 按工作项序号判定它是否被分配给地区配额，返回该捕获哪个回合
+    ///
+    /// 走独立频道 [`QUOTA_STREAM_TAG`]，因此改配额不影响非配额样本的截断回合。
+    /// 判定顺序是**先第 3 年再第 2 年**：这样调高第 2 年配额不会重排已分配给
+    /// 第 3 年的那批 index（第 3 年样本贵 12 倍，重排的代价不对称）。
+    ///
+    /// 配额之和超过 1000‰ 时截断；`max_turn` 够不到目标回合时不分配。
+    fn region_quota_turn(&self, index: u64) -> Option<i32> {
+        let y3 = self.region_quota_permille[1].min(1000);
+        let y2 = self.region_quota_permille[0].min(1000 - y3);
+        if y2 + y3 == 0 {
+            return None;
+        }
+        let draw = (derive_seed(self.seed_base, index, QUOTA_STREAM_TAG) % 1000) as u32;
+        let turn = if draw < y3 {
+            REGION_SELECT_TURN_Y3
+        } else if draw < y3 + y2 {
+            REGION_SELECT_TURN_Y2
+        } else {
+            return None;
+        };
+        (turn <= self.max_turn).then_some(turn)
     }
 }
 
@@ -491,6 +633,16 @@ pub struct SampleSpec {
     pub inherit: InheritInfo,
     /// 截断回合：跑到该回合及之后的首个合格决策点即停
     pub truncate_turn: i32,
+    /// 只捕获该阶段（`None` = 白名单内首个合格决策点）
+    ///
+    /// 唯一用途是采到第 2/3 年地区选择：它们在 turn 23/47 的**回合末**，
+    /// 同回合的 `RamenSelect` / `Train` 通常先命中白名单，自由捕获下这两个
+    /// 决策点的样本量近乎为零（见 [`SamplerConfig::region_quota_permille`]）。
+    /// 指定阶段即跳过前面的决策点继续走。
+    ///
+    /// 与 `truncate_turn` 是**合取**：仍要求 `turn >= truncate_turn`，
+    /// 故配额样本的 `truncate_turn` 必须正好写成目标回合。
+    pub capture_stage: Option<RamenStage>,
     /// 本局主种子（决策流与规则流由它分裂而来）
     pub seed: u64,
     /// 轨迹扰动概率（随任务固化，不在执行时从配置读）
@@ -598,6 +750,8 @@ struct SamplingTrainer {
     min_actions: usize,
     /// 截断回合
     truncate_turn: i32,
+    /// 只捕获该阶段（`None` = 白名单内首个合格决策点）
+    capture_stage: Option<RamenStage>,
     /// 捕获结果
     captured: RefCell<Option<CapturedRoot>>
 }
@@ -607,6 +761,14 @@ impl SamplingTrainer {
     fn done(&self) -> bool {
         self.captured.borrow().is_some()
     }
+
+    /// 当前阶段是否是本次任务要捕获的阶段
+    fn stage_matches(&self, stage: &RamenStage) -> bool {
+        match &self.capture_stage {
+            Some(want) => stage == want,
+            None => is_capturable_stage(stage)
+        }
+    }
 }
 
 impl Trainer<RamenGame> for SamplingTrainer {
@@ -614,7 +776,7 @@ impl Trainer<RamenGame> for SamplingTrainer {
         if !self.done()
             && game.turn() >= self.truncate_turn
             && actions.len() >= self.min_actions
-            && is_capturable_stage(&game.stage)
+            && self.stage_matches(&game.stage)
         {
             *self.captured.borrow_mut() = Some(CapturedRoot {
                 game: game.clone(),
@@ -669,6 +831,7 @@ pub fn sample_from_spec(spec: SampleSpec) -> Result<SampleOutcome> {
         epsilon: spec.epsilon,
         min_actions: spec.min_actions,
         truncate_turn: spec.truncate_turn,
+        capture_stage: spec.capture_stage.clone(),
         captured: RefCell::new(None)
     };
 
@@ -787,6 +950,93 @@ mod tests {
             assert_eq!(per_uma[&uma.game_id], 85, "{} 无角色冲突，应为 85 套", uma.alias);
         }
         assert_eq!(space.len(), 5 * 85 + 2 * 50);
+        Ok(())
+    }
+
+    /// 第一代空间的枚举指纹钉死在 [`GEN1_SPACE_HASH_V1`]
+    ///
+    /// 本测试失败 = 有人动了卡池或构成。已落盘的教师数据都产自旧空间，
+    /// 且它们的 manifest 没记空间指纹，重导会被静默改写 `plan_count`。
+    /// 处理办法见 [`GEN1_SPACE_HASH_V1`] 的文档，**不要直接改常数值**。
+    #[test]
+    fn test_gen1_space_hash_pinned() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::gen1()?;
+        let hash = space.content_hash();
+        println!("gen1 空间 {} 个组合，指纹 {hash}", space.len());
+        println!("钉死值 {GEN1_SPACE_HASH_V1}");
+
+        // 顺序敏感性：交换两个组合就该换指纹，否则它挡不住枚举顺序变化
+        let mut swapped = SamplingSpace::gen1()?;
+        swapped.plans.swap(0, 1);
+        println!("交换首两项后 {}", swapped.content_hash());
+
+        assert_eq!(hash, GEN1_SPACE_HASH_V1, "采样空间变了；先读 GEN1_SPACE_HASH_V1 的文档");
+        assert_ne!(swapped.content_hash(), hash, "指纹必须对枚举顺序敏感");
+        Ok(())
+    }
+
+    /// 分布外空间：追加一张智力卡后能组出「2 速 1 耐 2 智」，且规模符合手算
+    ///
+    /// 池内只有 30289 一张智力卡，`counts[4] = 2` 在默认卡池下组不出任何卡组；
+    /// 追加 30306（智，chara 1060，与 7 个马娘均无冲突）后：
+    /// 无冲突马娘 C(6,2)×C(2,1)×C(2,2)=30，冲突马娘速池 6→5 得 C(5,2)×2=20，
+    /// 合计 5×30 + 2×20 = 190。
+    #[test]
+    fn test_custom_space_two_wisdom() -> Result<()> {
+        setup()?;
+        let shape = DeckShape {
+            counts: [2, 1, 0, 0, 2],
+            name: "2速1耐2智1友"
+        };
+
+        println!("默认卡池只有 1 张智力卡，2 智构成应当组不出卡组：");
+        match SamplingSpace::custom(&[], shape) {
+            Ok(space) => println!("  ❌ 意外组出了 {} 套", space.len()),
+            Err(e) => println!("  ✅ 如期报错：{e}")
+        }
+
+        let space = SamplingSpace::custom(&[303064], shape)?;
+        let mut per_uma: HashMap<u32, usize> = HashMap::new();
+        for plan in space.plans() {
+            *per_uma.entry(plan.uma).or_default() += 1;
+        }
+        for uma in GEN1_UMAS.iter() {
+            println!("{} ({}) -> {} 套卡组", uma.alias, uma.game_id, per_uma[&uma.game_id]);
+        }
+        println!("合计 {} 套 (马娘, 卡组)", space.len());
+
+        // 每套卡组都必须同时带上两张智力卡，且构成名与友人卡正确
+        for plan in space.plans() {
+            assert!(plan.deck.contains(&302894), "缺少池内智力卡 302894");
+            assert!(plan.deck.contains(&303064), "缺少追加的智力卡 303064");
+            assert_eq!(plan.deck[5], 303054, "友人卡应固定为 303054");
+            assert_eq!(plan.shape, "2速1耐2智1友");
+        }
+        assert_eq!(per_uma[&112901], 20, "杏目与 30242 同角色，速池应缩到 5");
+        assert_eq!(per_uma[&100301], 20, "东海帝王与 30275 同角色，速池应缩到 5");
+        assert_eq!(space.len(), 5 * 30 + 2 * 20);
+        Ok(())
+    }
+
+    /// 重复的追加卡不会让同一张卡在卡组里出现两次
+    #[test]
+    fn test_custom_space_ignores_duplicate_extra() -> Result<()> {
+        setup()?;
+        let shape = DeckShape {
+            counts: [3, 1, 0, 0, 1],
+            name: "3速1耐1智1友"
+        };
+        // 302894 本就在池内，再追加一次应被忽略
+        let space = SamplingSpace::custom(&[302894, 302894], shape)?;
+        println!("追加池内卡后规模 {} 套（应与第一代该构成一致）", space.len());
+        for plan in space.plans() {
+            let mut seen = plan.deck.to_vec();
+            seen.sort_unstable();
+            seen.dedup();
+            assert_eq!(seen.len(), 6, "卡组出现重复卡: {:?}", plan.deck);
+        }
+        assert_eq!(space.len(), 5 * 40 + 2 * 20);
         Ok(())
     }
 
@@ -1142,6 +1392,145 @@ mod tests {
                 "搜索没有产出任何有效样本"
             );
         }
+        Ok(())
+    }
+
+    // ========== 地区选择配额 ==========
+
+    /// 回归：**关掉配额后第 2/3 年地区选择的样本量近乎为零**
+    ///
+    /// 这是 [`SamplerConfig::region_quota_permille`] 存在的全部理由。自由捕获下
+    /// turn 23/47 的回合末 `RegionSelect` 通常被同回合的 `RamenSelect` / `Train`
+    /// 抢先：实测 1200 个任务里 turn 23 命中 0 次、turn 47 命中 9 次（0.76%）。
+    /// 而 `policy[214, 234)` 那 20 个地区格里，第 2/3 年占 15 个。
+    ///
+    /// 断言写成「占比 < 5%」而非「恒为 0」：turn 47 在前面的决策点恰好不合格时
+    /// 确实能被自由捕获到，写死 0 会是个会自己红掉的假命题。
+    #[test]
+    fn test_region_select_undersampled_without_quota() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::gen1()?;
+        let config = SamplerConfig {
+            region_quota_permille: [0, 0],
+            ..SamplerConfig::default()
+        };
+
+        let mut region_turns: HashMap<i32, usize> = HashMap::new();
+        let mut captured = 0usize;
+        for index in 0..1200u64 {
+            if let SampleOutcome::Captured(pos) = sample_position(&space, &config, index)? {
+                captured += 1;
+                if pos.stage == RamenStage::RegionSelect {
+                    *region_turns.entry(pos.turn).or_default() += 1;
+                }
+            }
+        }
+        println!("无配额 1200 任务：捕获 {captured} 条，RegionSelect 分布 {region_turns:?}");
+        let y1 = region_turns.get(&2).copied().unwrap_or(0);
+        let y2 = region_turns.get(&REGION_SELECT_TURN_Y2).copied().unwrap_or(0);
+        let y3 = region_turns.get(&REGION_SELECT_TURN_Y3).copied().unwrap_or(0);
+        assert!(y1 > 0, "第 1 年的 turn 2 地区选择本应能自由捕获");
+        assert!(
+            (y2 + y3) * 20 < captured,
+            "第 2/3 年地区样本占比 {}/{captured} 已超过 5%%，配额机制的前提需重新评估",
+            y2 + y3
+        );
+        Ok(())
+    }
+
+    /// 配额打开后，第 2/3 年地区选择都能采到，且候选表是完整组合枚举
+    #[test]
+    fn test_region_quota_captures_year2_and_year3() -> Result<()> {
+        setup()?;
+        // 第 3 年 `fixed` 策略**绕过 trainer** 直接落地，采不到任何样本。
+        // 测试进程走 `default_for_init()`，默认即 `All`；此处显式断言，
+        // 免得将来别处先用 toml 初始化 globals 时本测试给出误导性的失败原因。
+        use crate::gamedata::{GAMECONFIG, RamenRegionStrategy};
+        assert_eq!(
+            global!(GAMECONFIG).ramen_region_strategy,
+            RamenRegionStrategy::All,
+            "本测试要求 ramen_region_strategy = all（fixed 下第 3 年不经过 trainer）"
+        );
+        let space = SamplingSpace::gen1()?;
+        let config = SamplerConfig {
+            region_quota_permille: [500, 500],
+            ..SamplerConfig::default()
+        };
+
+        let mut by_turn: HashMap<i32, usize> = HashMap::new();
+        let mut cands: HashMap<i32, usize> = HashMap::new();
+        for index in 0..24u64 {
+            let SampleOutcome::Captured(pos) = sample_position(&space, &config, index)? else {
+                continue;
+            };
+            assert_eq!(pos.stage, RamenStage::RegionSelect, "配额样本必须停在 RegionSelect");
+            assert!(
+                matches!(pos.turn, REGION_SELECT_TURN_Y2 | REGION_SELECT_TURN_Y3),
+                "配额样本停在了非地区回合 {}",
+                pos.turn
+            );
+            *by_turn.entry(pos.turn).or_default() += 1;
+            cands.insert(pos.turn, pos.actions.len());
+        }
+        println!("配额 500/500 的 24 个任务：{by_turn:?}，候选数 {cands:?}");
+        assert!(
+            by_turn.get(&REGION_SELECT_TURN_Y2).copied().unwrap_or(0) > 0,
+            "没采到第 2 年地区选择"
+        );
+        assert!(
+            by_turn.get(&REGION_SELECT_TURN_Y3).copied().unwrap_or(0) > 0,
+            "没采到第 3 年地区选择"
+        );
+        assert_eq!(
+            cands.get(&REGION_SELECT_TURN_Y2),
+            Some(&10),
+            "第 2 年应是 C(5,3)=10 个组合"
+        );
+        assert_eq!(
+            cands.get(&REGION_SELECT_TURN_Y3),
+            Some(&120),
+            "第 3 年 all 策略应是 C(10,3)=120 个组合"
+        );
+        Ok(())
+    }
+
+    /// 配额走独立频道：调整它不改动落在普通配额上的任何一条任务
+    ///
+    /// 这条保证的是分片续跑的可复现契约——否则改一次配额，已跑完的分片全部作废。
+    #[test]
+    fn test_region_quota_does_not_perturb_other_samples() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::gen1()?;
+        let off = SamplerConfig {
+            region_quota_permille: [0, 0],
+            ..SamplerConfig::default()
+        };
+        let on = SamplerConfig {
+            region_quota_permille: [20, 30],
+            ..SamplerConfig::default()
+        };
+
+        let mut quota_hits = 0usize;
+        let total = 2000u64;
+        for index in 0..total {
+            let a = space.spec_at(&off, index);
+            let b = space.spec_at(&on, index);
+            if b.capture_stage.is_some() {
+                quota_hits += 1;
+                assert!(
+                    matches!(b.truncate_turn, REGION_SELECT_TURN_Y2 | REGION_SELECT_TURN_Y3),
+                    "配额任务的截断回合必须正好是地区回合，实际 {}",
+                    b.truncate_turn
+                );
+                continue;
+            }
+            assert_eq!(a, b, "非配额任务被配额改动了: index={index}");
+        }
+        println!("{total} 个任务中 {quota_hits} 个落入地区配额（50‰ 期望 ≈ 100）");
+        assert!(
+            (60..160).contains(&quota_hits),
+            "配额比例偏离过大: {quota_hits} / {total}"
+        );
         Ok(())
     }
 }

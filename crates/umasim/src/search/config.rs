@@ -67,6 +67,13 @@ pub struct SearchConfig {
     /// 等效 1.31 倍；开启后 0.69、等效 **3.65 倍**（区间 2.44–8.62）。
     pub crn_stage_reseed: bool,
 
+    /// 是否按 rollout 序号保留有序原始分（仅教师数据采集用）
+    ///
+    /// 默认 `false`：生产路径不分配缓冲、不写入 [`crate::search::SearchOutput::ordered_rollouts`]，
+    /// 对搜索结果零影响。开启后按候选、按序号对齐记录 `score` 轴原始分，
+    /// 失败序号为 `None`（不能省略，否则后续元素会与其他候选的 CRN 配对错位）。
+    pub record_ordered_rollouts: bool,
+
     /// 决策理由分差门限（保留字段，不再用作触发器）
     ///
     /// 当前每回合都输出决策理由；分差仅用于选择其他候选的显示颜色档位。
@@ -94,6 +101,7 @@ impl Default for SearchConfig {
             search_cpuct: 1.0,
             expected_search_stdev: 2200.0,
             crn_stage_reseed: true,
+            record_ordered_rollouts: false,
             reason_gap_threshold: 150.0,
             reason_max_display: 5
         }
@@ -167,6 +175,12 @@ impl SearchConfig {
         self
     }
 
+    /// 启用/禁用按 rollout 序号保留有序原始分（教师数据采集用，见 [`record_ordered_rollouts`](Self::record_ordered_rollouts)）
+    pub fn with_record_ordered_rollouts(mut self, enabled: bool) -> Self {
+        self.record_ordered_rollouts = enabled;
+        self
+    }
+
     /// 设置决策理由分差门限（`0` 等价禁用理由输出）
     pub fn with_reason_gap_threshold(mut self, threshold: f64) -> Self {
         self.reason_gap_threshold = threshold;
@@ -228,6 +242,24 @@ mod tests {
         c.check(
             !sc.crn_stage_reseed,
             "crn_stage_reseed 跟随 GameConfig 的 false"
+        );
+        c.finish()
+    }
+
+    /// `record_ordered_rollouts` 必须默认关闭，且 toml 路径不会悄悄打开它。
+    #[test]
+    fn test_record_ordered_rollouts_defaults_off() -> Result<()> {
+        let def = SearchConfig::default();
+        let from_toml = SearchConfig::new_game_config(&load_real_default()?);
+        println!(
+            "default={} new_game_config={}",
+            def.record_ordered_rollouts, from_toml.record_ordered_rollouts
+        );
+        let mut c = Checks::new();
+        c.check(!def.record_ordered_rollouts, "SearchConfig::default 为 false");
+        c.check(
+            !from_toml.record_ordered_rollouts,
+            "new_game_config 未接线时保持默认 false"
         );
         c.finish()
     }

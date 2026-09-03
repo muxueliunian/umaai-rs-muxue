@@ -519,25 +519,7 @@ impl RamenPolicy {
     /// 剩余有效回合少于缺口（即使全部打完也补不齐，摆烂）时同样不强制，
     /// 由正常打分决策并记录原因（`free_race_gate_reason` 进决策日志 breakdown）。
     fn free_race_gate(&self, game: &RamenGame, actions: &[RamenAction]) -> Option<usize> {
-        let free = game.uma.find_free_race(game.turn())?;
-        let need = free.count.saturating_sub(game.uma.count_free_race(free));
-        // 达标后直到区间结束不再干预（软倾向同理由 `score_race` 降级为普通比赛分）
-        if need == 0 {
-            return None;
-        }
-        let remain = remaining_race_slots(game.turn(), free);
-        // 摆烂：剩余有效回合少于缺口，打完也补不齐 → 不再强制（原因进决策日志）
-        if remain < need {
-            return None;
-        }
-        if remain > need + self.config.race_gate_slack {
-            return None;
-        }
-        // 本回合等级不满足：打了不计数，不强制（留给后续有效回合）
-        if !race_turn_qualified(game.turn(), free) {
-            return None;
-        }
-        actions.iter().position(|a| a.operation == Operation::Race)
+        free_race_gate_index(game, actions, self.config.race_gate_slack)
     }
 
     /// 自选比赛守门的详细原因（供决策日志 breakdown 记录摆烂/强制情形）
@@ -1010,6 +992,41 @@ pub(crate) fn remaining_race_slots(turn: i32, free: &FreeRaceData) -> u32 {
     }
     mask &= !0u64 << lo;
     mask.count_ones()
+}
+
+/// 自选比赛硬守门的判定本体（不依赖 [`RamenPolicy`] 实例）
+///
+/// 自选比赛不达标会在 `BaseGame::check_free_race` 判定育成失败，这是**硬性义务
+/// 而非价值权衡**，任何决策器都必须过这一层。判定本身只读局面与候选、不读策略参数，
+/// 故抽成自由函数供任意决策器复用同一份逻辑，避免各自实现出现分歧。
+/// 判定语义见 [`RamenPolicy::free_race_gate`]，此处逐字保持一致。
+///
+/// `slack` 对应 [`RamenPolicyConfig::race_gate_slack`]，调用方一律取该配置值，
+/// 不要另行硬编码。
+///
+/// 返回候选中「比赛」动作的下标；`None` 表示无需干预
+/// （无要求 / 已达标 / 仍宽裕 / 本回合等级不满足 / 剩余有效回合不足而摆烂 /
+/// 候选里没有比赛动作）。
+pub fn free_race_gate_index(game: &RamenGame, actions: &[RamenAction], slack: u32) -> Option<usize> {
+    let free = game.uma.find_free_race(game.turn())?;
+    let need = free.count.saturating_sub(game.uma.count_free_race(free));
+    // 达标后直到区间结束不再干预（软倾向同理由 `score_race` 降级为普通比赛分）
+    if need == 0 {
+        return None;
+    }
+    let remain = remaining_race_slots(game.turn(), free);
+    // 摆烂：剩余有效回合少于缺口，打完也补不齐 → 不再强制（原因进决策日志）
+    if remain < need {
+        return None;
+    }
+    if remain > need + slack {
+        return None;
+    }
+    // 本回合等级不满足：打了不计数，不强制（留给后续有效回合）
+    if !race_turn_qualified(game.turn(), free) {
+        return None;
+    }
+    actions.iter().position(|a| a.operation == Operation::Race)
 }
 
 /// 当前回合比赛等级（0 = 无比赛；等级越高越好）

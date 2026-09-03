@@ -3,6 +3,9 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-09-03
+- **`ramen_space_bench` 固定地区策略为 `all`**：与 `bench_base`、`ramen_teacher_collect` 一致，不再跟随 `game_config.toml`。此前跟随 toml 时，只要有人为手动模式把 `ramen_region_strategy` 改成 `fixed`，基准就会静默换成另一个分布（第 3 年由 120 组合枚举变成写死单组合并跳过 trainer），此前记下的全部均分基线一并作废，而输出里看不出任何区别。只改 strategy 不碰 `ramen_region_fixed`——后者仅在 `fixed` 下被读，清空它是空操作
+- **`ramen_handwritten_choice` 补转发 `select_event_choice`**：包装用的 `RecordingTrainer` 只实现了 `select_action` / `select_choice`，`select_event_choice` 落到 trait 默认实现，绕过了手写策略重写的友人事件特例——重放出的轨迹因此可能与采集时不是同一条
+- **若干健壮性与文档修正**：`.npy` 头部读取补长度检查（截断文件原会在切片处 panic）；删除 `ChoiceRow` 中只写不读的阶段字段（消除默认 `cargo check` 的 dead_code 警告）；NN 训练员的模型测试在 `saved_models/` 缺模型时跳过而非失败（该目录不入库）；修正 `enumerate_space` 误用 `enumerate_decks` 文档摘要与 `ramen_special_root` 指向 `#[cfg(test)]` 的 rustdoc 死链；`CandidateAccum::push` 的有序槽位判空合并为一次
 - **训练评估单源化（B2）消除 policy↔local 双重计算**：新增 `RamenTrainEval`（buffs/value/ramen_effect/fail_rate/shining 五件套）+ `RamenPolicy::eval_train` 单源评估，`score_train_action` 拆为 eval/other 两分支，`score_train_actions`/`decide_train` 新增 cached 变体（`TrainEvalCache` 按 train 位缓存）；`LocalRamenTrainer::decide_train` 跨 policy 打分与 local 调整层共享同一份 eval，同一回合同 train 的 `calc_training_buff`/`calc_training_value`/`calc_training_failure_rate`/`calc_ramen_training_effect`（原本最多算 3 遍）收口成 1 遍；`RamenGame` 新增 `calc_training_value_with_effect`（trait 方法保持完整单函数实现避免跨 impl 边界内联损失）。microbench 7 段 F（decide_train 整回合）4238→~3650 ns/iter（**-14%**），其余段回落基线 ±5% 内；sim_profiler 500 局整局 CPU ~1.25s→1.13s（**-10%**）；平均分逐位一致 64871
 - **训练评估确定性守门**：`test_train_eval_deterministic_and_cached_consistent` 三条——同局面两次 `eval_train` 逐位一致（缓存可复用前提）/ cached 与 uncached 决策逐项一致（含非 Train 候选）/ trait `calc_training_value` 与 `with_effect` 双路径逐位等价（防重复代码漂移）
 - **mcts_profiler bin 注册补 `required-features=["profiler"]`**：顶层 `#![cfg(feature = "profiler")]` 未注册导致默认 check/build 报 `main function not found`（与 muxue fork 同款坑，修复入主仓库）
@@ -21,6 +24,46 @@
 - **`distribute_person` 采样改零分配**：`WeightedIndex::new`（每次 Vec 堆分配 + 前缀和）换成 `Uniform::new + sample` + 5 元素线性分桶（新 `sample_bucket`），顺势消除 person clone 与负权重检查（得意率业务非负）；与 rand 整数 WeightedIndex 抽样序列逐位等价（新增 7 组合 × 5 万次守门测试 + 全量测试数值逐位不变），进程内对照每次采样 -31~-42%，distribute_all 为最大杠杆段（A/D ≈ 53%）
 
 ## 2026-09-01
+- **预声明 LR 日程**：train.py 新增 `--lr-schedule {plateau,cosine}`（默认 plateau，不给新参数时行为逐位不变）与 `--lr-warmup-steps`、`--lr-final-factor`，cosine 按 optimizer step 走线性 warmup + 余弦退火，倍率作用于各参数组的初始 LR。原先的 ReduceLROnPlateau 由每轮的留出 regret 驱动，而 regret 同时还在挑 `best.pt`；它又按轮计数，数据量一变轮数跟着变、LR 衰减次数也跟着变，对照实验的差异因此无法归因
+- **`--max-steps` 精确截断**：此前换算成整轮并向上取整，"训同样多步"在不同数据量下并不成立。现改为在 batch 边界精确截到指定步数，`run_epoch` 增回报实跑步数、checkpoint 增记 `global_step` 以便续跑对齐
+- **采样空间指纹**：SamplingSpace 新增 `content_hash()`（覆盖马娘、卡组与构成，且对枚举顺序敏感）与钉死的 `GEN1_SPACE_HASH_V1`，采集 manifest 增记 `sampling_space_hash`，导出器校验数据所属空间与本次编译一致后才导出并写进 meta，旧 manifest 缺该字段时按 v1 空间处理。卡池与构成写在代码里，改动既不反映到 `gamedata_sig` 也不反映到 `recipe_hash`；而导出器的 `plan_count` 取自当前编译的 `gen1()`，扩空间后重导旧目录会静默改写它，训练侧按 `index % plan_count` 的组合切分随之整体错位。该字段刻意不并入 `recipe_hash`——并入会让同一空间下的新旧数据配方哈希不同、无法合并
+- **分布外采样空间**：sampler 新增 `SamplingSpace::custom`——在第一代卡池上追加支援卡并只用一种自定义构成，与 `gen1` 共用同一套枚举与合法性判据（卡类型读 cardDB、角色冲突实比对），追加的重复卡忽略。ramen_space_bench 相应新增 `--shape` 与 `--extra-card`，默认不给时行为逐位不变；`--extra-card` 必须与 `--shape` 同用，否则默认口径就不再与教师数据同分布。用于检验网络对未训练卡组流派的泛化，输出显式标注分布外、提示分数不可与默认口径直接比较
+
+## 2026-08-31
+- **评估列窗口**：eval.py 的 `evaluate_model` 与命令行新增 `--eval-columns LO HI`，候选价值只用该段 rollout 列重算（data.py 的 NpyShard 相应惰性 mmap `cand_scores`/`cand_valid`，窗口内无有效列的样本整条跳过并计数）。原先只有全列 `cand_mean` 一个口径，而 `best.pt` 正是按它挑的，被结算的列因此参与了模型选择
+- **eval.py 沿用 checkpoint 的切分粒度**：独立评估此前恒按默认的 combo 重切，按 sample 训练的模型会被静默换成另一套留出集
+- **训练侧诊断设施**：train.py 新增 `--eval-columns`（每轮额外记一份限定列的留出指标到 `evaluation_a`，不参与早停与 LR 调度）、`--checkpoint-steps`（在指定 optimizer step 处存 `step_XXXXXX.pt`）、`--ema-halflife-steps`（按步维护带偏差校正的权重 EMA 并一并存盘）、`--no-early-stop`（训满轮数上限）。metrics 增记 `global_step`，run.json 增记 `diagnostics` 段。四项都不改变梯度，不给新参数时逐位复现旧结果
+- **训练随机轴拆分**：train.py 新增 `--split-seed`（样本身份：划分与抽稀）与 `--init-seed`（优化路径：初始化、dropout、minibatch 顺序），未给出时都回落到 `--seed`，旧命令行为逐位不变。此前两者绑在一起，每换一个种子就换掉约 10% 训练样本；实测固定 split 后闭环 sd 从 2521 降到 156
+- **早停按 optimizer step 计**：新增 `--patience-steps` 与 `--max-steps`，按每轮步数换算成轮。按轮计数时数据量翻倍会让同样的轮数变成两倍步数，学习曲线各点的训练时长口径不一致
+- **闭环 bench 局号偏移**：ramen_space_bench 新增 `--run-offset`。相邻基种子会撞随机世界（`derive_seed` 是 XOR 后 splitmix，`base ^ r == base + r`），此前三个相邻种子的 12600 局实际只有 5248 个唯一世界，标准误被低估约 1.5 倍。改由固定基种子、按局号区间切分
+- **选择集 / 验收集分离**：新增 scripts/ramen_nn/compare_bench.py，按世界去重做配对比较，并断言两集零重叠。同一批对局既挑 checkpoint 又报成绩会带 winner's curse
+- **因子化吃面输出头**：model.py 新增 `factorized_eat_head`，把 `[1,201)` 联合格拆成「地区 + 用法 + 零初始化交互」。输出布局与 ONNX 算子集不变。三训练种子下无可测效果，默认关闭
+- **SpecialSelect 联合决策根还原**：新增 trainer/ramen_special_root——把 `SpecialSelect` 局面写回 `pending_ramen` / `pending_special_targets` / `stage` 还原成它所来自的 `RamenSelect` 联合决策根，供网络在正确状态上读联合格位。教师在 `RamenSelect` 根上搜的是联合动作（地区 × 隐藏风味用法），policy 格 `[1,201)` 也是联合格，而训练集里 `SpecialSelect` 阶段样本数为 0；真实对局却把决策拆成两拍，第二拍的阶段 one-hot 在全部训练样本里恒为 0，网络输出属外推。模块不带 onnx 门控，否则守门测试在默认 feature 下不会运行。测试断言还原后特征逐位相同、且**不还原时必须不同**——后者保证规则层新增字段时测试会红而不是静默失效
+- **NN 训练员 SpecialSelect 三档口径**：新增 `SpecialSelectMode::{Raw, Canonical, Handwritten}` 与 `with_special_mode`，默认 `Canonical`；`Raw` 保留作对照，`Handwritten` 把该阶段整个交给手写策略以给可恢复上限定界。`ramen_space_bench` 与 `ramen_advantage_probe` 都加 `--special-mode`。ramen_advantage_probe 的 required-features 补 onnx——无 onnx 时它没有任何可用功能，让 cargo 直接跳过该目标好过编一个只会报错的空壳；ramen_space_bench 仍须在默认 feature 下可构建（handwritten/random 是主用途），故其 special-mode 解析走 onnx 门控
+- **拉面 NN 策略训练员**：新增 ramen_nn_trainer——把 ONNX 模型接到 `Trainer<RamenGame>`，编码定长特征后按冻结格位表给当前候选打分 argmax；choice 头未训练，事件选项委托推荐手写策略。仅在 onnx feature 下编译
+- **自选比赛硬守门供网络复用**：`RamenPolicy::free_race_gate` 的判定本体抽成自由函数 `free_race_gate_index`，NN 训练员在 Train 阶段先过同一层守门再读网络输出。自选比赛不达标直接判育成失败，是硬性义务而非价值权衡，任何策略都要过；判定语义逐字保持不变，手写策略行为不变
+- **采样空间基准接入网络**：ramen_space_bench 新增 `--trainer nn` 与 `--model`，模型在进程启动时加载一次由各局共享而非每局重载；`--no-race-shield` 可关掉守门，仅供研究守门能否移除，不作为验收口径。策略分派由字符串匹配改为预构造枚举，未知策略名在开跑前报错而不是每局重判
+- **on-policy 配对 advantage 探针**：新增 ramen_advantage_probe bin——用指定策略跑完整局，在网络与手写选择不同的决策点上做配对 rollout（两动作共享同一张 CRN 种子表，rollout 基策为手写），按性能差分恒等式估计 `J(π) − J(H)`。两策略选同一动作的点贡献恒为 0，直接跳过不搜索；分歧点按蓄水池等概率抽样，单局估计按分歧点总数加权还原。`--rollin` 可把 roll-in 换成手写，用于量测占用分布错配。此前训练侧的 `expected_regret` 算在手写 roll-in 加扰动的分布上，与闭环结果反向，不能用来排序训练方案
+- **训练集稳定抽稀**：data.py 新增 `subsample_train_refs`，train.py 新增 `--max-train-samples`——按 `splitmix64(sample_id, seed)` 排序取前 N 条，同一种子下各数据量点严格嵌套且验证集不变，曲线上的差异只来自数据量。checkpoint 的 split 段增记 `full_train_size` 与 `max_train_samples`
+- **Train 阶段动作重加权（可选）**：train.py 新增 `--train-action-reweight`，按 policy 软标签主动作施加截断逆平方根样本权重（上限 4，归一到均值 1），只作用于 Train 阶段；权重与计数写入 run.json 与 checkpoint。默认关闭
+- **onnx feature 编译修复**：neural_net_evaluator 补 `use rand::Rng`
+
+## 2026-08-30
+- **采样地区配额**：采样器新增地区配额与「只捕获指定阶段」开关，按工作项序号确定性分配、走独立随机频道，改配额不影响其余样本的截断回合。此前第 2/3 年的地区选择几乎采不到——它们在回合末，同回合的吃面/训练决策先命中采样白名单，实测 1200 次采样 turn 23 命中 0 条、turn 47 只有 9 条
+- **拉面教师样本容器**：新增 training_sample 模块——定长特征 + 元信息 + 变长候选表，每候选按 rollout 序号存定长分数槽位并配有效性位图，失败的 rollout 留空而不是跳过，否则候选之间的 CRN 配对会整体错位；统计量由原始 f64 累加，均值与标准差和 ActionResult 同口径；附 pilot 用的 bincode 批次落盘。PolicySlots 补 serde 派生
+- **搜索层保留有序 rollout**：SearchConfig 新增 `record_ordered_rollouts` 开关，默认关闭时不分配缓冲、不改变搜索结果；开启后按 rollout 序号定长记录 score 轴原始分，随 SearchOutput 一并输出根种子。失败的 rollout 留空而不是跳过，UCB 路径同样按序号写入，否则候选之间的 CRN 配对会整体错位
+- **拉面版 export_sample**：搜索输出可直接导成教师样本——定长特征 + 元信息 + 按 rollout 序号对齐的候选分，不计算 policy/value 标签（标签是离线可再生的 sidecar）；未开启有序 rollout 记录时直接报错，不退化成用直方图回填
+- **教师数据采集驱动**：新增 ramen_teacher_collect bin——采样局面、搜索、导出样本、分片落盘并写 manifest。四条运行时前提（记录有序 rollout / 关闭 UCB / 显式 radical_factor_max / 地区策略 all）由 bin 强制设置，manifest 记的是它们的实际取值，另存游戏数据签名与 git 提交以便复现；支持按 manifest 断点续跑，`--count` 是从 `--start` 起算的累计目标，区间为空时报错并保持 manifest 不变
+- **教师数据 NumPy 导出**：新增 ramen_export_npy bin——把多个采集目录的 bincode 分片摊平成一组 .npy 数组供 Python 训练侧读取，候选维用 CSR 偏移表示变长。合并前校验各目录的采集配方哈希与 git 提交一致、样本 id 不重复，维度常数与本次编译不符时报错。只导原始量不导标签，软标签配方与 value 归一化留在训练侧。`--raw` 额外导出每次 rollout 的原始分数与槽位有效性。npy 头部定长占位、收尾回填行数，全程流式不驻留内存
+- **采样空间基准**：新增 ramen_space_bench bin——遍历采样空间全部 (马娘, 卡组) 计划各跑若干整局，按构成与马娘分组给出均分、标准差与标准误。此前唯一的基准 bench_base 用的马娘不在采样空间内且无自选比赛要求，测出的手写基线不能当作网络验收门槛；本 bin 与教师数据同分布，两边数字才可比
+- **手写策略选择记录**：新增 ramen_handwritten_choice bin——重放教师样本的每个局面、记录手写策略的选择并落到 policy 格位，供训练侧算出同一批局面同一 Q 口径下手写自己的后悔值。训练侧的后悔值是相对搜索教师的，不回答「网络比手写强还是弱」。RamenSelect 按真实对局分两阶段问再合成，因为手写的吃面决策不读万能风味用法，直接喂合并候选表等于让它随机挑
+- **导出器记录采样计划数**：manifest 增记 plan_count，训练侧据此按 (马娘, 卡组) 组合切留出集，不再在 Python 侧硬编码组合数
+- **Python 训练侧**：新增 scripts/ramen_nn——标签生成、模型、训练、评估、ONNX 导出与 mmap 多目录加载器。policy 标签取配对 Bayesian bootstrap 的最优概率而非温度化 softmax，value 走逐 rollout leave-one-out 的选择—估值以消除选择乐观偏差，地区选择按组合概率边缘化到三格，稀疏阶段用截断逆平方根加权。留出集默认按卡组组合切分而非按样本，避免同一套卡组同时进训练与验证；卡片 token 默认不加槽位 embedding——卡组顺序在游戏里没有含义，而训练数据的槽位与卡片类型完全相关，加了会让模型记顺序而非读属性
+
+## 2026-08-29
+- **拉面 NN policy 格位表**：新增 policy_schema 模块，把动作映射到 234 维固定格位并由单一入口分派；吃面按地区 ID 而非槽位编码、吃面与万能风味用法合成联合格、地区选择纳入第一代。**格位表冻结**
+- **格位表与规则层的耦合回归**：原有测试只拿本文件常量自洽验证，规则层一改不会变红；补测试用采样器把真实候选（含合并决策形态）与规则层用法表全过一遍格位映射。顺带修合并决策的「不吃面」落格失败——原先只接受空 targets，实际每个吃面决策点都会漏掉该候选
+- **NN 管线计划文档同步现状**：Phase 1/2 标完成；教师数据预算改按 search_n=1024 重算；拉面 CRN 机制更正为共享 rule_master（阶段重播种仅 onsen），配套作废一处无效测量；补 Phase 3 开跑前待办
 - **MCTS pprof-rs profiler bin 固化**：sim_profiler 模板的 MCTS 版（pprof-rs 用户态采样，输出 .pb 给 go tool pprof / inferno-flamegraph）
 - **性能分析指南文档**：新增 perf_profiling.md，记录 cargo flamegraph / pprof-rs 工具选择准则与 MCTS hot path 数据
 - **决策理由输出按分排序 + 分差着色**：移除险胜门限触发，每回合都输出决策理由；"中选"改"首选"并固定亮绿色，其余按评分降序编号 `#2` 起，颜色按与**首选**差距分档（`<30` 亮绿 / `<100` 绿 / `<300` 黄 / 其余真彩色灰，与文本内 `±分差` 同源）；`reason_gap_threshold` 字段保留兼容但不再用作触发器；`test_color_thresholds` 在 `--features no-color` 下自动跳过

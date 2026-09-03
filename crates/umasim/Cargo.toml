@@ -44,6 +44,33 @@ path = "src/bin/mcts_profiler.rs"
 # 不注册 required-features 会在默认 check/build 时报 "main function not found"。
 required-features = ["profiler"]
 
+[[bin]]
+name = "ramen_teacher_collect"
+path = "tools/data_collection/ramen_teacher_collect.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "ramen_export_npy"
+path = "tools/data_collection/ramen_export_npy.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "ramen_space_bench"
+path = "tools/data_collection/ramen_space_bench.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "ramen_handwritten_choice"
+path = "tools/data_collection/ramen_handwritten_choice.rs"
+required-features = ["cli"]
+
+[[bin]]
+name = "ramen_advantage_probe"
+path = "tools/data_collection/ramen_advantage_probe.rs"
+# 探针整体依赖 ONNX 网络策略，无 onnx 时没有任何可用功能：
+# 让 cargo 直接跳过该目标，而不是编一个只会 bail 的空壳
+required-features = ["cli", "onnx"]
+
 [features]
 default = ["cli", "diag"]
 diag = []

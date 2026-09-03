@@ -17,6 +17,12 @@ pub mod logging_trainer;
 pub mod mcts_trainer;
 pub mod ramen_handwritten_trainer;
 pub mod ramen_mcts_trainer;
+#[cfg(feature = "onnx")]
+pub mod ramen_nn_trainer;
+// 模块本身不门控：守门测试必须在默认 feature 下运行（见模块文档）。
+// 收成 `pub(crate)` 会在默认 feature 下触发 dead_code 警告——唯一的调用方
+// `ramen_nn_trainer` 挂在 onnx 上，故保持 `pub`，只让顶层 re-export 跟着 onnx 走
+pub mod ramen_special_root;
 //pub mod mean_filter_collector_trainer;
 //pub mod neural_net_trainer;
 
@@ -26,6 +32,11 @@ pub use logging_trainer::LoggingTrainer;
 pub use mcts_trainer::MctsTrainer;
 pub use ramen_handwritten_trainer::RamenHandwrittenTrainer;
 pub use ramen_mcts_trainer::{RamenMctsTrainer, RamenSearchStages, RamenSelection};
+#[cfg(feature = "onnx")]
+pub use ramen_nn_trainer::{RamenNnTrainer, SpecialSelectMode};
+// 只有网络策略用得上它，故 re-export 跟着 onnx 走
+#[cfg(feature = "onnx")]
+pub use ramen_special_root::canonical_ramen_select_root;
 //pub use mean_filter_collector_trainer::MeanFilterCollectorTrainer;
 //pub use neural_net_trainer::NeuralNetTrainer;
 
