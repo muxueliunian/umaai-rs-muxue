@@ -24,7 +24,7 @@ use umasim::{
     output::{DecisionSink, HumanReadableSink, StdoutJsonSink},
     search::SearchConfig,
     trainer::MctsTrainer,
-    utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause}
+    utils::{check_working_dir, init_logger, load_game_config, pause}
 };
 
 use crate::{
@@ -204,8 +204,9 @@ async fn main_guard() -> Result<()> {
 
     // 启动横幅走 stderr（避免污染 JSON 模式的 stdout 流）
     eprintln!("{}", to_art("UMAAI 0.26".to_string(), "small", 0, 1, 0).expect("here"));
-    // 0. 运行前检查
-    check_windows_terminal()?;
+    // 0. 运行前检查（Windows terminal 检测暂时注释掉——非 Windows 平台跳过，
+    //    避免误报；Step 5 之后视需要再决定是否启用）
+    // check_windows_terminal()?;
     if !fs_err::exists("game_config.toml")? {
         check_working_dir()?;
     }
