@@ -158,7 +158,6 @@ impl RamenHandwrittenTrainer {
     ///
     /// 与 [`Self::clear_breakdown`] 配套——单候选走早退时不该让 caller 看到
     /// 上一次决策的协议数据。
-    #[allow(dead_code)]
     fn clear_decision_summary(&self) {
         if let Ok(mut slot) = self.last_decision_summary.lock() {
             *slot = None;

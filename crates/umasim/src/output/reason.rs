@@ -7,7 +7,7 @@
 //! analyze_narrow_win（纯函数，按分排序懒计算）
 //!   ├─ DecisionReasonData（原始数据，Serialize，schema 稳定）
 //!   │    └─ DecisionReasonSink 接口发出
-//!   │         └─ umasim 默认实现 [`NoopSink`]（静默丢弃——屏幕只要可读文字）；
+//!   │         └─ umasim 默认实现 [`DecisionReasonNoopSink`]（静默丢弃——屏幕只要可读文字）；
 //!   │            下游程序可实现自己的通道（[`LogJsonSink`] 接日志 / 文件 / socket）
 //!   └─ render_reason_lines（可读文字，数据驱动渲染）
 //!        └─ info! 直接上屏（措辞固定：首选 / 简称维度，子项条数 REASON_TOP_DIMS）
@@ -181,7 +181,7 @@ pub struct DecisionReasonData {
 /// 决策理由原始数据出口
 ///
 /// 原始数据面向**下游程序**（分析/展示/协议），不应与人类日志耦合。
-/// umasim 默认挂 [`NoopSink`]（屏幕只需要可读文字）；需要原始数据的下游
+/// umasim 默认挂 [`DecisionReasonNoopSink`]（屏幕只需要可读文字）；需要原始数据的下游
 /// 程序可实现本 trait（或直接用 [`LogJsonSink`]）接入自己的通道。
 /// 实现需 `Send + Sync`：trainer 会被 rayon 多局并行共享。
 pub trait DecisionReasonSink: Send + Sync {
@@ -193,9 +193,9 @@ pub trait DecisionReasonSink: Send + Sync {
 ///
 /// 保留 sink 调用路径：下游接入时通过 trainer 的 `with_reason_sink`
 /// 换成实际实现即可，核心层无需改动。
-pub struct NoopSink;
+pub struct DecisionReasonNoopSink;
 
-impl DecisionReasonSink for NoopSink {
+impl DecisionReasonSink for DecisionReasonNoopSink {
     fn emit(&self, _reason: &DecisionReasonData) {}
 }
 
@@ -658,7 +658,7 @@ mod tests {
         assert!((gap_confidence(100.0, 0.0, 8, 0.0, 8) - 1.0).abs() < 1e-9);
     }
 
-    /// NoopSink 静默丢弃：emit 后无 panic 无输出（原始数据出口的 umasim 默认）
+    /// DecisionReasonNoopSink 静默丢弃：emit 后无 panic 无输出（原始数据出口的 umasim 默认）
     #[test]
     fn test_noop_sink() {
         let data = DecisionReasonData {
@@ -672,7 +672,7 @@ mod tests {
             chosen_n: 8,
             rivals: vec![]
         };
-        NoopSink.emit(&data);
-        println!("NoopSink emit 完成（静默）");
+        DecisionReasonNoopSink.emit(&data);
+        println!("DecisionReasonNoopSink emit 完成（静默）");
     }
 }

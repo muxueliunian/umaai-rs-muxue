@@ -55,7 +55,7 @@ use crate::{
     gamedata::{EventChoice, EventData},
     output::{
         DecisionInfo as DecisionInfoProto,
-        reason::{DecisionReasonData, NoopSink, ReasonMetric, analyze_narrow_win, render_reason_lines}
+        reason::{DecisionReasonData, DecisionReasonNoopSink, ReasonMetric, analyze_narrow_win, render_reason_lines}
     },
     search::{ActionResult, FlatSearch, RamenSearchOutput, SearchConfig, TerminalStats}
 };
@@ -305,7 +305,7 @@ impl RamenMctsTrainer {
             combined_cache_hits: AtomicUsize::new(0),
             pending_combined_targets: Mutex::new(None),
             last_search_summary: Mutex::new(None),
-            reason_sink: Arc::new(NoopSink)
+            reason_sink: Arc::new(DecisionReasonNoopSink)
         }
     }
 
@@ -343,7 +343,7 @@ impl RamenMctsTrainer {
         self
     }
 
-    /// 设置决策理由原始数据出口（默认 [`NoopSink`] 静默；需要原始 JSON 时传
+    /// 设置决策理由原始数据出口（默认 [`DecisionReasonNoopSink`] 静默；需要原始 JSON 时传
     /// [`crate::output::LogJsonSink`] 或自定义实现）
     pub fn with_reason_sink(mut self, sink: Arc<dyn crate::output::DecisionReasonSink>) -> Self {
         self.reason_sink = sink;
