@@ -3,11 +3,12 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-09-07
-- **Step 6 parse_game 按 scenarioId 分发**：新建 `crates/umaai/src/protocol/ramen.rs`（GameStatusRamen + GameStatus impl 骨架，scenario_id=14）；protocol/mod.rs 加 `ParsedGame` 枚举 + `parse_game_by_scenario` + `extract_scenario_id`；main.rs 主循环用 `parse_game_by_scenario` 替换硬编码 `parse_game::<GameStatusOnsen>`，拉面分支走 Step 6 占位（warn + skip），完整 from_external_state 留 Step 7；7 个 protocol 测试覆盖 onsen/ramen fixture 路由 + 缺字段 / 错类型 / 未知 scenarioId
-- **Step 5 LuckScoreTracker 接线**：新建 `crates/umaai/src/luck_score.rs`（LuckScoreTracker + LuckScoreSnapshot + 切局检测 + 按局数加权 T(n) baseline）；main.rs calc_onsen_event/training 去掉 sink 参数，emit 移到主循环末尾走 `emit_with_luck`：取 last_decision → 算 Σ(score×n)/Σn baseline → tracker.on_new_turn → 挂 snapshot + action_luck 到 scenario_extra → sink.emit；is_newgame 时重置 tracker；5 个 luck_score 单元测试覆盖初始/累加/切局/snapshot 序列化
-- **Step 4 CLI --json 分流 + sink 接线**：umaai 用 lexopt 解析 `--json` / `-h` / `--help`，按模式选 StdoutJsonSink / HumanReadableSink（Arc<dyn DecisionSink>），JSON 模式关 ANSI（colored::control::set_override(false)）+ 启动横幅/温泉顺序等状态走 stderr；calc_onsen_training/event 加 sink 参数 select_action 后 emit_decision；Cargo.toml 去 clap 留 lexopt；3 个 parse_args 测试（默认/--json/未知参数报错）+ umai bin --help/--bogus 手动验证通过
-- **Step 3 DecisionSink 三实现**：新建 `umasim/output/sink.rs`（DecisionSink trait + EmptySink / HumanReadableSink / StdoutJsonSink），HumanReadableSink 仅 emit 决策主干（首选 + 评分 + 理由），回合/剧本状态由 main.rs 独立开关控制；reason::NoopSink 改名 DecisionReasonNoopSink 与 sink::NoopSink 区分（sink::NoopSink → EmptySink 更明确"空实现"语义）；5 个 sink 测试覆盖不 panic 与 NaN 失败回退
-- **Step 2 last_decision override 三 trainer**：DecisionInfo 加 candidate_n（与 scores 同长同截断供 luck 按局数加权）；MctsTrainer 加 last_action_idx 哨兵 + search_output 已有；RamenMctsTrainer 加 last_search_summary 缓存 + reason 走 vs #2 维度差；RamenHandwrittenTrainer 加 last_decision_summary；reason/onsen/手写留空；elapsed_ms 留 None 延 Step5；合并搜索路径因 candidates↔actions 下标不对应暂不覆盖；集成文档 §3.3.1 改按局数加权（onsen update_score 同口径）
+- **Step 6 parse_game scenarioId 分发**：protocol/ramen.rs 加 GameStatusRamen 骨架（scenario_id=14） + mod.rs `ParsedGame` 枚举 + `parse_game_by_scenario`，main 按 12/14 分发（拉面侧 Step 7 接入 AI 主流程）；7 个 protocol 测试
+- **Step 5 LuckScoreTracker + emit_with_luck 接线**：luck_score.rs 新增 tracker + 切局检测 + 按局数加权 baseline，main emit 走 `emit_with_luck` 挂 scenario_extra；移除 ratatui（utils 只用 crossterm）；5 个 luck_score 测试
+- **健壮性 fix 三件套**：watcher 路径/env 缺失降级为 warn + 空字符串 + `release-pause` feature gate（发布版启用 `--features release-pause`）；注释 check_windows_terminal；延迟 spawn hotkey_handler（避免失败路径 runtime drop hang）
+- **Step 4 CLI --json 分流 + sink 接线**：umaai 用 lexopt 替 clap 解析 `--json`/`-h`/`--help`；JSON 模式关 ANSI + 启动横幅 eprintln；按模式选 StdoutJsonSink / HumanReadableSink
+- **Step 3 DecisionSink 三实现**：sink.rs 新增 trait + EmptySink / HumanReadableSink / StdoutJsonSink；reason::NoopSink 改名 DecisionReasonNoopSink 与 sink::EmptySink 区分
+- **Step 2 last_decision override 三 trainer**：DecisionInfo 加 candidate_n（与 scores 同长同截断供 luck 按局数加权）；MctsTrainer / RamenMctsTrainer / RamenHandwrittenTrainer override last_decision()；集成文档 §3.3.1 改"按局数加权"
 
 ## 2026-09-04
 - **吃面 PT 增量延后到 NextTurn**：`ground_ramen_effects` 不再立即 `scenario_pt += pt_gain` / `eat_count += 1`，训练阶段 `calc_ramen_training_effect` 用吃面前 PT 算 `ramen_pt_effect` / `region_bonus` 档位；PT 增量与 eat_count 在 `next()` 的 `NextTurn` 阶段（清空 `current_ramen` 之前）统一处理，RMJ 归档与 `check_rmj` 行为不变
