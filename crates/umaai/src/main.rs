@@ -24,7 +24,7 @@ use umasim::{
     output::{DecisionSink, HumanReadableSink, StdoutJsonSink},
     search::SearchConfig,
     trainer::MctsTrainer,
-    utils::{check_working_dir, init_logger, load_game_config, pause}
+    utils::{check_working_dir, init_logger, load_game_config}
 };
 
 use crate::{
@@ -261,8 +261,14 @@ async fn main_guard() -> Result<()> {
         .search
         .with_rollout_batch_size(game_config.mcts.rollout_batch_size);
 
-    // 开始检测文件
-    let mut watcher = UraFileWatcher::init()?;
+    // 开始检测文件——init 失败时优雅退出（不 panic）：路径无效 / notify 失败都打 warn + return Ok(())
+    let mut watcher = match UraFileWatcher::init() {
+        Ok(w) => w,
+        Err(e) => {
+            log::warn!("UraFileWatcher init 失败: {e}，main 不进入 watch loop，程序正常退出（exit 0）");
+            return Ok(());
+        }
+    };
     loop {
         let contents = watcher.watch("thisTurn.json")?;
         let mut is_newgame = false;
@@ -304,6 +310,24 @@ async fn main_guard() -> Result<()> {
     }
 }
 
+/// 出错时按 Enter 暂停（仅发布版，CI / 开发默认不阻塞 stdin）
+///
+/// 与 `release-pause` feature 联动：
+/// - `cargo build --release`（默认）：开发 / CI 路径，**不暂停**——避免 stdin 在
+///   自动化场景里 hang，且让 cargo run 时 Ctrl-C 后立即退出方便调试。
+/// - `cargo build --release --features release-pause`：发布给用户的二进制，
+///   启动后暂停"按 Enter 退出"，让用户看清错误信息。
+#[cfg(feature = "release-pause")]
+fn pause_on_exit() {
+    eprintln!("\n按 Enter 退出...");
+    let _ = std::io::stdin().read_line(&mut String::new());
+}
+
+#[cfg(not(feature = "release-pause"))]
+fn pause_on_exit() {
+    // 开发 / CI 默认 no-op；详见 fn pause_on_exit 文档
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     match main_guard().await {
@@ -312,7 +336,7 @@ async fn main() -> Result<()> {
             println!("{}", "UmaAI 出现错误，即将退出:".red());
             println!("{}", "-----------------------------------".red());
             println!("{}", format!("{e:?}").red());
-            pause().expect("pause");
+            pause_on_exit();
         }
     }
     Ok(())
