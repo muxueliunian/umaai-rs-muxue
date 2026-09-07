@@ -29,10 +29,7 @@ use umasim::{
 
 use crate::{
     luck_score::LuckScoreTracker,
-    protocol::{
-        GameStatusOnsen,
-        urafile::{UraFileWatcher, parse_game}
-    },
+    protocol::urafile::UraFileWatcher,
     utils::{SAVED_GAME, hotkey_handler}
 };
 
@@ -330,9 +327,11 @@ async fn main_guard() -> Result<()> {
 
     loop {
         let contents = watcher.watch("thisTurn.json")?;
-        let mut is_newgame = false;
-        match parse_game::<GameStatusOnsen>(&contents) {
-            Ok(mut game) => {
+        // Step 6：按 baseGame.scenarioId 分发（12=温泉 / 14=拉面）。拉面侧 AI 主流程
+        // 在 Step 7 接入——这里只解析 + 打 warn，AI 不出推荐。
+        match crate::protocol::parse_game_by_scenario(&contents) {
+            Ok(crate::protocol::ParsedGame::Onsen(mut game)) => {
+                let mut is_newgame = false;
                 // 保存一份到全局
                 {
                     if let Some(mutex) = SAVED_GAME.get() {
@@ -369,6 +368,13 @@ async fn main_guard() -> Result<()> {
 
                 // 回合决策完成后统一 emit（带 luck score 挂载）—— 见 emit_with_luck 注释
                 emit_with_luck(&trainer, &game, &sink, &mut luck_tracker, chara_id);
+            }
+            Ok(crate::protocol::ParsedGame::Ramen(_game)) => {
+                // Step 6 占位：拉面 AI 主流程（calc_ramen_* + RamenMctsTrainer）
+                // 在 Step 7 接入；当前先打 warn + continue，避免 main 卡住。
+                log::warn!(
+                    "scenarioId=14 拉面剧本已解析（Step 6 占位），AI 主流程 Step 7 接入；本回合 skip"
+                );
             }
             Err(e) => {
                 println!("{}", format!("解析回合信息出错: {e}").red());

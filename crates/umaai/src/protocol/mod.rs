@@ -11,9 +11,11 @@ use umasim::{
 };
 
 pub mod onsen;
+pub mod ramen;
 pub mod story;
 pub mod urafile;
 pub use onsen::*;
+pub use ramen::*;
 pub use story::*;
 
 /// 描述不同剧本的通信状态，需要能转为对应的Game结构
@@ -302,5 +304,222 @@ impl From<&BaseGame> for GameStatusBase {
             race_history: game.uma.list_races(),
             story: None
         }
+    }
+}
+
+/// 解析后的剧本：用于 main loop 按 scenarioId 分发（避免一个 `Game` trait object
+/// 处理两种剧本的复杂度——`G::Action` 是关联类型，trait object 路径受限）
+///
+/// **Step 6 现状**：温泉路径完整可用；拉面路径走 `GameStatusRamen::into_game`
+/// 占位（构造基础 RamenGame，ramen 段增量字段覆写在 Step 7 落实）。
+#[derive(Debug)]
+pub enum ParsedGame {
+    /// `scenarioId == 12`：温泉剧本
+    Onsen(umasim::game::onsen::game::OnsenGame),
+    /// `scenarioId == 14`：拉面剧本
+    Ramen(umasim::game::ramen::RamenGame)
+}
+
+/// 从 `thisTurn.json` 内容读 `baseGame.scenarioId`（int）
+///
+/// 不走 `parse_game::<GameStatusOnsen>`（会消耗一次解析），用 `serde_json::Value`
+/// 偷出 scenarioId 即可。
+pub fn extract_scenario_id(contents: &str) -> Result<u32> {
+    let value: serde_json::Value = serde_json::from_str(contents)?;
+    value
+        .get("baseGame")
+        .and_then(|b| b.get("scenarioId"))
+        .and_then(|s| s.as_u64())
+        .map(|id| id as u32)
+        .ok_or_else(|| anyhow::anyhow!("baseGame.scenarioId 缺失或类型错误"))
+}
+
+/// 按 `baseGame.scenarioId` 分发解析（详见 `umaai_air_redirector_integration.md` §3.4）
+///
+/// - `12` → `GameStatusOnsen` → `OnsenGame`
+/// - `14` → `GameStatusRamen` → `RamenGame`（Step 6 占位；Step 7 完整覆写）
+/// - 其它 → `Err`
+pub fn parse_game_by_scenario(contents: &str) -> Result<ParsedGame> {
+    use crate::protocol::urafile::parse_game;
+    let scenario_id = extract_scenario_id(contents)?;
+    match scenario_id {
+        12 => parse_game::<GameStatusOnsen>(contents).map(ParsedGame::Onsen),
+        14 => parse_game::<GameStatusRamen>(contents).map(ParsedGame::Ramen),
+        other => Err(anyhow::anyhow!("不支持的 scenarioId: {other}（仅支持 12=温泉 / 14=拉面）"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 最小 thisTurn.json fixture（scenarioId=12 温泉）
+    ///
+    /// 注：`GameStatusBase` 用 `rename_all = "camelCase"`，但部分字段有
+    /// `#[serde(rename = "...")]` 覆盖为 snake_case（friend_stage / playing_state /
+    /// friendship_noncard_yayoi / friend_outgoingUsed 等）——fixture 必须保持原样。
+    const FIXTURE_ONSEN: &str = r#"{
+        "baseGame": {
+            "scenarioId": 12,
+            "umaId": 102601,
+            "umaStar": 5,
+            "turn": 0,
+            "vital": 100,
+            "maxVital": 120,
+            "motivation": 4,
+            "fiveStatus": [1000, 800, 800, 800, 800],
+            "fiveStatusLimit": [1600, 1500, 1400, 1400, 1500],
+            "skillPt": 0,
+            "skillScore": 0,
+            "totalHints": 0,
+            "trainLevelCount": [1, 1, 1, 1, 1],
+            "ptScoreRate": 2.0,
+            "failureRateBias": 0,
+            "isIll": false,
+            "isQieZhe": false,
+            "isAiJiao": false,
+            "isPositiveThinking": false,
+            "isRefreshMind": false,
+            "isLucky": false,
+            "zhongMaBlueCount": [0, 0, 0, 0, 0],
+            "isRacing": false,
+            "cardId": [],
+            "persons": [],
+            "personDistribution": [[], [], [], [], []],
+            "lockedTrainingId": -1,
+            "friendship_noncard_yayoi": 0,
+            "friendship_noncard_reporter": 0,
+            "friend_stage": 0,
+            "friend_outgoingUsed": 0,
+            "playing_state": 1,
+            "raceHistory": [],
+            "story": null
+        },
+        "onsen": {
+            "currentOnsen": 0,
+            "bathing": { "ticketNum": 5, "buffRemainTurn": 0, "isSuperReady": false },
+            "onsenState": [],
+            "digRemain": [],
+            "digCount": 0,
+            "digPower": [1, 1, 1],
+            "digLevel": [1, 1, 1],
+            "digVitalCost": 5,
+            "pendingSelection": false
+        }
+    }"#;
+
+    /// 最小 thisTurn.json fixture（scenarioId=14 拉面）—— ramen 段空（Step 6 占位）
+    const FIXTURE_RAMEN: &str = r#"{
+        "baseGame": {
+            "scenarioId": 14,
+            "umaId": 102601,
+            "umaStar": 5,
+            "turn": 0,
+            "vital": 100,
+            "maxVital": 120,
+            "motivation": 4,
+            "fiveStatus": [1000, 800, 800, 800, 800],
+            "fiveStatusLimit": [1600, 1500, 1400, 1400, 1500],
+            "skillPt": 0,
+            "skillScore": 0,
+            "totalHints": 0,
+            "trainLevelCount": [1, 1, 1, 1, 1],
+            "ptScoreRate": 2.0,
+            "failureRateBias": 0,
+            "isIll": false,
+            "isQieZhe": false,
+            "isAiJiao": false,
+            "isPositiveThinking": false,
+            "isRefreshMind": false,
+            "isLucky": false,
+            "zhongMaBlueCount": [0, 0, 0, 0, 0],
+            "isRacing": false,
+            "cardId": [302424, 302894, 303044, 302924, 303024, 303054],
+            "persons": [],
+            "personDistribution": [[], [], [], [], []],
+            "lockedTrainingId": -1,
+            "friendship_noncard_yayoi": 0,
+            "friendship_noncard_reporter": 0,
+            "friend_stage": 0,
+            "friend_outgoingUsed": 0,
+            "playing_state": 1,
+            "raceHistory": [],
+            "story": null
+        },
+        "ramen": {}
+    }"#;
+
+    /// extract_scenario_id：正常字段
+    #[test]
+    fn test_extract_scenario_id_ok() {
+        assert_eq!(extract_scenario_id(FIXTURE_ONSEN).unwrap(), 12);
+        assert_eq!(extract_scenario_id(FIXTURE_RAMEN).unwrap(), 14);
+    }
+
+    /// extract_scenario_id：缺 baseGame
+    #[test]
+    fn test_extract_scenario_id_missing_basegame() {
+        let json = r#"{}"#;
+        let r = extract_scenario_id(json);
+        println!("缺 baseGame: is_err={}", r.is_err());
+        assert!(r.is_err());
+    }
+
+    /// extract_scenario_id：缺 scenarioId
+    #[test]
+    fn test_extract_scenario_id_missing_field() {
+        let json = r#"{"baseGame": {}}"#;
+        let r = extract_scenario_id(json);
+        println!("缺 scenarioId: is_err={}", r.is_err());
+        assert!(r.is_err());
+    }
+
+    /// extract_scenario_id：scenarioId 是字符串而非数字
+    #[test]
+    fn test_extract_scenario_id_wrong_type() {
+        let json = r#"{"baseGame": {"scenarioId": "12"}}"#;
+        let r = extract_scenario_id(json);
+        println!("scenarioId 类型错: is_err={}", r.is_err());
+        assert!(r.is_err());
+    }
+
+    /// parse_game_by_scenario：onsen fixture 路由到 ParsedGame::Onsen
+    #[test]
+    fn test_parse_game_by_scenario_onsen() {
+        // 跑前需要 init_global + cwd 是 workspace 根（gamedata/default_config.toml）
+        let workspace_root = umasim::utils::get_workspace_root().unwrap();
+        let _ = std::env::set_current_dir(workspace_root);
+        let _ = umasim::gamedata::init_global();
+        let r = parse_game_by_scenario(FIXTURE_ONSEN);
+        println!("onsen fixture: is_ok={}", r.is_ok());
+        match r {
+            Ok(ParsedGame::Onsen(_)) => {}
+            Ok(ParsedGame::Ramen(_)) => panic!("不应路由到 Ramen"),
+            Err(e) => panic!("onsen fixture 不应报错: {e}")
+        }
+    }
+
+    /// parse_game_by_scenario：ramen fixture 路由到 ParsedGame::Ramen（占位 newgame）
+    #[test]
+    fn test_parse_game_by_scenario_ramen() {
+        let workspace_root = umasim::utils::get_workspace_root().unwrap();
+        let _ = std::env::set_current_dir(workspace_root);
+        let _ = umasim::gamedata::init_global();
+        let r = parse_game_by_scenario(FIXTURE_RAMEN);
+        println!("ramen fixture: is_ok={}", r.is_ok());
+        match r {
+            Ok(ParsedGame::Ramen(_)) => {}
+            Ok(ParsedGame::Onsen(_)) => panic!("不应路由到 Onsen"),
+            Err(e) => panic!("ramen fixture 不应报错: {e}")
+        }
+    }
+
+    /// parse_game_by_scenario：未知 scenarioId 报错
+    #[test]
+    fn test_parse_game_by_scenario_unknown_id() {
+        let json = r#"{"baseGame": {"scenarioId": 999}}"#;
+        let r = parse_game_by_scenario(json);
+        println!("scenarioId=999: is_err={}", r.is_err());
+        assert!(r.is_err());
     }
 }
