@@ -228,10 +228,9 @@ async fn main_guard() -> Result<()> {
     // 3. 再初始化全局数据
     init_global_with_config(&game_config)?;
 
-    // ctrl-s handler
-    tokio::spawn(async move {
-        hotkey_handler().await;
-    });
+    // ctrl-s handler —— **延迟到 watcher 启动成功之后** spawn。`hotkey_handler`
+    // 是无限循环（loop），如果 watcher init 失败走 early return，runtime drop
+    // 时会等这个 task 结束 → hang，cargo run 卡住不退出。
 
     let mut rng = StdRng::from_os_rng();
 
@@ -269,6 +268,12 @@ async fn main_guard() -> Result<()> {
             return Ok(());
         }
     };
+
+    // watcher 启动成功后才 spawn hotkey_handler（见上方注释——避免失败路径 hang）
+    tokio::spawn(async move {
+        hotkey_handler().await;
+    });
+
     loop {
         let contents = watcher.watch("thisTurn.json")?;
         let mut is_newgame = false;
