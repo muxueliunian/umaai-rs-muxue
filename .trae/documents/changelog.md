@@ -2,6 +2,9 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-07
+- **Step 2 last_decision override 三处**：DecisionInfo 加 `candidate_n: Vec<u32>` 字段（与 candidate_scores 同长同截断，UCB 下给 luck baseline 算局数加权），MctsTrainer(onsen) / RamenMctsTrainer / RamenHandwrittenTrainer override last_decision()，search_output 缓存已有 + RamenMctsTrainer 新增 last_search_summary 缓存 + RamenHandwrittenTrainer 新增 last_decision_summary 缓存；reason 字段 ramen MCTS 走终局维度差值（vs #2 智+180 PT-33），onsen/手写留空；elapsed_ms 留 None（Step 5 再填）；合并搜索路径因 candidate↔actions 下标不对应暂不覆盖。集成文档 §3.3.1 改"按局数加权"（sum/count = Σ mean_i × n_i / Σ n_i，与 onsen 历史 update_score 同口径）
+
 ## 2026-09-04
 - **吃面 PT 增量延后到 NextTurn**：`ground_ramen_effects` 不再立即 `scenario_pt += pt_gain` / `eat_count += 1`，训练阶段 `calc_ramen_training_effect` 用吃面前 PT 算 `ramen_pt_effect` / `region_bonus` 档位；PT 增量与 eat_count 在 `next()` 的 `NextTurn` 阶段（清空 `current_ramen` 之前）统一处理，RMJ 归档与 `check_rmj` 行为不变
 - **三处基线重抓 + 一条新守门**：`bench.rs` BASELINE_SCORE 64336→63870 / BASELINE_FIVE `[3337,2328,2200,1101,829]`→`[3337,2293,2200,1086,829]`、`flat_search.rs` 三阶段根搜索 7 候选 mean 重抓、`ramen_mcts_trainer` 两测试基线同步；新增 `test_eat_ramen_pt_gain_defers_to_next_turn` 钉「吃面 ground 后 scenario_pt 不变 / calc_ramen_training_effect 用吃面前 PT 算增量 / NextTurn 后累加」三条边界

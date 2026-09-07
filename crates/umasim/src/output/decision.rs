@@ -32,6 +32,15 @@ pub struct DecisionInfo {
     /// 与 [`Self::action_index`] 等长，便于下游展示"为什么选 A 不选 B"。
     pub candidate_scores: Vec<f32>,
 
+    /// 各候选的 rollout 样本数（与 [`Self::candidate_scores`] 严格同长、同序、同截断）
+    ///
+    /// UCB 下各候选跑数可能悬殊，手写策略 / 随机等无局数概念的 trainer 留空
+    /// （`Vec::default()` 即 `vec![]`）。
+    ///
+    /// 用途：算 luck score 时 T(n) baseline = `Σ (score × n) / Σ n`（展平平均，
+    /// 与 `MctsTrainer::update_score` 的 `sum/count` 同口径）—— AIRedirector 不消费此字段。
+    pub candidate_n: Vec<u32>,
+
     /// 决策原因（手写逻辑说明 / MCTS 解释 / 自定义文案）
     pub reason: Option<String>,
 
@@ -93,6 +102,7 @@ mod tests {
         assert!(info.visit_count.is_none());
         assert!(info.score_breakdown.is_none());
         assert!(info.scenario_extra.is_none());
+        assert!(info.candidate_n.is_empty(), "默认无局数概念");
     }
 
     #[test]
@@ -121,6 +131,7 @@ mod tests {
     fn test_serde_roundtrip_full() {
         let mut info = DecisionInfo::from_index_and_score(2, 1500.75);
         info.candidate_scores = vec![100.0, 200.0, 1500.75, 300.0];
+        info.candidate_n = vec![100, 200, 1500, 300];
         info.reason = Some("MCTS 选中评分最高动作".into());
         info.elapsed_ms = Some(128);
         info.search_depth = Some(8);
@@ -146,6 +157,7 @@ mod tests {
             action_index: 1,
             score: 42.0,
             candidate_scores: vec![10.0, 42.0, 30.0],
+            candidate_n: vec![],
             reason: None,
             elapsed_ms: Some(7),
             search_depth: None,
@@ -157,5 +169,6 @@ mod tests {
         assert_eq!(v["action_index"], 1);
         assert_eq!(v["score"], 42.0);
         assert!(v["candidate_scores"].is_array());
+        assert!(v["candidate_n"].is_array(), "candidate_n 始终序列化（空 Vec 也不省）");
     }
 }

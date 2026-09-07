@@ -22,7 +22,8 @@ use crate::{
         Trainer,
         ramen::{Operation, RamenAction, RamenGame, RamenStage, policy::RamenPolicy, policy::RamenPolicyOutput}
     },
-    gamedata::{EventChoice, EventData}
+    gamedata::{EventChoice, EventData},
+    output::DecisionInfo as DecisionInfoProto
 };
 
 /// 决策所属的**有效阶段**（按动作类型纠正 `game.stage`）
@@ -64,7 +65,21 @@ pub struct RamenHandwrittenTrainer {
     /// 用 `Mutex` 而非 `RefCell`：搜索层要求 `Trainer: Sync`（rayon 跨线程共享同一个
     /// rollout 决策器），`RefCell` 会让整个 `FlatSearch<RamenGame>` 失去 `Sync`。
     /// 单局日志场景无竞争，加锁开销可忽略。
-    last_breakdown: Mutex<Option<String>>
+    last_breakdown: Mutex<Option<String>>,
+    /// 上一次决策的协议字段（选中下标 + 各候选评分），供 [`Trainer::last_decision`](crate::game::Trainer::last_decision) 读取
+    ///
+    /// 与 `last_breakdown` 共生命周期——`stash_breakdown` 同时填两者。早退 / 转发
+    /// 路径会清成 `None`，不让 caller 看到上一决策的陈旧数据。
+    last_decision_summary: Mutex<Option<LastDecisionSummary>>
+}
+
+/// 手写策略上一次决策的最小摘要
+#[derive(Debug, Clone)]
+struct LastDecisionSummary {
+    /// `select_action` 返回的下标（caller 视角，与传入 `actions` 数组一致）
+    chosen_idx: usize,
+    /// 各候选的 `RamenPolicyOutput`（与传入 `actions` 数组严格同序；长度不一致视为异常）
+    outputs: Vec<RamenPolicyOutput>
 }
 
 impl RamenHandwrittenTrainer {
@@ -74,7 +89,8 @@ impl RamenHandwrittenTrainer {
             policy: RamenPolicy::default(),
             verbose: false,
             collect_breakdown: true,
-            last_breakdown: Mutex::new(None)
+            last_breakdown: Mutex::new(None),
+            last_decision_summary: Mutex::new(None)
         }
     }
 
@@ -92,7 +108,8 @@ impl RamenHandwrittenTrainer {
             policy,
             verbose: false,
             collect_breakdown: true,
-            last_breakdown: Mutex::new(None)
+            last_breakdown: Mutex::new(None),
+            last_decision_summary: Mutex::new(None)
         }
     }
 
@@ -123,6 +140,30 @@ impl RamenHandwrittenTrainer {
             *slot = Some(text);
         }
     }
+
+    /// 缓存本次决策的协议摘要（各候选 score + 选中下标），供 `last_decision` 读取
+    ///
+    /// 与 [`Self::stash_breakdown`] 解耦：rollout 路径关闭 breakdown 采集时
+    /// 仍须保留协议摘要——后者是协议层契约，不该被 rollout 性能优化关掉。
+    fn stash_decision_summary(&self, idx: usize, outputs: &[RamenPolicyOutput]) {
+        if let Ok(mut slot) = self.last_decision_summary.lock() {
+            *slot = Some(LastDecisionSummary {
+                chosen_idx: idx,
+                outputs: outputs.to_vec()
+            });
+        }
+    }
+
+    /// 清空 `last_decision_summary`（早退 / 转发 fallback 时调用）
+    ///
+    /// 与 [`Self::clear_breakdown`] 配套——单候选走早退时不该让 caller 看到
+    /// 上一次决策的协议数据。
+    #[allow(dead_code)]
+    fn clear_decision_summary(&self) {
+        if let Ok(mut slot) = self.last_decision_summary.lock() {
+            *slot = None;
+        }
+    }
 }
 
 impl Default for RamenHandwrittenTrainer {
@@ -142,6 +183,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
                     *slot = Some(format!("仅1候选: {}", actions[0]));
                 }
             }
+            self.clear_decision_summary();
             return Ok(0);
         }
         let (idx, outputs) = match ramen_effective_stage(game, actions) {
@@ -165,6 +207,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
             _ => (0, vec![])
         };
         self.stash_breakdown(&outputs);
+        self.stash_decision_summary(idx, &outputs);
         if self.verbose {
             info!(
                 "[手写][回合 {}] 阶段 {:?} 选择: {}",
@@ -179,6 +222,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
         let (idx, outputs) = self.policy.decide_event(game, choices)?;
         self.stash_breakdown(&outputs);
+        self.stash_decision_summary(idx, &outputs);
         if self.verbose {
             info!("[手写][回合 {}] 事件选择: {}", game.turn(), idx + 1);
         }
@@ -190,6 +234,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     ) -> Result<usize> {
         let (idx, outputs) = self.policy.decide_event(game, choices)?;
         self.stash_breakdown(&outputs);
+        self.stash_decision_summary(idx, &outputs);
         if self.verbose {
             info!("[手写][回合 {}] 事件选择: {}", game.turn(), idx + 1);
         }
@@ -198,6 +243,62 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
 
     fn last_breakdown(&self) -> Option<String> {
         self.last_breakdown.lock().ok().and_then(|slot| slot.clone())
+    }
+
+    /// 上一次手写策略决策的协议格式
+    ///
+    /// 候选评分按 score 降序截断到 `reason_max_display`（手写策略没有局数概念，
+    /// `candidate_n` 留空）。`reason` 暂留空（用户拍板"其他剧本暂留空"——拉面 MCTS
+    /// 走 [`crate::output::reason`] 的维度差分析；手写策略的 reason 输出语义尚未
+    /// 拍板，留待后续步骤）。
+    ///
+    /// `score_breakdown` 直接挂中选者的 `RamenPolicyOutput::breakdown` 调参维度。
+    fn last_decision(&self) -> Option<DecisionInfoProto> {
+        let summary = self.last_decision_summary.lock().ok()?.clone()?;
+        if summary.outputs.is_empty() || summary.chosen_idx >= summary.outputs.len() {
+            return None;
+        }
+        let chosen = &summary.outputs[summary.chosen_idx];
+        // 手写策略不属于搜索层，`SearchConfig::reason_max_display` 与手写 reason 显示语义无关，
+        // 这里硬编码 5：与 `SearchConfig::default()` 同口径，保持屏幕显示与协议层一致。
+        let max_n = 5usize;
+
+        // 按 score 降序排序并截断；手写策略默认按该字段硬编码 5（不读 SearchConfig）。
+        // 不读 SearchConfig：手写策略不属于搜索层，调参配置改的是搜索预算，与 reason 显示无关。
+        let mut indexed: Vec<(usize, f32)> = summary.outputs.iter().enumerate().map(|(i, o)| (i, o.score)).collect();
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let ordered: Vec<(usize, f32)> = if indexed.len() <= max_n {
+            indexed
+        } else {
+            indexed.truncate(max_n);
+            if indexed.iter().any(|(i, _)| *i == summary.chosen_idx) {
+                indexed
+            } else {
+                let mut v = vec![(summary.chosen_idx, chosen.score)];
+                v.extend(indexed);
+                v
+            }
+        };
+
+        let action_index = ordered.iter().position(|(i, _)| *i == summary.chosen_idx).unwrap_or(0);
+        let breakdown = chosen
+            .breakdown
+            .iter()
+            .map(|(k, v)| (k.clone(), *v))
+            .collect::<std::collections::HashMap<String, f32>>();
+
+        Some(DecisionInfoProto {
+            action_index,
+            score: chosen.score,
+            candidate_scores: ordered.iter().map(|(_, s)| *s).collect(),
+            candidate_n: vec![],
+            reason: None,
+            elapsed_ms: None,
+            search_depth: None,
+            visit_count: None,
+            score_breakdown: if breakdown.is_empty() { None } else { Some(breakdown) },
+            scenario_extra: None
+        })
     }
 }
 #[cfg(test)]
@@ -274,5 +375,54 @@ mod tests {
         println!("两次评分: {:?}", scores);
         assert_eq!(scores[0], scores[1]);
         Ok(())
+    }
+
+    /// last_decision 协议字段：候选评分按 score 降序截断 5、candidate_n 留空、reason 留空
+    ///
+    /// 手写策略没有局数概念（`RamenPolicyOutput` 无 count 字段），`candidate_n` 必须
+    /// 为空。`reason` 用户拍板"其他剧本暂留空"，验证为 None。
+    #[test]
+    fn test_handwritten_last_decision() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let seed: u64 = 42;
+        let (mut decision_rng, rule_master) = crate::bench::seeded_rngs(seed, 0);
+        let trainer = RamenHandwrittenTrainer::new();
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.set_rule_master(rule_master);
+
+        // 跑一局，每步决策都查 last_decision：协议字段格式守门
+        let mut decisions = 0usize;
+        let mut had_breakdown = 0usize;
+        while game.next() {
+            let actions = game.list_actions()?;
+            let _ = trainer.select_action(&game, &actions, &mut decision_rng)?;
+            if let Some(info) = trainer.last_decision() {
+                decisions += 1;
+                let mut c = crate::utils::Checks::new();
+                c.check(!info.candidate_scores.is_empty(), "候选评分非空");
+                c.check(
+                    info.candidate_n.is_empty(),
+                    "手写策略 candidate_n 必须留空（无局数概念）"
+                );
+                c.check(info.reason.is_none(), "手写策略 reason 暂留 None");
+                c.check(info.elapsed_ms.is_none(), "elapsed_ms 暂留 None（Step 5 再填）");
+                c.check(info.action_index < info.candidate_scores.len(), "选中下标在截断后范围内");
+                c.check(info.candidate_scores.len() <= 5, "候选评分截断到 5");
+                if info.score_breakdown.is_some() {
+                    had_breakdown += 1;
+                }
+                c.finish()?;
+            }
+            game.run_stage(&trainer, &mut decision_rng)?;
+        }
+
+        let mut c = crate::utils::Checks::new();
+        println!("手写策略决策 {decisions} 次，含 score_breakdown {had_breakdown} 次");
+        c.check(decisions > 50, "整局绝大多数决策点都有 last_decision");
+        c.finish()
     }
 }

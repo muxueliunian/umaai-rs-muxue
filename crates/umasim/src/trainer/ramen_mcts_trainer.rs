@@ -53,7 +53,10 @@ use crate::{
         ramen::{Operation, RamenGame, RamenStage, policy::FIXED_SUPER_RAMEN_INDEX}
     },
     gamedata::{EventChoice, EventData},
-    output::reason::{NoopSink, ReasonMetric, analyze_narrow_win, render_reason_lines},
+    output::{
+        DecisionInfo as DecisionInfoProto,
+        reason::{DecisionReasonData, NoopSink, ReasonMetric, analyze_narrow_win, render_reason_lines}
+    },
     search::{ActionResult, FlatSearch, RamenSearchOutput, SearchConfig, TerminalStats}
 };
 
@@ -192,6 +195,43 @@ pub enum RamenSelection {
     Pt
 }
 
+/// 上一次真正走过 MCTS 搜索的最小摘要（供 `last_decision` 读取）
+///
+/// **只缓存决策协议需要的字段**，不复制整个 [`RamenSearchOutput`]（含每个候选
+/// 的 `ActionResult.distribution` 数组，clone 成本过大）。`last_decision` 要的
+/// 三件套：分数 / 局数 / 选中下标，加上 reason 字段用的维度差文本。
+#[derive(Debug, Clone)]
+struct LastSearchSummary {
+    /// 中选者在 `action_results` 中的下标
+    chosen_idx: usize,
+    /// 全候选按 [`RamenSelection`] 口径的分数（按 action_results 顺序）
+    scores: Vec<f64>,
+    /// 全候选的 rollout 样本数（按 action_results 顺序）
+    counts: Vec<u32>,
+    /// 终局维度差值文本（供 `DecisionInfo::reason`；`None` 表示维度不可用或 rivals 为空）
+    reason_text: Option<String>
+}
+
+/// 从 [`DecisionReasonData`] 抽出"评分最高的未中选候选"的最显著维度差，拼成简短文本
+///
+/// 输出形如 `vs #2 智+180 PT-33`，对应 `render_reason_lines` 给 rivals[0] 编的 `#2` 号。
+/// rivals 为空（单候选/中选者评分最高）时返回 `None`——与 `analyze_narrow_win` 同口径。
+fn summarize_ramen_reason(data: &DecisionReasonData) -> Option<String> {
+    let best_rival = data.rivals.first()?;
+    let mut parts: Vec<String> = Vec::new();
+    for dim in best_rival.pros.iter().take(1).chain(best_rival.cons.iter().take(1)) {
+        if dim.unit == "flag" {
+            parts.push(format!("{}{:+.0}%", dim.label, dim.delta * 100.0));
+        } else {
+            parts.push(format!("{}{:+.0}", dim.label, dim.delta));
+        }
+    }
+    if parts.is_empty() {
+        return None;
+    }
+    Some(format!("vs #2 {}", parts.join(" ")))
+}
+
 /// 拉面杯 MCTS 训练员
 ///
 /// 被门控选中的阶段走 [`FlatSearch`]，其余转发给内置的
@@ -239,6 +279,11 @@ pub struct RamenMctsTrainer {
     /// 用 `Mutex` 而非 `RefCell`：`Trainer` 在搜索/并行场景要求 `Sync`
     /// （与既有 `last_breakdown` 同理）。
     pending_combined_targets: Mutex<Option<[i32; 3]>>,
+    /// 上一次真正走过搜索的最小摘要（供 [`Trainer::last_decision`](crate::game::Trainer::last_decision) 读取）
+    ///
+    /// 早退分支（单候选 / 门控关 / 转发 fallback）会清成 `None`——避免把
+    /// 上一次搜索的陈旧数据当成本次输出。
+    last_search_summary: Mutex<Option<LastSearchSummary>>,
     /// 决策理由原始数据出口（每回合都发出 JSON；umasim 默认接日志）
     ///
     /// 可读文字不走此出口，由 [`Self::emit_decision_reason`] 渲染后上屏。
@@ -259,6 +304,7 @@ impl RamenMctsTrainer {
             searched: AtomicUsize::new(0),
             combined_cache_hits: AtomicUsize::new(0),
             pending_combined_targets: Mutex::new(None),
+            last_search_summary: Mutex::new(None),
             reason_sink: Arc::new(NoopSink)
         }
     }
@@ -491,6 +537,59 @@ impl RamenMctsTrainer {
         };
         *slot = targets;
     }
+
+    /// 把本次搜索摘要写入 `last_search_summary`（供 [`Trainer::last_decision`](crate::game::Trainer::last_decision) 读取）
+    ///
+    /// 仅缓存决策协议需要的字段（分数 / 局数 / 选中下标 + reason 文本），不复制整个
+    /// [`RamenSearchOutput`]——`ActionResult.distribution` 数组 clone 成本过大。
+    ///
+    /// reason 文本独立算一份：与 `emit_decision_reason` 的 `analyze_narrow_win`
+    /// 解耦，避免 `verbose=false` 时漏算。verbose=true 路径会算两次，代价
+    /// 忽略（analyze_narrow_win 不在 hot path）。
+    fn stash_last_summary(&self, output: &RamenSearchOutput, chosen_idx: usize) {
+        let (scores, counts): (Vec<f64>, Vec<u32>) = match self.selection {
+            RamenSelection::Score => (
+                output.action_results.iter().map(|(s, _)| s.mean()).collect(),
+                output.action_results.iter().map(|(s, _)| s.count()).collect()
+            ),
+            RamenSelection::Pt => (
+                output
+                    .action_results
+                    .iter()
+                    .map(|(_, pt)| pt.weighted_mean(output.radical_factor))
+                    .collect(),
+                output.action_results.iter().map(|(s, _)| s.count()).collect()
+            )
+        };
+        let reason_text = {
+            let metric = match self.selection {
+                RamenSelection::Pt => ReasonMetric::Pt,
+                RamenSelection::Score => ReasonMetric::Score
+            };
+            let threshold = self.search.config().reason_gap_threshold;
+            let max_display = self.search.config().reason_max_display;
+            analyze_narrow_win(0, metric, threshold, max_display, chosen_idx, output)
+                .and_then(|data| summarize_ramen_reason(&data))
+        };
+        if let Ok(mut slot) = self.last_search_summary.lock() {
+            *slot = Some(LastSearchSummary {
+                chosen_idx,
+                scores,
+                counts,
+                reason_text
+            });
+        }
+    }
+
+    /// 清空 `last_search_summary`（早退 / 转发 fallback 时调用）
+    ///
+    /// 与 [`Self::clear_breakdown`] 一一对应：搜索没真发生过，就不该让
+    /// `last_decision` 看到上一次搜索的陈旧数据。
+    fn clear_last_summary(&self) {
+        if let Ok(mut slot) = self.last_search_summary.lock() {
+            *slot = None;
+        }
+    }
 }
 
 impl Default for RamenMctsTrainer {
@@ -512,6 +611,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
                     Some(idx) => {
                         self.combined_cache_hits.fetch_add(1, Ordering::Relaxed);
                         self.clear_breakdown();
+                        self.clear_last_summary();
                         return Ok(idx);
                     }
                     None => {
@@ -537,6 +637,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
         // 门控**必须**用未经纠正的 `game.stage`（第 1 年地区已是正规 `RegionSelect`）
         if actions.len() <= 1 || !self.stages.contains(&game.stage) {
             self.clear_breakdown();
+            self.clear_last_summary();
             return self.fallback.select_action(game, actions, rng);
         }
 
@@ -576,7 +677,14 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
                     );
                 }
                 match actions.iter().position(|a| a.ramen == best.ramen) {
-                    Some(three_idx) => return Ok(three_idx),
+                    Some(three_idx) => {
+                        // 合并搜索的 candidates 是 (ramen, targets) 组合，与三阶段
+                        // actions 列表的下标不对应（同一 ramen 可能跨多个 action）。
+                        // Step 2 暂不在合并路径暴露 DecisionInfo——`last_decision`
+                        // 看到 None 即返回 None，避免 caller 拿到错位的 action_index。
+                        self.clear_last_summary();
+                        return Ok(three_idx);
+                    }
                     None => {
                         bail!(
                             "RamenSelect 合并搜索结果在三阶段候选中找不到: best.ramen={:?}，实际候选=[{}]",
@@ -615,11 +723,13 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
                 res.count()
             );
         }
+        self.stash_last_summary(&output, idx);
         Ok(idx)
     }
 
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
         self.clear_breakdown();
+        self.clear_last_summary();
         self.fallback.select_choice(game, choices, rng)
     }
 
@@ -628,6 +738,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
         &self, game: &RamenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
     ) -> Result<usize> {
         self.clear_breakdown();
+        self.clear_last_summary();
         self.fallback.select_event_choice(game, event, choices, rng)
     }
 
@@ -637,6 +748,67 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
             Some(text) => Some(text),
             None => self.fallback.last_breakdown()
         }
+    }
+
+    /// 上一次真正走过 MCTS 搜索的协议格式
+    ///
+    /// 仅在 `select_action` 普通搜索路径成功走过 [`FlatSearch::search`](crate::search::FlatSearch::search)
+    /// 时返回 `Some`：早退分支（单候选 / 门控关 / SpecialSelect 缓存命中 / 转发
+    /// fallback / 合并搜索路径）会把 `last_search_summary` 清成 `None`——
+    /// 避免 caller 拿到陈旧数据。
+    ///
+    /// **合并搜索路径暂不覆盖**：`RamenSelect` 走 `list_combined_ramen_select_actions`
+    /// 时，candidates 是 `(ramen, targets)` 组合，与 `select_action` 收到的三阶段
+    /// `actions` 列表下标不对应（同 ramen 跨多个 action）；保留准确映射留待后续步骤。
+    ///
+    /// 取分口径跟随 [`Self::selection`]（`Score` → `.0.mean()` / `Pt` → `.1.weighted_mean`）；
+    /// 候选评分按口径排序、截断到 `SearchConfig::reason_max_display`（分数与 `candidate_n` 同步）。
+    /// 选中者若被截断在 top-N 之外则插入首位，`action_index` 重定位到截断后下标。
+    ///
+    /// `reason` 字段来自 [`summarize_ramen_reason`]（评分最高的未中选候选的最显著
+    /// 终局维度差）；rivals 为空或维度不可见时为 `None`。
+    fn last_decision(&self) -> Option<DecisionInfoProto> {
+        let summary = self.last_search_summary.lock().ok()?.clone()?;
+        if summary.scores.is_empty() || summary.chosen_idx >= summary.scores.len() {
+            return None;
+        }
+
+        let max_n = self.search.config().reason_max_display.max(1);
+        let mut indexed: Vec<(usize, f64, u32)> = summary
+            .scores
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| (i, s, summary.counts[i]))
+            .collect();
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let ordered: Vec<(usize, f64, u32)> = if indexed.len() <= max_n {
+            indexed
+        } else {
+            indexed.truncate(max_n);
+            // 选中者不在 top-N 时插入首位（极少见：MCTS 选中者基本总在前 max_n 内）
+            if indexed.iter().any(|(i, _, _)| *i == summary.chosen_idx) {
+                indexed
+            } else {
+                let mut v =
+                    vec![(summary.chosen_idx, summary.scores[summary.chosen_idx], summary.counts[summary.chosen_idx])];
+                v.extend(indexed);
+                v
+            }
+        };
+
+        let action_index = ordered.iter().position(|(i, _, _)| *i == summary.chosen_idx).unwrap_or(0);
+        Some(DecisionInfoProto {
+            action_index,
+            score: summary.scores[summary.chosen_idx] as f32,
+            candidate_scores: ordered.iter().map(|(_, s, _)| *s as f32).collect(),
+            candidate_n: ordered.iter().map(|(_, _, n)| *n).collect(),
+            reason: summary.reason_text,
+            elapsed_ms: None,
+            search_depth: None,
+            visit_count: None,
+            score_breakdown: None,
+            scenario_extra: None
+        })
     }
 }
 
@@ -1381,6 +1553,103 @@ mod tests {
             game.stage == RamenStage::BeginAfterRegionSelect,
             "turn 2 RegionSelect 下一阶段是 BeginAfterRegionSelect"
         );
+        c.finish()
+    }
+
+    /// last_decision 协议字段：候选评分与局数同步截断到 reason_max_display
+    ///
+    /// §7 验证策略要求：`last_decision` 跑一局后取所有决策，断言 `score` /
+    /// `candidate_scores` 非零、`candidate_n` 与 `candidate_scores` 严格同长。
+    /// 合并搜索路径 Step 2 暂不覆盖（输出 None）；只测普通搜索路径（train_only 门控）。
+    #[test]
+    fn test_last_decision_exposes_search_protocol() -> Result<()> {
+        let seed = 42;
+        let (mut game, mut rng) = setup(seed)?;
+        let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(4).with_ucb(false))
+            .with_stages(RamenSearchStages::train_only());
+
+        let mut train_decisions = 0usize;
+        let mut emitted = 0usize;
+        // 推进到第一个 Train 阶段，触发一次普通搜索路径
+        while game.next() {
+            if game.stage == RamenStage::Train {
+                let actions = game.list_actions()?;
+                if actions.len() > 1 {
+                    let _idx = trainer.select_action(&game, &actions, &mut rng)?;
+                    let info = trainer.last_decision();
+                    println!(
+                        "Train turn={} candidates={} -> last_decision={}",
+                        game.turn(),
+                        actions.len(),
+                        if info.is_some() { "Some" } else { "None" }
+                    );
+                    if let Some(info) = info {
+                        emitted += 1;
+                        train_decisions += 1;
+                        let mut c = Checks::new();
+                        c.check(info.score != 0.0, "选中评分非零");
+                        c.check(!info.candidate_scores.is_empty(), "候选评分非空");
+                        c.check(
+                            info.candidate_scores.len() == info.candidate_n.len(),
+                            "candidate_n 与 candidate_scores 严格同长"
+                        );
+                        c.check(
+                            info.candidate_scores.len() <= actions.len(),
+                            "截断后候选数 <= 原始候选数"
+                        );
+                        c.check(info.action_index < info.candidate_scores.len(), "选中下标在截断后范围内");
+                        // reason_max_display 默认 5
+                        c.check(info.candidate_scores.len() <= 5, "截断到 reason_max_display=5");
+                        c.check(info.elapsed_ms.is_none(), "elapsed_ms 暂留 None（Step 5 再填）");
+                        c.check(info.search_depth.is_none(), "search_depth 留 None（AIRedirector 不需要）");
+                        c.check(info.visit_count.is_none(), "visit_count 留 None（AIRedirector 不需要）");
+                        // candidate_n 各元素 > 0（真实 MCTS rollout 数）
+                        c.check(info.candidate_n.iter().all(|&n| n > 0), "每个候选都有正样本数");
+                        c.finish()?;
+                    }
+                    break;
+                }
+            }
+            let _ = game.run_stage(&trainer, &mut rng)?;
+        }
+
+        let mut c = Checks::new();
+        println!("Train 决策 {train_decisions} 次，last_decision 有值 {emitted} 次");
+        c.check(train_decisions > 0, "至少跑到一次 Train 决策");
+        c.check(emitted > 0, "至少有一次一次 last_decision 有值");
+        c.finish()
+    }
+
+    /// 早退分支（单候选）last_decision 必须返回 None，避免上一次搜索的陈旧数据
+    #[test]
+    fn test_last_decision_none_on_singleton() -> Result<()> {
+        let seed = 42;
+        let (mut game, mut rng) = setup(seed)?;
+        let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(4).with_ucb(false))
+            .with_stages(RamenSearchStages::train_only());
+
+        // 跑一局，每步决策都查 last_decision：单候选路径必须 None
+        let mut singlet_seen = 0usize;
+        let mut summary_seen = 0usize;
+        while game.next() {
+            let actions = game.list_actions()?;
+            if actions.len() == 1 {
+                let _ = trainer.select_action(&game, &actions, &mut rng)?;
+                if trainer.last_decision().is_none() {
+                    singlet_seen += 1;
+                }
+                if trainer.searched_count() > 0 {
+                    summary_seen += 1;
+                }
+            } else {
+                let _ = trainer.select_action(&game, &actions, &mut rng)?;
+                let _ = trainer.last_decision();
+            }
+            game.run_stage(&trainer, &mut rng)?;
+        }
+        let mut c = Checks::new();
+        println!("单候选决策数 {singlet_seen}, 走过搜索 {summary_seen}");
+        c.check(singlet_seen > 0, "整局至少有一个单候选决策");
         c.finish()
     }
 }

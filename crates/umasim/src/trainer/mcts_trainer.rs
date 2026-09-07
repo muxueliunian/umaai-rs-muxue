@@ -10,7 +10,7 @@
 use std::sync::{
     Arc,
     Mutex,
-    atomic::{AtomicU64, Ordering}
+    atomic::{AtomicU64, AtomicUsize, Ordering}
 };
 
 use anyhow::{Result, anyhow};
@@ -27,6 +27,7 @@ use crate::{
     gamedata::{EventChoice, EventData, GAMECONSTANTS},
     global,
     neural::{Evaluator, HandwrittenEvaluator},
+    output::DecisionInfo as DecisionInfoProto,
     search::{FlatSearch, SearchConfig, SearchOutput},
     utils::format_luck
 };
@@ -52,7 +53,13 @@ pub struct MctsTrainer {
     /// 第一回合分数
     pub initial_score: (AtomicU64, AtomicU64),
     /// 保存当前的搜索结果用于输出
-    pub search_output: Arc<Mutex<SearchOutput>>
+    pub search_output: Arc<Mutex<SearchOutput>>,
+    /// 上一次真正走过 MCTS 搜索的 `select_action` 返回下标
+    ///
+    /// 初值 `usize::MAX` 哨兵；早退分支（单候选 / 温泉走手写）不更新。
+    /// [`Trainer::last_decision`](crate::game::Trainer::last_decision) 据此判定
+    /// 是否真有 MCTS 决策可暴露——避免把上一次搜索的陈旧数据当成本次输出。
+    pub last_action_idx: AtomicUsize
 }
 
 impl MctsTrainer {
@@ -66,7 +73,8 @@ impl MctsTrainer {
             mcts_selection: "pt".to_string(),
             last_score: (AtomicU64::new(0), AtomicU64::new(0)),
             initial_score: (AtomicU64::new(0), AtomicU64::new(0)),
-            search_output: Arc::new(Mutex::new(SearchOutput::default()))
+            search_output: Arc::new(Mutex::new(SearchOutput::default())),
+            last_action_idx: AtomicUsize::new(usize::MAX)
         }
     }
 
@@ -317,6 +325,7 @@ impl Trainer<OnsenGame> for MctsTrainer {
                 .bright_green()
             );
         }
+        self.last_action_idx.store(idx, Ordering::SeqCst);
         Ok(idx)
     }
 
@@ -355,5 +364,77 @@ impl Trainer<OnsenGame> for MctsTrainer {
             .map(|(i, _)| OnsenAction::Choice((Box::new(event.clone()), i)))
             .collect();
         self.select_action(game, &choice_actions, rng)
+    }
+
+    /// 上一次 MCTS 决策的协议格式
+    ///
+    /// 仅在 `select_action` 真正走过 `self.search.search(...)` 时返回 `Some`：
+    /// 早退分支（单候选 / 温泉走手写）不写 `last_action_idx`，本方法据此判定。
+    ///
+    /// 取分口径跟随 [`Self::mcts_selection`]（`"pt"` → `(ActionResult, _).1.weighted_mean`，
+    /// 其余 → `.0.weighted_mean`）；候选评分按口径排序、截断到
+    /// `SearchConfig::reason_max_display`（分数与 `candidate_n` 同步截断）。
+    /// 选中者若被截断在 top-N 之外则插入首位，`action_index` 重定位到截断后下标。
+    ///
+    /// `reason` 暂留空（onsen 无 terminal 维度，参照 `output::reason::analyze_narrow_win`
+    /// 的"终局差值"风格补全需要额外的维度层接入，留待后续步骤）。
+    fn last_decision(&self) -> Option<DecisionInfoProto> {
+        let idx = self.last_action_idx.load(Ordering::SeqCst);
+        if idx == usize::MAX {
+            return None;
+        }
+        let output = self.search_output.lock().ok()?.clone();
+        if idx >= output.actions.len() || output.actions.is_empty() {
+            return None;
+        }
+
+        let is_pt = self.mcts_selection == "pt";
+        let radical = output.radical_factor;
+        let take_score = |pair: &(crate::search::ActionResult, crate::search::ActionResult)| -> f64 {
+            if is_pt {
+                pair.1.weighted_mean(radical)
+            } else {
+                pair.0.weighted_mean(radical)
+            }
+        };
+        let all_scores: Vec<f64> = output.action_results.iter().map(take_score).collect();
+        let all_n: Vec<u32> = output.action_results.iter().map(|(s, _)| s.count()).collect();
+        let chosen_score = take_score(&output.action_results[idx]) as f32;
+
+        // 按评分降序排序并截断：候选数 <= max_n 时全发，无需特殊处理选中者
+        let max_n = self.search.config().reason_max_display.max(1);
+        let mut indexed: Vec<(usize, f64, u32)> = all_scores
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| (i, s, all_n[i]))
+            .collect();
+        indexed.sort_by(|a, b| b.1.total_cmp(&a.1));
+        let ordered: Vec<(usize, f64, u32)> = if indexed.len() <= max_n {
+            indexed
+        } else {
+            indexed.truncate(max_n);
+            // 选中者不在 top-N 时插入首位（极少见：UCB 下选中者基本总在前 max_n 内）
+            if indexed.iter().any(|(i, _, _)| *i == idx) {
+                indexed
+            } else {
+                let mut v = vec![(idx, all_scores[idx], all_n[idx])];
+                v.extend(indexed);
+                v
+            }
+        };
+
+        let action_index = ordered.iter().position(|(i, _, _)| *i == idx).unwrap_or(0);
+        Some(DecisionInfoProto {
+            action_index,
+            score: chosen_score,
+            candidate_scores: ordered.iter().map(|(_, s, _)| *s as f32).collect(),
+            candidate_n: ordered.iter().map(|(_, _, n)| *n).collect(),
+            reason: None,
+            elapsed_ms: None,
+            search_depth: None,
+            visit_count: None,
+            score_breakdown: None,
+            scenario_extra: None
+        })
     }
 }
