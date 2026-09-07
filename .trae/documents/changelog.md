@@ -3,6 +3,7 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-09-07
+- **Step 4 CLI --json 分流 + sink 接线**：umaai 用 lexopt 解析 `--json` / `-h` / `--help`，按模式选 StdoutJsonSink / HumanReadableSink（Arc<dyn DecisionSink>），JSON 模式关 ANSI（colored::control::set_override(false)）+ 启动横幅/温泉顺序等状态走 stderr；calc_onsen_training/event 加 sink 参数 select_action 后 emit_decision；Cargo.toml 去 clap 留 lexopt；3 个 parse_args 测试（默认/--json/未知参数报错）+ umai bin --help/--bogus 手动验证通过
 - **Step 3 DecisionSink 三实现**：新建 `umasim/output/sink.rs`（DecisionSink trait + EmptySink / HumanReadableSink / StdoutJsonSink），HumanReadableSink 仅 emit 决策主干（首选 + 评分 + 理由），回合/剧本状态由 main.rs 独立开关控制；reason::NoopSink 改名 DecisionReasonNoopSink 与 sink::NoopSink 区分（sink::NoopSink → EmptySink 更明确"空实现"语义）；5 个 sink 测试覆盖不 panic 与 NaN 失败回退
 - **Step 2 last_decision override 三 trainer**：DecisionInfo 加 candidate_n（与 scores 同长同截断供 luck 按局数加权）；MctsTrainer 加 last_action_idx 哨兵 + search_output 已有；RamenMctsTrainer 加 last_search_summary 缓存 + reason 走 vs #2 维度差；RamenHandwrittenTrainer 加 last_decision_summary；reason/onsen/手写留空；elapsed_ms 留 None 延 Step5；合并搜索路径因 candidates↔actions 下标不对应暂不覆盖；集成文档 §3.3.1 改按局数加权（onsen update_score 同口径）
 

@@ -1,10 +1,14 @@
 //! umaai-rs - Rewrite UmaAI in Rust
 //!
 //! author: curran
-use std::{sync::Mutex, time::Instant};
+use std::{
+    sync::{Arc, Mutex},
+    time::Instant
+};
 
 use anyhow::Result;
 use colored::Colorize;
+use lexopt::prelude::*;
 use log::info;
 use rand::{SeedableRng, rngs::StdRng};
 use serde::Serialize;
@@ -17,6 +21,7 @@ use umasim::{
     },
     gamedata::init_global_with_config,
     neural::Evaluator,
+    output::{DecisionSink, HumanReadableSink, StdoutJsonSink},
     search::SearchConfig,
     trainer::MctsTrainer,
     utils::{check_windows_terminal, check_working_dir, init_logger, load_game_config, pause}
@@ -32,6 +37,47 @@ use crate::{
 
 pub mod protocol;
 pub mod utils;
+
+/// CLI 参数
+///
+/// `--json`：stdout 严格只 JSON（AIRedirector 模式）；启动横幅 / 日志 / 状态
+/// 走 stderr，避免污染 JSON 流。**不引入新命令行参数**——除 `--json` 模式开关
+/// 外，所有可调项走 `game_config.toml` / `default_config.toml`（详见集成文档 §3.2.3）。
+#[derive(Default)]
+struct Args {
+    /// `--json` 模式：stdout 仅 JSON，供 AIRedirector 抓取
+    json: bool,
+    /// `--help` / `-h` 模式：打印用法并退出 0
+    help: bool
+}
+
+/// 解析 CLI 参数（lexopt 与项目惯例一致——umasim 主 bin 全部用 lexopt）
+///
+/// 未知参数通过 `arg.unexpected()` 转为 `Err`，不静默接受歧义输入。
+fn parse_args() -> Result<Args> {
+    let mut args = Args::default();
+    let mut parser = lexopt::Parser::from_env();
+    while let Some(arg) = parser.next()? {
+        match arg {
+            Long("json") => args.json = true,
+            Short('h') | Long("help") => args.help = true,
+            _ => return Err(arg.unexpected().into())
+        }
+    }
+    Ok(args)
+}
+
+/// 打印 `--help` 输出（两个 sink 都走 stdout 没问题——`-h` 与 `--json` 互斥）
+fn print_help_and_exit() -> ! {
+    println!("umaai-rs — UmaAI decision engine");
+    println!();
+    println!("用法: umaai [--json]");
+    println!();
+    println!("选项:");
+    println!("  --json    stdout 严格只 JSON（AIRedirector 模式：启动横幅 / 日志走 stderr）");
+    println!("  -h, --help  打印本帮助");
+    std::process::exit(0);
+}
 
 pub fn run_evaluate<G, E>(game: &G, evaluator: &E, rng: &mut StdRng) -> Result<()>
 where
@@ -57,13 +103,16 @@ where
 }
 
 /// 训练模式
-pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mut StdRng) -> Result<()> {
+pub fn calc_onsen_training(
+    trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mut StdRng, sink: &Arc<dyn DecisionSink>
+) -> Result<()> {
     println!("{}", game.explain_distribution()?);
     info!("{}", "正在计算...".bright_black());
     if game.pending_selection {
         // 是温泉选择状态
         let actions = game.list_actions_onsen_select();
         let onsen = trainer.select_action(game, &actions, rng)?;
+        emit_decision(trainer, game, sink);
         // 前进一步选择升级
         game.apply_action(&actions[onsen], rng)?;
         let upgradeable = game.get_upgradeable_equipment();
@@ -73,6 +122,7 @@ pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mu
                 .map(|x| OnsenAction::Upgrade(*x as i32))
                 .collect::<Vec<_>>();
             trainer.select_action(game, &actions, rng)?;
+            emit_decision(trainer, game, sink);
         }
     } else {
         // 如果被解析成 Bathing 但没有温泉券合buff，就直接跳过到 Train
@@ -85,6 +135,7 @@ pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mu
             return Ok(());
         }
         let action_idx = trainer.select_action(game, &actions, rng)?;
+        emit_decision(trainer, game, sink);
         let action = actions[action_idx].clone();
 
         // 选择温泉券时需要继续给出训练推荐
@@ -102,6 +153,7 @@ pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mu
             let actions = game.list_actions()?;
             if !actions.is_empty() {
                 let _action_idx = trainer.select_action(game, &actions, rng)?;
+                emit_decision(trainer, game, sink);
                 //let action = actions[action_idx].clone();
             }
         }
@@ -111,17 +163,47 @@ pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mu
 }
 
 /// 事件模式
-pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRng) -> Result<()> {
+pub fn calc_onsen_event(
+    trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRng, sink: &Arc<dyn DecisionSink>
+) -> Result<()> {
     if let Some(event) = game.unresolved_events.first() {
         let _selection = trainer.select_event_choice(game, event, &event.choices, rng)?;
+        emit_decision(trainer, game, sink);
         println!("{}", "[按 F2 保存当前回合状态]".bright_black());
     }
     Ok(())
 }
 
+/// 把 trainer 的 last_decision 喂给 sink（取 GameView 由 Game trait 默认实现填充）
+///
+/// 选择事件选项不直接走 `select_action`，但 `MctsTrainer::last_decision` 在事件
+/// 决策也会被填（因为 `select_event_choice` 内部走 `select_action` 包装）——
+/// 这里取一次即可。
+fn emit_decision<G: Game>(trainer: &MctsTrainer, game: &G, sink: &Arc<dyn DecisionSink>) {
+    if let Some(info) = trainer.last_decision() {
+        sink.emit(&info, &game.view());
+    }
+}
+
 /// 实际的主函数
 async fn main_guard() -> Result<()> {
-    println!("{}", to_art("UMAAI 0.26".to_string(), "small", 0, 1, 0).expect("here"));
+    let args = parse_args()?;
+    if args.help {
+        print_help_and_exit();
+    }
+
+    // sink 选择必须在 colored::set_override 之前——后者是全局副作用
+    let sink: Arc<dyn DecisionSink> = if args.json {
+        // JSON 模式关闭 ANSI：colored 即使 --no-color 也可能输出 ANSI reset，
+        // 影响 AIRedirector 解析。详见集成文档 §3.2.6 第 3 条。
+        colored::control::set_override(false);
+        Arc::new(StdoutJsonSink)
+    } else {
+        Arc::new(HumanReadableSink)
+    };
+
+    // 启动横幅走 stderr（避免污染 JSON 模式的 stdout 流）
+    eprintln!("{}", to_art("UMAAI 0.26".to_string(), "small", 0, 1, 0).expect("here"));
     // 0. 运行前检查
     check_windows_terminal()?;
     if !fs_err::exists("game_config.toml")? {
@@ -172,39 +254,6 @@ async fn main_guard() -> Result<()> {
     let _max_depth = game_config.mcts.max_depth;
     // 始终强制 handwritten（保持与原 "handwritten" 分支一致的行为）
     trainer.search = trainer.search.with_leaf_evaluator_handwritten();
-    /*
-    // 原始 leaf eval 开关（已注释，等 onnx feature 真正启用时再恢复）：
-    match game_config.mcts.rollout_evaluator.as_str() {
-        "handwritten" => {
-            trainer.search = trainer.search.with_leaf_evaluator_handwritten();
-        }
-        "nn" => {
-            if game_config.mcts.max_depth == 0 {
-                println!(
-                    "警告: mcts.rollout_evaluator=\"nn\" 但 mcts.max_depth=0，leaf eval 不会被使用（等价于旧路径）"
-                );
-            }
-            if game_config.mcts_selection == "pt" && game_config.mcts.max_depth > 0 {
-                return Err(anyhow!(
-                    "E4 验收约束：mcts.rollout_evaluator=\"nn\" 且 max_depth>0 时禁止 mcts_selection=\"pt\"；请改为 \"score\""
-                ));
-            }
-
-            let model_path = game_config.neuralnet_model_path.as_str();
-            if !Path::new(model_path).exists() {
-                return Err(anyhow!("mcts.rollout_evaluator=\"nn\" 但模型文件不存在: {model_path}"));
-            }
-            // 先验证模型可加载（避免"以为开了 NN 实际没开"的伪对照）
-            let _ = NeuralNetEvaluator::load(model_path)?;
-            trainer.search = trainer.search.with_leaf_evaluator_nn(model_path.to_string());
-        }
-        other => {
-            return Err(anyhow!(
-                "未知 mcts.rollout_evaluator=\"{other}\"（仅支持 \"handwritten\" | \"nn\"）"
-            ));
-        }
-    }
-    */
 
     // E4：leaf eval 微批大小（batch=1 等价于逐样本推理；batch>1 才会启用 infer_batch）
     trainer.search = trainer
@@ -236,14 +285,14 @@ async fn main_guard() -> Result<()> {
                 }
                 if is_newgame {
                     trainer.print_newgame_config(&game);
-                    println!("{}", format!("温泉顺序: {:?}", game_config.onsen_order).bright_yellow());
-                    println!("{}", "------------------------------".bright_yellow())
+                    eprintln!("{}", format!("温泉顺序: {:?}", game_config.onsen_order).bright_yellow());
+                    eprintln!("{}", "------------------------------".bright_yellow())
                 }
 
                 if !game.unresolved_events.is_empty() {
-                    calc_onsen_event(&trainer, &game, &mut rng)?;
+                    calc_onsen_event(&trainer, &game, &mut rng, &sink)?;
                 } else {
-                    calc_onsen_training(&trainer, &mut game, &mut rng)?;
+                    calc_onsen_training(&trainer, &mut game, &mut rng, &sink)?;
                 }
             }
             Err(e) => {
@@ -274,14 +323,57 @@ mod tests {
 
     use anyhow::Result;
     use colored::Colorize;
+    use lexopt::prelude::*;
     use log::info;
     use notify::{Event, RecursiveMode, Watcher};
     use umasim::{gamedata::init_global, utils::init_logger};
 
+    use super::Args;
     use crate::protocol::{
         GameStatusOnsen,
         urafile::{UraFileWatcher, parse_game}
     };
+
+    /// 把 lexopt::Parser + 解析逻辑包成一个 helper（与 `parse_args` 同结构，
+    /// 但用 `from_iter` 喂手工 vec 避免依赖真实 env arg）
+    fn parse_from<I: IntoIterator<Item = String>>(args: I) -> anyhow::Result<Args> {
+        let mut out = Args::default();
+        let mut parser = lexopt::Parser::from_iter(args);
+        while let Some(arg) = parser.next()? {
+            match arg {
+                Long("json") => out.json = true,
+                Short('h') | Long("help") => out.help = true,
+                _ => return Err(arg.unexpected().into())
+            }
+        }
+        Ok(out)
+    }
+
+    /// 空参数列表 → 默认 `Args { json: false, help: false }`
+    #[test]
+    fn test_parse_args_default() -> Result<()> {
+        let args = parse_from(vec!["umaai".to_string()])?;
+        assert!(!args.json, "默认 json=false");
+        assert!(!args.help, "默认 help=false");
+        Ok(())
+    }
+
+    /// `--json` 解析为 `json=true`
+    #[test]
+    fn test_parse_args_json() -> Result<()> {
+        let args = parse_from(vec!["umaai".to_string(), "--json".to_string()])?;
+        assert!(args.json, "--json 触发");
+        assert!(!args.help, "help 仍为 false");
+        Ok(())
+    }
+
+    /// 未知参数 → `Err`，不静默接受歧义输入
+    #[test]
+    fn test_parse_args_unknown_rejects() {
+        let result = parse_from(vec!["umaai".to_string(), "--bogus".to_string()]);
+        println!("--bogus 解析: is_err={}", result.is_err());
+        assert!(result.is_err(), "未知参数必须报错");
+    }
 
     #[tokio::test]
     async fn test_watch() -> Result<()> {

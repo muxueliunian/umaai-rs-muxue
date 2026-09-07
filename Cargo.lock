@@ -2899,7 +2899,6 @@ version = "0.2.6"
 dependencies = [
  "anyhow",
  "chrono",
- "clap",
  "colored",
  "comfy-table",
  "dunce",
@@ -2910,6 +2909,7 @@ dependencies = [
  "hashbrown 0.16.1",
  "indicatif",
  "inquire",
+ "lexopt",
  "libc",
  "log",
  "notify",
