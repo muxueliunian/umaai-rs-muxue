@@ -28,6 +28,7 @@ use umasim::{
 };
 
 use crate::{
+    luck_score::LuckScoreTracker,
     protocol::{
         GameStatusOnsen,
         urafile::{UraFileWatcher, parse_game}
@@ -35,6 +36,7 @@ use crate::{
     utils::{SAVED_GAME, hotkey_handler}
 };
 
+pub mod luck_score;
 pub mod protocol;
 pub mod utils;
 
@@ -103,16 +105,13 @@ where
 }
 
 /// 训练模式
-pub fn calc_onsen_training(
-    trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mut StdRng, sink: &Arc<dyn DecisionSink>
-) -> Result<()> {
+pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mut StdRng) -> Result<()> {
     println!("{}", game.explain_distribution()?);
     info!("{}", "正在计算...".bright_black());
     if game.pending_selection {
         // 是温泉选择状态
         let actions = game.list_actions_onsen_select();
         let onsen = trainer.select_action(game, &actions, rng)?;
-        emit_decision(trainer, game, sink);
         // 前进一步选择升级
         game.apply_action(&actions[onsen], rng)?;
         let upgradeable = game.get_upgradeable_equipment();
@@ -122,7 +121,6 @@ pub fn calc_onsen_training(
                 .map(|x| OnsenAction::Upgrade(*x as i32))
                 .collect::<Vec<_>>();
             trainer.select_action(game, &actions, rng)?;
-            emit_decision(trainer, game, sink);
         }
     } else {
         // 如果被解析成 Bathing 但没有温泉券合buff，就直接跳过到 Train
@@ -135,7 +133,6 @@ pub fn calc_onsen_training(
             return Ok(());
         }
         let action_idx = trainer.select_action(game, &actions, rng)?;
-        emit_decision(trainer, game, sink);
         let action = actions[action_idx].clone();
 
         // 选择温泉券时需要继续给出训练推荐
@@ -153,7 +150,6 @@ pub fn calc_onsen_training(
             let actions = game.list_actions()?;
             if !actions.is_empty() {
                 let _action_idx = trainer.select_action(game, &actions, rng)?;
-                emit_decision(trainer, game, sink);
                 //let action = actions[action_idx].clone();
             }
         }
@@ -163,26 +159,80 @@ pub fn calc_onsen_training(
 }
 
 /// 事件模式
-pub fn calc_onsen_event(
-    trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRng, sink: &Arc<dyn DecisionSink>
-) -> Result<()> {
+pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRng) -> Result<()> {
     if let Some(event) = game.unresolved_events.first() {
         let _selection = trainer.select_event_choice(game, event, &event.choices, rng)?;
-        emit_decision(trainer, game, sink);
         println!("{}", "[按 F2 保存当前回合状态]".bright_black());
     }
     Ok(())
 }
 
-/// 把 trainer 的 last_decision 喂给 sink（取 GameView 由 Game trait 默认实现填充）
+/// 把 trainer 的 last_decision 喂给 sink：先挂 luck score 字段，再 emit
 ///
-/// 选择事件选项不直接走 `select_action`，但 `MctsTrainer::last_decision` 在事件
-/// 决策也会被填（因为 `select_event_choice` 内部走 `select_action` 包装）——
-/// 这里取一次即可。
-fn emit_decision<G: Game>(trainer: &MctsTrainer, game: &G, sink: &Arc<dyn DecisionSink>) {
-    if let Some(info) = trainer.last_decision() {
-        sink.emit(&info, &game.view());
-    }
+/// **Step 5 改造**：从原 `emit_decision` 升级——每回合不再"select_action → 立即 emit"，
+/// 而是把多次 select_action 的 last_decision 收集起来，由主循环在 calc_onsen_*
+/// 完成后**统一调一次本函数**：
+///
+/// 1. 取 `trainer.last_decision()`（最后一次 select_action 的数据）
+/// 2. 算 T(n) baseline（按局数加权：Σ score × n / Σ n，与 onsen `update_score` 同口径）
+/// 3. `tracker.on_new_turn(chara_id, t_n_baseline)` 更新 / 切局检测
+/// 4. 挂 `tracker.snapshot()` + 每候选 `action_luck` 到 `info.scenario_extra`
+/// 5. `sink.emit(&info, &game.view())`
+///
+/// `GameView::view()` 由 Game trait 默认实现填充；onsen scenario 字段留空待 Step 6/7。
+fn emit_with_luck<G: Game>(
+    trainer: &MctsTrainer, game: &G, sink: &Arc<dyn DecisionSink>, tracker: &mut LuckScoreTracker, chara_id: u64
+) {
+    let Some(mut info) = trainer.last_decision() else {
+        return;
+    };
+    // T(n) baseline：按局数加权（手写 / 早期早退时 candidate_n 为空 → 退化为按候选数等权）
+    let t_n_baseline: f64 = if info.candidate_n.is_empty() {
+        if info.candidate_scores.is_empty() {
+            0.0
+        } else {
+            info.candidate_scores.iter().map(|&s| s as f64).sum::<f64>()
+                / info.candidate_scores.len() as f64
+        }
+    } else {
+        let total_n: u32 = info.candidate_n.iter().sum();
+        if total_n == 0 {
+            info.candidate_scores.iter().map(|&s| s as f64).sum::<f64>()
+                / info.candidate_scores.len().max(1) as f64
+        } else {
+            info.candidate_scores
+                .iter()
+                .zip(info.candidate_n.iter())
+                .map(|(&s, &n)| (s as f64) * (n as f64))
+                .sum::<f64>()
+                / total_n as f64
+        }
+    };
+
+    let _turn_delta = tracker.on_new_turn(chara_id, t_n_baseline);
+
+    // 每候选 action_luck：T(n, action_i) - T(n)（AIRedirector 关心，玩家模式跳过）
+    let action_luck = serde_json::json!(
+        info.candidate_scores
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| (i, (s as f64) - t_n_baseline))
+            .collect::<std::collections::HashMap<usize, f64>>()
+    );
+
+    // 挂载 scenario_extra：snapshot + action_luck
+    let extra = match serde_json::to_value(tracker.snapshot()) {
+        Ok(mut v) => {
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("action_luck".into(), action_luck);
+            }
+            Some(v)
+        }
+        Err(_) => None
+    };
+    info.scenario_extra = extra;
+
+    sink.emit(&info, &game.view());
 }
 
 /// 实际的主函数
@@ -274,6 +324,10 @@ async fn main_guard() -> Result<()> {
         hotkey_handler().await;
     });
 
+    // Luck score 跟踪器（Step 5）：每回合 baseline 累加 + 切局检测，snapshot
+    // 挂在 DecisionInfo::scenario_extra 下发给 AIRedirector。
+    let mut luck_tracker = LuckScoreTracker::new();
+
     loop {
         let contents = watcher.watch("thisTurn.json")?;
         let mut is_newgame = false;
@@ -301,11 +355,20 @@ async fn main_guard() -> Result<()> {
                     eprintln!("{}", "------------------------------".bright_yellow())
                 }
 
-                if !game.unresolved_events.is_empty() {
-                    calc_onsen_event(&trainer, &game, &mut rng, &sink)?;
-                } else {
-                    calc_onsen_training(&trainer, &mut game, &mut rng, &sink)?;
+                // 切局检测：新对局起始时重置 tracker（让 total_luck 归零）
+                let chara_id = game.uma().uma_id as u64;
+                if is_newgame {
+                    luck_tracker = LuckScoreTracker::new();
                 }
+
+                if !game.unresolved_events.is_empty() {
+                    calc_onsen_event(&trainer, &game, &mut rng)?;
+                } else {
+                    calc_onsen_training(&trainer, &mut game, &mut rng)?;
+                }
+
+                // 回合决策完成后统一 emit（带 luck score 挂载）—— 见 emit_with_luck 注释
+                emit_with_luck(&trainer, &game, &sink, &mut luck_tracker, chara_id);
             }
             Err(e) => {
                 println!("{}", format!("解析回合信息出错: {e}").red());

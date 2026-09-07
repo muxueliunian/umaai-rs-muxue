@@ -4,11 +4,11 @@ use std::{
 };
 
 use anyhow::Result;
-use log::warn;
-use ratatui::crossterm::{
+use crossterm::{
     self,
     event::{self, Event, KeyCode, KeyEventKind}
 };
+use log::warn;
 use umasim::game::onsen::game::OnsenGame;
 #[cfg(target_os = "windows")]
 use windows::Win32::System::Threading::GetCurrentThreadStackLimits;
