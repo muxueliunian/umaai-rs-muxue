@@ -64,6 +64,7 @@
 例如，`region_feeling = [2, 2, 1]`, 表示消耗2个A，2个B，1个C=1拉面。
 `隐藏风味`可以**替代任意普通诀窍点**；每次做面时可以使用0-2个`隐藏风味`。
 做面后，仅在当回合内享受拉面提供的加成效果。加成效果为：基础效果`ramen_basic_effect`和地区效果`ramen_region_effect`的和.
+**PT 增量/eat_count 延后到 NextTurn 阶段**：`ground_ramen_effects`（SpecialSelect→Train 过渡时触发）只设 `current_ramen` / 消耗诀窍 / 生成分身 / 羁绊效果，不立即累加 `scenario_pt` 也不 `eat_count += 1`——这两步统一在 `Game::next()` 的 `NextTurn` 阶段（清空 `current_ramen` 之前）做。这样训练阶段的 `calc_ramen_training_effect` 读到的是「吃面前」的 `scenario_pt`，`ramen_pt_effect` / `region_bonus` 档位不会因本次吃面立即跨档抬升；PT 增量的档位收益从下一回合才参与计算。RMJ 归档与 `check_rmj` 看到的是吃面后 PT，行为不变。
 
 ### 剧本点数（ramen_pt）
 剧本点数影响剧本的`全局加成`，初始为0，每次做面都会增加剧本点数。

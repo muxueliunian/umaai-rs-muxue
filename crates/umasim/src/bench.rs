@@ -745,8 +745,11 @@ average = [1, 0, 1, 1, 2]
     /// 上游 (2) 抓的 63532 / [3258,...] 是在 (1) 之前测的（speed 3258 即缺陷 B 未修的值）。
     /// 本分支叠加后重抓：五维只有速度位从 3258 变 3337（正是 (1) 保住的那次开局继承增量），
     /// 其余四维逐位不变，分数 +804。
-    const BASELINE_SCORE: i32 = 64336;
-    const BASELINE_FIVE: [i32; 5] = [3337, 2328, 2200, 1101, 829];
+    // 2026-09 更新：吃面 PT 增量 / eat_count 延后到 NextTurn 后，训练阶段
+    // 用吃面前 PT 算 ramen_pt_effect / region_bonus 档位，纯推荐策略整局偏低；
+    // 基准重抓。
+    const BASELINE_SCORE: i32 = 63870;
+    const BASELINE_FIVE: [i32; 5] = [3337, 2293, 2200, 1086, 829];
 
     /// 把三个地区 id 格式化成与决策日志 `action_desc` 相同的 `地区[a,b,c]`。
     fn region_desc(regions: [usize; 3]) -> String {

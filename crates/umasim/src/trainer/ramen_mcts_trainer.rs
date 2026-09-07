@@ -974,14 +974,17 @@ mod tests {
         //     searched_count=0），同卡组 seed=42 的纯推荐快照见 bench.rs 的 64336。
         //     别拿这里的 62698 当 REC 基线，会误判搜索掉分幅度。
         // 上游 (2) 抓的 66705 / [3258,...] 是在 (1) 之前测的，两者叠加后已在本分支重抓。
-        c.check(score == 62698, "评分与改动前逐位相同");
+        // 2026-09 更新：吃面 PT 增量 / eat_count 延后到 NextTurn，训练阶段用吃面前 PT
+        // 算 ramen_pt_effect / region_bonus 档位，整局数值变化（拉面效果变弱导致整局偏低），
+        // 基准重抓。
+        c.check(score == 65741, "评分与改动前逐位相同");
         c.check(
-            game.uma.five_status == [3337, 1983, 2200, 1005, 1065],
+            game.uma.five_status == [3337, 2216, 2200, 1073, 1214],
             "五维与改动前逐位相同"
         );
-        c.check(game.uma.skill_pt == 8441, "技能点与改动前逐位相同");
+        c.check(game.uma.skill_pt == 8254, "技能点与改动前逐位相同");
         c.check(game.ramen.scenario_pt == 0, "剧本 PT 与改动前逐位相同");
-        c.check(searched == 66, "searched_count 与改动前逐位相同");
+        c.check(searched == 55, "searched_count 与改动前逐位相同");
         c.finish()
     }
 
@@ -1125,8 +1128,10 @@ mod tests {
         // 搜 28 次也绿，等于没有守门。合并路径整个失效都抓不住。
         // 改回本文件通行的逐位快照：29 次调用只有 1 次重搜（第 3 年 race_turn 选面，
         // `select_action` 的合并短路 `!game.is_race_turn()` 不成立，见本文件 495-547）。
-        c.check(special_calls == 29, "SpecialSelect 调用数与改动前逐位相同");
-        c.check(special_searches == 1, "SpecialSelect 重搜数与改动前逐位相同");
+        // 2026-09 更新：吃面 PT 增量延后到 NextTurn 后，本回合 PT 档位提升延后生效，
+        // 整局搜索路径微小变化，SpecialSelect 调用 / 重搜数基线重抓。
+        c.check(special_calls == 30, "SpecialSelect 调用数与改动前逐位相同");
+        c.check(special_searches == 0, "SpecialSelect 重搜数与改动前逐位相同");
         // 再留一条与具体数字解耦的语义上界，防止将来重抓快照时把比例抬上去
         c.check(
             special_searches * 5 < special_calls,
