@@ -511,9 +511,27 @@ match scenario_id {
 
 **前置依赖**：
 - `crates/umaai/src/protocol/ramen.rs`（新增，见 `ramen_protocol_v2.md` §5）
-- `umasim` 核心层 `RamenGame::from_external_state`（新增）
 
-**改动范围**：约 +30 行。
+**实装方式**：
+
+完整协议 → `RamenGame` 转换由通道层 `GameStatusRamen::into_game()`
+（`crates/umaai/src/protocol/ramen.rs:124`）承接：
+
+1. **baseGame 增量字段**：用 `parse_inherit` + `RamenGame::newgame` 构造基础游戏，再覆写
+   `turn` / `vital` / `five_status` / `deck` / `persons` / `distribution` 等。
+   5 人卡组构造包含友人 / 理事长 / 记者；事件走 `unresolved_events` 路线。
+2. **拉面段 12 字段全覆写**：`RamenStatus` 12 个字段逐一映射到 `RamenState` 对应位置
+   （feeling_guage_gains / feeling_slot / feeling_stock 累计 / special_feeling /
+   train_feeling_type / active_effect_array / super_ramen / selected_regions /
+   feeling_guage_gain_base / current_ramen / scenario_pt / next_scenario_pt）。
+3. **stage dispatch**：按协议 `playing_state` 1/5/45/46/48 → `RamenStage::Train` /
+   `Settlement` / `SuperRamenSelect`，其它 playing_state 走 warn + fallback Train。
+4. **`deck_can_split`**：在 `into_game` 末尾按 `card_type_count` 实际数 ≥ 5 重算。
+
+**单回合诊断工具**：`crates/umaai/src/bin/ramen_turn_inspect.rs` —— 用 CLI 参数指定单个
+ramen JSON，走 `parse_game_by_scenario` 载入 → `GameStatusRamen::into_game` 构造 `RamenGame`
+→ 用 `game_config.toml` 默认 `SearchConfig` 构造 `RamenMctsTrainer` → 在当前 `stage` 跑
+`select_action` → 打印 human-readable 回合状态 + MCTS 决策。
 
 ## 4. AIRedirector 端改动（极小）
 
@@ -647,7 +665,7 @@ public void Initialize(IPluginContext context)
 4. **Step 4：CLI `--json` 分流 + main.rs sink 调用**（§3.2.5）—— umaai 端最薄一层
 5. **Step 5：LuckScoreTracker + 挂载 scenario_extra**（§3.3）—— 一次性接线
 6. **Step 6：parse_game 按 scenarioId 分发**（§3.4）—— 拉面协议落地的前置
-7. **Step 7：RamenGame::from_external_state + 测试**（§3.4 前置依赖）—— 用 151 份样本驱动
+7. **Step 7：RamenGame 协议覆写 + 测试**（§3.4 前置依赖）—— 用 151 份样本驱动 + `ramen_turn_inspect` 单回合诊断
 8. **Step 8：AIRedirector 端**（§4）—— 加拉面分支 + `--json` + JSON 行识别
 
 ## 7. 验证策略

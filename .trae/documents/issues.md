@@ -31,6 +31,7 @@
 | 9 | rng_consistency 的 `0..6` 遍历 | ⚠️ 待解决（测试语义） | `run_turns` 同时锁 `deck[i]`/`persons[i]`，友人卡人头 6 锁不到；不影响该测试结论 |
 | 10 | onsen 挖土过滤器 `*p != 6 && *p != 7` | ⚠️ 待统一化 | onsen 布局下正确，按上游意愿未动，属防回归而非 bug |
 | 11 | 手写策略评估器人头计数 `head_count` | ⚠️ 待解决（仅 onsen） | `HandwrittenEvaluator` 只 `impl Evaluator<OnsenGame>`，供温泉 MCTS rollout/leaf 估值；拉面走 `RamenPolicy`、base 走 `HandwrittenTrainer`，均不经此文件 |
+| 12 | spec 期望固定 person_index 6/7/8-12 vs 当前 push-顺序动态 layout | ⚠️ 待解决（规划） | adapter_spec 期望固定 layout（理事长 6 / 记者 7 / NPC 8-12），但当前 into_game 按 push 顺序动态分配 person_index，无空洞；启用 spec 的 personDistribution 8→12 改写会越界。已商定方案：给 `BasePerson` 加 `is_hidden: bool` 字段把缺位者以 placeholder 形式屏蔽（影响 ramen/action.rs / features.rs / game.rs 约 50+ 处）。Step 7 不做，保持 push-顺序 layout 现状交付；后续单独 PR 做 is_hidden 重构。 |
 
 > 结论：拉面剧本的「人头」问题已全部清零；剩余未解决项集中在已搁置的温泉剧本与 base 潜伏项，以及拉面侧的死代码 / 测试语义 / 跨剧本防御缺口。详见下文各条目。
 

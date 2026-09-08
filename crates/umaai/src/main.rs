@@ -17,13 +17,14 @@ use umasim::{
     game::{
         Game,
         Trainer,
-        onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame}
+        onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame},
+        ramen::{RamenGame, RamenStage}
     },
     gamedata::init_global_with_config,
     neural::Evaluator,
-    output::{DecisionSink, HumanReadableSink, StdoutJsonSink},
+    output::{DecisionInfo, DecisionSink, HumanReadableSink, StdoutJsonSink},
     search::SearchConfig,
-    trainer::MctsTrainer,
+    trainer::{MctsTrainer, RamenMctsTrainer},
     utils::{check_working_dir, init_logger, load_game_config}
 };
 
@@ -164,6 +165,40 @@ pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRn
     Ok(())
 }
 
+/// 拉面训练：跑本回合所有 stage 直到推到 NextTurn / Settlement / SuperRamenSelect
+///
+/// **Step 7 接入**（参照 onsen `calc_onsen_training` 模式）：
+/// - 循环 `game.run_stage(&trainer, rng)` 让 trainer 在各 stage（RamenSelect /
+///   SpecialSelect / Train / RegionSelect / Begin 等）出决策
+/// - 退出条件：stage 推到 NextTurn（回合边界）/ Settlement（RMJ 结算，等下一条 JSON）
+///   / SuperRamenSelect（超级拉面选择，等下一条 JSON）
+/// - 特别处理「turn 2/23/47 的首次 RegionSelect」：`RamenGame::next()` 在 turn=2 的
+///   `Begin` 之后会自动推进到 `RegionSelect`（adapter_spec §UmaAI 需要复合决策 + 项目
+///   注释 §'Begin → RegionSelect → BeginAfterRegionSelect'），本函数不需要额外触发
+///   —— 只要不提前退出，`run_stage` 会把整个阶段链跑完。
+///
+/// 异常退出（事件回合、不 dispatch 的样本）由 `parse_game_by_scenario` 前的 caller 检查
+/// `game.stage`：若 stage 是 Begin（newgame 默认），说明 into_game 没 dispatch，
+/// 主循环不应调用本函数。
+pub fn calc_ramen_training(trainer: &RamenMctsTrainer, game: &mut RamenGame, rng: &mut StdRng) -> Result<()> {
+    // 防御性保护：最多循环 32 次避免 stage 流转卡死
+    const MAX_STAGE_LOOP: usize = 32;
+    for _ in 0..MAX_STAGE_LOOP {
+        match game.stage {
+            RamenStage::NextTurn | RamenStage::Settlement | RamenStage::SuperRamenSelect => {
+                // 回合边界 / RMJ 结算 / 超级拉面选择 —— 等下一条 JSON
+                break;
+            }
+            _ => {
+                // 其余 stage 全部交给 run_stage：内部已处理 select_action + apply_action + next()
+                game.run_stage(trainer, rng)?;
+            }
+        }
+    }
+    println!("{}", "[按 F2 保存当前回合状态]".bright_black());
+    Ok(())
+}
+
 /// 把 trainer 的 last_decision 喂给 sink：先挂 luck score 字段，再 emit
 ///
 /// **Step 5 改造**：从原 `emit_decision` 升级——每回合不再"select_action → 立即 emit"，
@@ -177,10 +212,24 @@ pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRn
 /// 5. `sink.emit(&info, &game.view())`
 ///
 /// `GameView::view()` 由 Game trait 默认实现填充；onsen scenario 字段留空待 Step 6/7。
+///
+/// **Step 7 改造**：拆出 `emit_with_luck_decision` 接收 `Option<DecisionInfo>`，
+/// 让拉面分支（`RamenMctsTrainer` 等其他 trainer）也能复用 luck score 挂载逻辑，
+/// 不必为每个 trainer 单独写一份。
 fn emit_with_luck<G: Game>(
     trainer: &MctsTrainer, game: &G, sink: &Arc<dyn DecisionSink>, tracker: &mut LuckScoreTracker, chara_id: u64
 ) {
-    let Some(mut info) = trainer.last_decision() else {
+    emit_with_luck_decision(trainer.last_decision(), game, sink, tracker, chara_id);
+}
+
+/// 把已提取的 `DecisionInfo` 喂给 sink：挂 luck score 字段 + emit。
+///
+/// 与 [`emit_with_luck`] 区别在于**不依赖具体 trainer 类型**——只要 trainer 实现了
+/// `Trainer<G>` 并返回 `DecisionInfo` 即可。拉面分支（`RamenMctsTrainer` 等）走这里。
+fn emit_with_luck_decision<G: Game>(
+    last_decision: Option<DecisionInfo>, game: &G, sink: &Arc<dyn DecisionSink>, tracker: &mut LuckScoreTracker, chara_id: u64
+) {
+    let Some(mut info) = last_decision else {
         return;
     };
     // T(n) baseline：按局数加权（手写 / 早期早退时 candidate_n 为空 → 退化为按候选数等权）
@@ -292,6 +341,15 @@ async fn main_guard() -> Result<()> {
     // 这个设置在AI模式下不生效
     trainer.mcts_selection = "score".to_string();
 
+    // 拉面 MCTS 训练员（与 onsen 的 MctsTrainer 强耦合 OnsenGame 不同；拉面用
+    // RamenMctsTrainer 绑 RamenGame，独立构造。stages 走 game_config.mcts.ramen_search_stages，
+    // 与 umasim/src/main.rs 拉面路径口径一致。
+    let ramen_mcts_config = SearchConfig::new_game_config(&game_config);
+    let ramen_stages = umasim::trainer::RamenSearchStages::parse(&game_config.mcts.ramen_search_stages)?;
+    let ramen_trainer = RamenMctsTrainer::new(ramen_mcts_config)
+        .with_stages(ramen_stages)
+        .verbose(true);
+
     // Phase 4 feature 拆分后，onnx 评估器路径已 cfg gate 到 `onnx` feature。
     // 当前通道层不依赖 onnx（不需要 tract-onnx 巨大依赖链），强制走 MctsTrainer
     // 默认的 handwritten leaf eval（FlatSearch::new() 默认就是 Handwritten）。
@@ -369,11 +427,40 @@ async fn main_guard() -> Result<()> {
                 // 回合决策完成后统一 emit（带 luck score 挂载）—— 见 emit_with_luck 注释
                 emit_with_luck(&trainer, &game, &sink, &mut luck_tracker, chara_id);
             }
-            Ok(crate::protocol::ParsedGame::Ramen(_game)) => {
-                // Step 6 占位：拉面 AI 主流程（calc_ramen_* + RamenMctsTrainer）
-                // 在 Step 7 接入；当前先打 warn + continue，避免 main 卡住。
-                log::warn!(
-                    "scenarioId=14 拉面剧本已解析（Step 6 占位），AI 主流程 Step 7 接入；本回合 skip"
+            Ok(crate::protocol::ParsedGame::Ramen { mut game, single_mode_chara_id }) => {
+                // Step 7：拉面 AI 主流程接入（参照 onsen `Ok(ParsedGame::Onsen(..))` 路径）。
+                // `into_game` 已经按 (source, active_effect, playing_state, turn) 完成 stage dispatch：
+                //   - 不 dispatch 的样本（source=event / playing_state=5/46/48 / 数据获取不全）
+                //     stage 仍为 Begin（newgame 默认值），跳过本分支
+                //   - 已 dispatch 的样本按 RamenSelect / Train / RegionSelect 走主流程
+                //
+                // 注意：`SAVED_GAME` 是 OnsenGame（`ctrl-s` 玩家调试保存用），拉面侧
+                // 暂不写入——避免 onsen / ramen 类型冲突；切局检测改用 single_mode_chara_id。
+                if game.stage == RamenStage::Begin {
+                    // into_game 没 dispatch（事件 / 结算 / 数据不全），等下一条 JSON
+                    continue;
+                }
+
+                // 切局检测：`single_mode_chara_id` 变化 → 新一局开始。
+                // C# 端 single_mode_chara_id 单调递增，同 uma_id 重复训练也能识别新局。
+                // 协议字段缺失（None）时退化到 uma_id 兜底（旧 json / 测试 fixture）。
+                let chara_id = single_mode_chara_id
+                    .unwrap_or_else(|| game.uma().uma_id as u64);
+                if luck_tracker.last_single_mode_id() != Some(chara_id) {
+                    eprintln!("{}", "---- 拉面新一局 ----".bright_yellow());
+                    luck_tracker = LuckScoreTracker::new();
+                }
+
+                // 跑本回合所有 stage 直到推到 NextTurn / Settlement / SuperRamenSelect
+                calc_ramen_training(&ramen_trainer, &mut game, &mut rng)?;
+
+                // 回合决策完成后统一 emit（带 luck score 挂载）
+                emit_with_luck_decision(
+                    ramen_trainer.last_decision(),
+                    &game,
+                    &sink,
+                    &mut luck_tracker,
+                    chara_id,
                 );
             }
             Err(e) => {

@@ -1,28 +1,63 @@
 //! 拉面杯剧本通信状态（`scenarioId = 14`）
 //!
 //! 协议定稿见 `.trae/documents/ramen_protocol_v2.md`（v1，2026-09）。
+//! 易混淆点见 `.trae/documents/adapter_spec.md`（2026-09-08 修订）。
 //!
 //! **Step 7 现状**：`GameStatusRamen::into_game` 完整实现，从 `thisTurn.json`
 //! 覆写所有 ramen 段字段到 `RamenGame`：
-//! - baseGame 增量字段（`playingState` → stage dispatch、`source` 路由）
+//! - baseGame 增量字段（`source` + `playingState` + `active_effect_array` 三方联合 stage dispatch）
 //! - ramen 段全字段（last_ramen / feeling_stock / feeling_slot / feeling_guage_gains /
 //!   active_effect_array / super_ramen / selected_regions / scenario_pt / next_scenario_pt /
 //!   feeling_guage_gain_base / train_feeling_type / special_feeling）
 //!
 //! 拆分 `active_effect_array` 到 `RamenEffect` 各字段**搁置**（按 §5 第 5 条）：
 //! 当前只做忠实映射（`Vec<ActiveEffectEntry>` 直接覆写），后续按训练数值需求再补。
+//!
+//! ## stage dispatch 规则（adapter_spec §source / §playing_state）
+//!
+//! | turn | source | active_effect | playing_state | 含义 | stage |
+//! |---|---|---|---|---|---|
+//! | ≤ 1 | 任 | 任 | 1 | 剧本机制未启用（拉面机制 turn >= 2 才启动） | `Train` |
+//! | ≥ 2 | `event` | 任 | 1/5 | 事件回合，AI 暂不处理 | (warn + 不 dispatch) |
+//! | ≥ 2 | `command` | 空 | 1/5 | 当回合训练前，未吃面 | `RamenSelect` |
+//! | ≥ 2 | `command` | 有 | 1/5 | 当回合已吃面，写中间状态 `pending_ramen=Some(last_ramen)` | `Train` |
+//! | ≥ 2 | `special` | - | 45 | 地区选择 | `RegionSelect` |
+//! | ≥ 2 | `command` | - | 45 | 同上（source=special 暂未出现） | `RegionSelect` |
+//! | ≥ 2 | `command` | - | 46 | RMJ 结算，不处理 | (warn + 不 dispatch) |
+//! | ≥ 2 | `command` | - | 48 | RMJ 最终结算，不处理 | (warn + 不 dispatch) |
+//!
+//! `source=special` 在 151 份样本中暂未出现，按 `command + playing_state=45` 兜底为 RegionSelect。
+//! 数据获取不全（turn 2..=71 且 `selected_regions` 全 0）→ warn + 不 dispatch。
+//!
+//! ## persons layout（adapter_spec §理事長、记者、NPC生成）
+//!
+//! | person_index | 身份 | 出现条件 |
+//! |---|---|---|
+//! | 0..=5 | 6 张训练卡（含友人） | 始终 |
+//! | 6 | 理事長 | turn >= 0 |
+//! | 7 | 记者 | turn > 12（不包含 12） |
+//! | 8..=12 | 5 个 NPC | turn >= 2 |
+//!
+//! 规则层内部查找走 `PersonType`（Yayoi/Reporter/Npc），不依赖 person_index 数字；
+//! person_index 数字仅供 `distribute_all` / 日志观测使用。
+//!
+//! ## personDistribution 中 NPC chara_id 派发（adapter_spec §personDistribution 适配）
+//!
+//! 协议约定：NPC 全填 `8`。但 `distribute_all` 按 chara_id 派发，5 个 NPC 必须 chara_id 各异。
+//! 规则：把 `person_distribution` 中**全局按出现次序**的 `8` 依次改写为 `8, 9, 10, 11, 12`，
+//! 改写后的数字即 NPC chara_id 来源（与 `NPC_CHARA_IDS` 一一对齐）。
 
 use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 
-use crate::protocol::{BasePersonStatus, GameStatus, GameStatusBase};
+use crate::protocol::{GameStatus, GameStatusBase};
 use umasim::{
     game::{
         BasePerson,
         PersonType,
         SupportCard,
-        ramen::{RamenGame, RamenStage}
+        ramen::{RamenGame, RamenStage, rules::NPC_CHARA_IDS}
     }
 };
 
@@ -166,15 +201,20 @@ impl GameStatus for GameStatusRamen {
         game.base.train_level_count = base.train_level_count.clone();
         game.base.distribution = base.person_distribution.clone();
 
-        // 4. 构造 persons（友人 / 理事长 / 记者）
+        // 4. 构造 persons。按 spec §'理事長、记者、NPC生成' 的 layout：
+        //   0..5 = deck 6 张（友人 chara_id=9001 / 其他友人改 OtherFriend）
+        //   6 = 理事長（始终在场，turn=0 也有）
+        //   7 = 记者（turn > 12 时才有，不包含 12）
+        //   8..12 = 5 个 NPC（turn >= 2 时才有，chara_id 来自 NPC_CHARA_IDS 一一对齐）
+        // 规则层查找走 PersonType，不依赖 person_index 数字；这里赋的 person_index
+        // 仅供 distribute_all / 日志观测。NPC chara_id 派发见 §'personDistribution 适配'。
+        game.persons.clear();
         let mut persons = vec![];
         for (index, card) in game.base.deck.iter().enumerate() {
             let mut person = BasePerson::try_from(card)?;
-            person.person_index = index as i32;
-            if person.person_type == PersonType::ScenarioCard {
-                if person.chara_id != 9030 {
-                    person.person_type = PersonType::OtherFriend;
-                }
+            person.person_index = persons.len() as i32;
+            if person.person_type == PersonType::ScenarioCard && person.chara_id != 9001 {
+                person.person_type = PersonType::OtherFriend;
             }
             if index < base.persons.len() {
                 person.friendship = base.persons[index].friendship;
@@ -182,14 +222,32 @@ impl GameStatus for GameStatusRamen {
             }
             persons.push(person);
         }
-        // 理事长
+        // 6: 理事長（始终在场）
         let mut yayoi = BasePerson::yayoi();
+        yayoi.person_index = 6;
         yayoi.friendship = base.friendship_noncard_yayoi;
         persons.push(yayoi);
-        // 记者
-        let mut reporter = BasePerson::reporter();
-        reporter.friendship = base.friendship_noncard_reporter;
-        persons.push(reporter);
+        // 7: 记者（adapter_spec：turn > 12 时才有，不包含 12）
+        if base.turn > 12 {
+            let mut reporter = BasePerson::reporter();
+            reporter.person_index = 7;
+            reporter.friendship = base.friendship_noncard_reporter;
+            persons.push(reporter);
+        }
+        // 8..12: 5 NPC（adapter_spec：turn >= 2 时才有，chara_id 各异）
+        if base.turn >= 2 {
+            for (i, &npc_id) in NPC_CHARA_IDS.iter().enumerate() {
+                persons.push(BasePerson {
+                    person_index: (8 + i) as i32,
+                    person_type: PersonType::Npc,
+                    train_type: -1,
+                    chara_id: npc_id,
+                    friendship: 0,
+                    is_hint: false,
+                    card_id: None
+                });
+            }
+        }
         game.persons = persons;
 
         // 5. 事件：协议 baseGame.story 非空 → push 到 unresolved_events
@@ -267,27 +325,134 @@ impl GameStatus for GameStatusRamen {
         game.ramen.scenario_pt = ramen.scenario_pt;
         game.ramen.next_scenario_pt = ramen.next_scenario_pt;
 
-        // 7. Stage dispatch（按协议 §3 playing_state 映射）
-        let playing_state = base.playing_state;
-        game.stage = match playing_state {
-            1 => RamenStage::Train,
-            // playing_state=5 事件回合：stage 与 ps=1 同（事件在 unresolved_events）
-            5 => RamenStage::Train,
-            45 | 46 => RamenStage::Settlement,
-            48 => RamenStage::SuperRamenSelect,
-            // 比赛回合（2..=10）Rust 端沿用 Train——是否进游戏循环由 main loop 路由
-            2..=10 => RamenStage::Train,
-            other => {
-                log::warn!("未知 playing_state: {other}，fallback 到 Train");
-                RamenStage::Train
-            }
-        };
+        // 7. personDistribution 适配（adapter_spec §personDistribution 适配）：
+        //    spec 要求把全局按出现次序的 `8` 依次改写为 `8, 9, 10, 11, 12`。
+        //    **当前实现不改写**——若启用会越界（详见 `issues.md` #12：spec 期望固定
+        //    person_index 6/7/8-12，但当前 into_game 按 push 顺序动态分配 person_index，
+        //    当 turn <= 12 时 persons 只有 12 项，distribution 出现 `12` 会越界）。等
+        //    `BasePerson.is_hidden` 重构落地后再启用改写。
+        //
+        //    NPC chara_id 各异由 `NPC_CHARA_IDS` 常量保证（persons 构造时直接取常量），
+        //    与 distribution 数字无绑定；distribute_all 按 persons 顺序遍历 chara_id 派发。
+        //    留此注释作为占位，等 is_hidden PR 合并后启用改写函数。
 
-        // 8. 友人在 5 人卡组下才能分身（newgame 已用同校验；这里保险起见再算一次）
-        game.deck_can_split = game.base.card_type_count.iter().filter(|x| **x > 0).count() >= 5;
+        // 8. Stage dispatch（adapter_spec §source / §playing_state 三方联合）。
+        //    先做数据获取不全检查（turn 2..=71 且 selected_regions 全 0），命中则 warn + 不 dispatch。
+        //    不 dispatch 时保留 `RamenStage::Begin`（newgame 默认值），由 main loop 识别并跳过。
+        let active_effect_count = game.ramen.active_effect_array.len();
+        let data_incomplete = (2..=71).contains(&base.turn)
+            && game.ramen.selected_regions.iter().all(|&r| r == 0);
+        if data_incomplete {
+            log::warn!(
+                "拉面协议数据获取不全：turn={} selected_regions 全 0（年份选择未到位）",
+                base.turn
+            );
+            // 不动 game.stage，保留 Begin 让 main loop 走 fallback
+        } else if base.turn <= 1 {
+            // turn 0/1：剧本机制未启用（拉面机制 turn >= 2 才启动），直接进 Train。
+            // 与 `RamenGame::next()` 内部短路（game.rs:124 turn < 2 跳 RamenSelect）口径一致：
+            // 我们在 into_game 派发阶段提前派发，避免 main loop 走到 Distribute 后被 next() 短路时
+            // 看不到本应有 RamenSelect 候选可选的语义。
+            log::info!("turn={} 剧本机制未启用，直接进 Train 阶段", base.turn);
+            game.stage = RamenStage::Train;
+        } else {
+            let source = base.source.as_deref().unwrap_or("");
+            let playing_state = base.playing_state;
+            let turn = base.turn;
+            match (source, active_effect_count > 0, playing_state) {
+                // event / playing_state=5 / 46 / 48：AI 不进决策循环
+                ("event", _, _) => {
+                    log::info!("source=event，本回合为事件回合，跳过 AI 推荐");
+                }
+                (_, _, 5) => {
+                    log::info!("playing_state=5 事件回合，跳过 AI 推荐");
+                }
+                (_, _, 46) => {
+                    log::info!("playing_state=46 RMJ 结算，跳过 AI 推荐");
+                }
+                (_, _, 48) => {
+                    log::info!("playing_state=48 RMJ 最终结算，跳过 AI 推荐");
+                }
+                // 超级拉面回合（turn >= 72）：
+                //   active_effect_array 空 → 直接丢包（按 spec §超级拉面回合处理），
+                //     等下一条数据；下一条数据会有 active_effect_array，是超级拉面激活后
+                //     的效果，给训练决策。
+                //   active_effect_array 有 → 训练阶段直接给决策，且不能重算超级拉面。
+                (src, true, 1) if turn >= 72 => {
+                    log::info!("超级拉面回合 turn={turn}，active_effect 已生效，给训练决策");
+                    game.stage = RamenStage::Train;
+                    // game.ramen.pending_ramen 已在前面 current_ramen 写入路径设置
+                    game.ramen.combined_decision = true;
+                    let _ = src;
+                }
+                (src, false, 1) if turn >= 72 => {
+                    log::info!("超级拉面回合 turn={turn} 但 active_effect_array 为空，丢弃等下一条");
+                    let _ = src;
+                    // 不 dispatch
+                }
+                // 普通训练回合：command + active_effect_array 有 → 已吃面，Train
+                //                                                  且构造中间状态 pending_ramen
+                ("command", true, 1) => {
+                    game.stage = RamenStage::Train;
+                    // 写中间状态：adapter_spec §source 'command + active_effect_array 有' →
+                    //  构造 RamenAction::ramen_select(Some(last_ramen))，让 umaai 决策训练。
+                    //  按用户决策，落地为 `game.ramen.pending_ramen = Some(last_ramen)`。
+                    if let Some(cur) = game.ramen.current_ramen {
+                        game.ramen.pending_ramen = Some(cur);
+                    }
+                }
+                // 普通训练回合：command + active_effect_array 空 → 吃面前，给 RamenSelect 决策
+                ("command", false, 1) => {
+                    game.stage = RamenStage::RamenSelect;
+                }
+                // 地区选择：playing_state=45（source=special 在 151 样本中暂未出现）
+                (_, _, 45) => {
+                    game.stage = RamenStage::RegionSelect;
+                }
+                // 兜底：未识别的 playing_state → warn + fallback Train
+                (_, _, other) => {
+                    log::warn!(
+                        "未知 playing_state={other} source={source:?} active_effect={active_effect_count} turn={turn}，fallback 到 Train"
+                    );
+                    game.stage = RamenStage::Train;
+                }
+            }
+        }
+
+        // 9. 友人在 4 种及以上支援卡类型时才能分身（与 `RamenGame::newgame` 同口径
+        // `card_type_count.iter().filter(|x| **x > 0).count() >= 4`：卡组 6 张里含友人卡，
+        // 卡组类型 ≥ 4 即满足分身条件）
+        game.deck_can_split = game.base.card_type_count.iter().filter(|x| **x > 0).count() >= 4;
 
         Ok(game)
     }
+}
+
+/// `person_distribution` 适配（adapter_spec §personDistribution 适配）
+///
+/// TODO：本函数暂未启用——spec 要求把全局按出现次序的 `8` 依次改写为 `8, 9, 10, 11, 12`，
+/// 但当前 `into_game` 按 push 顺序动态分配 person_index，当 turn <= 12 时 persons 只有
+/// 12 项（下标 0..11），distribution 出现 `12` 会越界。详见 `issues.md` #12。
+///
+/// 启用条件：等 `BasePerson.is_hidden` 重构落地（按 spec 固定 person_index 6/7/8-12，
+/// 缺位者以 placeholder + is_hidden=true 占位）。届时本函数实现即可安全启用。
+#[allow(dead_code, unused_variables)]
+fn adapt_person_distribution_npc_todo(distribution: &[Vec<i32>]) -> Vec<Vec<i32>> {
+    let mut out: Vec<Vec<i32>> = Vec::with_capacity(distribution.len());
+    let mut next_npc_id = 8_i32;
+    for row in distribution {
+        let mut new_row = Vec::with_capacity(row.len());
+        for &v in row {
+            if v == 8 {
+                new_row.push(next_npc_id);
+                next_npc_id += 1;
+            } else {
+                new_row.push(v);
+            }
+        }
+        out.push(new_row);
+    }
+    out
 }
 
 /// `GameStatusRamen` → 拉面协议 JSON（暂未实现反向转换，Step 7 后续补）
@@ -460,6 +625,39 @@ mod tests {
             let expected_super = if super_ramen_json < 0 { None } else { Some(super_ramen_json as usize) };
             assert_eq!(game.ramen.super_ramen, expected_super, "{}: super_ramen 不一致", path.display());
 
+            // 5) persons layout 校验（adapter_spec §理事長、记者、NPC生成）：
+            //    按 into_game 内的 push 顺序实际下标（无空洞）：
+            //      0..=5   deck 6 张
+            //      6       理事長（始终在场）
+            //      7..=11  NPC（turn >= 2；记者不存在时 NPC 占据此区）
+            //      7       记者（turn > 12；NPC 后移到 8..=12）
+            //    ——注意：spec 写"理事长 6 / 记者 7 / NPC 8-12"是 spec 期望的固定下标，
+            //    但实现按 push 顺序，无记者时 NPC 占 7..=11。
+            let turn = game.base.turn;
+            if turn < 2 {
+                assert_eq!(game.persons.len(), 7, "{}: turn < 2 应为 7（6 卡 + 1 理事長）", path.display());
+                assert!(matches!(game.persons[6].person_type, PersonType::Yayoi),
+                    "{}: persons[6] 应为理事長", path.display());
+            } else if turn <= 12 {
+                assert_eq!(game.persons.len(), 12, "{}: turn 2..=12 应为 12（+ 5 NPC，无记者）", path.display());
+                assert!(matches!(game.persons[6].person_type, PersonType::Yayoi),
+                    "{}: persons[6] 应为理事長", path.display());
+                for i in 7..=11 {
+                    assert!(matches!(game.persons[i].person_type, PersonType::Npc),
+                        "{}: persons[{i}] 应为 NPC", path.display());
+                }
+            } else {
+                assert_eq!(game.persons.len(), 13, "{}: turn > 12 应为 13（+ 记者 + 5 NPC）", path.display());
+                assert!(matches!(game.persons[6].person_type, PersonType::Yayoi),
+                    "{}: persons[6] 应为理事長", path.display());
+                assert!(matches!(game.persons[7].person_type, PersonType::Reporter),
+                    "{}: persons[7] 应为记者", path.display());
+                for i in 8..=12 {
+                    assert!(matches!(game.persons[i].person_type, PersonType::Npc),
+                        "{}: persons[{i}] 应为 NPC", path.display());
+                }
+            }
+
             // 累计统计
             count_ok += 1;
             *count_stage.entry(format!("{:?}", game.stage)).or_insert(0) += 1;
@@ -478,11 +676,22 @@ mod tests {
         println!("年内吃面回合数={count_eaten_turns}");
         println!("选了超级拉面档位 2 的样本数={count_super_ramen_2}");
         assert_eq!(count_ok, files.len(), "所有样本必须 parse + into_game 成功");
-        // stage 分布：Train 应最多；Settlement/SuperRamenSelect 也应出现
-        assert!(count_stage.contains_key("Train"), "Train stage 应占绝大多数");
+        // stage 分布（adapter_spec §stage dispatch 实测 chara 6204）：
+        //   Begin: 数据获取不全 / 不 dispatch 的样本（source=event / playing_state=46/48 等）
+        //   RamenSelect: command + active_effect 空（吃面前）
+        //   Train: command + active_effect 有（吃面后训练 / 超级拉面回合训练）
+        //   RegionSelect: playing_state=45（地区选择前）
+        assert!(count_stage.contains_key("RamenSelect"), "应有 RamenSelect 样本");
+        assert!(count_stage.contains_key("Train"), "应有 Train 样本");
+        assert!(count_stage.contains_key("RegionSelect"), "应有 RegionSelect 样本");
+        // 不应再出现旧协议派发的 stage
+        assert!(!count_stage.contains_key("Settlement"), "Settlement stage 已废弃（46/48 不 dispatch）");
+        assert!(!count_stage.contains_key("SuperRamenSelect"), "SuperRamenSelect stage 不应自动派发");
         // 协议文档约束：chara 6204 max scenario_pt = 7500（Y3 终值）
         assert_eq!(max_scenario_pt, 7500, "实测 chara 6204 应在 Y3 终值 7500");
         // 至少有一个 super_ramen == 2 的样本（实测 turn72 起）
         assert!(count_super_ramen_2 >= 1, "应至少有 1 份 super_ramen=2 样本");
+        // 至少有一个 source=event / playing_state=46 / 48 等不 dispatch 样本（落到 Begin）
+        assert!(count_stage.get("Begin").copied().unwrap_or(0) >= 10, "不 dispatch 样本数应 >= 10");
     }
 }

@@ -2,6 +2,15 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-08
+- **新增 adapter_spec 文档**：整理 SendGameStatusPlugin 与 umaai 协议对接的易混淆点（feeling_guage 拼错 / persons/personDistribution 适配 / playing_state 含义 / 数据获取不全判定 / 超级拉面回合处理 / 阶段来源三态等）
+- **Step 7 拉面剧本协议与主流程接入**：阶段派发按 source / active_effect / playing_state 三方联合；turn ≤ 1 直接进 Train；playing_state=45 进地区选择；超级拉面回合按 active_effect 区分丢包/决策；数据获取不全 warn + 不派发
+- **拉面 persons layout 与协议对齐**：理事长 / 记者 / NPC 按 adapter_spec 排布；记者出现回合修正为 turn > 12；151 样本驱动测试同步更新
+- **GameStatusBase 协议字段扩展**：新增 source（snake_case）、single_mode_chara_id（snake_case，单调递增切局键），兼容旧 JSON
+- **拉面 AI 主循环接入**：main loop 拉面分支从占位升级为完整流程；切局检测改用 single_mode_chara_id，缺失时退化到 uma_id
+- **拉面单回合诊断 binary**：新增 CLI 二进制，指定单个 ramen JSON 即可跑完整 into_game + MCTS，human-readable 输出
+- **集成文档 §3.4 同步**：Step 7 实装方式（协议层 into_game + 单回合诊断工具）替代规划期描述
+
 ## 2026-09-07
 - **Step 8 AIRedirector C# 端极小改动**（独立仓库 URA_Plugins/AIRedirector，已合 a8edca8）：`UmaAiProcessStartInfo.Create` 加 `jsonMode` 参数（`--json` 开关）；`AIRedirectorConfig` 加 `Ramen` / `Ramen_Path` 字段；`Class1.StartProcess` 加 `jsonMode` 形参 + 拉面分支；`HandleOutput` 试 `TryParseUmaAiDecision` 解析（`schema_version` 识别）后路由 `ApplyDecision`；`UmaAiDecision` record struct；配置文件 UI 加拉面分支（`ConfigAction.EditRamen`）；smoke test 加 4 个测试（拉面 / 温泉 / 非 JSON / 缺 schema_version）—— 实际 Windows 编译与运行测试延后到切回 Windows
 - **Step 7 RamenGame::from_external_state 完整覆写**：`RamenState` 新增 `feeling_guage_gains` / `next_scenario_pt` / `feeling_guage_gain_base` / `active_effect_array: Vec<ActiveEffectEntry>`；`ActiveEffectEntry` 协议类型（category 语义搁置）；`protocol/ramen.rs::into_game` 完整实现（base 字段 + 5 人卡组 + 友人/理事长/记者 + events + 12 个 ramen 段字段 + stage dispatch 按 playing_state 1/5/45/46/48）；驱动 151 份 `logs/GameStatusSend_Ramen` 样本 round-trip 校验 scenario_pt / current_ramen / selected_regions / super_ramen 全透传，max_scenario_pt=7500 / stage 分布 Train 145 + Settlement 5 + SuperRamenSelect 1 与预期一致

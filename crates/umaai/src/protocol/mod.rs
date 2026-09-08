@@ -121,7 +121,22 @@ pub struct GameStatusBase {
     #[serde(default)]
     pub race_history: Vec<i32>,
     /// 事件信息
-    pub story: Option<StoryStatus>
+    pub story: Option<StoryStatus>,
+    /// 回合阶段来源（C# 端 thisTurn.json 顶层 `source`；拉面剧本用，影响 stage dispatch）
+    ///
+    /// 取值 `"command"` / `"event"` / `"special"` 之一。详见 `protocol/ramen.rs`
+    /// 文件头注释的 stage dispatch 规则表。旧数据可能缺失 → 不强制要求存在。
+    #[serde(default)]
+    pub source: Option<String>,
+    /// 单次育成模式的 chara_id（C# 端 `single_mode_chara_id`，单调递增）
+    ///
+    /// 与 `uma_id` 不同：同一马娘（`uma_id`）可重复训练，`single_mode_chara_id`
+    /// 每次训练 +1。luck tracker 切局检测使用此字段——`uma_id` 不足以分辨"同一
+    /// 马娘重开新一局"。
+    ///
+    /// 旧数据可能缺失 → `#[serde(default)]` 兜底为 `None`，切局检测退化到 `uma_id` 兜底。
+    #[serde(default, rename = "single_mode_chara_id")]
+    pub single_mode_chara_id: Option<u64>
 }
 
 impl GameStatusBase {
@@ -302,7 +317,9 @@ impl From<&BaseGame> for GameStatusBase {
             friend_outgoing_used,
             playing_state: 1,
             race_history: game.uma.list_races(),
-            story: None
+            story: None,
+            source: None,
+            single_mode_chara_id: None
         }
     }
 }
@@ -310,14 +327,23 @@ impl From<&BaseGame> for GameStatusBase {
 /// 解析后的剧本：用于 main loop 按 scenarioId 分发（避免一个 `Game` trait object
 /// 处理两种剧本的复杂度——`G::Action` 是关联类型，trait object 路径受限）
 ///
-/// **Step 6 现状**：温泉路径完整可用；拉面路径走 `GameStatusRamen::into_game`
-/// 占位（构造基础 RamenGame，ramen 段增量字段覆写在 Step 7 落实）。
+/// **Step 7 现状**：两种剧本路径均完整可用——`GameStatusRamen::into_game` 实现
+/// 12 ramen 段字段覆写 + stage dispatch（详见 `protocol/ramen.rs`）。
+///
+/// **Ramen 变体附 `single_mode_chara_id`**：切局检测使用此字段（C# 端单调递增，
+/// 同一 uma_id 重复训练也能识别新局）——`RamenGame`（`BaseGame` 包装）不含此协议
+/// 字段，所以 `ParsedGame::Ramen` 直接附带，避免主循环二次解析。
 #[derive(Debug)]
 pub enum ParsedGame {
     /// `scenarioId == 12`：温泉剧本
     Onsen(umasim::game::onsen::game::OnsenGame),
     /// `scenarioId == 14`：拉面剧本
-    Ramen(umasim::game::ramen::RamenGame)
+    Ramen {
+        /// 已 into_game 后的 RamenGame
+        game: umasim::game::ramen::RamenGame,
+        /// `baseGame.single_mode_chara_id`（C# 端单调递增切局键）
+        single_mode_chara_id: Option<u64>
+    }
 }
 
 /// 从 `thisTurn.json` 内容读 `baseGame.scenarioId`（int）
@@ -337,14 +363,20 @@ pub fn extract_scenario_id(contents: &str) -> Result<u32> {
 /// 按 `baseGame.scenarioId` 分发解析（详见 `umaai_air_redirector_integration.md` §3.4）
 ///
 /// - `12` → `GameStatusOnsen` → `OnsenGame`
-/// - `14` → `GameStatusRamen` → `RamenGame`（Step 6 占位；Step 7 完整覆写）
+/// - `14` → `GameStatusRamen::into_game` → `RamenGame`（Step 7 完整覆写；附带 `single_mode_chara_id`）
 /// - 其它 → `Err`
 pub fn parse_game_by_scenario(contents: &str) -> Result<ParsedGame> {
     use crate::protocol::urafile::parse_game;
     let scenario_id = extract_scenario_id(contents)?;
     match scenario_id {
         12 => parse_game::<GameStatusOnsen>(contents).map(ParsedGame::Onsen),
-        14 => parse_game::<GameStatusRamen>(contents).map(ParsedGame::Ramen),
+        14 => {
+            // 拉面：先 parse GameStatusRamen 取 single_mode_chara_id，再走 into_game。
+            // 两次 parse 避免在协议层字段侵入 RamenGame。
+            let status: GameStatusRamen = serde_json::from_str(contents)?;
+            let single_mode_chara_id = status.base_game.single_mode_chara_id;
+            status.into_game().map(|game| ParsedGame::Ramen { game, single_mode_chara_id })
+        }
         other => Err(anyhow::anyhow!("不支持的 scenarioId: {other}（仅支持 12=温泉 / 14=拉面）"))
     }
 }
@@ -494,7 +526,7 @@ mod tests {
         println!("onsen fixture: is_ok={}", r.is_ok());
         match r {
             Ok(ParsedGame::Onsen(_)) => {}
-            Ok(ParsedGame::Ramen(_)) => panic!("不应路由到 Ramen"),
+            Ok(ParsedGame::Ramen { .. }) => panic!("不应路由到 Ramen"),
             Err(e) => panic!("onsen fixture 不应报错: {e}")
         }
     }
@@ -508,7 +540,7 @@ mod tests {
         let r = parse_game_by_scenario(FIXTURE_RAMEN);
         println!("ramen fixture: is_ok={}", r.is_ok());
         match r {
-            Ok(ParsedGame::Ramen(_)) => {}
+            Ok(ParsedGame::Ramen { .. }) => {}
             Ok(ParsedGame::Onsen(_)) => panic!("不应路由到 Onsen"),
             Err(e) => panic!("ramen fixture 不应报错: {e}")
         }

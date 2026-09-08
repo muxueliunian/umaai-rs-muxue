@@ -38,12 +38,15 @@ pub struct LuckScoreSnapshot {
 ///
 /// 持有 chara_id 切局检测、初始 / 上回合 baseline 两份内部状态。
 /// 每次 AI 推荐完成后由 `main.rs` 调 [`Self::on_new_turn`] 更新。
+///
+/// **切局键**：`single_mode_chara_id`（C# 端 `single_mode_chara_id`，单调递增）——
+/// 比 `uma_id` 更准确（同一马娘 `uma_id` 重复训练时也能识别新局）。
 pub struct LuckScoreTracker {
     initial_terminal_baseline: Option<f64>,
     prev_turn_terminal_baseline: Option<f64>,
     total_luck: f64,
     last_turn_delta: Option<f64>,
-    last_chara_id: Option<u64>
+    last_single_mode_id: Option<u64>
 }
 
 impl Default for LuckScoreTracker {
@@ -60,27 +63,36 @@ impl LuckScoreTracker {
             prev_turn_terminal_baseline: None,
             total_luck: 0.0,
             last_turn_delta: None,
-            last_chara_id: None
+            last_single_mode_id: None
         }
+    }
+
+    /// 当前记录的 `single_mode_chara_id`（`None` 表示从未记录过）
+    ///
+    /// 拉面分支用此判断切局——不依赖 `SAVED_GAME`（那是 onsen 专用）。
+    /// 用 `single_mode_chara_id` 而不是 `uma_id`：同一马娘（`uma_id` 相同）可重复训练，
+    /// 但 `single_mode_chara_id` 单调递增，能识别"同一 chara 重开新一局"。
+    pub fn last_single_mode_id(&self) -> Option<u64> {
+        self.last_single_mode_id
     }
 
     /// AI 推荐后调用：传入当前回合 T(n) baseline（已按局数加权计算好的值）
     ///
     /// 返回：当前回合的回合运气分（`None` 表示首次 / 切局后的首回合）
     ///
-    /// **切局检测**：`last_chara_id` 变化或初始 baseline 未记录 → 全部 reset：
+    /// **切局检测**：`last_single_mode_id` 变化或初始 baseline 未记录 → 全部 reset：
     /// - `initial_terminal_baseline` / `prev_turn_terminal_baseline` = 本回合 baseline
     /// - `total_luck` = 0.0
     /// - `last_turn_delta` = None
-    /// - `last_chara_id` = 新 chara_id
-    pub fn on_new_turn(&mut self, chara_id: u64, t_n_baseline: f64) -> Option<f64> {
+    /// - `last_single_mode_id` = 新 chara_id
+    pub fn on_new_turn(&mut self, single_mode_id: u64, t_n_baseline: f64) -> Option<f64> {
         // 切局检测：chara_id 变了或 AI 第一次启动
-        if self.last_chara_id != Some(chara_id) || self.initial_terminal_baseline.is_none() {
+        if self.last_single_mode_id != Some(single_mode_id) || self.initial_terminal_baseline.is_none() {
             self.initial_terminal_baseline = Some(t_n_baseline);
             self.prev_turn_terminal_baseline = Some(t_n_baseline);
             self.total_luck = 0.0;
             self.last_turn_delta = None;
-            self.last_chara_id = Some(chara_id);
+            self.last_single_mode_id = Some(single_mode_id);
             return None;
         }
 
