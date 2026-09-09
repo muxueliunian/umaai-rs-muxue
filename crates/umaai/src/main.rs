@@ -17,7 +17,7 @@ use umasim::{
     game::{
         Game,
         Trainer,
-        onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame},
+        onsen::{game::OnsenGame},
         ramen::{RamenGame, RamenStage}
     },
     gamedata::init_global_with_config,
@@ -31,7 +31,7 @@ use umasim::{
 use crate::{
     luck_score::LuckScoreTracker,
     protocol::urafile::UraFileWatcher,
-    utils::{SAVED_GAME, hotkey_handler}
+    utils::SAVED_GAME
 };
 
 pub mod luck_score;
@@ -103,99 +103,87 @@ where
 }
 
 /// 训练模式
-pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mut StdRng) -> Result<()> {
-    println!("{}", game.explain_distribution()?);
-    info!("{}", "正在计算...".bright_black());
+///
+/// 仅对当前阶段的候选列表调 `trainer.select_action` 出推荐，**不**调
+/// `apply_action` / `next()` —— 与拉面侧的修复一致：AI 不推进游戏状态，
+/// 下次 watch 收到 JSON 后主循环从零重建 game 再算。
+///
+/// `json_mode`：true 时跳过 F2 提示与训练分布的屏幕打印（这些输出仅供人类调试）。
+pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mut StdRng, json_mode: bool) -> Result<()> {
+    if !json_mode {
+        println!("{}", game.explain_distribution()?);
+        info!("{}", "正在计算...".bright_black());
+    }
     if game.pending_selection {
-        // 是温泉选择状态
+        // 温泉选择状态：列出候选 + 选一次（升级是独立的下一阶段决策，本次不下发）
         let actions = game.list_actions_onsen_select();
-        let onsen = trainer.select_action(game, &actions, rng)?;
-        // 前进一步选择升级
-        game.apply_action(&actions[onsen], rng)?;
-        let upgradeable = game.get_upgradeable_equipment();
-        if !upgradeable.is_empty() {
-            let actions = upgradeable
-                .iter()
-                .map(|x| OnsenAction::Upgrade(*x as i32))
-                .collect::<Vec<_>>();
-            trainer.select_action(game, &actions, rng)?;
+        if !actions.is_empty() {
+            let _ = trainer.select_action(game, &actions, rng)?;
         }
     } else {
-        // 如果被解析成 Bathing 但没有温泉券合buff，就直接跳过到 Train
-        if game.stage == OnsenTurnStage::Bathing && game.bathing.ticket_num == 0 && game.bathing.buff_remain_turn == 0 {
-            game.next();
-        }
-
         let actions = game.list_actions()?;
-        if actions.is_empty() {
-            return Ok(());
-        }
-        let action_idx = trainer.select_action(game, &actions, rng)?;
-        let action = actions[action_idx].clone();
-
-        // 选择温泉券时需要继续给出训练推荐
-        if game.stage == OnsenTurnStage::Bathing {
-            // 日志控制说明：旧实现曾用 `disable_log()/enable_log()` 临时抑制温泉券期间
-            // 的训练搜索日志。Phase 3 后规则层日志已通过 `diag` feature 编译期裁剪
-            // （搜索 rollout 默认不产生 `info!` / `diag!`），无需运行期切换。这里直接
-            // 走完整搜索流程，日志静默由 diag 特性保证。
-            if action == OnsenAction::UseTicket(true) {
-                game.do_use_ticket(rng)?;
-            }
-            game.next();
-
-            info!("{}", "正在计算训练...".bright_black());
-            let actions = game.list_actions()?;
-            if !actions.is_empty() {
-                let _action_idx = trainer.select_action(game, &actions, rng)?;
-                //let action = actions[action_idx].clone();
-            }
+        if !actions.is_empty() {
+            let _ = trainer.select_action(game, &actions, rng)?;
         }
     }
-    println!("{}", "[按 F2 保存当前回合状态]".bright_black());
-    Ok(())
-}
-
-/// 事件模式
-pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRng) -> Result<()> {
-    if let Some(event) = game.unresolved_events.first() {
-        let _selection = trainer.select_event_choice(game, event, &event.choices, rng)?;
+    if !json_mode {
         println!("{}", "[按 F2 保存当前回合状态]".bright_black());
     }
     Ok(())
 }
 
-/// 拉面训练：跑本回合所有 stage 直到推到 NextTurn / Settlement / SuperRamenSelect
-///
-/// **Step 7 接入**（参照 onsen `calc_onsen_training` 模式）：
-/// - 循环 `game.run_stage(&trainer, rng)` 让 trainer 在各 stage（RamenSelect /
-///   SpecialSelect / Train / RegionSelect / Begin 等）出决策
-/// - 退出条件：stage 推到 NextTurn（回合边界）/ Settlement（RMJ 结算，等下一条 JSON）
-///   / SuperRamenSelect（超级拉面选择，等下一条 JSON）
-/// - 特别处理「turn 2/23/47 的首次 RegionSelect」：`RamenGame::next()` 在 turn=2 的
-///   `Begin` 之后会自动推进到 `RegionSelect`（adapter_spec §UmaAI 需要复合决策 + 项目
-///   注释 §'Begin → RegionSelect → BeginAfterRegionSelect'），本函数不需要额外触发
-///   —— 只要不提前退出，`run_stage` 会把整个阶段链跑完。
-///
-/// 异常退出（事件回合、不 dispatch 的样本）由 `parse_game_by_scenario` 前的 caller 检查
-/// `game.stage`：若 stage 是 Begin（newgame 默认），说明 into_game 没 dispatch，
-/// 主循环不应调用本函数。
-pub fn calc_ramen_training(trainer: &RamenMctsTrainer, game: &mut RamenGame, rng: &mut StdRng) -> Result<()> {
-    // 防御性保护：最多循环 32 次避免 stage 流转卡死
-    const MAX_STAGE_LOOP: usize = 32;
-    for _ in 0..MAX_STAGE_LOOP {
-        match game.stage {
-            RamenStage::NextTurn | RamenStage::Settlement | RamenStage::SuperRamenSelect => {
-                // 回合边界 / RMJ 结算 / 超级拉面选择 —— 等下一条 JSON
-                break;
-            }
-            _ => {
-                // 其余 stage 全部交给 run_stage：内部已处理 select_action + apply_action + next()
-                game.run_stage(trainer, rng)?;
-            }
+/// 事件模式
+pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRng, json_mode: bool) -> Result<()> {
+    if let Some(event) = game.unresolved_events.first() {
+        let _selection = trainer.select_event_choice(game, event, &event.choices, rng)?;
+        if !json_mode {
+            println!("{}", "[按 F2 保存当前回合状态]".bright_black());
         }
     }
-    println!("{}", "[按 F2 保存当前回合状态]".bright_black());
+    Ok(())
+}
+
+/// 拉面训练：仅对当前阶段的候选列表调一次 `trainer.select_action`，**不修改 game 状态**
+///
+///**设计原则**（修复主循环反复计算 / JSON 不输出问题）：
+///- watch 收到一次 `thisTurn.json` 只代表"当前回合、当前阶段"的快照。
+///- AI 仅基于本次快照出推荐（select_action），把决策数据交给 sink / luck tracker，
+///  **不**调 `apply_action` / `next()` 推进 stage 或 turn。
+///- 下次 watch 收到新 JSON 时，主循环**重新 parse JSON → 重建 game**，从零计算。
+///- 不保存当前 game 状态（除 `luck_tracker` 的切局检测元数据外），所以两次 JSON 之间
+///  没有依赖，每次都是从同一份输入重新跑一遍。
+///
+/// 不修改 game 也意味着 trainer 的 `last_decision` 仍是基于**当前阶段**候选；
+/// `last_search_summary` 在每回合第一次有效 select_action 后被写入，下一次重新
+/// 构造 trainer 字段仍干净（mainloop 下次重建会调 trainer——但 `ramen_trainer`
+/// 是单例，所以需要主循环不重新构造，依赖 trainer 自身在 select_action 后写
+/// `last_search_summary`、下一次 watch 时由 mainloop 调用 `last_decision()` 读取）。
+pub fn calc_ramen_training(trainer: &RamenMctsTrainer, game: &mut RamenGame, rng: &mut StdRng, json_mode: bool) -> Result<()> {
+    // 当前阶段的候选列表 + 决策：仅读 game，不修改
+    let actions = match game.stage {
+        RamenStage::NextTurn | RamenStage::Settlement | RamenStage::SuperRamenSelect => {
+            // 回合边界 / RMJ 结算 / 超级拉面选择 —— 等下一条 JSON，AI 不出推荐
+            Vec::new()
+        }
+        _ => game.list_actions()?
+    };
+    if !actions.is_empty() {
+        let _ = trainer.select_action(game, &actions, rng)?;
+    }
+    // 屏幕侧（human mode）按需求在每回合头部打印马娘 / 剧本 / 训练分布
+    if !json_mode {
+        if let Ok(status) = game.explain() {
+            println!("{status}");
+        }
+        let script_info = game.explain_ramen_info();
+        if !script_info.is_empty() {
+            println!("{script_info}");
+        }
+        if let Ok(dist_info) = game.explain_distribution() {
+            println!("{dist_info}");
+        }
+        println!("{}", "[按 F2 保存当前回合状态]".bright_black());
+    }
     Ok(())
 }
 
@@ -297,9 +285,10 @@ async fn main_guard() -> Result<()> {
     } else {
         Arc::new(HumanReadableSink)
     };
+    let json_mode = args.json;
 
     // 启动横幅走 stderr（避免污染 JSON 模式的 stdout 流）
-    eprintln!("{}", to_art("UMAAI 0.26".to_string(), "small", 0, 1, 0).expect("here"));
+    eprintln!("{}", to_art("Ramen-AI".to_string(), "small", 0, 1, 0).expect("here"));
     // 0. 运行前检查（Windows terminal 检测暂时注释掉——非 Windows 平台跳过，
     //    避免误报；Step 5 之后视需要再决定是否启用）
     // check_windows_terminal()?;
@@ -375,9 +364,15 @@ async fn main_guard() -> Result<()> {
     };
 
     // watcher 启动成功后才 spawn hotkey_handler（见上方注释——避免失败路径 hang）
-    tokio::spawn(async move {
-        hotkey_handler().await;
-    });
+    //
+    // **临时停用**（2026-09 重构期）：ctrl-s 保存当前回合状态功能暂不可用，
+    // 同时热键循环里无限 poll crossterm event 在玩家无 stdin 场景（容器 / CI / AIRedirector 接管）
+    // 会持续占用 tokio worker 配额，且功能本身在 AI 通道下无意义。后续重构时再恢复，
+    // 或改为「玩家调试入口受 feature gate / 命令行参数控制」。
+    //
+    // tokio::spawn(async move {
+    //     hotkey_handler().await;
+    // });
 
     // Luck score 跟踪器（Step 5）：每回合 baseline 累加 + 切局检测，snapshot
     // 挂在 DecisionInfo::scenario_extra 下发给 AIRedirector。
@@ -419,13 +414,16 @@ async fn main_guard() -> Result<()> {
                 }
 
                 if !game.unresolved_events.is_empty() {
-                    calc_onsen_event(&trainer, &game, &mut rng)?;
+                    calc_onsen_event(&trainer, &game, &mut rng, json_mode)?;
                 } else {
-                    calc_onsen_training(&trainer, &mut game, &mut rng)?;
+                    calc_onsen_training(&trainer, &mut game, &mut rng, json_mode)?;
                 }
 
                 // 回合决策完成后统一 emit（带 luck score 挂载）—— 见 emit_with_luck 注释
                 emit_with_luck(&trainer, &game, &sink, &mut luck_tracker, chara_id);
+
+                // 计算完成：通知下游 watcher 进入阻塞状态
+                eprintln!("计算完成，等待新数据...");
             }
             Ok(crate::protocol::ParsedGame::Ramen { mut game, single_mode_chara_id }) => {
                 // Step 7：拉面 AI 主流程接入（参照 onsen `Ok(ParsedGame::Onsen(..))` 路径）。
@@ -452,7 +450,7 @@ async fn main_guard() -> Result<()> {
                 }
 
                 // 跑本回合所有 stage 直到推到 NextTurn / Settlement / SuperRamenSelect
-                calc_ramen_training(&ramen_trainer, &mut game, &mut rng)?;
+                calc_ramen_training(&ramen_trainer, &mut game, &mut rng, json_mode)?;
 
                 // 回合决策完成后统一 emit（带 luck score 挂载）
                 emit_with_luck_decision(
@@ -462,6 +460,9 @@ async fn main_guard() -> Result<()> {
                     &mut luck_tracker,
                     chara_id,
                 );
+
+                // 计算完成：通知下游 watcher 进入阻塞状态
+                eprintln!("计算完成，等待新数据...");
             }
             Err(e) => {
                 println!("{}", format!("解析回合信息出错: {e}").red());

@@ -2,6 +2,13 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-09
+- **AI 不再推进游戏状态**：拉面 calc_ramen_training 与温泉 calc_onsen_training / calc_onsen_event 改为只调一次 select_action 出推荐、不再 apply / next；主循环每次 watch 收到新 JSON 后从零重建 game 重新计算，两次 JSON 间不互相依赖
+- **温泉 / 拉面回合头部打印**：human mode 在每次计算后打印马娘状态 / 剧本信息 / 训练分布；json mode 跳过这些屏幕输出
+- **JSON 模式 stdout 净化**：计算完成提示「计算完成，等待新数据...」、启动横幅走 stderr；`[按 F2 保存当前回合状态]` 等人类调试提示在 json mode 跳过
+- **ctrl-s 热键功能临时停用**：tokio::spawn(hotkey_handler) 注释掉（crossterm 无限 poll 占用 worker 配额、AI 通道下无意义），后续重构时按 feature gate 恢复
+- **版本号 / 横幅升级**：`umasim` / `umaai` Cargo.toml version 升 0.2.x → 0.14.0；启动横幅 "UMAAI 0.26" 改为 "UMAAI-Ramen"
+
 ## 2026-09-08
 - **新增 adapter_spec 文档**：整理 SendGameStatusPlugin 与 umaai 协议对接的易混淆点（feeling_guage 拼错 / persons/personDistribution 适配 / playing_state 含义 / 数据获取不全判定 / 超级拉面回合处理 / 阶段来源三态等）
 - **Step 7 拉面剧本协议与主流程接入**：阶段派发按 source / active_effect / playing_state 三方联合；turn ≤ 1 直接进 Train；playing_state=45 进地区选择；超级拉面回合按 active_effect 区分丢包/决策；数据获取不全 warn + 不派发
