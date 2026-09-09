@@ -74,12 +74,18 @@ pub struct RamenHandwrittenTrainer {
 }
 
 /// 手写策略上一次决策的最小摘要
+///
+/// 2026-09 扩展：新增 `descriptions` 字段——AIRedirector 仅靠 `action_index` 数字
+/// 无法映射拉面组合动作名，必须挂描述才能展示。`descriptions` 与 `outputs`
+/// 严格同长同序（同源于 `select_action` 的 `actions` 入参）。
 #[derive(Debug, Clone)]
 struct LastDecisionSummary {
     /// `select_action` 返回的下标（caller 视角，与传入 `actions` 数组一致）
     chosen_idx: usize,
     /// 各候选的 `RamenPolicyOutput`（与传入 `actions` 数组严格同序；长度不一致视为异常）
-    outputs: Vec<RamenPolicyOutput>
+    outputs: Vec<RamenPolicyOutput>,
+    /// 各候选的可读描述（与 `outputs` 严格同长同序，按 `actions` 入参顺序）
+    descriptions: Vec<String>
 }
 
 impl RamenHandwrittenTrainer {
@@ -145,11 +151,18 @@ impl RamenHandwrittenTrainer {
     ///
     /// 与 [`Self::stash_breakdown`] 解耦：rollout 路径关闭 breakdown 采集时
     /// 仍须保留协议摘要——后者是协议层契约，不该被 rollout 性能优化关掉。
-    fn stash_decision_summary(&self, idx: usize, outputs: &[RamenPolicyOutput]) {
+    ///
+    /// 2026-09 扩展：`actions` 入参新增——把候选描述缓存到 `descriptions`，
+    /// 让 `last_decision` 输出给 AIRedirector 映射动作名。
+    fn stash_decision_summary(
+        &self, idx: usize, outputs: &[RamenPolicyOutput], actions: &[<crate::game::ramen::RamenGame as crate::game::Game>::Action]
+    ) {
+        let descriptions: Vec<String> = actions.iter().map(|a| a.to_string()).collect();
         if let Ok(mut slot) = self.last_decision_summary.lock() {
             *slot = Some(LastDecisionSummary {
                 chosen_idx: idx,
-                outputs: outputs.to_vec()
+                outputs: outputs.to_vec(),
+                descriptions
             });
         }
     }
@@ -206,7 +219,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
             _ => (0, vec![])
         };
         self.stash_breakdown(&outputs);
-        self.stash_decision_summary(idx, &outputs);
+        self.stash_decision_summary(idx, &outputs, actions);
         if self.verbose {
             info!(
                 "[手写][回合 {}] 阶段 {:?} 选择: {}",
@@ -221,7 +234,10 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], _rng: &mut StdRng) -> Result<usize> {
         let (idx, outputs) = self.policy.decide_event(game, choices)?;
         self.stash_breakdown(&outputs);
-        self.stash_decision_summary(idx, &outputs);
+        // 事件选择：actions 在 trait 里类型为 `&[Vec<EventChoice>]`，与 RamenAction 不可转——这里
+        // 不挂候选描述（事件选择阶段对 AIRed 端不展示候选名）。stash_decision_summary
+        // 第三个参数改用空 Vec 兜底，避免 protocol 字段错位。
+        self.stash_decision_summary(idx, &outputs, &[]);
         if self.verbose {
             info!("[手写][回合 {}] 事件选择: {}", game.turn(), idx + 1);
         }
@@ -233,7 +249,8 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     ) -> Result<usize> {
         let (idx, outputs) = self.policy.decide_event(game, choices)?;
         self.stash_breakdown(&outputs);
-        self.stash_decision_summary(idx, &outputs);
+        // 同 select_choice：事件选择阶段不挂候选描述（与 RamenAction 类型不可转）
+        self.stash_decision_summary(idx, &outputs, &[]);
         if self.verbose {
             info!("[手写][回合 {}] 事件选择: {}", game.turn(), idx + 1);
         }
@@ -280,22 +297,24 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
         };
 
         let action_index = ordered.iter().position(|(i, _)| *i == summary.chosen_idx).unwrap_or(0);
-        let breakdown = chosen
-            .breakdown
-            .iter()
-            .map(|(k, v)| (k.clone(), *v))
-            .collect::<std::collections::HashMap<String, f32>>();
 
+        // 2026-09 简化：`score_breakdown` 字段已从 DecisionInfo 删除——
+        // breakdown 数据改走 `last_breakdown()` 方法（`LoggingTrainer` 调参日志仍用）
+        //
+        // 候选描述按 ordered 顺序取（与 candidate_scores 严格同长同序同截断）——
+        // 拉面组合动作靠此字段让 AIRedirector 映射动作名
+        let candidate_descriptions: Vec<String> = ordered
+            .iter()
+            .map(|(i, _)| summary.descriptions[*i].clone())
+            .collect();
         Some(DecisionInfoProto {
             action_index,
             score: chosen.score,
+            // decision_kind 由 main.rs 外部填——trainer 不感知 stage
+            decision_kind: String::new(),
             candidate_scores: ordered.iter().map(|(_, s)| *s).collect(),
+            candidate_descriptions,
             candidate_n: vec![],
-            reason: None,
-            elapsed_ms: None,
-            search_depth: None,
-            visit_count: None,
-            score_breakdown: if breakdown.is_empty() { None } else { Some(breakdown) },
             scenario_extra: None
         })
     }
@@ -407,20 +426,15 @@ mod tests {
                     info.candidate_n.is_empty(),
                     "手写策略 candidate_n 必须留空（无局数概念）"
                 );
-                c.check(info.reason.is_none(), "手写策略 reason 暂留 None");
-                c.check(info.elapsed_ms.is_none(), "elapsed_ms 暂留 None（Step 5 再填）");
                 c.check(info.action_index < info.candidate_scores.len(), "选中下标在截断后范围内");
                 c.check(info.candidate_scores.len() <= 5, "候选评分截断到 5");
-                if info.score_breakdown.is_some() {
-                    had_breakdown += 1;
-                }
                 c.finish()?;
             }
             game.run_stage(&trainer, &mut decision_rng)?;
         }
 
         let mut c = crate::utils::Checks::new();
-        println!("手写策略决策 {decisions} 次，含 score_breakdown {had_breakdown} 次");
+        println!("手写策略决策 {decisions} 次");
         c.check(decisions > 50, "整局绝大多数决策点都有 last_decision");
         c.finish()
     }

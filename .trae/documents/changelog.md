@@ -3,6 +3,10 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-09-09
+- **决策间 `decision_kind` 顶层字段 + `scenario_extra.ramen_action`**：partial decision 类型分发——main.rs 在 select_action 前按 `RamenStage` 填 `decision_kind`，onsen 填 `train`/`event`；`ramen_action` 由 `RamenAction.to_string()` 给出含吃面 + 隐藏诀窍 + 操作三阶段动作串（AIRed 端只显示不解析），合并路径一条 JSON 表达、三阶段路径按 chain 顺序分条
+- **新增 `candidate_descriptions` 字段**：与 `candidate_scores` / `candidate_n` 严格同长同序同截断，供 AIRed 映射拉面组合动作名（onsen 取自 `SearchOutput.actions[i]`、拉面 MCTS / 手写策略分别缓存到 `LastSearchSummary` / `LastDecisionSummary`）
+- **`DecisionInfo` 简化 + `scenario_extra.reason` 挂载**：删 5 个 stub 字段（reason / search_depth / visit_count / score_breakdown / elapsed_ms），保留 candidate_scores / candidate_n；拉面从 `LastReasonSink` 取 `DecisionReasonData` 挂到 `scenario_extra.reason` 完整透传 human reason 信息
+- **`--json` 输出类型扩展**：stdout 顶层 `type` 区分三类消息（`decision` / `info` / `error`），去掉 `schema_version`；`info` 仅 event 取值、`error` 仅 message——在 watcher init、watch loop 入口、拉面链式决策中间、切局、失败五处按需发射
 - **AI 不再推进游戏状态**：拉面 calc_ramen_training 与温泉 calc_onsen_training / calc_onsen_event 改为只调一次 select_action 出推荐、不再 apply / next；主循环每次 watch 收到新 JSON 后从零重建 game 重新计算，两次 JSON 间不互相依赖
 - **温泉 / 拉面回合头部打印**：human mode 在每次计算后打印马娘状态 / 剧本信息 / 训练分布；json mode 跳过这些屏幕输出
 - **JSON 模式 stdout 净化**：计算完成提示「计算完成，等待新数据...」、启动横幅走 stderr；`[按 F2 保存当前回合状态]` 等人类调试提示在 json mode 跳过
@@ -16,6 +20,9 @@
 - **human 输出改为运气行**：删去 AI 选择 / 理由两行，输出期望评分与运气分（本局 / 本回合），四舍五入为整数，本局运气按区间着色
 - **期望评分叠加每回合加成**：期望评分与运气分统一计入"每回合比手写逻辑多的分数"，按剩余回合数加权，初始基线按第 0 回合计算
 - **拉面决策理由输出解耦**：理由的原始数据始终下发供宿主使用，可读文字仅在诊断模式上屏，避免双打印
+- **feeling_guage → feeling_gauge 改名**：上游已修复误拼，协议与 umaai 端 `RamenStatus` 字段随迁 `feeling_gauge` / `feeling_gauge_gains` / `feeling_gauge_gain_base`，文档同步更新
+- **拉面 into_game 严格按协议重建 base**：弃 `RamenGame::newgame` 打补丁，改由 `parse_basegame` 重建（Uma / Friend 走 `parse_uma` / `parse_friend`、`five_status_limit` 取协议值、丢弃 `friend_event_ids`，友人事件 / 五维上限视为外部输入）；新增 `RamenGame::from_base_game`；`parse_basegame` 卡组循环补 persons 越界守卫
+- **地区选择（手写 fallback）决策可输出**：`region` 门控关闭时 `last_decision()` 为 None 导致无结果——`decide` **仅对 `RegionSelect`** 合成决策信息入链 emit（其余 None 阶段保持旧行为不合成）、不挂 luck；human 紫色显示「选择地区[...]（手写逻辑）」
 
 ## 2026-09-08
 - **新增 adapter_spec 文档**：整理 SendGameStatusPlugin 与 umaai 协议对接的易混淆点（feeling_guage 拼错 / persons/personDistribution 适配 / playing_state 含义 / 数据获取不全判定 / 超级拉面回合处理 / 阶段来源三态等）

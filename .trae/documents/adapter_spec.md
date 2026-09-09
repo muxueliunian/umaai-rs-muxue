@@ -2,7 +2,7 @@
 
 ## feeling_guage 误拼
 
-后续需要在上游插件 (SendGameStatusPlugin) 中修复. 目前按现状 feeling_guage 处理.
+上游插件 (SendGameStatusPlugin) 已修复拼写，协议字段改为 `feeling_gauge` / `feeling_gauge_gains` / `feeling_gauge_gain_base`。umaai 端字段名随协议同步改名。
 
 ## last_ramen 需要额外判断
 

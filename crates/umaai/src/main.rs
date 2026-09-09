@@ -204,8 +204,13 @@ pub fn calc_ramen_training(
     {
         // 对当前阶段做一次决策：捕获决策与其阶段 view，返回选中的动作
         // （g / out / rng 走参数，避免闭包长期独占借用与下方直接使用冲突；仅捕获共享 trainer）
+        //
+        // 2026-09 扩展：snapshot select_action 前的 stage 填到 info.decision_kind——
+        // 让 AIRedirector 端按 partial decision 类型分发。trainer 不感知 stage，
+        // 由"发起决策的 umaai"统一管理。
         let decide =
             |g: &mut RamenGame, out: &mut Vec<(DecisionInfo, GameView)>, rng: &mut StdRng| -> Result<Option<RamenAction>> {
+                let before_stage = g.stage.clone();
                 let actions = match g.stage {
                     RamenStage::NextTurn | RamenStage::Settlement | RamenStage::SuperRamenSelect => {
                         // 回合边界 / RMJ 结算 / 超级拉面选择 —— 等下一条 JSON，AI 不出推荐
@@ -219,7 +224,19 @@ pub fn calc_ramen_training(
                 let idx = trainer.select_action(g, &actions, rng)?;
                 let chosen = actions[idx].clone();
                 let view = g.view();
-                if let Some(info) = trainer.last_decision() {
+                // `last_decision()` 仅对真正走过 MCTS 搜索的阶段返回 `Some`；其它（门控
+                // 关闭的 `region`、合并 RamenSelect 路径、单候选等）返回 `None`。
+                // 仅地区选择（手写 fallback）需要合成一条输出——这是最初"无结果"的问题；
+                // 其余 None 阶段保持旧行为（决策仍返回但**不**合成、不 emit）。
+                let mut info = match trainer.last_decision() {
+                    Some(info) => Some(info),
+                    None if before_stage == RamenStage::RegionSelect => {
+                        Some(fallback_decision(&actions, idx, &before_stage))
+                    }
+                    None => None,
+                };
+                if let Some(mut info) = info.take() {
+                    info.decision_kind = ramen_stage_kind(before_stage).to_string();
                     out.push((info, view));
                 }
                 Ok(Some(chosen))
@@ -297,17 +314,33 @@ pub fn calc_ramen_training(
 /// 让拉面分支（`RamenMctsTrainer` 等其他 trainer）也能复用 luck score 挂载逻辑，
 /// 不必为每个 trainer 单独写一份。
 fn emit_with_luck<G: Game>(
-    trainer: &MctsTrainer, game: &G, sink: &Arc<dyn DecisionSink>, tracker: &mut LuckScoreTracker, chara_id: u64
+    trainer: &MctsTrainer, game: &G, sink: &Arc<dyn DecisionSink>, tracker: &mut LuckScoreTracker, chara_id: u64,
+    decision_kind: &str
 ) {
-    emit_with_luck_decision(trainer.last_decision(), game, sink, tracker, chara_id);
+    // onsen 路径没有 reason_sink，传 None——scenario_extra.reason 不挂
+    emit_with_luck_decision(trainer.last_decision(), game, sink, tracker, chara_id, None, decision_kind, None);
 }
 
 /// 把已提取的 `DecisionInfo` 喂给 sink：挂 luck score 字段 + emit。
 ///
 /// 与 [`emit_with_luck`] 区别在于**不依赖具体 trainer 类型**——只要 trainer 实现了
 /// `Trainer<G>` 并返回 `DecisionInfo` 即可。拉面分支（`RamenMctsTrainer` 等）走这里。
+///
+/// **2026-09 扩展**：
+/// - `reason_data`：拉面 MCTS 路径从 `LastReasonSink.take()` 取 `DecisionReasonData`，
+///   挂到 `scenario_extra.reason` 让 AIRedirector 拿到完整 human mode reason 信息
+///   （metric / chosen_desc / chosen_mean / chosen_n / rivals[]）。其他 trainer 传 `None`。
+/// - `decision_kind`：由 main.rs 外部传入（按用户拍板"由发起决策的umaai从外部保存状态"）——
+///   标明这条决策属于哪种（"ramen_select" / "special_select" / "train" / "region_select" /
+///   "super_ramen_select" / "event"）。C# 端按此字段分发 partial decision。
+/// - `ramen_action`：仅 ramen 路径传 `Some(&str)`——`RamenAction::to_string()` 的结果，
+///   含吃面 + 隐藏诀窍 + 操作三阶段信息（按用户拍板"AIRed 端只显示不解析"）。
 fn emit_with_luck_decision<G: Game>(
-    last_decision: Option<DecisionInfo>, game: &G, sink: &Arc<dyn DecisionSink>, tracker: &mut LuckScoreTracker, chara_id: u64
+    last_decision: Option<DecisionInfo>, game: &G, sink: &Arc<dyn DecisionSink>,
+    tracker: &mut LuckScoreTracker, chara_id: u64,
+    reason_data: Option<&DecisionReasonData>,
+    decision_kind: &str,
+    ramen_action: Option<&str>
 ) {
     let Some(mut info) = last_decision else {
         return;
@@ -352,11 +385,26 @@ fn emit_with_luck_decision<G: Game>(
             .collect::<std::collections::HashMap<usize, f64>>()
     );
 
-    // 挂载 scenario_extra：snapshot + action_luck
+    // 顶层 decision_kind（外部传入——按用户拍板"由发起决策的 umaai 从外部保存状态"）
+    info.decision_kind = decision_kind.to_string();
+
+    // 挂载 scenario_extra：snapshot + action_luck（必挂）+ reason（仅拉面 MCTS）+
+    // ramen_action（仅 ramen 路径——按用户拍板"对吃面情况要输出隐藏诀窍用法"，
+    // 这里直接存 to_string 字符串，AIRed 端只显示不解析）
     let extra = match serde_json::to_value(tracker.snapshot()) {
         Ok(mut v) => {
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("action_luck".into(), action_luck);
+                // reason：拉面 MCTS 路径挂，其他 trainer 不挂——按 trainer 支持度灵活
+                if let Some(data) = reason_data {
+                    if let Ok(reason_v) = serde_json::to_value(data) {
+                        obj.insert("reason".into(), reason_v);
+                    }
+                }
+                // ramen_action：仅 ramen 路径填（"吃面/X(替换Ax1+Bx2)" 等）
+                if let Some(action_text) = ramen_action {
+                    obj.insert("ramen_action".into(), action_text.into());
+                }
             }
             Some(v)
         }
@@ -367,6 +415,45 @@ fn emit_with_luck_decision<G: Game>(
     sink.emit(&info, &game.view());
 }
 
+/// RamenStage → decision_kind 字符串映射
+///
+/// main.rs 在 calc_ramen_training 内部 snapshot stage 填这个字段——trainer 不关心，
+/// 由"发起决策的 umaai"统一管理（按用户拍板）。
+fn ramen_stage_kind(stage: RamenStage) -> &'static str {
+    match stage {
+        RamenStage::Begin => "begin",
+        RamenStage::Distribute => "distribute",
+        RamenStage::RamenSelect => "ramen_select",
+        RamenStage::SpecialSelect => "special_select",
+        RamenStage::Train => "train",
+        RamenStage::AfterTrain => "after_train",
+        RamenStage::NextTurn => "next_turn",
+        RamenStage::RegionSelect => "region_select",
+        RamenStage::SuperRamenSelect => "super_ramen_select",
+        RamenStage::Settlement => "settlement",
+        RamenStage::BeginAfterRegionSelect => "begin_after_region_select"
+    }
+}
+
+/// 为 MCTS 手写 fallback 阶段的决策合成一条最小 `DecisionInfo`
+///
+/// [`Trainer::last_decision`] 只在**真正走过 MCTS 搜索**时返回 `Some`；门控关闭的阶段
+/// （如默认配置 `ramen_search_stages="train,ramen"` 下未开启的 `region`）落入手写
+/// fallback，`last_decision()` 为 `None`，但手写策略确实作出了选择——导致该阶段
+/// 没有任何决策结果输出。这里按本次候选列表与选中下标合成一条无搜索评分的决策信息，
+/// 保证 region_select 等阶段也有结果可 emit（candidate_scores 为空，luck baseline 退化按等权）。
+fn fallback_decision(actions: &[RamenAction], chosen_idx: usize, before_stage: &RamenStage) -> DecisionInfo {
+    DecisionInfo {
+        action_index: chosen_idx,
+        score: 0.0,
+        decision_kind: ramen_stage_kind(before_stage.clone()).to_string(),
+        candidate_scores: Vec::new(),
+        candidate_descriptions: actions.iter().map(|a| a.to_string()).collect(),
+        candidate_n: Vec::new(),
+        scenario_extra: None
+    }
+}
+
 /// 实际的主函数
 async fn main_guard() -> Result<()> {
     let args = parse_args()?;
@@ -375,15 +462,38 @@ async fn main_guard() -> Result<()> {
     }
 
     // sink 选择必须在 colored::set_override 之前——后者是全局副作用
+    //
+    // `--json` 分支额外保留 `StdoutJsonSink` 的具体类型句柄（`json_sink`）：
+    // `DecisionSink` trait 只覆盖决策 emit（info/error 不在内）。`emit_info` /
+    // `emit_error` 是 `StdoutJsonSink` 的额外方法，main 在 watch loop 的各触发点
+    // 显式调——human 模式下 `json_sink` 为 `None`，闭包 no-op。
+    let json_sink: Option<Arc<StdoutJsonSink>>;
     let sink: Arc<dyn DecisionSink> = if args.json {
         // JSON 模式关闭 ANSI：colored 即使 --no-color 也可能输出 ANSI reset，
         // 影响 AIRedirector 解析。详见集成文档 §3.2.6 第 3 条。
         colored::control::set_override(false);
-        Arc::new(StdoutJsonSink)
+        let js = Arc::new(StdoutJsonSink);
+        json_sink = Some(js.clone());
+        js
     } else {
+        json_sink = None;
         Arc::new(HumanReadableSink)
     };
     let json_mode = args.json;
+
+    // info / error 发射器闭包：human 模式 no-op；json 模式转发到 StdoutJsonSink
+    // （stdout 严格只 JSON——不再走 eprintln/println 污染流）。闭包按 Fn 借用
+    // json_sink，可在 watch loop 内反复调用。
+    let emit_info = |event: &str| {
+        if let Some(ref js) = json_sink {
+            js.emit_info(event);
+        }
+    };
+    let emit_error = |message: &str| {
+        if let Some(ref js) = json_sink {
+            js.emit_error(message);
+        }
+    };
 
     // 启动横幅走 stderr（避免污染 JSON 模式的 stdout 流）
     eprintln!("{}", to_art("Ramen-AI".to_string(), "small", 0, 1, 0).expect("here"));
@@ -461,8 +571,14 @@ async fn main_guard() -> Result<()> {
 
     // 开始检测文件——init 失败时优雅退出（不 panic）：路径无效 / notify 失败都打 warn + return Ok(())
     let mut watcher = match UraFileWatcher::init() {
-        Ok(w) => w,
+        Ok(w) => {
+            // watcher 就绪：通知 AIRed 子进程已连接并进入监听状态
+            emit_info("connected");
+            w
+        }
         Err(e) => {
+            // watcher init 失败：json 模式发 error 行；human 模式保留原 warn 日志
+            emit_error(&format!("watcher 初始化失败: {e}"));
             log::warn!("UraFileWatcher init 失败: {e}，main 不进入 watch loop，程序正常退出（exit 0）");
             return Ok(());
         }
@@ -485,6 +601,8 @@ async fn main_guard() -> Result<()> {
 
     loop {
         let contents = watcher.watch("thisTurn.json")?;
+        // 收到一份新 JSON：通知 AIRed "开始计算本回合"
+        emit_info("compute_start");
         // Step 6：按 baseGame.scenarioId 分发（12=温泉 / 14=拉面）。拉面侧 AI 主流程
         // 在 Step 7 接入——这里只解析 + 打 warn，AI 不出推荐。
         match crate::protocol::parse_game_by_scenario(&contents) {
@@ -507,6 +625,8 @@ async fn main_guard() -> Result<()> {
                     }
                 }
                 if is_newgame {
+                    // 检测到新一局：通知 AIRed 重置 UI 状态
+                    emit_info("new_game");
                     trainer.print_newgame_config(&game);
                     eprintln!("{}", format!("温泉顺序: {:?}", game_config.onsen_order).bright_yellow());
                     eprintln!("{}", "------------------------------".bright_yellow())
@@ -525,7 +645,9 @@ async fn main_guard() -> Result<()> {
                 }
 
                 // 回合决策完成后统一 emit（带 luck score 挂载）—— 见 emit_with_luck 注释
-                emit_with_luck(&trainer, &game, &sink, &mut luck_tracker, chara_id);
+                // decision_kind 标明 partial decision 类型：onsen 路径下要么是 train 要么是 event
+                let onsen_kind = if !game.unresolved_events.is_empty() { "event" } else { "train" };
+                emit_with_luck(&trainer, &game, &sink, &mut luck_tracker, chara_id, onsen_kind);
 
                 // 计算完成：通知下游 watcher 进入阻塞状态
                 eprintln!("计算完成，等待新数据...");
@@ -550,7 +672,9 @@ async fn main_guard() -> Result<()> {
                 let chara_id = single_mode_chara_id
                     .unwrap_or_else(|| game.uma().uma_id as u64);
                 if luck_tracker.last_single_mode_id() != Some(chara_id) {
-                    eprintln!("{}", "---- 拉面新一局 ----".bright_yellow());
+                    // 检测到新一局：通知 AIRed 重置 UI 状态
+                    emit_info("new_game");
+                    eprintln!("{}", "---- 拉面: 育成开始 ----".bright_yellow());
                     luck_tracker = LuckScoreTracker::new();
                 }
 
@@ -568,31 +692,72 @@ async fn main_guard() -> Result<()> {
                         println!("{dist_info}");
                     }
                 }
-
+                eprintln!("AI计算中...");
                 // 连续决策：返回链式决策（一个快照对应多个决策时逐个 emit）
                 // 中间决策（除最后一个）用各自捕获的 view 直接 emit（不触 luck），
                 // 最后一个决策走完整 luck 挂载（baseline 每回合只更新一次）。
                 let chain = calc_ramen_training(&ramen_trainer, &mut game, &mut rng, json_mode, &reason_slot)?;
                 let last_index = chain.len().saturating_sub(1);
-                for (info, view) in chain.iter().take(last_index) {
+                for (i, (info, view)) in chain.iter().take(last_index).enumerate() {
+                    // 链式决策的**第 2 个及之后**的决策前发 compute_next_step：
+                    // 通知 AIRed "AI 还在算这一回合"——首决策前已在 watch loop 入口
+                    // 发过 compute_start，不需要重复。
+                    if i > 0 {
+                        eprintln!("计算后续动作...");
+                        emit_info("compute_next_step");
+                    }
                     sink.emit(info, view);
                 }
                 if !chain.is_empty() {
-                    emit_with_luck_decision(
-                        ramen_trainer.last_decision(),
-                        &game,
-                        &sink,
-                        &mut luck_tracker,
-                        chara_id,
-                    );
+                    // 拉面 MCTS 路径：从 LastReasonSink 缓存取 DecisionReasonData 挂到
+                    // scenario_extra.reason，让 AIRedirector 拿到 human mode reason
+                    // 所需信息（metric / chosen_desc / chosen_mean / rivals[]）。
+                    // 链式决策**最后一步**才消费 reason_slot，避免中间决策漏挂。
+                    //
+                    // decision_kind 用最后一步决策的 stage——主链通常是 train（拉面
+                    // 决策落地后的训练阶段）。ramen_action 同样用最后一步决策的
+                    // candidate_descriptions[action_index]（to_string 形式，含
+                    // 训练名 + 之前已经 ground 的吃面效果）。
+                    let last_info = chain.last().expect("non-empty chain").0.clone();
+                    let last_kind = last_info.decision_kind.clone();
+                    let ramen_action_text = last_info
+                        .candidate_descriptions
+                        .get(last_info.action_index)
+                        .cloned();
+
+                    // 手写 fallback 决策（`candidate_scores` 为空，如默认配置下 region
+                    // 未开时的地区选择）：没有真正的搜索评分，走 luck 挂载只会以 baseline=0
+                    // 污染 luck tracker（后续回合运气全被算错），且 sink 打印的「期望评分」
+                    // 只是回合加成换算、运气恒 0 会误导。故直接 emit（不触 luck）；
+                    // HumanReadableSink 会为该决策打印「选择...（手写逻辑）」。搜索决策
+                    // （常见 train/ramen_select）仍走完整 luck 挂载。
+                    if last_info.candidate_scores.is_empty() {
+                        sink.emit(&last_info, &game.view());
+                    } else {
+                        emit_with_luck_decision(
+                            Some(last_info),
+                            &game,
+                            &sink,
+                            &mut luck_tracker,
+                            chara_id,
+                            reason_slot.take().as_ref(),
+                            &last_kind,
+                            ramen_action_text.as_deref(),
+                        );
+                    }
                 }
 
                 // 计算完成：通知下游 watcher 进入阻塞状态
                 eprintln!("计算完成，等待新数据...");
             }
             Err(e) => {
-                println!("{}", format!("解析回合信息出错: {e}").red());
-                println!("----------");
+                // json 模式：发 error JSON 行（不再用 println 污染 stdout 严格 JSON 流）
+                // human 模式：保留原 println 红色提示，玩家可见
+                emit_error(&format!("解析回合信息出错: {e}"));
+                if !json_mode {
+                    println!("{}", format!("解析回合信息出错: {e}").red());
+                    println!("----------");
+                }
             }
         }
     }

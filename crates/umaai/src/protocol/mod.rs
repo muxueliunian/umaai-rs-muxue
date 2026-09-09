@@ -225,7 +225,11 @@ impl GameStatusBase {
         let mut card_type_count = [0; 7];
         for (index, id) in self.card_id.iter().enumerate() {
             let mut card = SupportCard::new(*id)?;
-            card.friendship = self.persons[index].friendship;
+            // persons 可能不全（如 parse_game_by_scenario 的 ramen fixture 为 []），
+            // 越界时保留卡默认羁绊
+            if index < self.persons.len() {
+                card.friendship = self.persons[index].friendship;
+            }
             uma.race_bonus += card.effect.saihou;
             if card.card_type < 7 {
                 card_type_count[card.card_type as usize] += 1;

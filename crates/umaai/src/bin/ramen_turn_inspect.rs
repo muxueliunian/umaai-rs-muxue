@@ -164,11 +164,10 @@ fn print_candidates(actions_len: usize, info: Option<&DecisionInfo>) {
             if !info.candidate_n.is_empty() {
                 println!("候选局数（与 scores 同序同截断） = {:?}", info.candidate_n);
             }
-            if let Some(reason) = &info.reason {
-                println!("reason = {reason}");
-            }
-            if let Some(ms) = info.elapsed_ms {
-                println!("elapsed_ms = {ms}");
+            // 2026-09 简化：`reason` / `elapsed_ms` 已从 DecisionInfo 删除——
+            // reason 改由 scenario_extra.reason.rivals[] 承载（main.rs 接线）
+            if let Some(extra) = &info.scenario_extra {
+                println!("scenario_extra 键 = {:?}", extra.as_object().map(|o| o.keys().collect::<Vec<_>>()));
             }
         }
         None => {
