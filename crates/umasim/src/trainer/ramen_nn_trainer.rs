@@ -6,7 +6,13 @@
 //!
 //! 本模块仅在 `onnx` feature 下编译。
 
-use std::{path::Path, sync::Arc};
+use std::{
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicU64, Ordering}
+    }
+};
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rand::rngs::StdRng;
@@ -31,6 +37,21 @@ use super::{
     RecommendedRamenTrainer, ramen_handwritten_trainer::ramen_effective_stage,
     ramen_special_root::canonical_ramen_select_root
 };
+
+/// 进程内累计的推理请求数
+///
+/// 用来实测**当前 CPU 搜索的聚合推理吞吐**（请求数 / 墙钟时间）。这是评估
+/// 「换 GPU 批量推理能带来多少加速」的唯一合法基准量：搜索本来就在多个
+/// rayon 线程上并行推理，拿 GPU 满批吞吐去比单线程 tract 微基准会高估收益。
+///
+/// 计数在 [`RamenNnTrainer::infer`] 里做，故与模型实例无关、整进程累计；
+/// 单次推理约 1.4 ms，一次 `Relaxed` 自增的代价可以忽略。
+static INFER_REQUESTS: AtomicU64 = AtomicU64::new(0);
+
+/// 读取进程内累计的推理请求数
+pub fn infer_request_count() -> u64 {
+    INFER_REQUESTS.load(Ordering::Relaxed)
+}
 
 /// ONNX 可运行图（与温泉评估器同一套 tract 类型）
 type OnnxModel = SimplePlan<TypedFact, Box<dyn TypedOp>, Graph<TypedFact, Box<dyn TypedOp>>>;
@@ -151,6 +172,34 @@ pub enum SpecialSelectMode {
     Handwritten
 }
 
+/// 把 ONNX 文件编译成**固定 batch** 的可运行图
+///
+/// 导出的模型第 0 维是符号 `batch`，tract 在维度未知时拿不到形状特化，
+/// 优化后的图明显更慢。实测（`ens_d3`，本机单线程）：
+///
+/// | 输入形状 | µs/次 |
+/// |---|---|
+/// | 符号 `['batch', 754]` | 2647 |
+/// | 固定 `[1, 754]` | 1447 |
+///
+/// 白拿 1.83×，且**输出逐位不变**（见 `test_fixed_shape_matches_symbolic`）。
+///
+/// # 错误
+///
+/// 文件读不出、输入形状与 [`features::INPUT_DIM`] 不符、优化或转换失败时报错。
+fn build_runnable(model_path: &Path, batch: usize) -> Result<OnnxModel> {
+    ensure!(batch >= 1, "batch 必须 >= 1，实得 {batch}");
+    tract_onnx::onnx()
+        .model_for_path(model_path)
+        .context("无法读取 ONNX 模型文件")?
+        .with_input_fact(0, f32::fact([batch, features::INPUT_DIM]).into())
+        .context("固定输入形状失败")?
+        .into_optimized()
+        .context("模型优化失败")?
+        .into_runnable()
+        .context("模型转换失败")
+}
+
 /// 拉面杯神经网络训练员
 ///
 /// 模型用 [`Arc`] 共享，整进程加载一次即可；事件选项走内部的手写策略。
@@ -216,13 +265,7 @@ impl RamenNnTrainer {
         }
 
         log::info!("加载拉面杯 ONNX 模型: {}", model_path.display());
-        let model = tract_onnx::onnx()
-            .model_for_path(model_path)
-            .context("无法读取 ONNX 模型文件")?
-            .into_optimized()
-            .context("模型优化失败")?
-            .into_runnable()
-            .context("模型转换失败")?;
+        let model = build_runnable(model_path, 1)?;
         log::info!("拉面杯 ONNX 模型加载成功");
 
         Ok(Self {
@@ -243,7 +286,20 @@ impl RamenNnTrainer {
     ///
     /// 特征编码失败、输入输出维度不符、或 tract 推理失败时报错。
     pub fn infer(&self, game: &RamenGame) -> Result<RamenNnOutput> {
-        let features = encode(game)?;
+        self.infer_features(encode(game)?)
+    }
+
+    /// 对**已编码**的特征跑一次推理
+    ///
+    /// 从 [`Self::infer`] 里拆出来：批量调度器与 CPU/GPU 对拍都需要「先拿到输入、
+    /// 稍后再推理」，若各自重写一份编码就会与生产路径分叉。生产路径同样走这里，
+    /// 保证三条路用的是同一份实现。
+    ///
+    /// # 错误
+    ///
+    /// 输入输出维度不符或 tract 推理失败时报错。
+    pub fn infer_features(&self, features: Vec<f32>) -> Result<RamenNnOutput> {
+        INFER_REQUESTS.fetch_add(1, Ordering::Relaxed);
         ensure!(
             features.len() == features::INPUT_DIM,
             "特征长度 {} 与 INPUT_DIM={} 不符",
@@ -288,6 +344,55 @@ impl RamenNnTrainer {
     pub fn with_special_mode(mut self, mode: SpecialSelectMode) -> Self {
         self.special_mode = mode;
         self
+    }
+
+    /// 决策点的「推理前」一步：守门、口径选择、特征编码
+    ///
+    /// 返回 [`DecisionPrep::Resolved`] 表示这一步根本不需要网络。`rng` 只在
+    /// `SpecialSelect` 转交手写策略时用到。
+    ///
+    /// # 错误
+    ///
+    /// 候选为空、特征编码失败，或 [`SpecialSelectMode::Canonical`] 下联合决策根
+    /// 还原失败（阶段不对 / `pending_ramen` 为空）时报错。
+    pub fn prepare_decision(
+        &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
+    ) -> Result<DecisionPrep> {
+        ensure!(!actions.is_empty(), "候选动作为空");
+        let stage = ramen_effective_stage(game, actions);
+        // 自选比赛硬守门优先于网络输出：不达标直接育成失败，不是可权衡的价值项
+        if self.race_shield && stage == RamenStage::Train {
+            if let Some(idx) = free_race_gate_index(game, actions, race_gate_slack()) {
+                return Ok(DecisionPrep::Resolved(idx));
+            }
+        }
+        // SpecialSelect 是联合决策的第二拍，推理状态由 special_mode 决定；
+        // 候选合法性与打分一律基于**原局面**，只有喂给模型的那一份被还原
+        if stage == RamenStage::SpecialSelect {
+            return match self.special_mode {
+                SpecialSelectMode::Handwritten => {
+                    Ok(DecisionPrep::Resolved(self.fallback.select_action(game, actions, rng)?))
+                }
+                SpecialSelectMode::Canonical => {
+                    Ok(DecisionPrep::NeedsInference(encode(&canonical_ramen_select_root(game)?)?))
+                }
+                SpecialSelectMode::Raw => Ok(DecisionPrep::NeedsInference(encode(game)?))
+            };
+        }
+        Ok(DecisionPrep::NeedsInference(encode(game)?))
+    }
+
+    /// 决策点的「推理后」一步：按候选打分取赢家
+    ///
+    /// 打分基于**原局面** `game`，与 [`Self::prepare_decision`] 是否做过 canonical
+    /// 还原无关——还原只作用于喂给模型的那一份输入。
+    ///
+    /// # 错误
+    ///
+    /// 任一候选无法落格、格位越界、或候选为空时报错。
+    pub fn resolve_decision(&self, game: &RamenGame, actions: &[RamenAction], policy: &[f32]) -> Result<usize> {
+        let scores = self.score_actions(game, actions, policy)?;
+        argmax_logit(&scores)
     }
 
     /// 按当前阶段把每个候选映射到 policy logit
@@ -397,6 +502,22 @@ fn score_one(game: &RamenGame, stage: RamenStage, action: &RamenAction, policy: 
     }
 }
 
+/// 一个决策点在推理之前的准备结果
+///
+/// 把 `select_action` 的「推理前」与「推理后」切开，是批量调度的前提：调度器要
+/// 在推理点挂起 rollout，就必须先能单独拿到「这一步要喂给模型的输入」，等批量
+/// 推理回来再单独执行「按候选打分取赢家」。
+///
+/// 切口刻意放在这里而不是更深处：自选比赛守门与 `SpecialSelect` 的手写口径都是
+/// **不经过网络**的分支，若让调度器自己判断这些条件，就会出现第二份判定逻辑。
+#[derive(Debug, Clone)]
+pub enum DecisionPrep {
+    /// 无需推理即可定案：守门命中，或该阶段按配置转交手写策略
+    Resolved(usize),
+    /// 需要一次网络推理，`features` 是已编码好的模型输入
+    NeedsInference(Vec<f32>)
+}
+
 /// 在已打分的候选里取 logit 最大者；并列取更小下标
 ///
 /// # 错误
@@ -421,27 +542,13 @@ impl Trainer<RamenGame> for RamenNnTrainer {
     /// 推理失败、任一候选无法落格、候选为空，或 [`SpecialSelectMode::Canonical`] 下
     /// 联合决策根还原失败（阶段不对 / `pending_ramen` 为空）时报错。
     fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
-        ensure!(!actions.is_empty(), "候选动作为空");
-        let stage = ramen_effective_stage(game, actions);
-        // 自选比赛硬守门优先于网络输出：不达标直接育成失败，不是可权衡的价值项
-        if self.race_shield && stage == RamenStage::Train {
-            if let Some(idx) = free_race_gate_index(game, actions, race_gate_slack()) {
-                return Ok(idx);
+        match self.prepare_decision(game, actions, rng)? {
+            DecisionPrep::Resolved(idx) => Ok(idx),
+            DecisionPrep::NeedsInference(features) => {
+                let out = self.infer_features(features)?;
+                self.resolve_decision(game, actions, &out.policy)
             }
         }
-        // SpecialSelect 是联合决策的第二拍，推理状态由 special_mode 决定；
-        // 候选合法性与打分一律基于**原局面**，只有喂给模型的那一份被还原
-        let out = if stage == RamenStage::SpecialSelect {
-            match self.special_mode {
-                SpecialSelectMode::Handwritten => return self.fallback.select_action(game, actions, rng),
-                SpecialSelectMode::Canonical => self.infer(&canonical_ramen_select_root(game)?)?,
-                SpecialSelectMode::Raw => self.infer(game)?
-            }
-        } else {
-            self.infer(game)?
-        };
-        let scores = self.score_actions(game, actions, &out.policy)?;
-        argmax_logit(&scores)
     }
 
     /// 事件选项委托给手写策略（choice 头未训练）
@@ -472,7 +579,7 @@ impl Trainer<RamenGame> for RamenNnTrainer {
 #[cfg(test)]
 mod tests {
     use anyhow::{Result, bail};
-    use rand::rngs::StdRng;
+    use rand::{SeedableRng, rngs::StdRng};
 
     use super::*;
     use crate::{
@@ -563,6 +670,188 @@ mod tests {
         );
         c.check(out.value.stdev >= 0.0 && out.value.stdev.is_finite(), "value.stdev 非负且有限");
         c.check(scores.iter().all(|s| s.logit.is_finite()), "各候选 logit 均为有限值");
+        c.finish()
+    }
+
+    /// 固定输入形状后，输出必须与符号 batch 图**逐位一致**
+    ///
+    /// [`build_runnable`] 把第 0 维从符号 `batch` 钉成 1 换来 1.83× 提速，
+    /// 但 tract 的形状特化会改变算子选择与融合方式。若输出哪怕只差一个 ulp，
+    /// argmax 就可能在打平处翻面，**此前记录的全部网络闭环分静默作废**，
+    /// 而分数上只表现为「好像有点飘」。因此这里逐位比对，不设容差。
+    ///
+    /// 覆盖真实轨迹上的多个局面，而不是零输入：形状特化的差异往往只在特定
+    /// 数值区间显形。
+    #[test]
+    fn test_fixed_shape_matches_symbolic() -> Result<()> {
+        use tract_ndarray::Array2;
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut c = Checks::new();
+        let path = std::path::Path::new("saved_models/dagger/ens_d3.onnx");
+        if !path.is_file() {
+            println!("跳过：本机没有 {}", path.display());
+            return c.finish();
+        }
+
+        let symbolic = tract_onnx::onnx()
+            .model_for_path(path)?
+            .into_optimized()?
+            .into_runnable()?;
+        let fixed = build_runnable(path, 1)?;
+
+        // 沿真实轨迹取局面：用网络自己往前走，覆盖各个阶段
+        let trainer = RamenNnTrainer::load(path)?;
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        let mut checked = 0usize;
+        let mut max_abs_diff = 0.0f32;
+        let mut stages = Vec::new();
+        while game.next() && checked < 24 {
+            let feats = encode(&game)?;
+            let input = Array2::<f32>::from_shape_vec((1, features::INPUT_DIM), feats)?;
+            let a = symbolic.run(tvec!(input.clone().into_tvalue()))?;
+            let b = fixed.run(tvec!(input.into_tvalue()))?;
+            let va = a[0].to_array_view::<f32>()?;
+            let vb = b[0].to_array_view::<f32>()?;
+            for (x, y) in va.iter().zip(vb.iter()) {
+                max_abs_diff = max_abs_diff.max((x - y).abs());
+            }
+            stages.push(format!("{:?}", game.stage));
+            checked += 1;
+            game.run_stage(&trainer, &mut rng)?;
+        }
+        println!("比对 {checked} 个局面，阶段：{stages:?}");
+        println!("最大逐元素绝对差 = {max_abs_diff:e}");
+        c.check(checked >= 8, "至少覆盖 8 个局面");
+        c.check(max_abs_diff == 0.0, "固定形状与符号 batch 输出逐位一致");
+        c.finish()
+    }
+
+
+    /// 推理成本微基准：符号 batch vs 固定 batch，以及 batch 规模的吞吐曲线
+    ///
+    /// 要回答的问题是「132× 的成本到底花在哪」：
+    /// 1. **特征编码**占多少——若编码是大头，换推理后端不会有收益；
+    /// 2. **符号 batch 维**代价多少——[`RamenNnTrainer::load`] 直接 `into_optimized()`
+    ///    一个 `['batch', 754]` 的图，tract 在维度未知时拿不到形状特化，
+    ///    固定成 `[1, 754]` 可能白拿一大截；
+    /// 3. **批量的边际收益**——决定「把 512 条 rollout 改成锁步批量推理」这项
+    ///    结构性改造值不值得做，以及 GPU 后端的上限在哪。
+    ///
+    /// 仅微基准用途，`#[ignore]` 手动执行：
+    /// `cargo test --release --lib --features onnx -- --ignored --nocapture bench_infer`
+    #[test]
+    #[ignore]
+    #[allow(clippy::unwrap_used)]
+    fn bench_infer_batch_scaling() -> Result<()> {
+        use std::time::Instant;
+
+        use tract_ndarray::Array2;
+
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let path = std::path::Path::new("saved_models/dagger/ens_d3.onnx");
+        let mut c = Checks::new();
+        if !path.is_file() {
+            println!("跳过：本机没有 {}", path.display());
+            return c.finish();
+        }
+
+        // 取一个真实局面用于编码基准
+        let trainer = RamenNnTrainer::load(path)?;
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        advance_to_decision(&mut game, &trainer, &mut rng)?;
+
+        // --- 1. 特征编码 ---
+        let n_enc = 20_000;
+        let t0 = Instant::now();
+        let mut sink = 0.0f32;
+        for _ in 0..n_enc {
+            let f = encode(&game)?;
+            sink += f[0];
+        }
+        let enc_us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(n_enc);
+        println!("特征编码        {enc_us:>8.1} µs/次 (sink={sink:.3})");
+
+        // --- 2. 符号 batch（当前 load 的做法） ---
+        let dynamic = tract_onnx::onnx()
+            .model_for_path(path)?
+            .into_optimized()?
+            .into_runnable()?;
+        let one = Array2::<f32>::zeros((1, features::INPUT_DIM));
+        let n_run = 2_000;
+        let t0 = Instant::now();
+        for _ in 0..n_run {
+            let _ = dynamic.run(tvec!(one.clone().into_tvalue()))?;
+        }
+        let dyn_us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(n_run);
+        println!("符号 batch b=1  {dyn_us:>8.1} µs/次");
+
+        // --- 3. 固定 batch 的吞吐曲线 ---
+        println!("{:<16}{:>12}{:>14}{:>10}", "固定 batch", "µs/批", "µs/样本", "相对 b=1");
+        let mut per_sample_at_1 = 0.0f64;
+        for &b in &[1usize, 8, 32, 128, 512] {
+            let fixed = tract_onnx::onnx()
+                .model_for_path(path)?
+                .with_input_fact(0, f32::fact([b, features::INPUT_DIM]).into())?
+                .into_optimized()?
+                .into_runnable()?;
+            let input = Array2::<f32>::zeros((b, features::INPUT_DIM));
+            // 批越大单次越贵，样本总数大致持平即可
+            let reps = (16_384 / b).max(4);
+            let t0 = Instant::now();
+            for _ in 0..reps {
+                let _ = fixed.run(tvec!(input.clone().into_tvalue()))?;
+            }
+            let per_batch_us = t0.elapsed().as_secs_f64() * 1e6 / reps as f64;
+            let per_sample_us = per_batch_us / b as f64;
+            if b == 1 {
+                per_sample_at_1 = per_sample_us;
+            }
+            println!(
+                "{:<16}{:>12.1}{:>14.2}{:>10.2}x",
+                b,
+                per_batch_us,
+                per_sample_us,
+                per_sample_at_1 / per_sample_us
+            );
+        }
+
+        // --- 4. 集成 vs 单成员：ens_d3 是 3 个模型的算术平均，成本理应约 3 倍 ---
+        println!("\n{:<28}{:>12}", "模型（固定 b=1）", "µs/次");
+        for name in ["ens_d3.onnx", "d_s1.onnx"] {
+            let one_path = std::path::Path::new("saved_models/dagger").join(name);
+            if !one_path.is_file() {
+                println!("{name:<28}{:>12}", "缺文件");
+                continue;
+            }
+            let m = tract_onnx::onnx()
+                .model_for_path(&one_path)?
+                .with_input_fact(0, f32::fact([1, features::INPUT_DIM]).into())?
+                .into_optimized()?
+                .into_runnable()?;
+            let input = Array2::<f32>::zeros((1, features::INPUT_DIM));
+            let t0 = Instant::now();
+            for _ in 0..2_000 {
+                let _ = m.run(tvec!(input.clone().into_tvalue()))?;
+            }
+            println!("{name:<28}{:>12.1}", t0.elapsed().as_secs_f64() * 1e6 / 2_000.0);
+        }
+
+        println!(
+            "\n参考：手写策略单次决策约 {:.1} µs（由 3.5 s / 局 与约 2.4 万次 rollout 决策粗估）",
+            3.5e6 / 24_000.0
+        );
+        c.check(enc_us > 0.0, "编码基准跑通");
         c.finish()
     }
 }

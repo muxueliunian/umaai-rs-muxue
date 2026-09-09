@@ -114,6 +114,10 @@ class NpyShard:
         self.value_target = _load(self.label_dir, "value_target")
         label_index = _load(self.label_dir, "index")
         self.plan_count = _read_plan_count(self.data_dir)
+        # 组合键：由导出器按 (马娘, 卡组) 直接算出，与采样空间无关。缺失说明是加入该列
+        # 之前导出的目录，此时按组合切分回落到 `index % plan_count` 的旧口径。
+        combo_path = self.data_dir / "combo_key.npy"
+        self.combo_key = np.load(combo_path, mmap_mode="r") if combo_path.exists() else None
         # 原始 rollout 列只在 `--raw` 导出的目录里存在，且体积远大于其余数组，
         # 故不在构造时打开：只有按列窗口评估时才 mmap。
         self._cand_scores: np.ndarray | None = None
@@ -186,6 +190,8 @@ class NpyShard:
             raise ValueError(f"{self.data_dir}: x 形状错误 {self.x.shape}")
         if self.stage.shape != (n,) or self.turn.shape != (n,):
             raise ValueError(f"{self.data_dir}: stage/turn 形状错误")
+        if self.combo_key is not None and self.combo_key.shape != (n,):
+            raise ValueError(f"{self.data_dir}: combo_key 形状错误 {self.combo_key.shape}")
         if self.legal_mask.shape != (n, POLICY_DIM):
             raise ValueError(f"{self.data_dir}: legal_mask 形状错误 {self.legal_mask.shape}")
         if self.policy_target.shape != (n, POLICY_DIM) or self.value_target.shape != (n, 3):
@@ -250,24 +256,44 @@ def stable_split_refs(
 
     ``split_by`` 决定哈希什么：
 
-    - ``"combo"``（默认）：哈希 ``index % plan_count``，即 (马娘, 卡组) 组合。
+    - ``"combo"``（默认）：哈希 (马娘, 卡组) 组合。
       留出的组合完全不参与训练，验证指标才真的在测泛化。
     - ``"sample"``：哈希样本 id。同一套卡组会同时落进训练与验证，
       验证后悔值会系统性偏乐观，只在需要与旧结果对齐时使用。
+
+    按组合切分有两种取键口径，优先用前者：
+
+    - **``combo_key.npy``**：导出器按 (马娘, 卡组) 直接算出的稳定键。它与采样空间无关，
+      因此**不同空间采的目录可以合并**，且同一副卡组必定落在切分的同一侧。
+    - **``index % plan_count``**（回落）：仅当全部目录都没有 ``combo_key.npy`` 时使用。
+      该口径绑死在单一空间上，故此时仍要求各目录的 ``plan_count`` 一致。
     """
 
     if not 0.01 <= validation_fraction <= 0.5:
         raise ValueError("validation_fraction 必须位于 [0.01, 0.5]")
     if split_by not in ("combo", "sample"):
         raise ValueError("split_by 必须是 combo 或 sample")
-    plan_count = resolve_plan_count(shards) if split_by == "combo" else 0
+    use_combo_key = split_by == "combo" and all(shard.combo_key is not None for shard in shards)
+    if split_by == "combo" and not use_combo_key:
+        missing = [_display_path(s.data_dir) for s in shards if s.combo_key is None]
+        if len(missing) != len(shards):
+            raise ValueError(
+                "部分目录有 combo_key.npy、部分没有，两种组合口径不可混用："
+                f"缺少的目录 {missing}。请用当前版本的 ramen_export_npy 重新导出这些目录"
+            )
+    plan_count = 0 if use_combo_key or split_by == "sample" else resolve_plan_count(shards)
     threshold = int(validation_fraction * 10_000)
     train: list[tuple[int, int]] = []
     validation: list[tuple[int, int]] = []
     for shard_idx, shard in enumerate(shards):
         for local_idx, sample_id in enumerate(shard.index):
             ref = (shard_idx, local_idx)
-            key = int(sample_id) % plan_count if split_by == "combo" else int(sample_id)
+            if split_by == "sample":
+                key = int(sample_id)
+            elif use_combo_key:
+                key = int(shard.combo_key[local_idx])
+            else:
+                key = int(sample_id) % plan_count
             bucket = _splitmix64(key, seed) % 10_000
             (validation if bucket < threshold else train).append(ref)
     if not train or not validation:

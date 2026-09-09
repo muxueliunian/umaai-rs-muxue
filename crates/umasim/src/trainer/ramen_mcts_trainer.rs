@@ -238,6 +238,9 @@ fn summarize_ramen_reason(data: &DecisionReasonData) -> Option<String> {
 /// [`RecommendedRamenTrainer`]。搜索的 rollout 基策同样是推荐策略
 /// （由 `FlatSearchGame::default_rollout_trainer` 提供），因此本训练员
 /// 是「手写策略 + 搜索」的严格叠加：门控全关时行为与纯推荐策略一致。
+///
+/// rollout 基策可经 [`Self::with_nn_rollout`] 换成网络，此时搜索出的是
+/// `Q^NN` 而非 `Q^手写`——那已经是另一个教师，与旧基线不可比。
 pub struct RamenMctsTrainer {
     /// 扁平搜索器
     pub search: FlatSearch<RamenGame>,
@@ -312,6 +315,28 @@ impl RamenMctsTrainer {
     /// 本训练员真正走过搜索的决策次数
     pub fn searched_count(&self) -> usize {
         self.searched.load(Ordering::Relaxed)
+    }
+
+    /// 把 rollout 基策换成网络（`Q^手写` → `Q^NN`）
+    ///
+    /// `max_turn` 为网络生效的回合上限（含），`None` = 整局都用网络。
+    /// 只影响**搜索内部**的模拟：未被门控选中的阶段仍由 [`Self::fallback`]
+    /// 手写策略决定，本方法不改变它。
+    ///
+    /// ❗成本：网络单步推理约比手写慢一个量级，而 rollout 要跑到终局。
+    /// 手写 rollout 下 `search_n=512` 已是约 25 分钟/局，全程网络会再乘上去；
+    /// 先用 `max_turn` 做混合 rollout 或调小 `search_n` 定价，再决定预算。
+    ///
+    /// 同时打开 [`FlatSearch::with_strict_rollout`]：网络的推理失败很可能与局面
+    /// 相关，默认那种「丢掉失败的 rollout 继续统计」会把估值变成以推理成功为
+    /// 条件、且各候选条件互不相同，排序被污染而分数上看不出来。
+    #[cfg(feature = "onnx")]
+    pub fn with_nn_rollout(mut self, nn: Arc<super::RamenNnTrainer>, max_turn: Option<i32>) -> Self {
+        self.search = self
+            .search
+            .with_rollout_trainer(super::RamenRolloutTrainer::handwritten().with_neural_net(nn, max_turn))
+            .with_strict_rollout(true);
+        self
     }
 
     /// 设置搜索阶段门控

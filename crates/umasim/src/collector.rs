@@ -34,7 +34,11 @@ pub struct FileSignature {
     pub hash_fnv1a64: Option<String>
 }
 
-fn fnv1a64(bytes: &[u8]) -> u64 {
+/// FNV-1a 64 位哈希
+///
+/// 全仓库的稳定指纹口径：文件签名、文本指纹与采样空间的组合键都走这一个实现，
+/// 换实现会让已落盘的哈希全部失配。
+pub fn fnv1a64(bytes: &[u8]) -> u64 {
     // FNV-1a 64-bit
     let mut hash: u64 = 0xcbf29ce484222325;
     for &b in bytes {

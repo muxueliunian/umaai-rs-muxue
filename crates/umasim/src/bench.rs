@@ -78,6 +78,16 @@ pub struct GameOutcome {
     pub yearly_gauge_gain: [i32; 3],
     /// 逐年观测：诀窍溢出数（库存超上限被丢弃）。纯观测采集。
     pub yearly_gauge_overflow: [i32; 3],
+    /// 逐年观测：吃面决策点数（有面可选的回合）。纯观测采集。
+    pub yearly_ramen_offers: [i32; 3],
+    /// 逐年观测：至少有一碗做得出来的决策点数。纯观测采集。
+    pub yearly_ramen_cookable: [i32; 3],
+    /// 逐年观测：做得出来却选了不吃面的决策点数。纯观测采集。
+    pub yearly_ramen_skipped: [i32; 3],
+    /// 逐年观测：决策点上的诀窍库存总量之和。纯观测采集。
+    pub yearly_stock_sum: [i32; 3],
+    /// 逐年观测：决策点上的诀窍型别偏斜之和。纯观测采集。
+    pub yearly_stock_skew_sum: [i32; 3],
     /// 五次友人出行是否全部完成。
     pub friend_all: bool,
     /// 自选比赛是否全部达标（不达标即育成失败）。
@@ -110,6 +120,11 @@ pub fn run_seeded<T: Trainer<RamenGame>>(
         yearly_friend_turns: game.ramen.yearly_friend_turns,
         yearly_gauge_gain: game.ramen.yearly_gauge_gain,
         yearly_gauge_overflow: game.ramen.yearly_gauge_overflow,
+        yearly_ramen_offers: game.ramen.yearly_ramen_offers,
+        yearly_ramen_cookable: game.ramen.yearly_ramen_cookable,
+        yearly_ramen_skipped: game.ramen.yearly_ramen_skipped,
+        yearly_stock_sum: game.ramen.yearly_stock_sum,
+        yearly_stock_skew_sum: game.ramen.yearly_stock_skew_sum,
         friend_all: game.friend.out_used.iter().all(|used| *used),
         free_race_ok: game.uma.all_free_races_done()?,
         elapsed_ms
@@ -143,7 +158,7 @@ pub fn parse_region_cell(cell: &str) -> Result<[usize; 3]> {
 }
 
 /// results.csv 表头。只留逐年列，不留三年合计；合计由使用方自己加。
-pub const RESULTS_HEADER: [&str; 31] = [
+pub const RESULTS_HEADER: [&str; 46] = [
     "build",
     "seed",
     "score",
@@ -174,6 +189,21 @@ pub const RESULTS_HEADER: [&str; 31] = [
     "gauge_overflow_y1",
     "gauge_overflow_y2",
     "gauge_overflow_y3",
+    "ramen_offers_y1",
+    "ramen_offers_y2",
+    "ramen_offers_y3",
+    "ramen_cookable_y1",
+    "ramen_cookable_y2",
+    "ramen_cookable_y3",
+    "ramen_skipped_y1",
+    "ramen_skipped_y2",
+    "ramen_skipped_y3",
+    "stock_sum_y1",
+    "stock_sum_y2",
+    "stock_sum_y3",
+    "stock_skew_y1",
+    "stock_skew_y2",
+    "stock_skew_y3",
     "elapsed_ms"
 ];
 
@@ -210,6 +240,21 @@ pub fn outcome_to_row(build: &str, outcome: &GameOutcome) -> Vec<String> {
         outcome.yearly_gauge_overflow[0].to_string(),
         outcome.yearly_gauge_overflow[1].to_string(),
         outcome.yearly_gauge_overflow[2].to_string(),
+        outcome.yearly_ramen_offers[0].to_string(),
+        outcome.yearly_ramen_offers[1].to_string(),
+        outcome.yearly_ramen_offers[2].to_string(),
+        outcome.yearly_ramen_cookable[0].to_string(),
+        outcome.yearly_ramen_cookable[1].to_string(),
+        outcome.yearly_ramen_cookable[2].to_string(),
+        outcome.yearly_ramen_skipped[0].to_string(),
+        outcome.yearly_ramen_skipped[1].to_string(),
+        outcome.yearly_ramen_skipped[2].to_string(),
+        outcome.yearly_stock_sum[0].to_string(),
+        outcome.yearly_stock_sum[1].to_string(),
+        outcome.yearly_stock_sum[2].to_string(),
+        outcome.yearly_stock_skew_sum[0].to_string(),
+        outcome.yearly_stock_skew_sum[1].to_string(),
+        outcome.yearly_stock_skew_sum[2].to_string(),
         format!("{:.3}", outcome.elapsed_ms),
     ]
 }

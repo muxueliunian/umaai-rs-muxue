@@ -2,6 +2,10 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-09
+- **合入上游 AIRedirector 线与吃面 PT 规则变更**：上游 13 个提交并入本地 master；除 changelog 外无冲突，`game.rs` / `state.rs` / `bench.rs` / `flat_search.rs` / `ramen_mcts_trainer.rs` 五个双方都改的文件全部自动合并
+- **rollout 推理录制钩子改名避开撞名**：`RamenRolloutTrainer` 的 `DecisionSink` / `DecisionSnapshot` / `with_decision_sink` 改为 `RolloutInferSink` / `RolloutInferSnapshot` / `with_infer_sink`，与上游 `output::DecisionSink`（决策主干输出）区分——两者语义无关，同名会读错
+
 ## 2026-09-08
 - **新增 adapter_spec 文档**：整理 SendGameStatusPlugin 与 umaai 协议对接的易混淆点（feeling_guage 拼错 / persons/personDistribution 适配 / playing_state 含义 / 数据获取不全判定 / 超级拉面回合处理 / 阶段来源三态等）
 - **Step 7 拉面剧本协议与主流程接入**：阶段派发按 source / active_effect / playing_state 三方联合；turn ≤ 1 直接进 Train；playing_state=45 进地区选择；超级拉面回合按 active_effect 区分丢包/决策；数据获取不全 warn + 不派发
@@ -21,9 +25,27 @@
 - **Step 3 DecisionSink 三实现**：sink.rs 新增 trait + EmptySink / HumanReadableSink / StdoutJsonSink；reason::NoopSink 改名 DecisionReasonNoopSink 与 sink::EmptySink 区分
 - **Step 2 last_decision override 三 trainer**：DecisionInfo 加 candidate_n（与 scores 同长同截断供 luck 按局数加权）；MctsTrainer / RamenMctsTrainer / RamenHandwrittenTrainer override last_decision()；集成文档 §3.3.1 改"按局数加权"
 
+## 2026-09-06
+- **`FlatSearch` 新增可选批量 rollout 后端**：`batch_rollout: Option<Arc<dyn RamenBatchRollout>>` + `with_batch_rollout`；置上后拉面根搜索先让后端一次算完该根全部 `(候选, rollout 种子)`，rollout 闭包退化为查表、缺项报错。候选分配、CRN 种子派生、rank 加权均值排序与终局多维统计仍全部走内核；种子由 `rng.clone()` 预派生、内核随后从原 rng 派生同一个根，RNG 消耗与不接后端时逐位一致
+- **`RamenNnTrainer` 决策拆三步**：`prepare_decision`（守门 + 特例 + 编码）/ `infer_features` / `resolve_decision`，`select_action` 由三步组合而成；生产、对拍与跨 rollout 调度器因此共用同一份实现，不会各自漂移
+- **`RamenRolloutTrainer` 可选决策录制钩子**：`RolloutInferSink` / `RolloutInferSnapshot` / `with_infer_sink`；未挂钩子时决策路径逐位不变
+- **新工具 `ramen_root_bench`**：固定根与整局的实验入口，七种模式（CPU 按候选并行 / CPU 扁平并行 / CPU-GPU 对拍 / GPU 波次驱动 / 侧车复用 / 整局冒烟 / 生产教师两后端一致性与正式整局），改实验参数不触发重新编译
+- **跨 rollout 波次驱动**：rollout 改为可暂停状态机，暂停点落在已有阶段边界（各决策阶段均为「先 `list_actions`、状态不变、再 `select_action`」，故进入 `run_stage` 前即可备好答案），配确定性补位与固定物理批尺寸；`game/` 未改动
+- **终局轨迹即时释放局面**：已完成轨迹及时释放完整局面，避免局面内存随累计 rollout 数增长；完成记录、任务队列与结果数组仍随任务总数增长
+- **侧车就绪握手与 stderr 排空**：推理侧车须在模型加载与预热完成后才写就绪标记，Rust 端阻塞等待；握手后由独立线程持续排空 stderr 并保留最近若干行诊断，避免管道填满导致子进程阻塞
+- **实验身份指纹补齐**：`ramen_space_bench` 的运行身份改按源码路径与内容计算，并新增游戏数据指纹；`--resume` 在身份不符时拒绝续跑，日志重复键报错
+- **`ramen_root_bench` 搜索配置显式关闭 UCB**：`SearchConfig::default()` 的 `use_ucb` 为真且分组尺寸 256，`n<=256` 时看不出差异、`n=512` 才会改变汇总口径；同时新增「每候选汇总计数等于 n」守门
+- **本地实验配置（不进上游）**：release profile 改 `opt-level = 3` / `lto = "fat"` 以缩短整局实验耗时；`game_config.toml` 的 `config_override` 卡组、种马额外属性与 `trainer` 切到当前实验口径
+
 ## 2026-09-04
 - **吃面 PT 增量延后到 NextTurn**：`ground_ramen_effects` 不再立即 `scenario_pt += pt_gain` / `eat_count += 1`，训练阶段 `calc_ramen_training_effect` 用吃面前 PT 算 `ramen_pt_effect` / `region_bonus` 档位；PT 增量与 eat_count 在 `next()` 的 `NextTurn` 阶段（清空 `current_ramen` 之前）统一处理，RMJ 归档与 `check_rmj` 行为不变
 - **三处基线重抓 + 一条新守门**：`bench.rs` BASELINE_SCORE 64336→63870 / BASELINE_FIVE `[3337,2328,2200,1101,829]`→`[3337,2293,2200,1086,829]`、`flat_search.rs` 三阶段根搜索 7 候选 mean 重抓、`ramen_mcts_trainer` 两测试基线同步；新增 `test_eat_ramen_pt_gain_defers_to_next_turn` 钉「吃面 ground 后 scenario_pt 不变 / calc_ramen_training_effect 用吃面前 PT 算增量 / NextTurn 后累加」三条边界
+- **吃面决策点埋点**：`RamenState` 新增 5 组逐年纯观测（决策点数 / 可做点数 / 有得做却不吃的点数 / 库存合计 / 型别偏斜合计），`rules.rs` 新增 `recipe_reachable` 与 `record_ramen_select`，三阶段与合并决策两条路径各挂一次；bench CSV 相应扩 15 列。用于把诀窍丢弃拆成「没料」「型别凑不齐」「有得做但不做」三种成因
+- **组合身份改为直接量 `combo_key`**：`DeckPlan::combo_key()` 由 (马娘, 卡组) 直接算出，导出器新写 `combo_key.npy`，`data.py` 按组合切分时优先用它、缺失才回落 `index % plan_count`。旧口径绑死在单一采样空间上，换空间后同一 `index` 指向别的组合，新旧数据因此无法合并；新键与空间无关，故不同空间采的目录可以合并训练
+- **采集器与导出器接通分布外空间**：`ramen_teacher_collect` / `ramen_export_npy` 新增 `--shape` / `--extra-card`，与 `ramen_space_bench` 同口径；三处共用的空间构造下沉为 `sampler::space_from_cli`，`parse_shape` / `format_shape_name` 一并移入
+- **组合键守门**：第一代 525 个组合键互不碰撞；子空间的 240 个组合与 gen1 逐个相同（跨空间稳定）；分布外 190 个组合与 gen1 零重合
+- **`SPECIAL_TARGET_LIMIT` 常量化**：隐藏风味单次用量上限 2 由字面量收口为常量
+- **埋点守门**：`recipe_reachable` 与 `list_special_targets_for` 在 17150 组上逐位同真假；4200 局 A/B 原有列逐局一致、均分逐位相同、耗时无可测差异
 
 ## 2026-09-03
 - **EXP-006h 复现合并**：handwritten token 入口接通 bench、闭环 Δ+67 t+4 显著，本地分支留档

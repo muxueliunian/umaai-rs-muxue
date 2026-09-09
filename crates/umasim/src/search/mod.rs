@@ -20,7 +20,7 @@ pub(crate) mod seeds;
 pub(crate) mod terminal;
 
 pub use config::SearchConfig;
-pub use flat_search::FlatSearch;
+pub use flat_search::{FlatSearch, RamenBatchRollout, RamenBatchTable};
 pub use ramen_terminal::{FROZEN_DIM_KEYS, RamenTerminal, RamenTerminalStats};
 pub use result::{ActionResult, OrderedRollouts, SearchOutput};
 

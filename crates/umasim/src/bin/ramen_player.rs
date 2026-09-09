@@ -200,6 +200,11 @@ fn main() -> Result<()> {
         yearly_friend_turns: game.ramen.yearly_friend_turns,
         yearly_gauge_gain: game.ramen.yearly_gauge_gain,
         yearly_gauge_overflow: game.ramen.yearly_gauge_overflow,
+        yearly_ramen_offers: game.ramen.yearly_ramen_offers,
+        yearly_ramen_cookable: game.ramen.yearly_ramen_cookable,
+        yearly_ramen_skipped: game.ramen.yearly_ramen_skipped,
+        yearly_stock_sum: game.ramen.yearly_stock_sum,
+        yearly_stock_skew_sum: game.ramen.yearly_stock_skew_sum,
         friend_all: game.friend.out_used.iter().all(|used| *used),
         free_race_ok: game.uma.all_free_races_done()?,
         elapsed_ms
