@@ -5,7 +5,15 @@
 //! - 均匀分配：每个动作平均分配搜索次数（并行化）
 //! - UCB 分配：根据 UCB 公式动态分配搜索资源（C++ UmaAi 风格）
 
-use anyhow::{Result, bail, ensure};
+use std::{
+    collections::HashMap,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering}
+    }
+};
+
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use log::{debug, warn};
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
@@ -161,7 +169,51 @@ where
     /// **当前未接线**：本字段只被写入、从未被搜索逻辑读取。
     /// 原设计意图是批量推理（NN 评估器批处理），待 rollout 评估器接入后再消费。
     /// 配置链（`MctsConfig::rollout_batch_size` → `with_rollout_batch_size`）同样是空转。
-    rollout_batch_size: usize
+    rollout_batch_size: usize,
+
+    /// rollout 失败是否让整次搜索失败（默认 `false` = 历史行为）
+    ///
+    /// 默认路径下单条 rollout 失败只被计入 `failed` 并告警，搜索照常用剩下的样本
+    /// 排序——手写基策的失败是零星的，丢掉几条不改变结论。
+    ///
+    /// ❗**换过 rollout 基策的实验必须打开**：若失败与状态相关（网络在某类局面
+    /// 上推理报错），剩下的样本就是「以推理成功为条件」的分布，各候选的条件还
+    /// 互不相同，排序会被系统性污染，而分数上完全看不出来。
+    strict_rollout: bool,
+
+    /// 批量 rollout 后端（**目前仅拉面使用**）
+    ///
+    /// 置上之后，[`FlatSearch::<RamenGame>::search`] 不再逐条调用 rollout 闭包，
+    /// 而是先让后端一次算完该根上全部 `(候选, rollout 种子)`，闭包退化为查表。
+    /// 候选分配、CRN 种子派生、排序与统计**仍然全部走内核**，口径不变。
+    ///
+    /// 泛型结构体上挂一个非泛型 trait 对象是有意为之：温泉没有批量后端，
+    /// 为它引入一层泛型参数只会污染所有调用点。
+    batch_rollout: Option<Arc<dyn RamenBatchRollout>>
+}
+
+/// 一次批量 rollout 的结果表
+///
+/// 键是 `(候选下标, rollout 种子)`；种子由内核的 [`RolloutSeeds`] 派生，
+/// **不吃候选下标**，故各候选在同一 `j` 上共享种子（CRN 的载体）。
+pub type RamenBatchTable = HashMap<(usize, u64), RolloutOutcome<RamenTerminal>>;
+
+/// 批量 rollout 后端
+///
+/// 让「一次算完整个根」的执行方式（例如跨 rollout 攒批送 GPU）能接进生产教师，
+/// 而不必另写一套简化版教师。实现者只负责**算结果**，不参与排序与统计。
+pub trait RamenBatchRollout: Send + Sync {
+    /// 算完 `game` 上每个候选的 `n` 条 rollout
+    ///
+    /// 必须为每个 `(候选下标, seeds.seed_at(j))`（`j` 取 `0..n`）都给出结果；
+    /// 缺项会让搜索报错而不是静默少样本。
+    ///
+    /// # 错误
+    ///
+    /// 后端自身执行失败时报错。
+    fn precompute(
+        &self, game: &RamenGame, actions: &[RamenAction], seeds: &RolloutSeeds, n: usize
+    ) -> Result<RamenBatchTable>;
 }
 
 impl<G: FlatSearchGame> FlatSearch<G>
@@ -175,8 +227,18 @@ where
             leaf_evaluator: LeafEvaluator::Handwritten,
             rollout_trainer: G::default_rollout_trainer(),
             config,
-            rollout_batch_size: 1
+            rollout_batch_size: 1,
+            strict_rollout: false,
+            batch_rollout: None
         }
+    }
+
+    /// 挂上批量 rollout 后端（仅拉面路径生效）
+    ///
+    /// 见 [`RamenBatchRollout`]：只替换「rollout 怎么跑」，排序与统计仍走内核。
+    pub fn with_batch_rollout(mut self, backend: Arc<dyn RamenBatchRollout>) -> Self {
+        self.batch_rollout = Some(backend);
+        self
     }
 
     /// 创建默认搜索器
@@ -190,6 +252,27 @@ where
     #[cfg(feature = "onnx")]
     pub fn with_leaf_evaluator_nn(mut self, model_path: impl Into<String>) -> Self {
         self.leaf_evaluator = LeafEvaluator::NeuralNet(ThreadLocalNeuralNetLeafEvaluator::new(model_path));
+        self
+    }
+
+    /// 替换 rollout 基策
+    ///
+    /// 搜索出的 `Q` 是**对 rollout 基策的**动作价值，换掉它就是换掉整个教师：
+    /// 拉面用 [`RamenRolloutTrainer`](crate::trainer::RamenRolloutTrainer) 装载
+    /// 网络后，`Q^手写` 变成 `Q^NN`，`greedy(Q)` 即一次策略迭代。
+    ///
+    /// ❗**换了基策的搜索与旧基线不可比**：同一个 `search_n` 下排序依据已经不同，
+    /// 此前记录的教师闭环分只对手写 rollout 成立。
+    pub fn with_rollout_trainer(mut self, trainer: G::RolloutTrainer) -> Self {
+        self.rollout_trainer = trainer;
+        self
+    }
+
+    /// 设置 rollout 失败时是否让整次搜索失败
+    ///
+    /// 见 [`Self::strict_rollout`] 字段文档：换过 rollout 基策的实验一律打开。
+    pub fn with_strict_rollout(mut self, strict: bool) -> Self {
+        self.strict_rollout = strict;
         self
     }
 
@@ -487,7 +570,8 @@ where
     /// 对同一候选连续跑 `n` 次 rollout，累加进 `acc`
     ///
     /// 第 k 次取 `seeds.seed_at(offset + k)` 播种，`offset` 为该候选**已计划**的次数。
-    /// 失败次数累加进 `acc.failed`（不中断搜索，由调用方汇总告警）。
+    /// 失败次数累加进 `acc.failed`（不中断搜索，由调用方汇总告警）；
+    /// [`FlatSearch::strict_rollout`] 打开时改为立刻把错误抛给调用方。
     fn simulate_many<F, T>(
         &self, game: &G, action: &G::Action, n: usize, seeds: &RolloutSeeds, offset: usize,
         acc: &mut CandidateAccum<T::Stats>, rollout: &F
@@ -501,6 +585,9 @@ where
             match rollout(game, action, seeds.seed_at(idx)) {
                 Ok(v) => acc.push(idx, &v),
                 Err(e) => {
+                    if self.strict_rollout {
+                        return Err(e).with_context(|| format!("rollout {idx} 失败（strict_rollout 已开启）"));
+                    }
                     debug!("[搜索] rollout {} 失败: {e}", idx);
                     acc.failed += 1;
                     acc.ensure_ordered_slot(idx);
@@ -890,9 +977,38 @@ impl FlatSearch<RamenGame> {
     pub fn search(
         &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
     ) -> Result<RamenSearchOutput> {
-        self.search_with_terminal(game, actions, rng, |game, action, seed| {
-            self.simulate_common_extract(game, action, seed, seed, RamenTerminal::from_game)
-        })
+        let Some(backend) = self.batch_rollout.as_ref() else {
+            return self.search_with_terminal(game, actions, rng, |game, action, seed| {
+                self.simulate_common_extract(game, action, seed, seed, RamenTerminal::from_game)
+            });
+        };
+        // 用 rng 的克隆体预派生根种子：内核随后会从**原 rng** 派生出同一个根，
+        // 故 RNG 消耗与不接后端时逐位一致。
+        let seeds = RolloutSeeds::from_rng(&mut rng.clone());
+        let table = backend.precompute(game, actions, &seeds, self.config.search_n)?;
+        // 守门：`use_ucb=false` 下内核应给每个候选恰好 `search_n` 条。
+        // 数的是**内核实际消费次数**——后端产出多少条，与内核用掉多少条是两件事。
+        let consumed: Vec<AtomicUsize> = (0..actions.len()).map(|_| AtomicUsize::new(0)).collect();
+        let out = self.search_with_terminal(game, actions, rng, |_g, action, seed| {
+            let idx = actions
+                .iter()
+                .position(|x| x == action)
+                .ok_or_else(|| anyhow!("批量结果查表时找不到候选下标"))?;
+            consumed[idx].fetch_add(1, Ordering::Relaxed);
+            table
+                .get(&(idx, seed))
+                .cloned()
+                .ok_or_else(|| anyhow!("批量结果缺 (候选 {idx}, 种子 {seed:#018x})：后端与内核的种子派生不一致"))
+        })?;
+        for (idx, got) in consumed.iter().enumerate() {
+            let got = got.load(Ordering::Relaxed);
+            ensure!(
+                got == self.config.search_n,
+                "候选 {idx} 实际消费 {got} 条与 search_n={} 不符：汇总口径不是均匀分配",
+                self.config.search_n
+            );
+        }
+        Ok(out)
     }
 }
 

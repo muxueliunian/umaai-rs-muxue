@@ -2,6 +2,17 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-06
+- **`FlatSearch` 新增可选批量 rollout 后端**：`batch_rollout: Option<Arc<dyn RamenBatchRollout>>` + `with_batch_rollout`；置上后拉面根搜索先让后端一次算完该根全部 `(候选, rollout 种子)`，rollout 闭包退化为查表、缺项报错。候选分配、CRN 种子派生、rank 加权均值排序与终局多维统计仍全部走内核；种子由 `rng.clone()` 预派生、内核随后从原 rng 派生同一个根，RNG 消耗与不接后端时逐位一致
+- **`RamenNnTrainer` 决策拆三步**：`prepare_decision`（守门 + 特例 + 编码）/ `infer_features` / `resolve_decision`，`select_action` 由三步组合而成；生产、对拍与跨 rollout 调度器因此共用同一份实现，不会各自漂移
+- **`RamenRolloutTrainer` 可选决策录制钩子**：`DecisionSink` / `DecisionSnapshot` / `with_decision_sink`；未挂钩子时决策路径逐位不变
+- **新工具 `ramen_root_bench`**：固定根与整局的实验入口，七种模式（CPU 按候选并行 / CPU 扁平并行 / CPU-GPU 对拍 / GPU 波次驱动 / 侧车复用 / 整局冒烟 / 生产教师两后端一致性与正式整局），改实验参数不触发重新编译
+- **跨 rollout 波次驱动**：rollout 改为可暂停状态机，暂停点落在已有阶段边界（各决策阶段均为「先 `list_actions`、状态不变、再 `select_action`」，故进入 `run_stage` 前即可备好答案），配确定性补位与固定物理批尺寸；`game/` 未改动
+- **终局轨迹即时释放局面**：已完成轨迹及时释放完整局面，避免局面内存随累计 rollout 数增长；完成记录、任务队列与结果数组仍随任务总数增长
+- **侧车就绪握手与 stderr 排空**：推理侧车须在模型加载与预热完成后才写就绪标记，Rust 端阻塞等待；握手后由独立线程持续排空 stderr 并保留最近若干行诊断，避免管道填满导致子进程阻塞
+- **实验身份指纹补齐**：`ramen_space_bench` 的运行身份改按源码路径与内容计算，并新增游戏数据指纹；`--resume` 在身份不符时拒绝续跑，日志重复键报错
+- **`ramen_root_bench` 搜索配置显式关闭 UCB**：`SearchConfig::default()` 的 `use_ucb` 为真且分组尺寸 256，`n<=256` 时看不出差异、`n=512` 才会改变汇总口径；同时新增「每候选汇总计数等于 n」守门
+
 ## 2026-09-04
 - **吃面决策点埋点**：`RamenState` 新增 5 组逐年纯观测（决策点数 / 可做点数 / 有得做却不吃的点数 / 库存合计 / 型别偏斜合计），`rules.rs` 新增 `recipe_reachable` 与 `record_ramen_select`，三阶段与合并决策两条路径各挂一次；bench CSV 相应扩 15 列。用于把诀窍丢弃拆成「没料」「型别凑不齐」「有得做但不做」三种成因
 - **组合身份改为直接量 `combo_key`**：`DeckPlan::combo_key()` 由 (马娘, 卡组) 直接算出，导出器新写 `combo_key.npy`，`data.py` 按组合切分时优先用它、缺失才回落 `index % plan_count`。旧口径绑死在单一采样空间上，换空间后同一 `index` 指向别的组合，新旧数据因此无法合并；新键与空间无关，故不同空间采的目录可以合并训练

@@ -31,6 +31,7 @@ use umasim::{
     collector::{FileSignature, compute_file_signature, compute_text_hash_fnv1a64, scan_part_files, try_get_git_commit},
     game::{
         InheritInfo,
+        Trainer,
         ramen::{
             RamenAction,
             RamenGame,
@@ -41,10 +42,13 @@ use umasim::{
         }
     },
     gamedata::{GAMECONFIG, RamenRegionStrategy, init_global_with_config},
-    sampler::{SampledPosition, SamplerConfig, sample_position, space_from_cli},
+    sampler::{SampledPosition, SamplerConfig, sample_position_with_rollin, space_from_cli},
     search::{FlatSearch, SearchConfig},
+    trainer::RamenHandwrittenTrainer,
     utils::{get_workspace_root, init_logger, load_game_config}
 };
+#[cfg(feature = "onnx")]
+use umasim::trainer::RamenNnTrainer;
 
 /// manifest 文件名
 const MANIFEST_NAME: &str = "manifest.json";
@@ -114,7 +118,21 @@ struct CollectArgs {
 
     /// 第 2/3 年地区选择采样配额（千分之几），逗号分隔 `Y2,Y3`
     #[arg(long, value_delimiter = ',', num_args = 1, default_value = "20,30")]
-    region_quota_permille: Vec<u32>
+    region_quota_permille: Vec<u32>,
+
+    /// roll-in 基策：`handwritten`（默认，与既有全部数据一致）/ `nn`（需 `--model`）
+    ///
+    /// roll-in 决定轨迹走到哪些状态，因而决定**样本的状态分布**。换成 `nn` 即得到
+    /// DAgger 式的 on-policy 样本：教师在**网络自己会访问的状态**上给标注。
+    ///
+    /// ❗两种 roll-in 的样本**不可混进同一目录**，采集器用 manifest 里的 roll-in
+    /// 身份拦住。`nn` 的身份含模型文件哈希，换模型同样会被拦。
+    #[arg(long, default_value = "handwritten")]
+    rollin: String,
+
+    /// roll-in 用的 ONNX 模型路径；`--rollin nn` 时必填
+    #[arg(long)]
+    model: Option<PathBuf>
 }
 
 // ============================================================================
@@ -309,6 +327,15 @@ struct TeacherManifest {
     /// 卡池写在代码里，改它不会反映到 `gamedata_sig`。
     #[serde(default)]
     pub sampling_space_hash: Option<String>,
+    /// roll-in 基策身份；本字段加入之前采的数据为 `None`，一律视为 `handwritten`
+    ///
+    /// **刻意不进 `recipe_hash`**：理由与 [`sampling_space_hash`](Self::sampling_space_hash)
+    /// 相同——进了会让同配方的新旧数据哈希不同、无法合并。它是独立的显式绊线。
+    ///
+    /// 取值：`handwritten`，或 `nn:<模型文件的 FNV-1a>`。带哈希是为了让**换模型**
+    /// 也被拦住：同一个 `--rollin nn` 换个 checkpoint 就是另一个状态分布。
+    #[serde(default)]
+    pub rollin: Option<String>,
     /// 生效配方（前提 + 采样器 + search_n + 维度）的 FNV-1a
     pub recipe_hash_fnv1a64: String
 }
@@ -362,6 +389,79 @@ impl CollectRecipe {
 // ============================================================================
 // 搜索配置 / 动作表
 // ============================================================================
+
+/// 本次采集使用的 roll-in 基策
+///
+/// `RamenMctsTrainer` 那种带内部可变状态的类型不适合放这里；两个变体都是无状态
+/// 或只读的，可以整段采集复用一个实例。
+enum RollIn {
+    /// 手写策略（既有全部数据的 roll-in）
+    Handwritten(RamenHandwrittenTrainer),
+    /// 网络策略（DAgger）
+    #[cfg(feature = "onnx")]
+    Nn(Box<RamenNnTrainer>)
+}
+
+impl RollIn {
+    /// 取 `Trainer` 视图交给采样器
+    fn as_trainer(&self) -> &dyn Trainer<RamenGame> {
+        match self {
+            Self::Handwritten(t) => t,
+            #[cfg(feature = "onnx")]
+            Self::Nn(t) => t.as_ref()
+        }
+    }
+
+    /// 写进 manifest 的身份串
+    fn identity(&self, model_hash: Option<&str>) -> String {
+        match self {
+            Self::Handwritten(_) => "handwritten".to_string(),
+            #[cfg(feature = "onnx")]
+            Self::Nn(_) => format!("nn:{}", model_hash.unwrap_or("unknown"))
+        }
+    }
+}
+
+/// 按命令行构造 roll-in，并返回它的身份串
+///
+/// # 错误
+///
+/// 未知策略名、`nn` 缺 `--model`、未启用 `onnx` feature，或模型加载失败时报错。
+fn select_rollin(args: &CollectArgs) -> Result<(RollIn, String)> {
+    match args.rollin.as_str() {
+        "handwritten" => {
+            ensure!(args.model.is_none(), "--model 只对 --rollin nn 有意义");
+            let r = RollIn::Handwritten(RamenHandwrittenTrainer::new());
+            let id = r.identity(None);
+            Ok((r, id))
+        }
+        "nn" => {
+            #[cfg(feature = "onnx")]
+            {
+                let path = args
+                    .model
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("--rollin nn 需要同时给出 --model <onnx 路径>"))?;
+                // 模型文件哈希进身份串：换 checkpoint 等于换状态分布，必须被绊线拦住
+                let sig = compute_file_signature(path, true)?;
+                let hash = sig.hash_fnv1a64.clone().unwrap_or_else(|| "unknown".to_string());
+                let trainer = RamenNnTrainer::load(path)?.with_race_shield(true);
+                let r = RollIn::Nn(Box::new(trainer));
+                let id = r.identity(Some(&hash));
+                Ok((r, id))
+            }
+            #[cfg(not(feature = "onnx"))]
+            {
+                let _ = &args.model;
+                bail!(
+                    "--rollin nn 需要编译 feature onnx\
+                     （cargo build --release --features onnx,cli --bin ramen_teacher_collect）"
+                )
+            }
+        }
+        other => bail!("未知 --rollin: {other}（可选 handwritten / nn）")
+    }
+}
 
 /// 教师采集用的搜索配置：三条搜索侧前提全部显式写入，不依赖 `Default`
 fn teacher_search_config(search_n: usize, radical_factor_max: f64) -> SearchConfig {
@@ -690,6 +790,10 @@ fn main() -> Result<()> {
     let space_hash = space.content_hash();
     println!("采样空间 {space_hash}，{} 个 (马娘, 卡组) 组合", space.len());
 
+    // roll-in 决定样本落在哪些状态上；身份串进 manifest 供续跑绊线比对
+    let (rollin, rollin_id) = select_rollin(&args)?;
+    println!("roll-in 基策 {rollin_id}");
+
     let now = Utc::now().to_rfc3339();
     let (mut manifest, span) = if manifest_path.exists() {
         let old = TeacherManifest::load(&manifest_path)?;
@@ -705,6 +809,17 @@ fn main() -> Result<()> {
                 space_hash
             );
         }
+        // roll-in 身份：本字段加入前的目录一律是手写 roll-in，故 None 等价于 "handwritten"。
+        // 与空间指纹不同，这里**不留白**——旧目录的 roll-in 是确知的，不是来路不明。
+        let recorded_rollin = old.rollin.as_deref().unwrap_or("handwritten");
+        ensure!(
+            recorded_rollin == rollin_id,
+            "{} 是在 roll-in `{}` 下采的，本次是 `{}`。续跑会让同一目录里混进两种\
+             状态分布的样本，而 roll-in 决定的正是样本落在哪些局面上。",
+            manifest_path.display(),
+            recorded_rollin,
+            rollin_id
+        );
         ensure_parts_match_disk(&output_dir, &old.parts)?;
         let progress = IndexProgress {
             index_start: old.index_start,
@@ -765,6 +880,7 @@ fn main() -> Result<()> {
             git_commit: try_get_git_commit(&workspace_root),
             gamedata_sig: collect_gamedata_signatures()?,
             sampling_space_hash: Some(space_hash.clone()),
+            rollin: Some(rollin_id.clone()),
             recipe_hash_fnv1a64: recipe_hash
         };
         (manifest, span)
@@ -800,7 +916,7 @@ fn main() -> Result<()> {
     let mut next_part_index = manifest.parts.len();
 
     for index in span.start..span.end {
-        match sample_position(&space, &sampler_cfg, index)?.into_captured() {
+        match sample_position_with_rollin(&space, &sampler_cfg, index, rollin.as_trainer())?.into_captured() {
             None => {
                 manifest.skipped_uncaptured += 1;
                 println!("  index={index} 跳过（未捕获）");

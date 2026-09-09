@@ -819,9 +819,12 @@ struct CapturedRoot {
 ///
 /// 只在单个工作项内部使用、不跨线程共享，故用 `RefCell` 而非 `Mutex`
 /// （与搜索层的 rollout 决策器不同，那里必须 `Sync`）。
-struct SamplingTrainer {
-    /// 基策
-    inner: RamenHandwrittenTrainer,
+struct SamplingTrainer<'a> {
+    /// roll-in 基策
+    ///
+    /// 用 trait object 而不是具体类型：DAgger 要把它换成网络策略，好让采样落在
+    /// **网络自己会访问的状态**上。默认仍是手写策略，见 [`sample_from_spec`]。
+    inner: &'a dyn Trainer<RamenGame>,
     /// 扰动概率
     epsilon: f64,
     /// 合格决策点的最小候选数
@@ -834,7 +837,7 @@ struct SamplingTrainer {
     captured: RefCell<Option<CapturedRoot>>
 }
 
-impl SamplingTrainer {
+impl SamplingTrainer<'_> {
     /// 是否已经捕获
     fn done(&self) -> bool {
         self.captured.borrow().is_some()
@@ -849,7 +852,7 @@ impl SamplingTrainer {
     }
 }
 
-impl Trainer<RamenGame> for SamplingTrainer {
+impl Trainer<RamenGame> for SamplingTrainer<'_> {
     fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
         if !self.done()
             && game.turn() >= self.truncate_turn
@@ -889,11 +892,46 @@ pub fn sample_position(space: &SamplingSpace, config: &SamplerConfig, index: u64
     sample_from_spec(space.spec_at(config, index))
 }
 
+/// 执行一次采样，并指定 roll-in 基策
+///
+/// 任务（`SampleSpec`）与 roll-in 是正交的两件事：同一个 index 在两种 roll-in 下
+/// 用**同一个种子、同一副卡组**，只是轨迹走向不同的状态。这让 B/C 两组数据可以
+/// 按 index 配对比较。
+///
+/// # 错误
+///
+/// 见 [`sample_from_spec_with_rollin`]。
+pub fn sample_position_with_rollin(
+    space: &SamplingSpace, config: &SamplerConfig, index: u64, rollin: &dyn Trainer<RamenGame>
+) -> Result<SampleOutcome> {
+    sample_from_spec_with_rollin(space.spec_at(config, index), rollin)
+}
+
 /// 按给定任务执行采样
 ///
 /// 不再需要 `SamplerConfig`：任务本身已自包含，这样从 manifest 回放的任务
 /// 不可能受执行端配置影响。
 pub fn sample_from_spec(spec: SampleSpec) -> Result<SampleOutcome> {
+    // 就地构造并直接转交：默认路径的构造顺序与 RNG 消耗必须与改造前逐位一致，
+    // 否则既有 `npy_*` 全部作废。
+    let handwritten = RamenHandwrittenTrainer::new();
+    sample_from_spec_with_rollin(spec, &handwritten)
+}
+
+/// 按给定任务执行采样，并指定 roll-in 基策
+///
+/// `rollin` 决定轨迹走向哪些状态，因而决定**样本的状态分布**。传手写策略即与
+/// [`sample_from_spec`] 完全等价；传网络策略即得到 DAgger 式的 on-policy 样本。
+///
+/// ❗换 roll-in 会换掉整批样本的含义，**不能**与手写 roll-in 的数据混进同一目录：
+/// 调用方（采集器）负责把 roll-in 身份写进 manifest 并在续跑时比对。
+///
+/// # 错误
+///
+/// `epsilon` 越界、建局失败或推进阶段报错时报错。
+pub fn sample_from_spec_with_rollin(
+    spec: SampleSpec, rollin: &dyn Trainer<RamenGame>
+) -> Result<SampleOutcome> {
     // `rand::Rng::random_bool` 对区间外的概率直接 panic，而这里是生产路径
     if !(0.0..=1.0).contains(&spec.epsilon) {
         bail!("epsilon 必须落在 [0, 1]，实际为 {}", spec.epsilon);
@@ -905,7 +943,7 @@ pub fn sample_from_spec(spec: SampleSpec) -> Result<SampleOutcome> {
     game.set_rule_master(rule_master);
 
     let trainer = SamplingTrainer {
-        inner: RamenHandwrittenTrainer::new(),
+        inner: rollin,
         epsilon: spec.epsilon,
         min_actions: spec.min_actions,
         truncate_turn: spec.truncate_turn,

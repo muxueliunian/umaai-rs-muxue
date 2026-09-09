@@ -19,6 +19,9 @@ pub mod ramen_handwritten_trainer;
 pub mod ramen_mcts_trainer;
 #[cfg(feature = "onnx")]
 pub mod ramen_nn_trainer;
+// 模块本身不门控：默认 feature 下它就是原来那份写死的手写 rollout 基策，
+// 只有「装载网络」那条路径挂在 onnx 上。
+pub mod ramen_rollout_trainer;
 // 模块本身不门控：守门测试必须在默认 feature 下运行（见模块文档）。
 // 收成 `pub(crate)` 会在默认 feature 下触发 dead_code 警告——唯一的调用方
 // `ramen_nn_trainer` 挂在 onnx 上，故保持 `pub`，只让顶层 re-export 跟着 onnx 走
@@ -33,7 +36,10 @@ pub use mcts_trainer::MctsTrainer;
 pub use ramen_handwritten_trainer::RamenHandwrittenTrainer;
 pub use ramen_mcts_trainer::{RamenMctsTrainer, RamenSearchStages, RamenSelection};
 #[cfg(feature = "onnx")]
-pub use ramen_nn_trainer::{RamenNnTrainer, SpecialSelectMode};
+pub use ramen_nn_trainer::{DecisionPrep, RamenNnTrainer, SpecialSelectMode, infer_request_count};
+pub use ramen_rollout_trainer::RamenRolloutTrainer;
+#[cfg(feature = "onnx")]
+pub use ramen_rollout_trainer::{DecisionSink, DecisionSnapshot};
 // 只有网络策略用得上它，故 re-export 跟着 onnx 走
 #[cfg(feature = "onnx")]
 pub use ramen_special_root::canonical_ramen_select_root;

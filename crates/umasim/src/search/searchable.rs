@@ -130,14 +130,17 @@ impl FlatSearchGame for RamenGame {
     /// 体力门限等机制），切到 [`RecommendedRamenTrainer`] 后搜索评分与正式手写策略对齐，
     /// 排序结果更有意义；门控全关时与纯推荐策略逐位等价。决策开销 ×6.36（RamenSelect
     /// 预演主导），单局 ×2.10，搜索预算需相应调小或 train_only。
-    type RolloutTrainer = crate::trainer::RecommendedRamenTrainer;
+    /// 2026-09-05 再切：包一层 [`RamenRolloutTrainer`](crate::trainer::RamenRolloutTrainer)，
+    /// 使 rollout 基策可换成网络（`Q^手写` → `Q^NN`）。未装载网络时它就是
+    /// `RecommendedRamenTrainer::for_rollout()` 的直通转发，行为与 RNG 消耗逐位不变。
+    type RolloutTrainer = crate::trainer::RamenRolloutTrainer;
 
     /// 拉面暂无 leaf 估值器，Phase 1 只允许跑到终局
     const SUPPORTS_TRUNCATED_LEAF: bool = false;
 
     /// rollout 专用实例：三份年的 breakdown 全部关闭
     fn default_rollout_trainer() -> Self::RolloutTrainer {
-        crate::trainer::RecommendedRamenTrainer::for_rollout()
+        crate::trainer::RamenRolloutTrainer::handwritten()
     }
 
     /// 拉面 stage key（保留实现仅为满足 trait；规则层接管后不再被调用）
