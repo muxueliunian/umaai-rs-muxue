@@ -346,15 +346,21 @@ impl RamenNnTrainer {
         self
     }
 
-    /// 决策点的「推理前」一步：守门、口径选择、特征编码
+    /// 决策点的「推理前」一步：守门、口径选择、特征编码、单候选收敛
     ///
     /// 返回 [`DecisionPrep::Resolved`] 表示这一步根本不需要网络。`rng` 只在
     /// `SpecialSelect` 转交手写策略时用到。
     ///
+    /// 三类不需要网络的情形：自选比赛硬守门命中、`SpecialSelect` 取
+    /// [`SpecialSelectMode::Handwritten`] 口径、**候选只有一个**（见函数体末尾）。
+    ///
+    /// 本函数是 CPU 直连、rollout 与批量后端**共用的唯一决策准备入口**，
+    /// 三条路因此不会各自漂移。
+    ///
     /// # 错误
     ///
-    /// 候选为空、特征编码失败，或 [`SpecialSelectMode::Canonical`] 下联合决策根
-    /// 还原失败（阶段不对 / `pending_ramen` 为空）时报错。
+    /// 候选为空、特征编码失败、[`SpecialSelectMode::Canonical`] 下联合决策根
+    /// 还原失败（阶段不对 / `pending_ramen` 为空），或单候选落格检查失败时报错。
     pub fn prepare_decision(
         &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
     ) -> Result<DecisionPrep> {
@@ -368,18 +374,41 @@ impl RamenNnTrainer {
         }
         // SpecialSelect 是联合决策的第二拍，推理状态由 special_mode 决定；
         // 候选合法性与打分一律基于**原局面**，只有喂给模型的那一份被还原
-        if stage == RamenStage::SpecialSelect {
-            return match self.special_mode {
+        let prep = if stage == RamenStage::SpecialSelect {
+            match self.special_mode {
                 SpecialSelectMode::Handwritten => {
-                    Ok(DecisionPrep::Resolved(self.fallback.select_action(game, actions, rng)?))
+                    DecisionPrep::Resolved(self.fallback.select_action(game, actions, rng)?)
                 }
                 SpecialSelectMode::Canonical => {
-                    Ok(DecisionPrep::NeedsInference(encode(&canonical_ramen_select_root(game)?)?))
+                    DecisionPrep::NeedsInference(encode(&canonical_ramen_select_root(game)?)?)
                 }
-                SpecialSelectMode::Raw => Ok(DecisionPrep::NeedsInference(encode(game)?))
-            };
+                SpecialSelectMode::Raw => DecisionPrep::NeedsInference(encode(game)?)
+            }
+        } else {
+            DecisionPrep::NeedsInference(encode(game)?)
+        };
+
+        // 单候选：唯一候选必然中选，policy 取任何值都改不了 argmax 的结果，
+        // 于是整次网络往返可以省掉。
+        // （这类请求的占比只在若干固定根上量过，**不是整局比例**，见实验记录。）
+        //
+        // ❗只把 [`DecisionPrep::NeedsInference`] 收敛成 `Resolved`，**不碰任何
+        // 已经是 `Resolved` 的分支**：自选比赛守门在上面就地返回；`SpecialSelect`
+        // 的 `Handwritten` 口径要走 `fallback.select_action`，**那条路会消耗随机流**，
+        // 抢在它前面短路会改变 RNG 序列。
+        //
+        // ❗仍然走完上面全部守门与还原（含 `canonical_ramen_select_root` 的阶段校验
+        // 与 `encode`），并用零 policy 调一次 [`Self::score_actions`] 把**候选落格**
+        // 检查留住。
+        //
+        // 等价性的准确表述：**正常模型与合法局面下，动作与随机流不变**。
+        // 它**不**保留依赖真实推理的错误行为——推理失败、模型输出非有限值等，
+        // 在这条路径上不会再被触发。
+        if actions.len() == 1 && matches!(prep, DecisionPrep::NeedsInference(_)) {
+            self.score_actions(game, actions, &[0.0f32; POLICY_DIM])?;
+            return Ok(DecisionPrep::Resolved(0));
         }
-        Ok(DecisionPrep::NeedsInference(encode(game)?))
+        Ok(prep)
     }
 
     /// 决策点的「推理后」一步：按候选打分取赢家
@@ -671,6 +700,94 @@ mod tests {
         c.check(out.value.stdev >= 0.0 && out.value.stdev.is_finite(), "value.stdev 非负且有限");
         c.check(scores.iter().all(|s| s.logit.is_finite()), "各候选 logit 均为有限值");
         c.finish()
+    }
+
+    /// 单候选决策点直接定案，不再交给推理
+    ///
+    /// 两条断言：
+    /// 1. 多候选仍返回 [`DecisionPrep::NeedsInference`]；
+    /// 2. 同一局面同一阶段、候选切到只剩 1 个时返回 `Resolved(0)`，
+    ///    且该路径**不消耗随机流**（用 rng 克隆体的下一个 u64 做指纹，前后一致）。
+    ///
+    /// ❗**本测试只证明分支返回正确，不证明省下了推理**：`prepare_decision` 改动前
+    /// 本来也不执行推理，真正的省是「`Resolved` 不会再进 `infer_features`」，那要在
+    /// `select_action` 或整根对拍上量。
+    ///
+    /// ❗[`infer_request_count`] 是**进程级全局计数**，`cargo test` 默认并行跑，
+    /// 别的测试可能在读取前后递增它。故这里**只打印不断言**——把它写成确定性断言
+    /// 会做出一个随并行调度变红的测试。
+    ///
+    /// ❗本测试钉的是「正常模型 + 合法局面下动作与随机流不变」。它**不**覆盖
+    /// 「推理失败 / 模型输出非有限值」这类依赖真实推理的错误行为——单候选路径上
+    /// 那些检查本就不会再触发。
+    #[test]
+    fn test_single_candidate_skips_inference() -> Result<()> {
+        use rand::RngCore;
+
+        let root = get_workspace_root()?;
+        std::env::set_current_dir(&root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let model_path = root.join("saved_models").join("ramen_pilot").join("model.onnx");
+        if !model_path.is_file() {
+            println!("跳过：模型不存在（saved_models 不入库）");
+            return Ok(());
+        }
+        let trainer = RamenNnTrainer::load(&model_path)?;
+
+        let (mut rng, rule_master) = crate::bench::seeded_rngs(42, 0);
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.set_rule_master(rule_master);
+        advance_to_decision(&mut game, &trainer, &mut rng)?;
+
+        let actions = game.list_actions()?;
+        println!("阶段 {:?}  回合 {}  候选数 {}", game.stage, game.turn(), actions.len());
+
+        let mut c = Checks::new();
+
+        // (1) 多候选：仍需推理
+        if actions.len() > 1 {
+            let multi = trainer.prepare_decision(&game, &actions, &mut rng)?;
+            println!("多候选 prepare_decision -> {}", prep_name(&multi));
+            c.check(
+                matches!(multi, DecisionPrep::NeedsInference(_)),
+                "多候选决策点应仍返回 NeedsInference"
+            );
+        } else {
+            println!("本决策点只有 1 个候选，跳过多候选那一条");
+        }
+
+        // (2)(3) 单候选：直接定案 + 不动请求计数 + 不消耗随机流
+        let before = infer_request_count();
+        let probe_before = rng.clone().next_u64();
+        let single = trainer.prepare_decision(&game, &actions[..1], &mut rng)?;
+        let probe_after = rng.clone().next_u64();
+        let after = infer_request_count();
+        println!(
+            "单候选 prepare_decision -> {}  请求计数 {} -> {}  rng 指纹 {:#018x} -> {:#018x}",
+            prep_name(&single),
+            before,
+            after,
+            probe_before,
+            probe_after
+        );
+        c.check(
+            matches!(single, DecisionPrep::Resolved(0)),
+            "单候选应直接定案为 Resolved(0)"
+        );
+        c.check(probe_after == probe_before, "单候选路径不应消耗随机流");
+        // ❗请求计数只作观察：全局静态 + 并行测试，差值不是确定量，不能断言
+        println!("  （观察）全局推理请求计数 {before} -> {after}，并行下不可作断言");
+        c.finish()
+    }
+
+    /// 给 [`DecisionPrep`] 一个可打印的短名（测试输出用）
+    fn prep_name(p: &DecisionPrep) -> String {
+        match p {
+            DecisionPrep::Resolved(i) => format!("Resolved({i})"),
+            DecisionPrep::NeedsInference(f) => format!("NeedsInference(特征 {} 维)", f.len())
+        }
     }
 
     /// 固定输入形状后，输出必须与符号 batch 图**逐位一致**

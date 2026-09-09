@@ -2,6 +2,13 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-10
+- **单候选决策点免推理**：`RamenNnTrainer::prepare_decision` 在候选只有一个时直接定案，省掉整次网络往返；只收敛「需要推理」这一种结果，不影响守门与手写转发分支，候选落格检查保留
+- **改动前后对拍**：固定根上逐 rollout 终局评分与剩余网络决策均逐字段一致，请求数与墙钟均下降，批利用率同时下降；运行身份、数值与证据边界记于 `nn_pipeline_plan.md` 第 14 节
+- **新增守门测试**：钉「多候选仍需推理 / 单候选直接定案 / 该路径不消耗随机流」；推理请求计数是进程级全局量，并行测试下只作观察不作断言
+- **新增对拍工具 `compare_root_bench.py`**：比较 `ramen_root_bench` 的逐 rollout 与逐决策输出，直接比较实际字段不用哈希；逐决策按 rollout 顺序对齐，不依赖会随请求数变化的序号，并附缺组边界的单元测试
+- **`ramen_root_bench` 种子口径注释**：补记它与 `ramen_space_bench` 的基种子口径不同，只有 `--plan-index 0` 两边对齐，跨工具比较前须先对齐有效基种子
+
 ## 2026-09-09
 - **合入上游 AIRedirector 线与吃面 PT 规则变更**：上游 13 个提交并入本地 master；除 changelog 外无冲突，`game.rs` / `state.rs` / `bench.rs` / `flat_search.rs` / `ramen_mcts_trainer.rs` 五个双方都改的文件全部自动合并
 - **rollout 推理录制钩子改名避开撞名**：`RamenRolloutTrainer` 的 `DecisionSink` / `DecisionSnapshot` / `with_decision_sink` 改为 `RolloutInferSink` / `RolloutInferSnapshot` / `with_infer_sink`，与上游 `output::DecisionSink`（决策主干输出）区分——两者语义无关，同名会读错

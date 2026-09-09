@@ -1820,3 +1820,80 @@ encoder_blocks 1 / mlp 192×2 / dropout 0.15 / simple attention），只改训�
 
 可视化：Artifact「拉面杯蒸馏曲线」
 https://claude.ai/code/artifact/f49b7879-0bf0-460e-990c-9477dd6b8940
+
+## 14. 单候选免推理：改动前后对拍（2026-09-10）
+
+### 改动
+
+`RamenNnTrainer::prepare_decision` 末尾把 `DecisionPrep::NeedsInference` 收敛成
+`Resolved(0)`——候选只有一个时，policy 取任何值都改不了 argmax，整次网络往返可省。
+
+**只收敛 `NeedsInference`，不碰任何已是 `Resolved` 的分支**：自选比赛硬守门在函数
+上半部就地返回；`SpecialSelect` 的 `Handwritten` 口径走 `fallback.select_action`，
+**那条路消耗随机流**，抢在它前面短路会改 RNG 序列。`canonical_ramen_select_root`
+的阶段校验与 `encode` 仍全跑，并用零 policy 调一次 `score_actions` 保住候选落格检查。
+
+等价性目标：**正常模型与合法局面下，动作与随机流不变**。它不保留依赖真实推理的
+错误行为（推理失败、模型输出非有限值等在这条路径上不再触发）。
+
+### 运行身份
+
+- 规则版本：合并上游 `69f9355`（吃面 PT 延后到 NextTurn）之后的新规则
+- CPU 模型 `saved_models/dagger/ens_d3.onnx`；
+  侧车成员 `target/dagger_d_seed{1,2,3}/step_020000.pt`；
+  侧车 banner `device=cuda B=512 tf32=off matmul_precision=highest warmup=3`
+- plan 0（`uma=100603`，`shape=3速1耐1智1友`，`combo_key=16474779539310396924`），
+  seed 61444，run_idx 1200
+- 基线二进制由 detached `git worktree` 隔离副本构建，工作树未动。
+  ❗`get_workspace_root` 是**编译期绝对路径**，基线读的是副本目录的配置——
+  已逐字节核对 `gamedata/` 全部 9 个文件与 `game_config.toml` / `Cargo.toml` /
+  `Cargo.lock` 与主仓一致；副本不含 `saved_models/` 与 checkpoint，
+  故两臂只可能加载主仓那一份权重。
+
+### 结果
+
+| 根（均精确命中） | 候选 | 最优候选 | 基线请求 | 优化版 | 单候选占比 |
+|---|---:|:---:|---:|---:|---:|
+| t6 RamenSelect | 2 | 0 = 0 | 2648 | 2020 | 23.72% |
+| t36 Train | 7 | 1 = 1 | 5285 | 3921 | 25.81% |
+| t60 Train | 7 | 0 = 0 | 1908 | 1408 | 26.21% |
+
+- **逐 rollout 终局评分**：三根 CPU 与 t36 GPU 四组对拍，`seed`/`score`/`score_pt`
+  均为**不同 0 条、最大绝对差 0.000e+00**，无缺失/多出/重复键
+- **剩余网络决策**：基线剔除单候选后条数与优化版**完全相等**，
+  `turn`/`stage`/`n_actions`/`actions`/`chosen`/`features` 逐条一致
+- **性能**（t36，两臂交替三轮，关闭逐决策录制）：
+  GPU n=128 请求 84503 → 64662（约 −23.5%），墙钟中位 2.50 → 2.00 s（**约 −20%**）；
+  CPU n=8 墙钟中位 0.70 → 0.50 s。
+  ❗批利用率同时由 86.4% 降到 81.5%，与「请求节省未完全转成墙钟收益」相符，
+  但**不能把全部差额都归因于填充率**，固定开销同样影响。
+
+### 证据边界
+
+- 性能只在 **t36 单个固定根、plan 0、单 seed** 上测；非整局比例，非教师整局闭环
+- 耗时输出只到 0.1 s，故写「约 20%」；**三次读数相同不代表实际波动为零**
+- GPU n=8 两轮只有 56 条 rollout（远小于 batch 512，利用率约 10%），
+  属低填充，**只验证调度行为，不用于判断生产性能**
+- `--raw-csv` 是逐 rollout 终局评分口径，**不代表完整终局状态**
+- `infer_request_count()` 只在 CPU 推理入口递增，**侧车绕过它**，
+  不能用它统一衡量两种后端；GPU 侧看波次统计的 `served`
+- 守门测试 `test_single_candidate_skips_inference` **只证明分支返回正确，
+  不证明省下了推理**（改动前 `prepare_decision` 本来也不执行推理）
+
+### 跨阶段缓存的资格比例（仅统计，未实现）
+
+判据：同一条 rollout 内，`SpecialSelect` 请求的**前一条**网络请求存在、阶段为
+`RamenSelect`、回合相同、输入特征逐项相同。
+
+| 根 | 优化版剩余请求 | 其中 SpecialSelect | 可复用 | 占剩余 | 占基线全部 |
+|---|---:|---:|---:|---:|---:|
+| t6 | 2020 | 239 | 239 | 11.83% | 9.03% |
+| t36 | 3921 | 635 | 635 | 16.19% | 12.02% |
+| t60 | 1408 | 192 | 192 | 13.64% | 10.06% |
+
+三个根的不可复用计数均为 0。该结论与 `ramen_special_root.rs` 的既有逐位守门测试
+`test_canonical_special_root_matches_ramen_select` 方向一致，
+但**它只覆盖该测试的用例，不构成全路径证明**。
+
+对拍工具见 `scripts/ramen_nn/compare_root_bench.py`（`raw` / `decisions` /
+`cache-eligibility` 三个子命令，全部直接比较实际字段，不用哈希）。
