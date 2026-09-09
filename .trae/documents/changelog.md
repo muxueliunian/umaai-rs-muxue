@@ -12,6 +12,7 @@
 - **侧车就绪握手与 stderr 排空**：推理侧车须在模型加载与预热完成后才写就绪标记，Rust 端阻塞等待；握手后由独立线程持续排空 stderr 并保留最近若干行诊断，避免管道填满导致子进程阻塞
 - **实验身份指纹补齐**：`ramen_space_bench` 的运行身份改按源码路径与内容计算，并新增游戏数据指纹；`--resume` 在身份不符时拒绝续跑，日志重复键报错
 - **`ramen_root_bench` 搜索配置显式关闭 UCB**：`SearchConfig::default()` 的 `use_ucb` 为真且分组尺寸 256，`n<=256` 时看不出差异、`n=512` 才会改变汇总口径；同时新增「每候选汇总计数等于 n」守门
+- **本地实验配置（不进上游）**：release profile 改 `opt-level = 3` / `lto = "fat"` 以缩短整局实验耗时；`game_config.toml` 的 `config_override` 卡组、种马额外属性与 `trainer` 切到当前实验口径
 
 ## 2026-09-04
 - **吃面决策点埋点**：`RamenState` 新增 5 组逐年纯观测（决策点数 / 可做点数 / 有得做却不吃的点数 / 库存合计 / 型别偏斜合计），`rules.rs` 新增 `recipe_reachable` 与 `record_ramen_select`，三阶段与合并决策两条路径各挂一次；bench CSV 相应扩 15 列。用于把诀窍丢弃拆成「没料」「型别凑不齐」「有得做但不做」三种成因
