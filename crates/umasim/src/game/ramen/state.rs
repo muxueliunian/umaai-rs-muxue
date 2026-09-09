@@ -28,12 +28,6 @@ pub struct RamenState {
     pub feeling_slot: [i32; 3],
     /// 诀窍获得顺序队列（维护溢出时的丢弃顺序）
     pub feeling_queue: Vec<FeelingType>,
-    /// 每训练×每类型回合增量（5 训练 × 3 诀窍类型；协议 `feeling_guage_gains` 直接覆写）
-    #[serde(default)]
-    pub feeling_guage_gains: [[i32; 3]; 5],
-    /// 基础增量（按 region 配方，协议 `feeling_guage_gain_base` 直接覆写）
-    #[serde(default)]
-    pub feeling_guage_gain_base: [i32; 3],
 
     // ========== 隐藏风味 ==========
     /// 隐藏风味（special_feeling）库存，上限 4
@@ -48,11 +42,6 @@ pub struct RamenState {
     // ========== 剧本 Pt 和结算 ==========
     /// 剧本 Pt
     pub scenario_pt: i32,
-    /// 下次吃面可获的 PT（C# 端已算好；写入 `next_scenario_pt`）
-    ///
-    /// 协议字段 `next_scenario_pt` 直接覆写（Step 7 turn import 用）。
-    #[serde(default)]
-    pub next_scenario_pt: i32,
     /// RMJ 结算结果（第几次结算的成功/失败状态）
     pub rmj_results: Vec<bool>,
     /// 训练等级剧本加成（RMJ成功时+1，上限5）
@@ -109,15 +98,6 @@ pub struct RamenState {
     /// 诀窍角标分配（回合 2-71 时每个训练随机分配一个诀窍类型）
     pub train_feeling_type: Option<[FeelingType; 5]>,
 
-    // ========== 当前生效效果（协议直覆写） ==========
-    /// 当前生效效果列表（协议 `active_effect_array` 直接覆写）
-    ///
-    /// 每项结构 `{category, id, value}`，category 含义按文档 §5 第 5 条搁置
-    /// （不解读语义，只做忠实映射）；`RamenEffect` 各字段的还原待后续步骤按
-    /// 训练数值需求补拆分。
-    #[serde(default)]
-    pub active_effect_array: Vec<ActiveEffectEntry>,
-
     // ========== 缺席记录 ==========
     /// 本回合被判定为「不在」的全部人头下标（支援卡/友人/团队卡/理事长/记者；
     /// NPC 必定出现、永不在列）
@@ -147,25 +127,6 @@ pub struct RamenState {
 }
 
 /// 拉面效果合并（基础效果 + 地区效果 + 超级拉面效果 + Pt常驻效果）
-///
-/// 字段对应剧本加成词条，参见 ramen_memo_cn 的"剧本加成"和"训练计算公式"。
-/// 训练数值公式：
-/// - 属性: lower_value * (100 + xunlian)/100 * (100 + youqing)/100
-/// - PT: lower_value * (100 + xunlian)/100 * (100 + youqing)/100 * (100 + pt_bonus)/100
-/// 协议 `active_effect_array` 的单项 `{category, id, value}`
-///
-/// 语义按文档 §5 第 5 条搁置（不解读语义，仅忠实映射）。如需按 category 拆分
-/// 到 [`RamenEffect`] 各字段，由后续步骤按训练数值需求补做。
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct ActiveEffectEntry {
-    /// 类别（1/2/4 等，语义未公开）
-    pub category: i32,
-    /// 效果 ID
-    pub id: i32,
-    /// 效果数值
-    pub value: i32
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct RamenEffect {
     // ========== 基础效果 ==========

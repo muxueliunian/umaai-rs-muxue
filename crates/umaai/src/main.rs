@@ -18,11 +18,19 @@ use umasim::{
         Game,
         Trainer,
         onsen::{game::OnsenGame},
-        ramen::{RamenGame, RamenStage}
+        ramen::{RamenAction, RamenGame, RamenStage}
     },
-    gamedata::init_global_with_config,
+    gamedata::{GAMECONSTANTS, init_global_with_config},
+    global,
     neural::Evaluator,
-    output::{DecisionInfo, DecisionSink, HumanReadableSink, StdoutJsonSink},
+    output::{
+        DecisionInfo,
+        DecisionSink,
+        GameView,
+        HumanReadableSink,
+        StdoutJsonSink,
+        reason::{DecisionReasonData, DecisionReasonSink, render_reason_lines}
+    },
     search::SearchConfig,
     trainer::{MctsTrainer, RamenMctsTrainer},
     utils::{check_working_dir, init_logger, load_game_config}
@@ -37,6 +45,33 @@ use crate::{
 pub mod luck_score;
 pub mod protocol;
 pub mod utils;
+
+/// 缓存最近一次决策理由的 sink（每回合覆写）
+///
+/// 接到 `RamenMctsTrainer::reason_sink`：把 `DecisionReasonData` 缓存到内部
+/// `Mutex<Option<…>>`，由 main 在 human mode 下取出后调 [`render_reason_lines`]
+/// `println!` 到屏幕。`emit_decision_reason` 内部的 `info!` 调用**已被 trainer
+/// `.verbose(false)` 关闭**，避免双打印；同时也避开 umaai 默认关闭日志的现状。
+pub struct LastReasonSink {
+    inner: Mutex<Option<DecisionReasonData>>
+}
+
+impl LastReasonSink {
+    fn new() -> Arc<Self> {
+        Arc::new(Self { inner: Mutex::new(None) })
+    }
+
+    fn take(&self) -> Option<DecisionReasonData> {
+        // 取走副本，留 None 给下一次覆写
+        self.inner.lock().expect("reason sink").take()
+    }
+}
+
+impl DecisionReasonSink for LastReasonSink {
+    fn emit(&self, reason: &DecisionReasonData) {
+        *self.inner.lock().expect("reason sink") = Some(reason.clone());
+    }
+}
 
 /// CLI 参数
 ///
@@ -143,48 +178,105 @@ pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRn
     Ok(())
 }
 
-/// 拉面训练：仅对当前阶段的候选列表调一次 `trainer.select_action`，**不修改 game 状态**
+/// 拉面训练：当前阶段出推荐，并在**两个特定场景**连续出下一个决策
 ///
-///**设计原则**（修复主循环反复计算 / JSON 不输出问题）：
-///- watch 收到一次 `thisTurn.json` 只代表"当前回合、当前阶段"的快照。
-///- AI 仅基于本次快照出推荐（select_action），把决策数据交给 sink / luck tracker，
-///  **不**调 `apply_action` / `next()` 推进 stage 或 turn。
-///- 下次 watch 收到新 JSON 时，主循环**重新 parse JSON → 重建 game**，从零计算。
-///- 不保存当前 game 状态（除 `luck_tracker` 的切局检测元数据外），所以两次 JSON 之间
-///  没有依赖，每次都是从同一份输入重新跑一遍。
+///**设计原则**：
+///- watch 收到一次 `thisTurn.json` 只代表"当前回合、当前阶段"的快照，AI 基于本次
+///  快照出推荐（select_action）。**仅解决"一个快照对应两个决策"的场景**，其余
+///  情况下**不**改 game（下次 watch 收到新 JSON → 主循环重建 game 从零计算）。
+///- 定向连续决策（类似 onsen 的"选完温泉券后继续给训练推荐"）：
+///  1. `RamenSelect` 选**不吃面**：不吃面没有真实操作产生新 JSON，手动
+///     `apply_action` + `next()` 推进到 `Train`，再给训练决策。
+///  2. `Train` 且 turn == 1（仅剧本机制启动前的第 1 回合）：训练决策后下一屏是
+///     回合 2 的地区选择（同样无新 JSON），跨过 `NextTurn` 推进到 `RegionSelect`，
+///     再给地区决策；到达 RegionSelect 后**立即停**，不继续向下级联。
+///- 其它所有阶段维持单决策：AI 不推进游戏状态，玩家执行后由 C# 发新 JSON。
 ///
-/// 不修改 game 也意味着 trainer 的 `last_decision` 仍是基于**当前阶段**候选；
-/// `last_search_summary` 在每回合第一次有效 select_action 后被写入，下一次重新
-/// 构造 trainer 字段仍干净（mainloop 下次重建会调 trainer——但 `ramen_trainer`
-/// 是单例，所以需要主循环不重新构造，依赖 trainer 自身在 select_action 后写
-/// `last_search_summary`、下一次 watch 时由 mainloop 调用 `last_decision()` 读取）。
-pub fn calc_ramen_training(trainer: &RamenMctsTrainer, game: &mut RamenGame, rng: &mut StdRng, json_mode: bool) -> Result<()> {
-    // 当前阶段的候选列表 + 决策：仅读 game，不修改
-    let actions = match game.stage {
-        RamenStage::NextTurn | RamenStage::Settlement | RamenStage::SuperRamenSelect => {
-            // 回合边界 / RMJ 结算 / 超级拉面选择 —— 等下一条 JSON，AI 不出推荐
-            Vec::new()
+/// 返回链式决策 `Vec<(DecisionInfo, GameView)>`（每个决策附带其**作出时**的
+/// `GameView`，保证中间决策行的 `turn`/`scenario` 正确）；由主循环逐个 emit。
+pub fn calc_ramen_training(
+    trainer: &RamenMctsTrainer, game: &mut RamenGame, rng: &mut StdRng, json_mode: bool, reason_slot: &LastReasonSink
+) -> Result<Vec<(DecisionInfo, GameView)>> {
+    // 链式决策收集：每次 select_action 捕获 DecisionInfo + 该阶段 view
+    let mut out: Vec<(DecisionInfo, GameView)> = Vec::new();
+    let mut any_decision = false;
+
+    {
+        // 对当前阶段做一次决策：捕获决策与其阶段 view，返回选中的动作
+        // （g / out / rng 走参数，避免闭包长期独占借用与下方直接使用冲突；仅捕获共享 trainer）
+        let decide =
+            |g: &mut RamenGame, out: &mut Vec<(DecisionInfo, GameView)>, rng: &mut StdRng| -> Result<Option<RamenAction>> {
+                let actions = match g.stage {
+                    RamenStage::NextTurn | RamenStage::Settlement | RamenStage::SuperRamenSelect => {
+                        // 回合边界 / RMJ 结算 / 超级拉面选择 —— 等下一条 JSON，AI 不出推荐
+                        Vec::new()
+                    }
+                    _ => g.list_actions()?
+                };
+                if actions.is_empty() {
+                    return Ok(None);
+                }
+                let idx = trainer.select_action(g, &actions, rng)?;
+                let chosen = actions[idx].clone();
+                let view = g.view();
+                if let Some(info) = trainer.last_decision() {
+                    out.push((info, view));
+                }
+                Ok(Some(chosen))
+            };
+
+        if let Some(chosen) = decide(game, &mut out, rng)? {
+            any_decision = true;
+            let before_stage = game.stage.clone();
+            let before_turn = game.turn();
+            // 定向连续决策判定：仅两个场景在决策#1 后继续给下一个决策
+            let need_continue = (before_stage == RamenStage::RamenSelect && !chosen.is_eating_ramen())
+                || (before_stage == RamenStage::Train && before_turn == 1);
+
+            if need_continue {
+                // 应用决策#1 并推进一个阶段（RamenSelect 不吃 → Train；Train(turn==1) → AfterTrain）
+                game.apply_action(&chosen, rng)?;
+                if game.next() {
+                    // 逐阶段推进直到下一决策点（或真正需要等新 JSON 的结算 / 超级拉面阶段）
+                    const MAX_STAGE_LOOP: usize = 32;
+                    for _ in 0..MAX_STAGE_LOOP {
+                        match game.stage {
+                            // RMJ 结算 / 超级拉面选择：等新 JSON，不再续
+                            RamenStage::Settlement | RamenStage::SuperRamenSelect => break,
+                            // 到达决策点：给出决策#2，随后停止（定向，不再向下级联）
+                            RamenStage::RamenSelect
+                            | RamenStage::SpecialSelect
+                            | RamenStage::Train
+                            | RamenStage::RegionSelect => {
+                                let _ = decide(game, &mut out, rng)?;
+                                break;
+                            }
+                            // 自动阶段（Begin / BeginAfterRegionSelect / Distribute / AfterTrain / NextTurn）：
+                            // 交给 umasim 的 run_stage 执行载荷，再用 next() 推进到下一阶段
+                            _ => {
+                                game.run_stage(trainer, rng)?;
+                                if !game.next() {
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
-        _ => game.list_actions()?
-    };
-    if !actions.is_empty() {
-        let _ = trainer.select_action(game, &actions, rng)?;
     }
-    // 屏幕侧（human mode）按需求在每回合头部打印马娘 / 剧本 / 训练分布
+    // 屏幕侧（human mode）输出推理结果（回合头部打印由 main 在调用前完成）
     if !json_mode {
-        if let Ok(status) = game.explain() {
-            println!("{status}");
-        }
-        let script_info = game.explain_ramen_info();
-        if !script_info.is_empty() {
-            println!("{script_info}");
-        }
-        if let Ok(dist_info) = game.explain_distribution() {
-            println!("{dist_info}");
+        if any_decision {
+            if let Some(data) = reason_slot.take() {
+                for line in render_reason_lines(&data) {
+                    println!("{line}");
+                }
+            }
         }
         println!("{}", "[按 F2 保存当前回合状态]".bright_black());
     }
-    Ok(())
+    Ok(out)
 }
 
 /// 把 trainer 的 last_decision 喂给 sink：先挂 luck score 字段，再 emit
@@ -243,7 +335,13 @@ fn emit_with_luck_decision<G: Game>(
         }
     };
 
-    let _turn_delta = tracker.on_new_turn(chara_id, t_n_baseline);
+    let _turn_delta = tracker.on_new_turn(
+        chara_id,
+        t_n_baseline,
+        game.turn(),
+        game.max_turn(),
+        global!(GAMECONSTANTS).mcts_turn_bonus,
+    );
 
     // 每候选 action_luck：T(n, action_i) - T(n)（AIRedirector 关心，玩家模式跳过）
     let action_luck = serde_json::json!(
@@ -333,11 +431,18 @@ async fn main_guard() -> Result<()> {
     // 拉面 MCTS 训练员（与 onsen 的 MctsTrainer 强耦合 OnsenGame 不同；拉面用
     // RamenMctsTrainer 绑 RamenGame，独立构造。stages 走 game_config.mcts.ramen_search_stages，
     // 与 umasim/src/main.rs 拉面路径口径一致。
+    //
+    // verbose=false：关闭 trainer 内部 `info!("[回合 X] 首选...")` 的 `log::info!` 上屏
+    // （避免与下方 human mode 下手动调 `render_reason_lines` 双打印，且
+    // umaai 默认关 log，trainer 走 info! 看不到）。DecisionReasonData 通过
+    // `with_reason_sink(LastReasonSink)` 缓存到 `reason_slot`。
     let ramen_mcts_config = SearchConfig::new_game_config(&game_config);
     let ramen_stages = umasim::trainer::RamenSearchStages::parse(&game_config.mcts.ramen_search_stages)?;
+    let reason_slot = LastReasonSink::new();
     let ramen_trainer = RamenMctsTrainer::new(ramen_mcts_config)
         .with_stages(ramen_stages)
-        .verbose(true);
+        .verbose(true)
+        .with_reason_sink(reason_slot.clone());
 
     // Phase 4 feature 拆分后，onnx 评估器路径已 cfg gate 到 `onnx` feature。
     // 当前通道层不依赖 onnx（不需要 tract-onnx 巨大依赖链），强制走 MctsTrainer
@@ -449,17 +554,38 @@ async fn main_guard() -> Result<()> {
                     luck_tracker = LuckScoreTracker::new();
                 }
 
-                // 跑本回合所有 stage 直到推到 NextTurn / Settlement / SuperRamenSelect
-                calc_ramen_training(&ramen_trainer, &mut game, &mut rng, json_mode)?;
+                // 屏幕侧（human mode）按需求在收到并解析回合数据后**立即**显示：
+                // 马娘状态 / 剧本信息 / 训练分布——后续才进入推理（calc_ramen_training）。
+                if !json_mode {
+                    if let Ok(status) = game.explain() {
+                        println!("{status}");
+                    }
+                    let script_info = game.explain_ramen_info();
+                    if !script_info.is_empty() {
+                        println!("{script_info}");
+                    }
+                    if let Ok(dist_info) = game.explain_distribution() {
+                        println!("{dist_info}");
+                    }
+                }
 
-                // 回合决策完成后统一 emit（带 luck score 挂载）
-                emit_with_luck_decision(
-                    ramen_trainer.last_decision(),
-                    &game,
-                    &sink,
-                    &mut luck_tracker,
-                    chara_id,
-                );
+                // 连续决策：返回链式决策（一个快照对应多个决策时逐个 emit）
+                // 中间决策（除最后一个）用各自捕获的 view 直接 emit（不触 luck），
+                // 最后一个决策走完整 luck 挂载（baseline 每回合只更新一次）。
+                let chain = calc_ramen_training(&ramen_trainer, &mut game, &mut rng, json_mode, &reason_slot)?;
+                let last_index = chain.len().saturating_sub(1);
+                for (info, view) in chain.iter().take(last_index) {
+                    sink.emit(info, view);
+                }
+                if !chain.is_empty() {
+                    emit_with_luck_decision(
+                        ramen_trainer.last_decision(),
+                        &game,
+                        &sink,
+                        &mut luck_tracker,
+                        chara_id,
+                    );
+                }
 
                 // 计算完成：通知下游 watcher 进入阻塞状态
                 eprintln!("计算完成，等待新数据...");

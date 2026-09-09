@@ -6,12 +6,14 @@
 //! **Step 7 现状**：`GameStatusRamen::into_game` 完整实现，从 `thisTurn.json`
 //! 覆写所有 ramen 段字段到 `RamenGame`：
 //! - baseGame 增量字段（`source` + `playingState` + `active_effect_array` 三方联合 stage dispatch）
-//! - ramen 段全字段（last_ramen / feeling_stock / feeling_slot / feeling_guage_gains /
-//!   active_effect_array / super_ramen / selected_regions / scenario_pt / next_scenario_pt /
-//!   feeling_guage_gain_base / train_feeling_type / special_feeling）
+//! - ramen 段（last_ramen / feeling_stock / feeling_slot / super_ramen /
+//!   selected_regions / scenario_pt / train_feeling_type / special_feeling 落入
+//!   `RamenState`；`feeling_guage_gains` / `feeling_guage_gain_base` /
+//!   `next_scenario_pt` / `active_effect_array` 仅用于 stage dispatch 判断，
+//!   **不**存进 `RamenState`）
 //!
-//! 拆分 `active_effect_array` 到 `RamenEffect` 各字段**搁置**（按 §5 第 5 条）：
-//! 当前只做忠实映射（`Vec<ActiveEffectEntry>` 直接覆写），后续按训练数值需求再补。
+//! `active_effect_array` 拆分到 `RamenEffect` 各字段**搁置**（按 §5 第 5 条）：
+//! 当前只用其长度判 stage dispatch，不解读单项语义，后续按训练数值需求再补。
 //!
 //! ## stage dispatch 规则（adapter_spec §source / §playing_state）
 //!
@@ -129,7 +131,7 @@ fn default_last_ramen() -> i32 {
 
 /// 协议 `active_effect_array` 的单项 `{category, id, value}`
 ///
-/// 直接 `Vec<ActiveEffectEntry>` 落到 `RamenState::active_effect_array`。
+/// 仅在 `into_game` 内用其长度做 stage dispatch 判断，不落入 `RamenState`；
 /// 按 category 拆分到 `RamenEffect` 各字段暂不实现。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ActiveEffectEntry {
@@ -261,7 +263,6 @@ impl GameStatus for GameStatusRamen {
 
         // 6. 覆写 ramen 段（协议 `RamenStatus` → `RamenState` 全字段映射）
         let ramen = self.ramen;
-        game.ramen.feeling_guage_gains = ramen.feeling_guage_gains;
         game.ramen.feeling_slot = ramen.feeling_guage;
         game.ramen.feeling_stock = {
             // 协议 feeling_stock 是按"获得顺序"的队列，每项 1/2/3 表示 A/B/C
@@ -293,15 +294,6 @@ impl GameStatus for GameStatusRamen {
                 Some(arr)
             }
         };
-        game.ramen.active_effect_array = ramen
-            .active_effect_array
-            .into_iter()
-            .map(|e| umasim::game::ramen::ActiveEffectEntry {
-                category: e.category,
-                id: e.id,
-                value: e.value
-            })
-            .collect();
         game.ramen.super_ramen = if ramen.super_ramen < 0 {
             None
         } else {
@@ -316,14 +308,12 @@ impl GameStatus for GameStatusRamen {
             }
             arr
         };
-        game.ramen.feeling_guage_gain_base = ramen.feeling_guage_gain_base;
-        game.ramen.current_ramen = if ramen.last_ramen < 0 {
+        game.ramen.current_ramen = if ramen.last_ramen < 0 || ramen.active_effect_array.is_empty() {
             None
         } else {
             Some(ramen.last_ramen as usize)
         };
         game.ramen.scenario_pt = ramen.scenario_pt;
-        game.ramen.next_scenario_pt = ramen.next_scenario_pt;
 
         // 7. personDistribution 适配（adapter_spec §personDistribution 适配）：
         //    spec 要求把全局按出现次序的 `8` 依次改写为 `8, 9, 10, 11, 12`。
@@ -339,7 +329,7 @@ impl GameStatus for GameStatusRamen {
         // 8. Stage dispatch（adapter_spec §source / §playing_state 三方联合）。
         //    先做数据获取不全检查（turn 2..=71 且 selected_regions 全 0），命中则 warn + 不 dispatch。
         //    不 dispatch 时保留 `RamenStage::Begin`（newgame 默认值），由 main loop 识别并跳过。
-        let active_effect_count = game.ramen.active_effect_array.len();
+        let active_effect_count = ramen.active_effect_array.len();
         let data_incomplete = (2..=71).contains(&base.turn)
             && game.ramen.selected_regions.iter().all(|&r| r == 0);
         if data_incomplete {
@@ -584,6 +574,8 @@ mod tests {
             let ramen_json = value.get("ramen").cloned().unwrap_or_default();
             let scenario_pt_json = ramen_json.get("scenario_pt").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let last_ramen_json = ramen_json.get("last_ramen").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let active_effect_json = ramen_json.get("active_effect_array").and_then(|v| v.as_array());
+            let active_effect_empty = active_effect_json.map_or(true, |a| a.is_empty());
             let super_ramen_json = ramen_json.get("super_ramen").and_then(|v| v.as_i64()).unwrap_or(-1);
             let selected_regions_json: [i32; 3] = {
                 let arr = ramen_json.get("selected_regions").and_then(|v| v.as_array());
@@ -611,8 +603,13 @@ mod tests {
             // 关键字段 round-trip 校验
             // 1) scenario_pt 透传
             assert_eq!(game.ramen.scenario_pt, scenario_pt_json, "{}: scenario_pt 不一致", path.display());
-            // 2) current_ramen 透传（last_ramen 协议字段）
-            let expected_current = if last_ramen_json < 0 { None } else { Some(last_ramen_json as usize) };
+            // 2) current_ramen 透传：仅在 last_ramen >= 0 且 active_effect_array 非空时生效
+            //    （L311 改动：active_effect_array 为空时 current_ramen 置 None，即使 last_ramen 有效）
+            let expected_current = if last_ramen_json < 0 || active_effect_empty {
+                None
+            } else {
+                Some(last_ramen_json as usize)
+            };
             assert_eq!(game.ramen.current_ramen, expected_current, "{}: current_ramen 不一致", path.display());
             // 3) selected_regions 透传
             let expected_regions: [usize; 3] = [

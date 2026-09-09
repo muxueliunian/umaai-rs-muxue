@@ -454,13 +454,11 @@ pub(crate) fn fallback_override_game_config() -> OverrideGameConfig {
 /// 载入 gamedata/default_config.toml, 和 game_config.toml 合并
 pub fn load_game_config() -> Result<GameConfig> {
     let def_path = resolve_default_config_path();
-    info!("载入默认配置: {}", def_path.display());
     let def_file = fs_err::read_to_string(&def_path)?;
     let default_config: GameConfig = toml::from_str(&def_file)?;
 
     let cfg_path = resolve_user_config_path();
     let override_config: OverrideGameConfig = if cfg_path.exists() {
-        info!("载入用户配置: {}", cfg_path.display());
         let cfg_file = fs_err::read_to_string(&cfg_path)?;
         toml::from_str(&cfg_file)?
     } else {

@@ -25,6 +25,7 @@
 //! 集中处理；sink 内部只负责 emit 自身内容，不跨职责调整全局状态。这样 sink
 //! 可以单独测试（不依赖 colored / log init 状态）。
 
+use colored::Colorize;
 use crate::output::{DecisionInfo, view::GameView};
 
 /// AI 决策的输出契约
@@ -72,12 +73,35 @@ pub struct HumanReadableSink;
 
 impl DecisionSink for HumanReadableSink {
     fn emit(&self, info: &DecisionInfo, _view: &GameView) {
-        // 决策主干：首选 + 评分
-        println!("AI 选择: 第 {} 个动作（评分: {}）", info.action_index, info.score);
-        // 理由（如有）—— 单独一行，避免和评分粘在一起
-        if let Some(reason) = &info.reason {
-            println!("理由: {reason}");
-        }
+        // 仅输出运气信息：期望评分 / 本局运气 / 本回合运气。
+        // 数据来自 main.rs `emit_with_luck_decision` 挂到 `scenario_extra` 的
+        // luck snapshot；scenario_extra 为 `None`（非 luck 决策，如拉面连续决策
+        // 的中间项）时无内容可打，静默跳过。
+        let Some(extra) = &info.scenario_extra else {
+            return;
+        };
+        let as_int = |v: &serde_json::Value| -> String {
+            match v {
+                serde_json::Value::Number(n) => n.as_f64().map(|f| f.round().to_string()).unwrap_or_default(),
+                _ => String::new()
+            }
+        };
+        let exp = extra.get("current_terminal_baseline").map(&as_int).unwrap_or_default();
+        let turn = extra.get("last_turn_delta").map(&as_int).unwrap_or_default();
+        // 本局运气按数值范围着色（红/黄/白/绿/亮绿）
+        let total = extra.get("total_luck_score").map(&as_int).unwrap_or_default();
+        let total_f = extra
+            .get("total_luck_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        let total_colored = match total_f {
+            x if x < -2000.0 => total.color("red"),
+            x if x < -500.0 => total.color("yellow"),
+            x if x <= 500.0 => total.color("white"),
+            x if x <= 2000.0 => total.color("green"),
+            _ => total.bright_green()
+        };
+        println!("期望评分 {exp} 运气: 本局 {total_colored}, 本回合 {turn}");
     }
 }
 
@@ -162,13 +186,41 @@ mod tests {
         println!("HumanReadableSink emit 完成");
     }
 
-    /// HumanReadableSink 无 reason 时只打决策主干一行
+    /// HumanReadableSink 无 scenario_extra 时静默跳过（不 panic、不输出）
     #[test]
-    fn test_human_readable_sink_no_reason() {
+    fn test_human_readable_sink_no_extra() {
         let mut info = sample_info();
-        info.reason = None;
+        info.scenario_extra = None;
         HumanReadableSink.emit(&info, &GameView::default());
-        println!("无 reason 时 emit 完成");
+        println!("无 extra 时 emit 完成（应静默跳过）");
+    }
+
+    /// HumanReadableSink 带 scenario_extra（luck snapshot）时只输出运气行
+    #[test]
+    fn test_human_readable_sink_with_luck_extra() {
+        let mut info = sample_info();
+        info.scenario_extra = Some(serde_json::json!({
+            "current_terminal_baseline": 60410.53,
+            "total_luck_score": 152.5,
+            "last_turn_delta": -12.4
+        }));
+        HumanReadableSink.emit(&info, &GameView::default());
+        println!("带 luck extra 时 emit 完成");
+    }
+
+    /// 本局运气各颜色档位均不 panic（四舍五入 + 着色路径全覆盖）
+    #[test]
+    fn test_human_readable_sink_luck_color_brackets() {
+        for total in [-2500.0, -1200.0, 0.0, 1200.0, 3500.0] {
+            let mut info = sample_info();
+            info.scenario_extra = Some(serde_json::json!({
+                "current_terminal_baseline": 60000.0,
+                "total_luck_score": total,
+                "last_turn_delta": 0.0
+            }));
+            HumanReadableSink.emit(&info, &GameView::default());
+        }
+        println!("各颜色档位 emit 完成");
     }
 
     /// StdoutJsonSink 正常输出 JSON（含 schema_version / turn / scenario）
