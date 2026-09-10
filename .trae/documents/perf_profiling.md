@@ -2,7 +2,7 @@
 
 > 记录"对手写逻辑 / MCTS 性能分析"系列试验的工具选择准则、最终结论与复现命令，便于以后重测与演进。
 
-## 本机 Windows 构建与测量（2026-09-10）
+## 本机 Windows 构建与测量（2026-09-10 至 2026-09-11）
 
 workspace 的 Release 配置为 `opt-level = 3`、`codegen-units = 1`、`lto = "thin"`，保留 `debug = true`。`.cargo/config.toml` 为 `x86_64-pc-windows-msvc` 启用 `target-cpu=native`，同时保留 8 MiB 栈设置。该 CPU 选项覆盖此目标的所有构建配置，包括 Debug 和测试；生成的程序以本机运行为目标，跨机器分发前需重新确定 CPU 基线。ThinLTO 和单 codegen unit 会增加编译成本。
 
@@ -189,6 +189,84 @@ cargo build --release --locked -p umasim --no-default-features --lib --target-di
 验证通过：20 项针对性 Release 测试和 `umaai` Release 构建。测试覆盖事件顺序与队列复用、规则随机流隔离、地区选择、友人事件平局、普通与 rollout 实例的整局动作/事件记录、正常原因日志、协议摘要及评分分解位模式。
 
 本地证据：`target/perf-results/round5-wisdom.csv`、`round5-reason-root.csv`、`round5-reason-matrix.csv`，以及 `round5-production-game-wisdom-<版本>/` 中的结果与决策 CSV。配对测量脚本为 `measure-round5-wisdom.ps1` / `measure-round5-roots.ps1`，测试命令集合为 `test-round5.ps1`，构建入口为 `build-round5-probes.ps1`；`round5-manifest.json` 记录基线提交、配置、源码与产物 SHA256，源码差异保存在 `round5-final.patch`。基线和最终程序分别保存在 `target/perf-round5-base/release/` 与 `target/perf-round5-reason/release/`；这些均为构建目录中的临时产物。
+
+### 第六轮：内联小数据并直接判断做面可行性
+
+本轮以第五轮提交 `2f90edc` 为基线，保持相同 Release 配置、生产参数和测量入口：
+
+- `BaseGame` 的继承因子与卡片类型计数直接存储值，分别为 44 / 28 字节，去掉两份 `Arc` 的克隆和释放计数。代价是每个游戏副本直接复制这些小数据；协议导入同步使用值，字段内容和输出格式保持一致。
+- 规则层共用最小可行隐藏风味方案计算。策略和选面入口需要最小方案或只问可做性时，直接计算库存缺口；完整候选仍沿用原枚举、过滤及排序，评分公式和随机顺序保持一致。
+
+| 测量 | 第五轮版本 | 第六轮版本 | 额外耗时变化 |
+|---|---:|---:|---:|
+| wisdom 完整育成 | 107.037 s | 102.145 s | -4.6% |
+| 第 32 回合训练根，三轮中位数 | 763.221 ms | 706.028 ms | -7.5% |
+| 第 60 回合训练根，三轮中位数 | 137.772 ms | 116.934 ms | -15.1% |
+
+整局仅测 `wisdom`，双方各一局，基础种子仍为 `61444`。终局分数均为 `70876`，结果 CSV 与 200 条决策记录排除耗时后全部一致。固定根仍为前述 speed 卡组的两个局面，交替三轮的全部非耗时输出一致，包括已输出的浮点统计位模式。后段固定根的耗时波动较大；上表是本轮配对观测，CSV 精度及测量范围边界沿用前两节，两个源码调整的收益未单独拆分归因。
+
+5 项针对性 Release 测试与 `umaai` Release 构建通过：基础状态克隆与副本修改隔离、卡组计数、协议因子导入/导出、150 种正常资源组合下的独立可行性期望、45 个局面的选面可达性和顺序。可行性期望从已有十元合法替换集合经规则校验与资源检查独立生成，核对完整枚举和最小方案。
+
+本地证据：`target/perf-results/round6-wisdom.csv`、`round6-root.csv` 和 `round6-production-game-wisdom-<版本>/` 的结果与决策 CSV；脚本为 `measure-round6-wisdom.ps1`、`measure-round6-roots.ps1`、`test-round6.ps1`、`build-round6-probes.ps1`。`round6-manifest.json` 记录基线提交及输入、源码和产物 SHA256，源码差异保存在 `round6-final.patch`。基线与候选程序分别位于 `target/perf-round6-base/release/` 和 `target/perf-round6-candidate/release/`，均为构建目录中的临时产物。
+
+### 第七轮：复用选面预演副本并省略 rollout 评分明细
+
+本轮以第六轮最终版本为基线，即 `2f90edc` 加 `round6-final.patch`，保持相同 Release 配置、生产参数、数据和测量入口：
+
+- 一次选面决策共用一个训练预演副本，切换候选时仅覆写阶段、当前拉面和待落地标记。三个吃面候选的场景由四次整局克隆减为一次，保留全部训练评分调用及顺序。副本存活至该次选面结束；会真正落地随机效果的 lookahead 仍使用独立副本。
+- 唯一明细采集开关 `collect_details` 控制评分分解和原因文本，普通实例开启，rollout 关闭。训练失败修正值使用明确字段 `train_fail_adj` 保存，安全桥继续按原顺序执行 `score - train_fail_adj`。rollout 内部的 `breakdown` 留空；普通分解内容、正常日志和协议摘要保留。
+
+| 测量 | 第六轮版本 | 第七轮版本 | 额外耗时变化 |
+|---|---:|---:|---:|
+| wisdom 完整育成 | 120.213 s | 76.565 s | -36.3% |
+| 第 32 回合训练根，三轮中位数 | 876.525 ms | 627.466 ms | -28.4% |
+| 第 60 回合训练根，三轮中位数 | 142.766 ms | 111.457 ms | -21.9% |
+
+整局仅测 `wisdom`，双方各一局，基础种子 `61444`，速度约为同轮基线的 **1.57 倍**。终局分数均为 `70876`，结果 CSV 与 200 条决策记录排除耗时后全部一致。两个固定根交替三轮的全部非耗时输出一致，包括已输出的浮点统计位模式。上表为本机同轮配对观测，两项调整的收益未单独拆分归因；CSV 精度及测量范围边界沿用前述生产对照。
+
+6 项针对性 Release 测试与 `umaai` Release 构建通过：普通和 rollout 的总分及失败修正位模式、正常评分分解、跨候选预演与独立副本一致性、原局面隔离、候选被拒绝后的继续评分、友人估值、整局动作/事件记录及协议摘要。另在已有低体力训练检查中显式启用安全桥，核对选中训练与收益位模式；正式预设关闭该机制，整局验收不能代替这一检查。
+
+本地证据：`target/perf-results/round7-wisdom.csv`、`round7-root.csv` 和 `round7-production-game-wisdom-<版本>/` 的结果与决策 CSV；脚本为 `measure-round7-wisdom.ps1`、`measure-round7-roots.ps1`、`test-round7.ps1`、`build-round7-probes.ps1`。`round7-manifest.json` 记录基线来源及源码、配置和产物 SHA256；`round7-final.patch` 是相对 `2f90edc` 的累计源码差异，包含第六轮改动。基线与候选程序位于 `target/perf-round7-base/release/` 和 `target/perf-round7-candidate/release/`，均为构建目录中的临时产物。
+
+### 第八轮：共享静态卡面板和事件分布（2026-09-11）
+
+本轮以第七轮最终版本为基线，即 `2f90edc` 加 `round7-final.patch`，保持相同 Release 配置、生产参数、数据和测量入口：
+
+- `SupportCard.data` 直接借用全局只读卡表，去掉构造时的面板深复制、`Arc` 分配及克隆/释放时的引用计数。面板生命周期限定为进程期，动态羁绊、训练效果和固有状态继续独立保存。公开 Rust 字段类型改为 `&'static SupportCardData`，仓外直接构造 `Arc` 或注入临时面板的源码需要调整；通信协议格式保持一致。
+- 基础、温泉和拉面剧本共用全局事件分布的 `WeightedIndex`。首次随机事件分支通过 `OnceLock` 初始化，后续复用；权重取自只读 `GAMECONSTANTS`，原权重计算、采样位置和 RNG 调用次数保持一致。局部 `GameConstants` 对象的取值方法不缓存。
+- 训练评分用五项数组保存训练调整前的原分，删除临时 `base Vec`。两次最优项选择及最后的牺牲分减法保持原样，非训练动作直接读取其未调整的分数。
+
+| 测量 | 第七轮版本 | 第八轮版本 | 额外耗时变化 |
+|---|---:|---:|---:|
+| wisdom 完整育成 | 69.686 s | 66.062 s | -5.2% |
+| 第 32 回合训练根，三轮中位数 | 532.814 ms | 499.550 ms | -6.2% |
+| 第 60 回合训练根，三轮中位数 | 96.050 ms | 88.811 ms | -7.5% |
+
+整局仅测 `wisdom`，双方各一局，基础种子 `61444`。终局分数均为 `70876`，结果 CSV 与 200 条决策记录排除耗时后全部一致；两个固定根交替三轮的全部非耗时输出一致，包括已输出的浮点统计位模式。三项修改的收益未单独拆分归因；上表为本机同轮配对观测，CSV 精度及测量范围边界沿用前述生产对照。共享代码涉及三个剧本，本轮性能数字仅代表拉面。
+
+5 项针对性 Release 检查与 `umaai` Release 构建通过：1024 次事件类别抽样及采样后随机流位置一致、事件分布实例复用、不同突破等级共享面板且动态副本独立、基础状态构造与克隆、候选重排/重复训练/纯非训练列表下的基础分牺牲约束，以及拉面协议导入/导出。牺牲约束检查分别覆盖保留基础最优项和允许调整后最优项的分支。
+
+本地证据：`target/perf-results/round8-wisdom.csv`、`round8-root.csv` 和 `round8-production-game-wisdom-<版本>/` 的结果与决策 CSV；脚本为 `measure-round8-wisdom.ps1`、`measure-round8-roots.ps1`、`test-round8.ps1`、`build-round8-probes.ps1`。`round8-manifest.json` 记录基线来源及源码、配置和产物 SHA256；`round8-final.patch` 是相对 `2f90edc` 的累计源码差异，包含第六、七轮改动。基线与候选程序位于 `target/perf-round8-base/release/` 和 `target/perf-round8-candidate/release/`，均为构建目录中的临时产物。
+
+### 第九轮：复用选面预演的训练基础计算（2026-09-11）
+
+本轮以第八轮最终版本为基线，即 `2f90edc` 加 `round8-final.patch`，保持相同 Release 配置、生产参数、数据和测量入口：
+
+- 一次选面调用共用五个训练位的基础评估，保存支援卡下层属性、buff、原始失败率、闪彩及体力值。切换候选时，从保存的下层属性重新应用该面的效果、截断和上限，再完成全部策略评分；各面的结果分别计算，保留原浮点运算顺序。
+- 每个评估槽增加下层六项属性和当前拉面标记。缓存仅在基础局面不变的选面预演内复用；真实吃面落地、分身、羁绊变化后的训练入口及 lookahead 使用新缓存。
+- 训练后体力检查读取本候选刚选中的训练值；重叠地区共用原局面各训练位的窗口分量，各地区仍按原顺序取最大值并应用地区权重。
+
+| 测量 | 第八轮版本 | 第九轮版本 | 额外耗时变化 |
+|---|---:|---:|---:|
+| wisdom 完整育成 | 63.809 s | 61.809 s | -3.1% |
+| 第 32 回合训练根，三轮中位数 | 484.368 ms | 469.130 ms | -3.1% |
+| 第 60 回合训练根，三轮中位数 | 83.757 ms | 79.321 ms | -5.3% |
+
+整局仅测 `wisdom`，双方各一局，基础种子 `61444`。终局分数均为 `70876`，结果 CSV 与 200 条决策记录排除耗时后全部一致；两个固定根交替三轮的全部非耗时输出一致，包括已输出的浮点统计位模式。本轮收益较小，各项复用的收益未单独拆分归因；上表为本机同轮配对观测，CSV 精度及测量范围边界沿用前述生产对照。
+
+5 项针对性 Release 检查与 `umaai` Release 构建通过：逐碗训练值与独立完整公式对照、重复候选及切回不吃面、低体力早退后按需填充、完整 Local 评分与体力变化一致、重叠地区窗口评分逐位一致，以及普通和 rollout 实例的整局动作/事件记录一致。
+
+本地证据：`target/perf-results/round9-wisdom.csv`、`round9-root.csv` 和 `round9-production-game-wisdom-<版本>/` 的结果与决策 CSV；脚本为 `measure-round9-wisdom.ps1`、`measure-round9-roots.ps1`、`test-round9.ps1`、`build-round9-probes.ps1`。`round9-manifest.json` 记录基线来源及源码、配置和产物 SHA256；`round9-final.patch` 是相对 `2f90edc` 的累计源码差异，包含第六至八轮改动。基线与候选程序位于 `target/perf-round9-base/release/` 和 `target/perf-round9-candidate/release/`，均为构建目录中的临时产物。
 
 ## 1. 背景
 

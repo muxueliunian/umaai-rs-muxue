@@ -91,10 +91,10 @@ impl RamenHandwrittenTrainer {
         }
     }
 
-    /// 创建 rollout 专用实例：关闭原因文本生成和采集，保留数值分解与协议摘要。
+    /// 创建 rollout 专用实例：关闭评分分解和原因文本采集，保留协议摘要。
     pub fn for_rollout() -> Self {
         let mut trainer = Self::new();
-        trainer.policy.collect_reason = false;
+        trainer.policy.collect_details = false;
         trainer
     }
 
@@ -121,7 +121,7 @@ impl RamenHandwrittenTrainer {
 
     /// 缓存本次决策的评分分解（各候选 `score + reason` 摘要）
     fn stash_breakdown(&self, outputs: &[RamenPolicyOutput]) {
-        if !self.policy.collect_reason {
+        if !self.policy.collect_details {
             return;
         }
         let text = outputs
@@ -179,7 +179,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     ) -> Result<usize> {
         // 单个候选直接返回（无选择空间）
         if actions.len() <= 1 {
-            if self.policy.collect_reason {
+            if self.policy.collect_details {
                 if let Ok(mut slot) = self.last_breakdown.lock() {
                     *slot = Some(format!("仅1候选: {}", actions[0]));
                 }

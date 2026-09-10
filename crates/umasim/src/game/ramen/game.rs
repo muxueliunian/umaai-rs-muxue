@@ -12,7 +12,7 @@ use colored::Colorize;
 #[cfg(feature = "cli")]
 use comfy_table::{ColumnConstraint, Table, Width};
 use rand::{Rng, SeedableRng, prelude::IndexedRandom, rngs::StdRng};
-use rand_distr::{Distribution, weighted::WeightedIndex};
+use rand_distr::Distribution;
 
 use super::{
     FeelingType,
@@ -20,7 +20,7 @@ use super::{
     RamenAction,
     RamenGame,
     RamenStage,
-    effects::{RamenTrainingEffect, calc_ramen_training_effect},
+    effects::{RamenTrainingEffect, apply_ramen_training_effect, calc_ramen_training_effect},
     events::assign_train_feeling_type,
     rules::{self, get_turn_special_feeling}
 };
@@ -36,7 +36,7 @@ use crate::{
     gamedata::{ActionValue, EventData, GAMECONFIG, GAMECONSTANTS, RamenRegionStrategy, TriggerType, ramen::RAMENDATA},
     global,
     rng::{CLONE_REGION_TAG, fork_local_stream},
-    utils::{AttributeArray, global_events, system_event, system_event_prob}
+    utils::{AttributeArray, global_event_distribution, global_events, system_event, system_event_prob}
 };
 
 impl Game for RamenGame {
@@ -421,8 +421,7 @@ impl Game for RamenGame {
             // 若留在此处消费回合固定流，固定流的消耗量会随策略（是否点击友人）
             // 变化，导致角标/分布/hint 跨策略错位。
             // 一般随机事件
-            let weights = WeightedIndex::new(global!(GAMECONSTANTS).get_event_distribution()).expect("event weights");
-            match weights.sample(rng) {
+            match global_event_distribution().sample(rng) {
                 0 => {
                     // 只从 Card 类型的人物中随机选择
                     let card_indices: Vec<i32> = self
@@ -683,11 +682,11 @@ impl Game for RamenGame {
         if train > 5 {
             return Err(anyhow!("训练类型错误"));
         }
-        // 完整实现（与 `calc_training_value_with_effect` 逐位等价，见守门测试
+        // 完整实现（与共享上层公式逐位等价，见守门测试
         // `test_train_eval_deterministic_and_cached_consistent` 守门 3）：
         // trait 方法保持单函数体——拆成"薄壳→inherent"会让 microbench C/D 段
         // （走 trait 路径）因跨 impl 边界未内联带回 +15ns/train 的测量口径退化；
-        // eval_train 走 `with_effect` 并行路径复用已算好的拉面效果。
+        // eval_train 保存下层属性，并通过 apply_ramen_training_effect 应用每碗面的效果。
         // 两阶段计算：参考 OnsenGame 的实现
         // 1. 下层值：default_calc_training_value 应用卡 buff（友情/训练/干劲/人数/成长率），
         //    然后约束 status_pt 各元素 ≤ 100（剧本规则：下层不超过 100）
@@ -782,12 +781,7 @@ impl Game for RamenGame {
 }
 
 impl RamenGame {
-    /// 上层拉面效果已算好时直接复用（`RamenPolicy::eval_train` 单源评估用，
-    /// 避免同一回合同一 train 三次重算 `calc_ramen_training_effect`）
-    ///
-    /// `#[inline]`：本方法是 `calc_training_value`（trait impl）与 `eval_train` 的
-    /// 公共底层，跨模块被频繁调用；不内联会让 microbench 的 value 主路径
-    /// 多一层函数调用开销（实测 +25%）。
+    /// 使用已计算的拉面效果求训练值，与策略评估共用上层加成公式。
     #[inline(always)]
     pub fn calc_training_value_with_effect(
         &self, buffs: &crate::game::CardTrainingEffect, train: usize, ramen_effect: &RamenTrainingEffect
@@ -795,35 +789,8 @@ impl RamenGame {
         if train > 5 {
             return Err(anyhow!("训练类型错误"));
         }
-        // 两阶段计算：参考 OnsenGame 的实现
-        // 1. 下层值：default_calc_training_value 应用卡 buff（友情/训练/干劲/人数/成长率），
-        //    然后约束 status_pt 各元素 ≤ 100（剧本规则：下层不超过 100）
         let mut base_value = self.default_calc_training_value(buffs, train)?;
-        for i in 0..6 {
-            base_value.status_pt[i] = base_value.status_pt[i].min(100);
-        }
-        // 2. 拉面 buff：累乘到下层值上（不合并到 buffs，避免累乘 vs 加法混淆）
-        let xunlian_mult = (100 + ramen_effect.xunlian) as f64 / 100.0;
-        let youqing_mult = (100 + ramen_effect.youqing) as f64 / 100.0;
-        let pt_bonus_mult = (100 + ramen_effect.pt_bonus) as f64 / 100.0;
-        let status_limit = 100 + ramen_effect.status_limit;
-        let pt_limit = 100 + ramen_effect.status_limit + ramen_effect.pt_limit;
-        // 3. 上层值：拉面 buff 带来的增量
-        // - xunlian × youqing 对 status_pt[0..4]（5 个属性训练值，含副属性加成 buff.bonus）都生效
-        // - pt_bonus 仅对 status_pt[5]（PT）单独生效
-        for i in 0..5 {
-            if base_value.status_pt[i] > 0 {
-                let upper_raw =
-                    (base_value.status_pt[i] as f64 * xunlian_mult * youqing_mult) as i32 - base_value.status_pt[i];
-                let upper = upper_raw.min(status_limit).max(0);
-                base_value.status_pt[i] += upper;
-            }
-        }
-        // PT 部分额外乘 pt_bonus
-        let pt_upper_raw = (base_value.status_pt[5] as f64 * xunlian_mult * youqing_mult * pt_bonus_mult) as i32
-            - base_value.status_pt[5];
-        let pt_upper = pt_upper_raw.min(pt_limit).max(0);
-        base_value.status_pt[5] += pt_upper;
+        base_value.status_pt = apply_ramen_training_effect(base_value.status_pt, ramen_effect);
         Ok(base_value)
     }
 
@@ -4014,7 +3981,7 @@ struct AlwaysTrueRng;
         game.base.turn = 60;
         game.ramen.current_ramen = Some(5);
         // 模拟支援卡种类 < 4（只有3种）
-        game.card_type_count = std::sync::Arc::new([1, 1, 1, 0, 0, 0, 0]);
+        game.card_type_count = [1, 1, 1, 0, 0, 0, 0];
         game.deck_can_split = false;
         assert!(
             !game.calc_hint_special_active(),

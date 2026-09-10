@@ -268,6 +268,24 @@ pub fn consume_for_ramen(state: &mut RamenState, recipe_idx: usize, special_targ
     Ok(total_special)
 }
 
+/// 当前库存下使用隐藏风味最少的可行替换方案，资源不足时返回 `None`。
+///
+/// 配方由 [`get_recipe`] 取得。合法方案的每一维都不能小于对应库存缺口，
+/// 因而逐维补齐缺口就是唯一的最小方案。
+pub fn min_special_targets(state: &RamenState, recipe: &[i32; 3]) -> Option<[i32; 3]> {
+    let min_needed = [
+        (recipe[0] - state.feeling_stock[0]).max(0),
+        (recipe[1] - state.feeling_stock[1]).max(0),
+        (recipe[2] - state.feeling_stock[2]).max(0)
+    ];
+    let need_sum: i32 = min_needed.iter().sum();
+    let budget = 2.min(state.special_feeling) - need_sum;
+    if budget < 0 || min_needed.iter().zip(recipe).any(|(needed, cost)| needed > cost) {
+        return None;
+    }
+    Some(min_needed)
+}
+
 /// 枚举给定当前库存和隐藏风味下，可用于制作指定面的所有合法 `special_targets`。
 ///
 /// 返回按 `sum(t)` 升序排列的候选列表（最少隐藏风味优先）。
@@ -284,17 +302,10 @@ pub fn consume_for_ramen(state: &mut RamenState, recipe_idx: usize, special_targ
 /// 这样生成的候选数与玩家实际可选空间一致（库存紧张 1~6 种，全富余 9~10 种）。
 pub fn list_special_targets_for(state: &RamenState, ramen_idx: usize) -> Result<Vec<[i32; 3]>> {
     let recipe = get_recipe(ramen_idx)?;
-    let min_needed: [i32; 3] = [
-        (recipe[0] - state.feeling_stock[0]).max(0),
-        (recipe[1] - state.feeling_stock[1]).max(0),
-        (recipe[2] - state.feeling_stock[2]).max(0)
-    ];
-    let need_sum: i32 = min_needed.iter().sum();
-    let budget = 2.min(state.special_feeling) - need_sum;
-    if budget < 0 {
+    let Some(min_needed) = min_special_targets(state, recipe) else {
         return Ok(Vec::new());
-    }
-    let total_cap = need_sum + budget;
+    };
+    let total_cap = 2.min(state.special_feeling);
     let mut out: Vec<[i32; 3]> = Vec::new();
     for t_a in min_needed[0]..=recipe[0] {
         if t_a > total_cap {
@@ -1228,6 +1239,8 @@ mod tests {
     /// 所以 `sf=4` 必须专门覆盖。
     #[test]
     fn test_special_targets_sum_invariant() -> anyhow::Result<()> {
+        use crate::utils::Checks;
+
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         init_global()?;
@@ -1239,15 +1252,26 @@ mod tests {
             ([5, 5, 5], "全富余")
         ];
 
+        let mut targets_match = true;
         for recipe_idx in 0..10 {
             let recipe = get_recipe(recipe_idx)?;
             for sf in 0..=4 {
                 for &(stock, stock_label) in &stocks {
                     let state = make_state_for_targets(stock, sf);
                     let targets = list_special_targets_for(&state, recipe_idx)?;
+                    let min = min_special_targets(&state, recipe);
+                    let mut expected: Vec<[i32; 3]> = LEGAL_SPECIAL_TARGETS
+                        .into_iter()
+                        .filter(|t| validate_special_targets(recipe, t).is_ok() && can_make_ramen(&state, recipe, t))
+                        .collect();
+                    expected.sort_by_key(|t| (t.iter().sum::<i32>(), *t));
+                    if targets != expected || min != expected.first().copied() {
+                        println!("替换方案不一致: 完整枚举={targets:?} 直接最小={min:?} 独立期望={expected:?}");
+                        targets_match = false;
+                    }
                     let max_sum = targets.iter().map(|t| t.iter().sum::<i32>()).max().unwrap_or(0);
                     println!(
-                        "recipe[{recipe_idx}]={recipe:?} sf={sf} stock={stock:?} ({stock_label}): n={} max_sum={max_sum}",
+                        "recipe[{recipe_idx}]={recipe:?} sf={sf} stock={stock:?} ({stock_label}): n={} max_sum={max_sum} min={min:?}",
                         targets.len()
                     );
                     if sf == 4 {
@@ -1271,7 +1295,9 @@ mod tests {
                 }
             }
         }
-        Ok(())
+        let mut c = Checks::new();
+        c.check(targets_match, "各配方、正常库存及隐藏风味组合下，完整列表和最小方案符合独立可行性期望");
+        c.finish()
     }
 
     /// P0.2D：任何输入下返回集合都是那 10 个三元组的子集，且上界是紧的（能到 9 或 10）

@@ -1,4 +1,4 @@
-use std::{collections::HashMap, default::Default, sync::Arc};
+use std::{collections::HashMap, default::Default};
 
 use anyhow::{Result, anyhow};
 use log::debug;
@@ -185,8 +185,8 @@ impl From<&CardValue> for CardTrainingEffect {
 /// 局中的支援卡信息，剧本通用
 #[derive(Debug, Clone, PartialEq)]
 pub struct SupportCard {
-    /// 面板数据，避免查表
-    pub data: Arc<SupportCardData>,
+    /// 直接借用进程期只读全局卡表中的面板数据。
+    pub data: &'static SupportCardData,
     /// 支援卡ID(5位)
     pub card_id: u32,
     /// 突破等级
@@ -244,7 +244,7 @@ impl SupportCard {
         let effect = CardTrainingEffect::from(&data.card_value[rank as usize]);
         let friendship = data.card_value[rank as usize].initial_jiban;
         Ok(Self {
-            data: Arc::new(data.clone()),
+            data,
             card_id: id,
             rank,
             card_type: data.card_type,
@@ -324,23 +324,46 @@ impl SupportCard {
 
 #[cfg(test)]
 mod tests {
+    use std::ptr;
+
     use super::*;
     use crate::{
         gamedata::init_global,
-        utils::{get_workspace_root, init_test_logger}
+        utils::{Checks, get_workspace_root, init_test_logger}
     };
 
+    /// 不同突破等级共享全局面板，克隆后的动态卡状态独立。
     #[test]
     fn test_support() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         init_test_logger("info")?;
         init_global()?;
-        let card = SupportCard::new(302424)?;
+        let mut card = SupportCard::new(302424)?;
         println!("{}", card.explain()?);
         let card2 = SupportCard::new(302464)?;
         println!("{}", card2.explain()?);
         println!("{}", (card.effect.add(&card2.effect)).explain());
-        Ok(())
+        let panel = global!(GAMEDATA).get_card(card.card_id)?;
+        let original_value = card.card_value().clone();
+        let rank0 = SupportCard::new(302420)?;
+        let mut checks = Checks::new();
+        checks.check(ptr::eq(card.data, panel) && ptr::eq(rank0.data, panel), "同卡不同突破等级直接共享全局面板");
+        checks.check(card.card_value() == &original_value, "构造另一突破等级不改变原卡数值");
+        checks.check(card.card_value() == &panel.card_value[4] && rank0.card_value() == &panel.card_value[0], "各卡读取自身突破等级的数值");
+
+        card.effect_state.insert("test".to_string(), 1);
+        let original_effect = card.effect.clone();
+        let original_friendship = card.friendship;
+        let mut branch = card.clone();
+        branch.effect_state.insert("test".to_string(), 2);
+        branch.effect.xunlian += 1;
+        branch.friendship += 1;
+        println!("克隆动态状态: {:?}，训练效果: {:?}，羁绊: {}", branch.effect_state, branch.effect, branch.friendship);
+        checks.check(ptr::eq(branch.data, panel), "克隆继续共享同一全局面板");
+        checks.check(card.effect_state.get("test") == Some(&1), "修改克隆固有状态不影响原卡");
+        checks.check(card.effect == original_effect && card.friendship == original_friendship, "修改克隆训练效果和羁绊不影响原卡");
+        checks.check(card.card_value() == &original_value && branch.card_value() == &original_value, "动态修改不改变共享面板数值");
+        checks.finish()
     }
 }

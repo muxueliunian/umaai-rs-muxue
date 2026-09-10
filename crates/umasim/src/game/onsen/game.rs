@@ -9,7 +9,7 @@ use rand::{
     rngs::StdRng,
     seq::{IndexedRandom, IteratorRandom}
 };
-use rand_distr::{Distribution, weighted::WeightedIndex};
+use rand_distr::Distribution;
 
 use crate::{
     diag,
@@ -31,7 +31,7 @@ use crate::{
     },
     gamedata::{ActionValue, EventData, GAMECONSTANTS, TrainingBasicTable, onsen::ONSENDATA},
     global,
-    utils::{Array5, Array6, AttributeArray, global_events, system_event, system_event_prob}
+    utils::{Array5, Array6, AttributeArray, global_event_distribution, global_events, system_event, system_event_prob}
 };
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -1441,9 +1441,7 @@ impl Game for OnsenGame {
                 vec![event]
             } else {
                 // 一般随机事件
-                let weights =
-                    WeightedIndex::new(global!(GAMECONSTANTS).get_event_distribution()).expect("event weights");
-                let event = match weights.sample(rng) {
+                let event = match global_event_distribution().sample(rng) {
                     0 => {
                         // 支援卡连续事件
                         let available_indices = (0..6)

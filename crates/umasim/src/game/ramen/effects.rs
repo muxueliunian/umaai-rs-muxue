@@ -4,7 +4,7 @@
 //! 将所有剧本加成来源合并为统一的训练效果，再应用于训练数值计算。
 
 use super::RamenGame;
-use crate::{gamedata::ramen::RAMENDATA, global};
+use crate::{gamedata::ramen::RAMENDATA, global, utils::Array6};
 
 /// 拉面杯训练效果（合并所有来源的加成）
 ///
@@ -34,6 +34,30 @@ pub struct RamenTrainingEffect {
     pub hint_special: bool,
     /// 分身数量
     pub clone_count: i32
+}
+
+/// 将支援卡下层属性按 100 截断，再应用拉面上层加成与增量上限。
+#[inline(always)]
+pub(crate) fn apply_ramen_training_effect(mut status: Array6, effect: &RamenTrainingEffect) -> Array6 {
+    for value in &mut status {
+        *value = (*value).min(100);
+    }
+    let xunlian_mult = (100 + effect.xunlian) as f64 / 100.0;
+    let youqing_mult = (100 + effect.youqing) as f64 / 100.0;
+    let pt_bonus_mult = (100 + effect.pt_bonus) as f64 / 100.0;
+    let status_limit = 100 + effect.status_limit;
+    let pt_limit = 100 + effect.status_limit + effect.pt_limit;
+    for value in &mut status[..5] {
+        if *value > 0 {
+            let upper_raw = (*value as f64 * xunlian_mult * youqing_mult) as i32 - *value;
+            let upper = upper_raw.min(status_limit).max(0);
+            *value += upper;
+        }
+    }
+    let pt_upper_raw = (status[5] as f64 * xunlian_mult * youqing_mult * pt_bonus_mult) as i32 - status[5];
+    let pt_upper = pt_upper_raw.min(pt_limit).max(0);
+    status[5] += pt_upper;
+    status
 }
 
 /// 把训练效果格式化为词条列表（非 0 才显示），如 `["训+23", "失败率-50", "上限+20"]`

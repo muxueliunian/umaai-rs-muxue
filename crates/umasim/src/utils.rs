@@ -1,7 +1,8 @@
 #[cfg(feature = "cli")]
 use std::io::Write;
 #[cfg(feature = "cli")]
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use anyhow::{Result, anyhow};
 use colored::Colorize;
@@ -12,6 +13,7 @@ use flexi_logger::{DeferredNow, Duplicate, FileSpec, style};
 #[cfg(feature = "cli")]
 use log::Record;
 use log::{error, info};
+use rand_distr::weighted::WeightedIndex;
 #[cfg(feature = "cli")]
 use serde::Serialize;
 
@@ -308,6 +310,13 @@ macro_rules! global {
 pub fn global_events() -> &'static EventCollection {
     &global!(GAMEDATA).events
 }
+/// 复用全局只读常量表的随机事件分布，在首次随机事件采样时初始化。
+pub fn global_event_distribution() -> &'static WeightedIndex<f64> {
+    static DISTRIBUTION: OnceLock<WeightedIndex<f64>> = OnceLock::new();
+    DISTRIBUTION.get_or_init(|| {
+        WeightedIndex::new(global!(GAMECONSTANTS).get_event_distribution()).expect("event weights")
+    })
+}
 /// 获得events.json里记载的指定system事件
 pub fn system_event(key: &str) -> Result<&'static EventData> {
     global_events()
@@ -477,6 +486,37 @@ pub fn load_game_config() -> Result<GameConfig> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 共享事件分布与原构造的抽样结果和随机流推进一致，重复取得时复用同一实例。
+    #[test]
+    fn test_global_event_distribution() -> Result<()> {
+        use std::{env::set_current_dir, ptr};
+
+        use rand::RngCore;
+        use rand_distr::Distribution;
+
+        use crate::{gamedata::init_global, rng::EventRng};
+
+        set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let original = WeightedIndex::new(global!(GAMECONSTANTS).get_event_distribution())?;
+        let mut original_rng = EventRng::new(61444);
+        let mut shared_rng = original_rng.clone();
+        let mut counts = [0; 4];
+        let mut same = true;
+        for _ in 0..1024 {
+            let expected = original.sample(&mut original_rng);
+            let actual = global_event_distribution().sample(&mut shared_rng);
+            same &= actual == expected;
+            counts[actual] += 1;
+        }
+        println!("共享事件分布抽样计数: {counts:?}");
+        let mut c = Checks::new();
+        c.check(same, "事件类别抽样序列一致");
+        c.check(original_rng.next_u64() == shared_rng.next_u64(), "采样后随机流位置一致");
+        c.check(ptr::eq(global_event_distribution(), global_event_distribution()), "事件分布实例复用");
+        c.finish()
+    }
 
     /// 缺文件兜底：手写构造路径 merge 后必须是生产值 12288 / 1.4，不是代码缺省 10240 / 2.0。
     ///
