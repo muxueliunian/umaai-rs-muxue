@@ -526,8 +526,6 @@ where
     {
         let num_actions = actions.len();
         let record = self.config.record_ordered_rollouts;
-        let mut collected: Vec<CandidateAccum<T::Stats>> =
-            (0..num_actions).map(|_| CandidateAccum::<T::Stats>::new(record)).collect();
         ensure!(
             self.config.search_group_size > 0,
             "search_group_size 不能为 0（UCB 分配会死循环）"
@@ -543,7 +541,7 @@ where
         //
         // 种子偏移必须用计划次数而非 `ActionResult::count()`：后者会因 rollout 失败
         // 而少计，导致同一 rollout 序号在不同候选上错位，破坏配对。
-        let mut planned = vec![0usize; num_actions];
+        let mut planned = vec![group_size; num_actions];
 
         // 第一阶段：每个动作先搜一组（并行）
         let run_initial = |action: &G::Action| -> Result<CandidateAccum<T::Stats>> {
@@ -551,17 +549,11 @@ where
             self.simulate_many(game, action, group_size, seeds, 0, &mut acc, rollout)?;
             Ok(acc)
         };
-        let initial: Vec<CandidateAccum<T::Stats>> = if use_parallel {
+        let mut collected: Vec<CandidateAccum<T::Stats>> = if use_parallel {
             actions.par_iter().map(run_initial).collect::<Result<Vec<_>>>()?
         } else {
             actions.iter().map(run_initial).collect::<Result<Vec<_>>>()?
         };
-
-        // 合并初始结果（告警统一到函数末尾，避免首组被日志打两遍）
-        for (i, acc) in initial.into_iter().enumerate() {
-            collected[i] = acc;
-            planned[i] = group_size;
-        }
 
         let mut total_n = (group_size * num_actions) as f64;
 

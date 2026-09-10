@@ -2,6 +2,75 @@
 
 > 记录"对手写逻辑 / MCTS 性能分析"系列试验的工具选择准则、最终结论与复现命令，便于以后重测与演进。
 
+## 本机 Windows 构建与测量（2026-09-10）
+
+workspace 的 Release 配置为 `opt-level = 3`、`codegen-units = 1`、`lto = "thin"`，保留 `debug = true`。`.cargo/config.toml` 为 `x86_64-pc-windows-msvc` 启用 `target-cpu=native`，同时保留 8 MiB 栈设置。该 CPU 选项覆盖此目标的所有构建配置，包括 Debug 和测试；生成的程序以本机运行为目标，跨机器分发前需重新确定 CPU 基线。ThinLTO 和单 codegen unit 会增加编译成本。
+
+`bench_base` 按游戏配置初始化 Rayon 线程池，通过 `SearchConfig::new_game_config` 继承搜索参数，再应用基准自己的搜索预算、UCB、激进系数等覆盖项；MCTS 启动输出包含线程数、分组大小和预期标准差。基准仍收集内存中的决策记录，`--log` 只控制逐局决策 CSV 落盘。
+
+### 第一轮：编译配置
+
+本轮使用 Rust 1.98.1 / LLVM 22.1.8，基线为 `opt-level = 'z'`、`codegen-units = 16`、`lto = false`、默认 CPU 目标；双方都包含上述基准参数修正，模拟公式相同。
+
+| 测量 | 基线 | 优化后 | 耗时变化 |
+|---|---:|---:|---:|
+| 手写策略整局，三轮均时的中位数 | 2.302 ms/局 | 1.762 ms/局 | -23.5% |
+| MCTS 小预算整局，7 局均时 | 14.067 s/局 | 11.198 s/局 | -20.4% |
+
+- 手写策略：7 个 build × 100 局，基础种子 `61444`；相同的 700 局交替运行三轮，双方各执行 2100 局。
+- MCTS：7 个 build 各 1 局，基础种子 `61444`；16 线程，`search_n=64`，阶段 `train,ramen`，`ucb=true`，`selection=score`，`radical_factor_max=1.4`，`group_size=512`，`expected_stdev=15000`。这是一次小预算对照；预算小于分组大小，首组后即停止，不覆盖 UCB 追加分配，也不能代表实际 `4096` 预算的收益。
+- 两组测量的结果 CSV 排除 `elapsed_ms` 后，所有字段逐项一致。耗时是本机本轮观测，不是跨机器性能承诺。
+- SIMD 实验：训练公式的掩码原型在独立小程序中出现打包浮点指令，但实际库构建未重现稳定收益，因此未保留源码改写。上表收益来自编译配置组合，不能归因于手写 SSE/AVX。
+
+从 workspace 根目录复测优化版本：
+
+```powershell
+cargo build --release --locked -p umasim --no-default-features --bin bench_base
+.\target\release\bench_base.exe --trainer handwritten --runs 100 --seed 61444 --out logs/perf-handwritten
+.\target\release\bench_base.exe --trainer mcts --runs 1 --seed 61444 --search-n 64 --search-stages train,ramen --search-ucb true --radical-factor 1.4 --out logs/perf-mcts
+```
+
+本轮本地证据保存在 `target/perf-results/final-matrix.csv`、`target/perf-results/mcts-baseline-initial/bench_base_results.csv` 和 `target/perf-results/mcts-final/bench_base_results.csv`；这些是构建目录中的临时产物。
+
+验证通过：`umaai` Release 构建，以及以下 5 个既有 Release 单元测试（`cargo test --release --locked -p umasim --no-default-features --lib <测试名>`）：
+
+- `test_train_eval_deterministic_and_cached_consistent`
+- `test_ramen_root_search_reproducible`
+- `test_search_ucb_reproducible`
+- `test_ramen_combined_action_full_game_smoke`
+- `test_new_game_config_follows_crn_stage_reseed`
+
+### 第二轮：减少模拟与搜索分配
+
+本轮保持第一轮编译配置，修改以下源码路径：
+
+- 评分分解项的名称使用 `&'static str`，复用已有字面量，保留分解项、分数和说明文本。
+- `reset_distribution` 清空五个训练位并保留内层 Vec 容量；`hint_special` 直接借用人头分布，移除深拷贝。
+- 支援卡 type 20 的六项计数使用栈数组；当前基准卡组均为 type 1，此项不贡献下表收益。
+- UCB 首组直接使用实际搜索结果，删除随后被覆盖的空累加器；加权均值的直方图扫描至最高已记录分数对应的桶，保持原累加顺序。
+
+以下对照的基线是**第一轮优化后的版本**，使用同一工具链重新配对测量：
+
+| 测量 | 第一轮版本 | 第二轮版本 | 额外耗时变化 |
+|---|---:|---:|---:|
+| 手写整局，三轮均时的中位数 | 1.814 ms/局 | 1.495 ms/局 | -17.6% |
+| MCTS 小预算整局，7 局均时 | 10.657 s/局 | 7.704 s/局 | -27.7% |
+| 第 60 回合训练根，N=4096，三轮中位数 | 474.594 ms | 271.680 ms | -42.8% |
+
+手写策略沿用 7 build × 100 局、基础种子 `61444`，同一批 700 局交替测三轮；结果 CSV 排除耗时后全部一致。MCTS 整局沿用第一轮的 N=64 参数并加 `--log`，7 个逐局决策日志及结果文件共 8 个 CSV，排除 `elapsed_ms` / `elapsed_us` 后全部一致；该项仍不覆盖 UCB 追加分配。
+
+N=4096 专项使用手写策略正常推进得到的 speed build 第 60 回合 Train 根，固定局面和搜索种子 `61444`，16 线程、group=512、激进系数上限 1.4、搜索到终局。7 个候选从首组共 3584 次追加到 10752 次，其中一个候选达到 4096 次；三轮交替对照的候选次数、两轴均值/标准差/加权均值位模式及终局统计完全一致。该数字仅代表这一后段训练根，不代表完整 N=4096 育成或前期局面。
+
+验证通过：13 项针对性 Release 测试，包括新增的分布重置/容量复用和双峰加权均值检查，以及 Hint、训练评分、友人评分、rollout 决策一致性、UCB 预算/失败槽/可复现性检查；`umaai` Release 构建通过。
+
+本地测量记录：`target/perf-results/round2-matrix.csv`、`round2-mcts.csv`、`round2-root.csv`。专项探针与同源构建脚本为该目录下的 `round2_root_probe.rs`、`build_round2_root_probe.ps1`；测试命令集合为 `check-round2.ps1`。这些均是本轮保留在构建目录中的临时诊断文件。专项复测：
+
+```powershell
+cargo build --release --locked -p umasim --no-default-features --lib --target-dir target/perf-thin1
+.\target\perf-results\build_round2_root_probe.ps1 -Deps target/perf-thin1/release/deps -OutputDir target/perf-round2-candidate/release
+.\target\perf-round2-candidate\release\root_probe.exe 3
+```
+
 ## 1. 背景
 
 项目当前三类 CPU 性能 / 延迟分析工具（覆盖全栈 vs 按段 vs 全局三层视角）：

@@ -219,16 +219,16 @@ impl RamenPolicyConfig {
 pub struct RamenPolicyOutput {
     /// 综合得分（越大越优）
     pub score: f32,
-    /// 评分分解（调参用，进入决策日志 score_breakdown 列）
-    pub breakdown: Vec<(String, f32)>,
+    /// 评分分解；固定名称借用静态字符串，避免每次评分分配名称。
+    pub breakdown: Vec<(&'static str, f32)>,
     /// 决策原因（人类可读，调试用）
     pub reason: String
 }
 
 impl RamenPolicyOutput {
     /// 追加一个分解项
-    pub fn add(&mut self, key: &str, value: f32) {
-        self.breakdown.push((key.to_string(), value));
+    pub fn add(&mut self, key: &'static str, value: f32) {
+        self.breakdown.push((key, value));
     }
 }
 
@@ -1973,7 +1973,7 @@ mod tests {
             Ok(out
                 .breakdown
                 .iter()
-                .find(|(k, _)| k == "attr")
+                .find(|(k, _)| *k == "attr")
                 .map(|(_, v)| *v)
                 .unwrap_or(0.0))
         };

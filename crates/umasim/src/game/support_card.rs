@@ -285,7 +285,7 @@ impl SupportCard {
             20 => {
                 // 巨匠: 羁绊>80时根据卡组决定加成
                 if self.friendship >= param[2] {
-                    let mut card_type_count = vec![0, 0, 0, 0, 0, 0];
+                    let mut card_type_count = [0; 6];
                     for c in game.deck() {
                         if c.card_type >= 5 {
                             card_type_count[5] += 1;

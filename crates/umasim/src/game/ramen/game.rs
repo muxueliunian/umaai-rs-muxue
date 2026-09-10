@@ -766,9 +766,7 @@ impl Game for RamenGame {
         }
         // hint_special：强制设置 at_trains 训练位置所有支援卡的 is_hint
         if hint_special_active && !special_trains.is_empty() {
-            // 复制 distribution 以避免借用冲突
-            let distribution: Vec<Vec<i32>> = self.distribution.clone();
-            for (train_idx, has_person) in distribution.iter().enumerate() {
+            for (train_idx, has_person) in self.base.distribution.iter().enumerate() {
                 if !special_trains.contains(&(train_idx as i32)) {
                     continue;
                 }

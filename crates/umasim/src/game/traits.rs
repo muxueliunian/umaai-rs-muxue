@@ -201,9 +201,10 @@ pub trait Game: Clone {
     fn explain_distribution(&self) -> Result<String>;
     /// 重置分布和叹号
     fn reset_distribution(&mut self) {
-        self.distribution_mut().clear();
-        for _ in 0..5 {
-            self.distribution_mut().push(vec![]);
+        let distribution = self.distribution_mut();
+        distribution.resize_with(5, Vec::new);
+        for train in distribution {
+            train.clear();
         }
         for p in self.persons_mut() {
             p.set_hint(false);
@@ -614,6 +615,40 @@ mod tests {
     use rand_distr::weighted::WeightedIndex;
 
     use crate::utils::Checks;
+
+    /// 初始化或清空五个训练位，并保留已分配的容量、清除人头 Hint。
+    #[test]
+    fn test_reset_distribution_reuses_capacity() -> Result<()> {
+        use std::env::set_current_dir;
+
+        use crate::{
+            game::{BasePerson, ramen::RamenGame},
+            utils::get_workspace_root,
+        };
+
+        set_current_dir(get_workspace_root()?)?;
+        let mut game = RamenGame::default();
+        let mut checks = Checks::new();
+        game.reset_distribution();
+        checks.check(game.distribution().len() == 5, "初始化五个训练位");
+
+        for train in game.distribution_mut() {
+            train.extend([0, 0, 0]);
+        }
+        game.persons.push(BasePerson { is_hint: true, ..Default::default() });
+        let capacities: Vec<_> = game.distribution().iter().map(Vec::capacity).collect();
+        game.reset_distribution();
+        checks.check(
+            game.distribution().len() == 5 && game.distribution().iter().all(Vec::is_empty),
+            "重置后五个训练位均为空",
+        );
+        checks.check(
+            game.distribution().iter().map(Vec::capacity).eq(capacities),
+            "重置保留各训练位容量",
+        );
+        checks.check(!game.persons[0].is_hint, "重置清除人头 Hint");
+        checks.finish()
+    }
 
     /// 零分配分桶采样与 rand 整数 `WeightedIndex` 逐位等价
     ///

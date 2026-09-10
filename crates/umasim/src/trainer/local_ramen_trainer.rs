@@ -701,7 +701,7 @@ impl LocalRamenTrainer {
     ///
     /// 事件本体按当前体力/干劲裁掉溢出，第三段两个选项也在这里实时比较；万能材料固定按
     /// 2 个来源计价，即使当前计数已满也不把外出禁掉。跨年稀缺性只由累计配额控制。
-    fn dynamic_friend_outing_value(&self, g: &RamenGame) -> Result<(f32, Vec<(String, f32)>, String)> {
+    fn dynamic_friend_outing_value(&self, g: &RamenGame) -> Result<(f32, Vec<(&'static str, f32)>, String)> {
         let used = g.friend.out_used.iter().filter(|&&x| x).count();
         if used >= 5 {
             return Ok((f32::NEG_INFINITY, vec![], "友人外出已完成".to_string()));
@@ -764,13 +764,13 @@ impl LocalRamenTrainer {
         Ok((
             total,
             vec![
-                ("outing_base".to_string(), base),
-                ("friend_event_dynamic".to_string(), event_value),
-                ("friend_material_required".to_string(), material),
-                ("friend_chain_dynamic".to_string(), chain),
-                ("friend_hidden_starve".to_string(), starve),
-                ("friend_hidden_future".to_string(), supply),
-                ("friend_proactive".to_string(), proactive),
+                ("outing_base", base),
+                ("friend_event_dynamic", event_value),
+                ("friend_material_required", material),
+                ("friend_chain_dynamic", chain),
+                ("friend_hidden_starve", starve),
+                ("friend_hidden_future", supply),
+                ("friend_proactive", proactive),
             ],
             format!(
                 "友人外出#{} 选项{} 动态事件{:.0} 材料+2(库存{}也不禁用) 饥饿+{:.0} 未来+{:.0} 主动+{:.0}",
@@ -1315,7 +1315,7 @@ impl LocalRamenTrainer {
             let fail_adj = out
                 .breakdown
                 .iter()
-                .find(|(k, _)| k == "fail_adj")
+                .find(|(k, _)| *k == "fail_adj")
                 .map(|(_, v)| *v)
                 .unwrap_or(0.0);
             let gross = out.score - fail_adj;
@@ -2216,7 +2216,7 @@ mod tests {
                 let c = o
                     .breakdown
                     .iter()
-                    .find(|(k, _)| k == "ramen_train_coupling")
+                    .find(|(k, _)| *k == "ramen_train_coupling")
                     .map(|(_, v)| *v)
                     .unwrap_or(0.0);
                 if t as usize == 0 {
@@ -2271,7 +2271,7 @@ mod tests {
         let (total0, bd0, _) = trainer.dynamic_friend_outing_value(&game)?;
         let starve0 = bd0
             .iter()
-            .find(|(k, _)| k == "friend_hidden_starve")
+            .find(|(k, _)| *k == "friend_hidden_starve")
             .map(|(_, v)| *v)
             .unwrap_or(0.0);
         println!("special=0 turn=30: starve={starve0} total={total0:.0}");
@@ -2282,7 +2282,7 @@ mod tests {
         let (total1, bd1, _) = trainer.dynamic_friend_outing_value(&game)?;
         let starve1 = bd1
             .iter()
-            .find(|(k, _)| k == "friend_hidden_starve")
+            .find(|(k, _)| *k == "friend_hidden_starve")
             .map(|(_, v)| *v)
             .unwrap_or(0.0);
         println!("special=2 turn=23: starve={starve1} total={total1:.0}");
@@ -2431,7 +2431,7 @@ mod tests {
                 let g = o
                     .breakdown
                     .iter()
-                    .find(|(k, _)| k == "eat_guarantee")
+                    .find(|(k, _)| *k == "eat_guarantee")
                     .map(|(_, v)| *v)
                     .unwrap_or(0.0);
                 guarantee = guarantee.max(g);
@@ -2510,7 +2510,7 @@ mod tests {
         let (_, bd1, _) = trainer.dynamic_friend_outing_value(&game)?;
         let supply1 = bd1
             .iter()
-            .find(|(k, _)| k == "friend_hidden_future")
+            .find(|(k, _)| *k == "friend_hidden_future")
             .map(|(_, v)| *v)
             .unwrap_or(0.0);
         println!("turn=30 special=0 used=0: friend_hidden_future={supply1}");
@@ -2522,7 +2522,7 @@ mod tests {
         let (_, bd2, _) = trainer.dynamic_friend_outing_value(&game)?;
         let supply2 = bd2
             .iter()
-            .find(|(k, _)| k == "friend_hidden_future")
+            .find(|(k, _)| *k == "friend_hidden_future")
             .map(|(_, v)| *v)
             .unwrap_or(0.0);
         println!("turn=55 special=2 used=3: friend_hidden_future={supply2}");
@@ -2580,7 +2580,7 @@ mod tests {
                     return Ok(o
                         .breakdown
                         .iter()
-                        .find(|(k, _)| k == "attr")
+                        .find(|(k, _)| *k == "attr")
                         .map(|(_, v)| *v)
                         .unwrap_or(0.0));
                 }
@@ -2676,8 +2676,8 @@ mod tests {
         let (_, outs_on) = on.decide_train(&preview, &actions)?;
         for (act, (o_off, o_on)) in actions.iter().zip(outs_off.iter().zip(outs_on.iter())) {
             if let Operation::Train(TrainingType::Wisdom) = act.operation {
-                let bonus_off = o_off.breakdown.iter().find(|(k, _)| k == "ramen_weak_train_boost").map(|(_, v)| *v).unwrap_or(0.0);
-                let bonus_on = o_on.breakdown.iter().find(|(k, _)| k == "ramen_weak_train_boost").map(|(_, v)| *v).unwrap_or(0.0);
+                let bonus_off = o_off.breakdown.iter().find(|(k, _)| *k == "ramen_weak_train_boost").map(|(_, v)| *v).unwrap_or(0.0);
+                let bonus_on = o_on.breakdown.iter().find(|(k, _)| *k == "ramen_weak_train_boost").map(|(_, v)| *v).unwrap_or(0.0);
                 let score_diff = o_on.score - o_off.score;
                 println!("智训练: off_score={:.1} on_score={:.1} diff={:.1} weakboost_off={:.1} weakboost_on={:.1}",
                     o_off.score, o_on.score, score_diff, bonus_off, bonus_on);
@@ -2696,7 +2696,7 @@ mod tests {
         let (_, outs_no_eat) = on.decide_train(&no_eat, &actions)?;
         for (act, o) in actions.iter().zip(outs_no_eat.iter()) {
             if let Operation::Train(TrainingType::Wisdom) = act.operation {
-                let bonus = o.breakdown.iter().find(|(k, _)| k == "ramen_weak_train_boost").map(|(_, v)| *v).unwrap_or(0.0);
+                let bonus = o.breakdown.iter().find(|(k, _)| *k == "ramen_weak_train_boost").map(|(_, v)| *v).unwrap_or(0.0);
                 println!("不吃面时智训练 weakboost: {bonus}");
                 if bonus != 0.0 {
                     panic!("不吃面时不应有 ramen_weak_train_boost: {bonus}");
