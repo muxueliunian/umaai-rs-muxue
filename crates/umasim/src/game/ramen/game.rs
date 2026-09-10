@@ -738,13 +738,6 @@ impl Game for RamenGame {
     fn distribute_hint(&mut self, rng: &mut impl Rng) -> Result<()> {
         let base_hint_rate = global!(GAMECONSTANTS).base_hint_rate / 100.0;
         let hint_bonus_pct = self.calc_hint_bonus_pct() as f64;
-        // 人头下标 ≠ 卡组下标：预抽 (card_id, hint 概率加成)，循环内按 card_id 反查。
-        // 这里不能调 deck_index_of——它借 &self，与 persons_mut() 冲突。
-        let hint_probs: Vec<(u32, i32)> = self
-            .deck()
-            .iter()
-            .map(|card| (card.card_id, card.card_value().hint_prob_increase))
-            .collect();
         // hint_special 生效时，位于 at_trains 训练位置的所有支援卡 (PersonType::Card) is_hint 都强制为 true
         // 生效条件：当前回合吃了面 + ramen_basic_effect[year].hint_special == true + 支援卡种类>=4
         let hint_special_active = self.calc_hint_special_active();
@@ -753,12 +746,14 @@ impl Game for RamenGame {
         } else {
             Default::default()
         };
-        for person in self.persons_mut() {
+        // 人头下标 ≠ 卡组下标，按 card_id 查找 Hint 概率加成。
+        let deck = &self.base.deck;
+        for person in &mut self.persons {
             if person.person_type() == PersonType::Card {
                 let bonus = person
                     .card_id()
-                    .and_then(|cid| hint_probs.iter().find(|(id, _)| *id == cid))
-                    .map_or(0, |(_, bonus)| *bonus);
+                    .and_then(|cid| deck.iter().find(|card| card.card_id == cid))
+                    .map_or(0, |card| card.card_value().hint_prob_increase);
                 let card_bonus = (100 + bonus) as f64 / 100.0;
                 let hint_prob = base_hint_rate * card_bonus * (1.0 + hint_bonus_pct / 100.0);
                 person.set_hint(rng.random_bool(hint_prob));

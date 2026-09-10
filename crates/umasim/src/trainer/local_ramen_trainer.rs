@@ -383,6 +383,12 @@ impl Default for LocalRamenConfig {
         }
     }
 }
+/// 一次训练预演的局面与选中动作，供覆盖检查和体力评估共同使用。
+struct TrainPreview {
+    game: RamenGame,
+    operation: Operation,
+}
+
 pub struct LocalRamenTrainer {
     policy: RamenPolicy,
     config: LocalRamenConfig,
@@ -903,11 +909,10 @@ impl LocalRamenTrainer {
                 .flatten()
                 .copied()
                 .filter(|&x| x >= 0 && (x as usize) < g.persons().len())
-                .map(|x| x as usize)
-                .collect::<Vec<_>>();
+                .map(|x| x as usize);
             let hn = people
-                .iter()
-                .filter(|&&i| g.persons()[i].hint() && matches!(g.persons()[i].person_type(), PersonType::Card))
+                .clone()
+                .filter(|&i| g.persons()[i].hint() && matches!(g.persons()[i].person_type(), PersonType::Card))
                 .count();
             let all_hint = g.is_hint_special_active_for_train(tr);
             let hp = if self.config.probabilistic_hint && hn > 0 && !all_hint {
@@ -1117,43 +1122,31 @@ impl LocalRamenTrainer {
         };
         Ok((checkpoint, rmj, great))
     }
-    /// 在不吃面的当前状态下返回真正会执行的基础动作。
-    /// 用于在 RamenSelect 前决定本回合究竟是训练，还是应先休息/外出/治病/比赛。
-    fn pre_eat_action(&self, g: &RamenGame) -> Result<Operation> {
+    /// 在指定吃面状态下预演一次训练决策，不落地随机分身或消费真实随机流。
+    fn preview_train(&self, g: &RamenGame, ramen: Option<usize>) -> Result<TrainPreview> {
         let mut preview = g.clone();
         preview.stage = RamenStage::Train;
-        preview.ramen.current_ramen = None;
+        preview.ramen.current_ramen = ramen;
         preview.ramen.clear_pending();
         let actions = preview.list_actions()?;
         let (idx, _) = self.decide_train(&preview, &actions)?;
-        actions
+        let operation = actions
             .get(idx)
             .map(|a| a.operation)
-            .ok_or_else(|| anyhow::anyhow!("吃面前训练决策索引越界: {idx}/{}", actions.len()))
+            .ok_or_else(|| anyhow::anyhow!("预演训练决策索引越界: {idx}/{}", actions.len()))?;
+        Ok(TrainPreview { game: preview, operation })
     }
 
     /// "吃面后必训练 at_trains 覆盖位" 门控：该面落地后，最优训练位是否落在面的 at_trains 内
     ///
-    /// 实现：clone 当前状态，设 `current_ramen = Some(region_id)`（等价吃面已落地，coupling /
-    /// 弱位偏好等吃面后加分正常参与），跑完整 `decide_train`——若最优动作不是 `Train(_)`
-    /// （体力崩 → 休息等，`eat_requires_training` 已挡在 RamenSelect 前，此处防御）或训练位
-    /// 不在该面 `at_trains` 内，返回 `false`（调用方将该吃面候选降为 `NEG_INFINITY`）。
-    ///
-    /// 注意：与 `post_ramen_vital_transition` 的预演同一模式（`current_ramen` + `clear_pending`），
-    /// 不落地随机分身（分身属策略流，预演不消费真实随机）。
-    fn eat_covered_train_passes(&self, g: &RamenGame, region_id: usize) -> Result<bool> {
+    /// 与体力评估复用同一次预演；非训练动作或未覆盖的训练位返回 `false`。
+    fn eat_covered_train_passes(&self, preview: &TrainPreview, region_id: usize) -> Result<bool> {
         let region = RAMENDATA
             .get()
             .and_then(|d| d.ramen_region_effect.get(region_id))
             .ok_or_else(|| anyhow::anyhow!("地区效果缺失: {region_id}"))?;
-        let mut preview = g.clone();
-        preview.stage = RamenStage::Train;
-        preview.ramen.current_ramen = Some(region_id);
-        preview.ramen.clear_pending();
-        let actions = preview.list_actions()?;
-        let (idx, _) = self.decide_train(&preview, &actions)?;
-        match actions.get(idx).map(|a| a.operation) {
-            Some(Operation::Train(tt)) => {
+        match preview.operation {
+            Operation::Train(tt) => {
                 let covered = region.at_trains.contains(&(tt as i32));
                 if !covered {
                     crate::diag!(
@@ -1168,10 +1161,6 @@ impl LocalRamenTrainer {
         }
     }
 
-    /// 预演第三年某碗面落地后的最佳训练，返回 `(训练类型, 训练前体力, 训练后体力)`。
-    ///
-    /// 训练前体力回答“本回合是否应先恢复”，训练后体力回答“下一回合是否会崩盘”。
-    /// 不落地随机分身，只使用当前可知面板与确定性拉面效果。
     /// 第三年本回合训练后，低体力是否还会伤害下一次普通训练。
     ///
     /// turn=70 后紧接 turn=71 有马纪念（赛后 +40），再进入 turn=72 超级拉面（回合开始 +20），
@@ -1180,27 +1169,20 @@ impl LocalRamenTrainer {
         !self.config.y3_recovery_horizon || g.turn() < 70
     }
 
-    fn post_ramen_vital_transition(&self, g: &RamenGame, region_id: usize) -> Result<Option<(usize, i32, i32)>> {
+    /// 从已有预演计算训练前后体力，返回 `(训练类型, 训练前体力, 训练后体力)`。
+    fn post_ramen_vital_transition(&self, preview: &TrainPreview) -> Result<Option<(usize, i32, i32)>> {
+        let g = &preview.game;
         // 每年吃面决策都评估吃面后的体力（turn>=72 超级拉面回合不吃面，防御性返回 None）
         if g.turn() >= 72 {
             return Ok(None);
         }
-        let mut preview = g.clone();
-        preview.stage = RamenStage::Train;
-        preview.ramen.current_ramen = Some(region_id);
-        preview.ramen.clear_pending();
-        let actions = preview.list_actions()?;
-        let (idx, _) = self.decide_train(&preview, &actions)?;
-        let Some(action) = actions.get(idx) else {
-            anyhow::bail!("吃面后预演索引越界: {idx}/{}", actions.len());
-        };
-        let Operation::Train(tt) = action.operation else {
+        let Operation::Train(tt) = preview.operation else {
             return Ok(None);
         };
         let train = tt as usize;
-        let buffs = preview.calc_training_buff(train)?;
-        let value = preview.calc_training_value(&buffs, train)?;
-        let before = preview.uma.vital;
+        let buffs = g.calc_training_buff(train)?;
+        let value = g.calc_training_value(&buffs, train)?;
+        let before = g.uma.vital;
         Ok(Some((train, before, before + value.vital)))
     }
 
@@ -1454,7 +1436,7 @@ impl LocalRamenTrainer {
 
     fn decide_ramen(&self, g: &RamenGame, a: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         let (_, mut out) = self.policy.decide_ramen(g, a)?;
-        let pre_action = self.pre_eat_action(g)?;
+        let pre_action = self.preview_train(g, None)?.operation;
         let year = (g.current_year() - 1) as usize;
         let eat_post = g.ramen.scenario_pt + calc_ramen_pt_gain(year, g.ramen.eat_count)?;
         let deadline_exception = self.deadline_urgency(g, eat_post)? > 0.0
@@ -1502,17 +1484,18 @@ impl LocalRamenTrainer {
         };
         for (act, o) in a.iter().zip(out.iter_mut()) {
             if let Some(region_id) = act.ramen {
+                let preview = self.preview_train(g, Some(region_id))?;
                 // 吃面后必训练 at_trains 覆盖位（C 方案简化约束）：预演该面落地后的最优训练位，
                 // 若不在 at_trains 内则否决（吃面加成浪费——玩家 87% 覆盖 vs 自动 52%）。
                 if self.config.eat_requires_covered_train
-                    && !self.eat_covered_train_passes(g, region_id)?
+                    && !self.eat_covered_train_passes(&preview, region_id)?
                 {
                     o.score = f32::NEG_INFINITY;
                     o.reason = "禁止吃面：吃完后最优训练位不在该面 at_trains 内".to_string();
                     o.add("eat_covered_train_gate", f32::NEG_INFINITY);
                     continue;
                 }
-                if let Some((train, pre_vital, post_vital)) = self.post_ramen_vital_transition(g, region_id)? {
+                if let Some((train, pre_vital, post_vital)) = self.post_ramen_vital_transition(&preview)? {
                     if train != 4
                         && self.config.y3_post_train_hard_floor > 0
                         && post_vital < self.config.y3_post_train_hard_floor
@@ -2300,6 +2283,7 @@ mod tests {
     /// 1. 该面落地后最优训练位在 at_trains 内 → `eat_covered_train_passes` 通过 → 吃面候选保留
     /// 2. 最优训练位不在该面 at_trains 内 → 门控拒绝（吃面加成将浪费）
     /// 3. 门控关闭（preset 默认开）且构造同一局面时，吃面候选不会被否决
+    /// 4. 同一预演提供选中训练的体力变化，覆盖与体力评估均不改变原局面
     #[test]
     #[allow(clippy::panic)]
     fn eat_covered_train_gate_blocks_mismatched_ramen() -> Result<()> {
@@ -2309,7 +2293,7 @@ mod tests {
                 ramen::{Operation, RamenAction, RamenGame, RamenStage, action::list_ramen_select_actions}
             },
             gamedata::init_global,
-            utils::{get_workspace_root, init_test_logger}
+            utils::{Checks, get_workspace_root, init_test_logger}
         };
 
         let workspace_root = get_workspace_root()?;
@@ -2346,7 +2330,8 @@ mod tests {
         // 「满」一律从实际上限取，不写字面量：上限 = 剧本基值 + 继承，会随剧本数据与
         // 蓝因子变化，写死数字会让夹具在上限变动后静默失去「满」的语义。
         game.uma.five_status = [600, 1000, 1000, 1000, game.uma.five_status_limit[4]];
-        let pass_rid4 = on.eat_covered_train_passes(&game, 4)?;
+        let preview = on.preview_train(&game, Some(4))?;
+        let pass_rid4 = on.eat_covered_train_passes(&preview, 4)?;
         println!("局面A(智满): 智面通过={pass_rid4}");
         if pass_rid4 {
             panic!("智已满且最优训练非智时，智面 (id 4) 应被 eat_covered_train_passes 拒绝");
@@ -2356,6 +2341,7 @@ mod tests {
         // 打印落地面后的候选分布确认最优位
         game.uma.five_status = game.uma.five_status_limit;
         game.uma.five_status[4] = 600;
+        let original = game.clone();
         {
             let mut preview = game.clone();
             preview.stage = RamenStage::Train;
@@ -2365,8 +2351,17 @@ mod tests {
             let (idx, outs) = on.decide_train(&preview, &acts)?;
             println!("局面B 智面落地最优: {:?} score={:.1}", acts[idx].operation, outs[idx].score);
         }
-        let pass_rid4_b = on.eat_covered_train_passes(&game, 4)?;
-        let pass_rid0_b = on.eat_covered_train_passes(&game, 0)?;
+        let preview = on.preview_train(&game, Some(4))?;
+        let pass_rid4_b = on.eat_covered_train_passes(&preview, 4)?;
+        let vital = on.post_ramen_vital_transition(&preview)?;
+        println!("局面B 智面预演体力: {vital:?}");
+        let mut checks = Checks::new();
+        checks.check(
+            matches!(vital, Some((4, before, after)) if before == original.uma.vital && after > before),
+            "智面覆盖与体力评估使用同一智力训练，训练前体力来自原局面且训练后恢复"
+        );
+        let preview = on.preview_train(&game, Some(0))?;
+        let pass_rid0_b = on.eat_covered_train_passes(&preview, 0)?;
         println!("局面B(智低): 智面通过={pass_rid4_b} 速面通过={pass_rid0_b}");
         if !pass_rid4_b {
             panic!("其他位全满、只剩智位有空间时，覆盖智位的面 (id 4) 应通过门控");
@@ -2374,7 +2369,8 @@ mod tests {
         if pass_rid0_b {
             panic!("其他位全满、最优训练为智时，不覆盖智位的面 (id 0 速) 应被门控拒绝");
         }
-        Ok(())
+        checks.check(game == original, "覆盖与体力预演不改变原局面");
+        checks.finish()
     }
 
     /// 吃面必成价值：本回合基础动作是训练且失败率>0 时，吃面候选应计入
@@ -2421,7 +2417,7 @@ mod tests {
         game.ramen.feeling_stock = [2, 2, 2]; // 库存充足，确保候选面可做
 
         let actions = list_ramen_select_actions(&game.ramen, &game.ramen.selected_regions);
-        let pre = trainer.pre_eat_action(&game)?;
+        let pre = trainer.preview_train(&game, None)?.operation;
         let (_, outs) = trainer.decide_ramen(&game, &actions)?;
         let mut guarantee = 0.0f32;
         let mut has_eat = false;
