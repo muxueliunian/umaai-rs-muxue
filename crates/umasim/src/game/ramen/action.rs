@@ -752,7 +752,8 @@ impl RamenAction {
         let mut hint_persons = vec![];
         let mut friend_clicked = false;
 
-        for person_index in game.distribution[train].clone() {
+        for i in 0..game.distribution[train].len() {
+            let person_index = game.distribution[train][i];
             if person_index < 0 {
                 continue;
             }
@@ -1592,6 +1593,8 @@ mod tests {
         let mut game = RamenGame::newgame(102601, &deck, inherit)?;
         // 第 2 回合后（已有友人卡 + 5 个 NPC：persons[0..5]=支援卡, [6]=友人, [7..12]=NPC）
         game.add_friend_and_npcs()?;
+        game.base.turn = 30;
+        game.ramen.scenario_pt = 1000;
         game.ramen.selected_regions = [0, 6, 7];
         game.ramen.train_feeling_type = Some([
             FeelingType::A,
@@ -1601,7 +1604,8 @@ mod tests {
             FeelingType::B
         ]);
         game.stage = RamenStage::Train;
-        let _rng = StdRng::seed_from_u64(42);
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut checks = Checks::new();
         let action = RamenAction::new(Operation::Train(TrainingType::Speed));
         let base_dist = calc_gauge_base_distribution(&game.ramen.selected_regions);
         let gauge_limit = crate::game::ramen::rules::GAUGE_LIMIT;
@@ -1621,7 +1625,10 @@ mod tests {
             failure_rate: 0.0
         };
         game.ramen.feeling_slot = [0, 0, 0];
-        action.fill_feeling_gauge(&mut game, 0, &params, false)?;
+        let mut expected_uma = game.uma.clone();
+        expected_uma.add_value(&game.calc_training_value(&params.buffs, 0)?);
+        action.handle_train_success(&mut game, 0, &params, &mut rng)?;
+        checks.check(game.uma == expected_uma, "训练成功的马娘状态与完整公式结果一致");
         let gain = game.ramen.feeling_slot[0];
         let expect_bonus = 1 + 0 + 2 / 2; // 1 + 支援卡0 + floor(2/2)=1
         let expected_gain = base_dist[0] + expect_bonus;
@@ -1660,7 +1667,7 @@ mod tests {
             "4 个 NPC 时应按 floor(4/2)=2 计算（而非硬编码 5 个 NPC 的 floor(5/2)=2 恰好巧合相同）"
         );
 
-        Ok(())
+        checks.finish()
     }
 
     /// 回归：超级拉面分身必须包含友人卡，且分身同样受「每训练一个友人」约束

@@ -91,6 +91,36 @@ cargo build --release --locked -p umasim --no-default-features --lib --target-di
 
 本地证据为 `target/perf-results/round3-matrix.csv`、`round3-mcts.csv`、`round3-root.csv`，测试命令集合为 `check-round3.ps1`。整局复测使用前述 `bench_base` 命令；固定根复用第二轮的探针源码与构建脚本，第三轮两版可执行文件保存在 `target/perf-round3-base/release` 和 `target/perf-round3-candidate/release`。这些均为构建目录中的临时产物。
 
+### 第四轮：候选内部并行
+
+本轮以第三轮提交 `e78b499` 为基线，保持编译配置、搜索预算、种子和评分公式。均匀分配与 UCB 首组的候选内部使用现有 Rayon 线程池并行执行 rollout；全部 `Result` 按原序号收集，再串行累计统计。UCB 追加组复用同一段代码，失败项保留原槽位与种子偏移。
+
+另外，Hint 训练位置直接借用全局只读切片，训练后处理按原序读取人头分布，三个支援卡事件计数使用数组，减少临时 Vec。属性平衡倍率缓存、训练拉面效果缓存经过拆分对照后未显示稳定收益，均未保留。
+
+| 测量 | 第三轮版本 | 第四轮版本 | 额外耗时变化 |
+|---|---:|---:|---:|
+| 手写整局，三轮均时的中位数 | 1.285 ms/局 | 1.298 ms/局 | +1.0% |
+| MCTS 小预算整局，7 局均时 | 6.486 s/局 | 3.404 s/局 | -47.5% |
+| 第 32 回合训练根，N=4096，三轮中位数 | 1895.621 ms | 1699.294 ms | -10.4% |
+| 第 60 回合训练根，N=4096，三轮中位数 | 192.281 ms | 159.369 ms | -17.1% |
+
+手写策略沿用同一批 700 局交替运行三轮，本轮未观察到加速，所有结果字段除耗时外一致。MCTS 整局沿用前述 16 线程、N=64、基础种子 `61444` 和 `--log` 参数，8 个结果与决策 CSV 排除耗时后全部一致。N=64 在首组后停止，该收益不能外推为完整 N=4096 育成的收益。
+
+两个 N=4096 根均由手写策略正常推进得到，使用 speed build、固定局面和搜索种子 `61444`、group=512、激进系数上限 1.4，搜索到终局。第 32 回合有 9 个候选，从首组 4608 次追加到 24576 次；第 60 回合有 7 个候选，从 3584 次追加到 10752 次。双方各根交替运行三轮，候选次数、两轴浮点统计位模式、终局统计和最优动作全部一致；测量范围是这两个固定根。
+
+并行粒度调整作用于温泉与拉面的共享内核。代价是每批临时结果缓冲、更多同时存活的游戏副本，以及 NN 路径可能使用更多线程本地模型；复用现有线程池和配置。ONNX 路径完成线程边界静态审查，本轮未实测其性能或跨线程逐位一致性。
+
+验证通过：24 项针对性 Release 测试及 `umaai` Release 构建。增强的单候选测试覆盖均匀分配/UCB 在 1 与 4 线程下的失败槽、两轴统计和终局记录一致性；同时检查多候选 CRN 对齐、温泉种子/候选顺序、拉面决策与训练行为。
+
+本地证据为 `target/perf-results/round4-parallel-matrix.csv`、`round4-parallel-mcts.csv`、`round4-parallel-root.csv`，测试命令集合为 `check-round4-final.ps1`。固定根探针为同目录的 `round4_root_probe.rs`，复测命令如下；这些探针、脚本与测量记录均为构建目录中的临时产物。
+
+```powershell
+cargo build --release --locked -p umasim --no-default-features --lib --target-dir target/perf-thin1
+.\target\perf-results\build_round4_root_probe.ps1 -Deps target/perf-thin1/release/deps -OutputDir target/perf-round4-parallel/release
+.\target\perf-round4-parallel\release\root_matrix_probe.exe 3 32
+.\target\perf-round4-parallel\release\root_matrix_probe.exe 3 60
+```
+
 ## 1. 背景
 
 项目当前三类 CPU 性能 / 延迟分析工具（覆盖全栈 vs 按段 vs 全局三层视角）：

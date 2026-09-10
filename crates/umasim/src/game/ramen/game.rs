@@ -1130,14 +1130,14 @@ impl RamenGame {
     }
 
     /// 计算当前回合 hint_special 生效的训练位置集合（地区拉面 at_trains）
-    fn calc_hint_special_at_trains(&self) -> Vec<i32> {
+    fn calc_hint_special_at_trains(&self) -> &'static [i32] {
         let ramen_data = global!(RAMENDATA);
         if let Some(region_idx) = self.ramen.current_ramen {
             if let Some(region) = ramen_data.ramen_region_effect.get(region_idx) {
-                return region.at_trains.clone();
+                return &region.at_trains;
             }
         }
-        Vec::new()
+        &[]
     }
 
     /// 判断 hint_special 是否对指定 train 生效
@@ -3944,8 +3944,14 @@ struct AlwaysTrueRng;
 
         let at_trains = game.calc_hint_special_at_trains();
         println!("region 0 at_trains={:?}", at_trains);
+        let mut checks = Checks::default();
+        checks.check(at_trains == [0], "region 0 只包含速训练位置");
+        game.ramen.current_ramen = None;
+        checks.check(game.calc_hint_special_at_trains().is_empty(), "未吃面时训练位置集合为空");
+        game.ramen.current_ramen = Some(global!(RAMENDATA).ramen_region_effect.len());
+        checks.check(game.calc_hint_special_at_trains().is_empty(), "地区索引不存在时训练位置集合为空");
         println!("hint_special 仅在 at_trains 训练位置生效 ✓");
-        Ok(())
+        checks.finish()
     }
 
     /// 支援卡种类 < 4 时 hint_special 不应生效

@@ -244,10 +244,7 @@ impl BaseGame {
 
     pub fn generate_card_event(&self, person_index: i32, rng: &mut impl Rng) -> Option<EventData> {
         // 支援卡事件. 再精细一点模拟 后一段事件发生次数不能多于前一段事件
-        let card_event_times: Vec<_> = vec![8001, 8002, 8003]
-            .iter()
-            .map(|x| *self.events.get(x).unwrap_or(&0))
-            .collect();
+        let card_event_times = [8001, 8002, 8003].map(|id| *self.events.get(&id).unwrap_or(&0));
         let mut available_events = vec![];
         if card_event_times[0] < 5 {
             available_events.push(0);
