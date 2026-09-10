@@ -121,6 +121,75 @@ cargo build --release --locked -p umasim --no-default-features --lib --target-di
 .\target\perf-round4-parallel\release\root_matrix_probe.exe 3 60
 ```
 
+### 生产参数与 origin 的累计对照
+
+基线为测量开始时远端 `origin/master` 的 `b12f710`，当前版本为 `84d6b99`。双方使用 Rust 1.98.1 / LLVM 22.1.8，以各自的 Release 配置构建同源测量入口：基线为 `opt-level='z'`、`codegen-units=16`、无 LTO、默认等价的 `x86-64` CPU 目标；当前为 `opt-level=3`、`codegen-units=1`、ThinLTO、`target-cpu=native`。因此本节记录编译配置与四轮源码优化的累计效果。
+
+配置取自指定发布目录的 `game_config.toml`，叠加在该目录的 `gamedata/default_config.toml` 上；两份文件的副本保存在 `target/perf-results/production-config/`。实际参数为 32 线程、MCTS `search_n=4096`、`group_size=512`、UCB 开启、`cpuct=1`、`expected_stdev=15000`、激进系数上限 1.4、搜索到终局、CRN 开启，阶段 `train,ramen`，取分 `score`。马娘为 `102601`，蓝因子 `[15,0,0,0,3]`，额外属性 `[0,10,20,40,40,40]`。
+
+整局使用 `bench_config.toml` 的 7 种预设卡组，固定友人卡 `303054`、基础种子 `61444`，每种卡组双方各完整育成 1 局，共 14 局。双方在同一 workspace 工作目录中读取相同的游戏 JSON 数据；同一份临时入口分别链接两版 `umasim`，直接继承合并后的生产搜索配置，避免 `bench_base` 的参数覆盖影响本次测量。各卡组配对串行运行，交替先运行 origin 或当前版本。
+
+| 卡组 | origin 秒/局 | 当前秒/局 | 耗时变化 |
+|---|---:|---:|---:|
+| speed | 411.259 | 125.148 | -69.6% |
+| stamina | 350.424 | 103.525 | -70.5% |
+| power_wisdom | 386.235 | 120.043 | -68.9% |
+| speed_wisdom | 360.558 | 108.282 | -70.0% |
+| wisdom | 507.117 | 163.452 | -67.8% |
+| sta0_wis2 | 455.149 | 140.463 | -69.1% |
+| spd2_gut0 | 339.972 | 98.608 | -71.0% |
+| **7 局均值** | **401.530** | **122.789** | **-69.4%** |
+
+七局累计耗时为 2810.713 → 859.520 秒，速度约为基线的 **3.27 倍**。计时包含完整育成模拟及内存决策记录，排除启动初始化和 CSV 落盘；样本是固定预设卡组各一局，不是多种子统计，也不含真实账号数据接入、监听或 UI 链路。
+
+7 对结果 CSV 与 7 对决策 CSV 排除 `elapsed_ms` / `elapsed_us` 后，表头、行序和全部输出字段一致；每版共记录 1399 条决策。该结论限于 CSV 已输出内容：结果未包含 `GameOutcome.friend_all`，决策中的 mean / sd / pt 使用整数显示精度，不能据此断言整局所有内部状态或浮点统计逐位一致。
+
+另以相同生产参数测量手写策略正常推进得到的 speed 卡组第 32、60 回合 Train 根，双方每根交替执行三轮，取耗时中位数：
+
+| 固定根 | origin 毫秒 | 当前毫秒 | 耗时变化 | 候选数 / 首组样本 / 最终有效样本 |
+|---|---:|---:|---:|---|
+| 第 32 回合 | 4219.878 | 1300.655 | -69.2% | 9 / 4608 / 24576 |
+| 第 60 回合 | 568.967 | 169.922 | -70.1% | 7 / 3584 / 15360 |
+
+每根六次运行的候选次数、已输出的两轴浮点统计位模式、终局汇总和最优动作全部一致。`search_n=4096` 是任一候选计划次数达到该值的停止阈值，不要求所有候选各执行 4096 次。探针未记录逐 rollout 原始序列、失败槽或完整直方图；上述逐位一致结论仅覆盖已输出统计，性能数字仅代表这两个固定根。
+
+本地证据：`target/perf-results/production-games.csv`、`production-roots.csv`，以及各 `production-game-<卡组>-<版本>/` 目录中的结果与决策 CSV。`production-manifest.json` 记录提交、编译配置、输入和构建产物 SHA256；同源入口为 `production_bench.rs` / `production_root_probe.rs`，构建脚本为 `build-production-probes.ps1`，配对测量脚本为 `measure-production-games.ps1` / `measure-production-roots.ps1`。这些文件均为构建目录中的临时产物。
+
+保留上述产物时，可在 workspace 根目录复测单个卡组与固定根；整局输出应指定新目录，其余卡组通过 `--build` 选择，基线使用 `perf-production-origin` 下的同名程序。固定根命令每次独立启动并搜索一次；复现表中三轮中位数时，两版交替、各独立启动三次：
+
+```powershell
+.\target\perf-production-current\release\production_bench.exe --build speed --log --out logs/production-current-speed-rerun
+.\target\perf-production-current\release\production_root_probe.exe 1 32
+.\target\perf-production-current\release\production_root_probe.exe 1 60
+```
+
+### 第五轮：跳过 rollout 原因文本并减少重复分配
+
+本轮以第四轮提交 `84d6b99` 为基线，双方使用相同的 Release 配置、生产参数、数据和同源测量入口。整局验收选取上一节耗时最长的 `wisdom` 卡组，固定基础种子 `61444`，双方各完整育成一局。
+
+源码调整：
+
+- `RamenPolicy.collect_reason` 统一控制原因字符串生成和日志文本采集；普通实例默认开启，三种 trainer 的 `for_rollout()` 关闭。评分公式、数值 `breakdown`、正常决策日志和手写策略协议摘要保留。
+- 地区选择在单次决策内复用每个地区的评分，并读取已有卡片类型计数；组合内仍按原顺序累加。
+- 训练后事件成功处理后清空并还回队列，保留容量；随机事件四项概率使用数组，超级拉面训练范围借用全局只读切片。
+- 友人事件边计算边保留最优项，去掉临时评分 Vec；保持 `total_cmp` 和平局取首项的规则。
+
+| 测量 | 第四轮版本 | 第五轮版本 | 额外耗时变化 |
+|---|---:|---:|---:|
+| wisdom 完整育成 | 185.019 s | 123.107 s | -33.5% |
+| 第 32 回合训练根，三轮中位数 | 1398.366 ms | 913.620 ms | -34.7% |
+| 第 60 回合训练根，三轮中位数 | 201.083 ms | 152.259 ms | -24.3% |
+
+`wisdom` 完整育成速度约为基线的 **1.50 倍**，终局分数均为 `70876`。结果 CSV 与 200 条决策记录排除耗时字段后全部一致；计时范围和 CSV 显示精度边界同上一节。该结果是单卡组、单种子的本机配对测量。缩小验收范围前已完成的 `speed` 配对为 140.121 → 92.439 秒（-34.0%），结果与决策 CSV 同样一致。
+
+固定根沿用上一节的两个局面和生产参数。基线、仅减少重复计算/分配的中间候选、最终候选交替测量三轮，全部非耗时输出一致，包括候选次数、已输出的两轴浮点统计位模式、终局汇总和最优动作。中间候选的两个根中位数为 1359.412 / 188.906 ms；本轮主要收益来自跳过 rollout 中未被使用的原因字符串。
+
+手写策略沿用同一批 700 局、三轮交替对照，各版本结果 CSV 排除耗时后全部一致；三轮均时的中位数为 1.403 → 1.374 ms/局，变化较小。普通手写策略保留原因文本，不应用 rollout 的文本省略。
+
+验证通过：20 项针对性 Release 测试和 `umaai` Release 构建。测试覆盖事件顺序与队列复用、规则随机流隔离、地区选择、友人事件平局、普通与 rollout 实例的整局动作/事件记录、正常原因日志、协议摘要及评分分解位模式。
+
+本地证据：`target/perf-results/round5-wisdom.csv`、`round5-reason-root.csv`、`round5-reason-matrix.csv`，以及 `round5-production-game-wisdom-<版本>/` 中的结果与决策 CSV。配对测量脚本为 `measure-round5-wisdom.ps1` / `measure-round5-roots.ps1`，测试命令集合为 `test-round5.ps1`，构建入口为 `build-round5-probes.ps1`；`round5-manifest.json` 记录基线提交、配置、源码与产物 SHA256，源码差异保存在 `round5-final.patch`。基线和最终程序分别保存在 `target/perf-round5-base/release/` 与 `target/perf-round5-reason/release/`；这些均为构建目录中的临时产物。
+
 ## 1. 背景
 
 项目当前三类 CPU 性能 / 延迟分析工具（覆盖全栈 vs 按段 vs 全局三层视角）：

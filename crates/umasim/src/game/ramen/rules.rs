@@ -479,11 +479,11 @@ pub fn get_region_clone_trains(region_id: usize) -> Result<Vec<i32>> {
 
 /// 获取超级拉面分身的训练范围选项。
 ///
-/// 返回 `training_limit_options` 的 clone。
+/// 借用全局 `training_limit_options`。
 /// 超级拉面分身条件（card_type_count >= 4）应在游戏逻辑中判定。
-pub fn get_super_ramen_clone_train_options() -> Result<Vec<Vec<i32>>> {
+pub fn get_super_ramen_clone_train_options() -> Result<&'static [Vec<i32>]> {
     let ramen_data = global!(RAMENDATA);
-    Ok(ramen_data.finals_effect.training_limit_options.clone())
+    Ok(&ramen_data.finals_effect.training_limit_options)
 }
 
 /// NPC 相关常量

@@ -53,13 +53,6 @@ pub struct RamenHandwrittenTrainer {
     pub policy: RamenPolicy,
     /// 是否输出每步决策日志（整局跑批时建议关闭）
     pub verbose: bool,
-    /// 是否采集评分分解文本（供 `LoggingTrainer` 取用）
-    ///
-    /// 作为**搜索的 rollout 基策**时必须关掉：`stash_breakdown` 每次决策都无条件
-    /// `format!` 出全候选分解并锁同一把 `Mutex`，而所有 rayon 线程共享同一个
-    /// rollout trainer。单次 rollout 约 170 次决策 × 24 线程 = 高频锁争用，
-    /// 而 rollout 内部的分解文本没有任何消费者。不影响分数，只影响吞吐。
-    pub collect_breakdown: bool,
     /// 最近一次决策的评分分解文本（供 LoggingTrainer 提取进决策日志）
     ///
     /// 用 `Mutex` 而非 `RefCell`：搜索层要求 `Trainer: Sync`（rayon 跨线程共享同一个
@@ -68,8 +61,7 @@ pub struct RamenHandwrittenTrainer {
     last_breakdown: Mutex<Option<String>>,
     /// 上一次决策的协议字段（选中下标 + 各候选评分），供 [`Trainer::last_decision`](crate::game::Trainer::last_decision) 读取
     ///
-    /// 与 `last_breakdown` 共生命周期——`stash_breakdown` 同时填两者。早退 / 转发
-    /// 路径会清成 `None`，不让 caller 看到上一决策的陈旧数据。
+    /// 独立于原因文本采集写入；早退路径清成 `None`，不暴露上一决策的数据。
     last_decision_summary: Mutex<Option<LastDecisionSummary>>
 }
 
@@ -94,18 +86,16 @@ impl RamenHandwrittenTrainer {
         Self {
             policy: RamenPolicy::default(),
             verbose: false,
-            collect_breakdown: true,
             last_breakdown: Mutex::new(None),
             last_decision_summary: Mutex::new(None)
         }
     }
 
-    /// 创建 rollout 专用实例（关闭分解采集，见 [`collect_breakdown`](Self::collect_breakdown)）
+    /// 创建 rollout 专用实例：关闭原因文本生成和采集，保留数值分解与协议摘要。
     pub fn for_rollout() -> Self {
-        Self {
-            collect_breakdown: false,
-            ..Self::new()
-        }
+        let mut trainer = Self::new();
+        trainer.policy.collect_reason = false;
+        trainer
     }
 
     /// 使用指定策略核心创建
@@ -113,7 +103,6 @@ impl RamenHandwrittenTrainer {
         Self {
             policy,
             verbose: false,
-            collect_breakdown: true,
             last_breakdown: Mutex::new(None),
             last_decision_summary: Mutex::new(None)
         }
@@ -132,7 +121,7 @@ impl RamenHandwrittenTrainer {
 
     /// 缓存本次决策的评分分解（各候选 `score + reason` 摘要）
     fn stash_breakdown(&self, outputs: &[RamenPolicyOutput]) {
-        if !self.collect_breakdown {
+        if !self.policy.collect_reason {
             return;
         }
         let text = outputs
@@ -190,7 +179,7 @@ impl Trainer<RamenGame> for RamenHandwrittenTrainer {
     ) -> Result<usize> {
         // 单个候选直接返回（无选择空间）
         if actions.len() <= 1 {
-            if self.collect_breakdown {
+            if self.policy.collect_reason {
                 if let Ok(mut slot) = self.last_breakdown.lock() {
                     *slot = Some(format!("仅1候选: {}", actions[0]));
                 }
@@ -395,10 +384,9 @@ mod tests {
         Ok(())
     }
 
-    /// last_decision 协议字段：候选评分按 score 降序截断 5、candidate_n 留空、reason 留空
+    /// last_decision 保留候选评分和描述；rollout 关闭原因文本后决策与协议输出一致。
     ///
-    /// 手写策略没有局数概念（`RamenPolicyOutput` 无 count 字段），`candidate_n` 必须
-    /// 为空。`reason` 用户拍板"其他剧本暂留空"，验证为 None。
+    /// 手写策略没有局数概念（`RamenPolicyOutput` 无 count 字段），`candidate_n` 必须为空。
     #[test]
     fn test_handwritten_last_decision() -> Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -409,16 +397,24 @@ mod tests {
         let seed: u64 = 42;
         let (mut decision_rng, rule_master) = crate::bench::seeded_rngs(seed, 0);
         let trainer = RamenHandwrittenTrainer::new();
+        let rollout = RamenHandwrittenTrainer::for_rollout();
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
         game.set_rule_master(rule_master);
 
         // 跑一局，每步决策都查 last_decision：协议字段格式守门
         let mut decisions = 0usize;
         let mut had_breakdown = 0usize;
+        let mut same_choices = true;
+        let mut same_protocol = true;
         while game.next() {
             let actions = game.list_actions()?;
-            let _ = trainer.select_action(&game, &actions, &mut decision_rng)?;
-            if let Some(info) = trainer.last_decision() {
+            let mut rollout_rng = decision_rng.clone();
+            let idx = trainer.select_action(&game, &actions, &mut decision_rng)?;
+            same_choices &= rollout.select_action(&game, &actions, &mut rollout_rng)? == idx;
+            let info = trainer.last_decision();
+            same_protocol &= info.as_ref() == rollout.last_decision().as_ref();
+            had_breakdown += usize::from(trainer.last_breakdown().is_some());
+            if let Some(info) = info {
                 decisions += 1;
                 let mut c = crate::utils::Checks::new();
                 c.check(!info.candidate_scores.is_empty(), "候选评分非空");
@@ -436,6 +432,10 @@ mod tests {
         let mut c = crate::utils::Checks::new();
         println!("手写策略决策 {decisions} 次");
         c.check(decisions > 50, "整局绝大多数决策点都有 last_decision");
+        c.check(same_choices, "关闭原因文本后每个决策点的动作选择一致");
+        c.check(same_protocol, "关闭原因文本后每个决策点的协议输出完整且一致");
+        c.check(had_breakdown > 0, "普通实例保留评分说明供决策日志使用");
+        c.check(rollout.last_breakdown().is_none(), "rollout 实例不采集原因文本");
         c.finish()
     }
 }

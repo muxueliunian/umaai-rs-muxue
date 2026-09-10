@@ -1488,7 +1488,7 @@ impl RamenGame {
     ///
     /// 事件结果随机走**策略流**（策略触发事件，v2 §4.3）；事件决策仍走决策流。
     fn run_after_train<T: Trainer<Self>>(&mut self, trainer: &T, rng: &mut StdRng) -> Result<()> {
-        let after_events = std::mem::take(&mut self.base.unresolved_events);
+        let mut after_events = std::mem::take(&mut self.base.unresolved_events);
         let mut strat = self.strategy.take();
         match strat.as_mut() {
             Some(s) => {
@@ -1504,6 +1504,8 @@ impl RamenGame {
             }
         }
         self.strategy = strat;
+        after_events.clear();
+        self.base.unresolved_events = after_events;
         Ok(())
     }
 
@@ -2619,6 +2621,52 @@ struct AlwaysTrueRng;
         game.apply_action(&actions[train_idx2], &mut rng)?;
 
         Ok(())
+    }
+
+    /// 训练后事件按入队顺序各处理一次，空队列不重放，并保留容量供下一回合使用。
+    #[test]
+    fn test_after_train_events_process_once_and_reuse_queue() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        let _ = init_test_logger("error");
+        init_global()?;
+        let mut c = Checks::new();
+
+        for master in [None, Some(61444)] {
+            let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+            if let Some(master) = master {
+                game.set_rule_master(master);
+            }
+            let mut rng = StdRng::seed_from_u64(42);
+            game.base.unresolved_events = Vec::with_capacity(4);
+            let capacity = game.base.unresolved_events.capacity();
+            for round in 1..=2 {
+                game.base.uma.vital = game.base.uma.max_vital - 5;
+                game.base.unresolved_events.extend([20, -10].into_iter().enumerate().map(|(i, vital)| {
+                    EventData {
+                        id: 90000 + i as u32,
+                        choices: vec![vec![EventChoice {
+                            value: ActionValue { vital, ..Default::default() },
+                            ..Default::default()
+                        }]],
+                        ..Default::default()
+                    }
+                }));
+                game.run_after_train(&RandomTrainer, &mut rng)?;
+                // 紧接着处理空队列，不能重复应用刚刚清掉的事件。
+                game.run_after_train(&RandomTrainer, &mut rng)?;
+                println!("规则种子={master:?}，轮次={round}，体力={}，队列容量={}",
+                    game.uma.vital, game.base.unresolved_events.capacity());
+                c.check(game.uma.vital == game.uma.max_vital - 10, "先恢复至上限再扣除体力，事件顺序不变");
+                c.check(
+                    [90000, 90001].iter().all(|id| game.base.events.get(id) == Some(&round)),
+                    "两个事件每轮各生效一次，空队列不重放"
+                );
+                c.check(game.base.unresolved_events.is_empty(), "事件处理后队列为空");
+                c.check(game.base.unresolved_events.capacity() == capacity, "后续回合复用事件队列容量");
+                c.check(game.strategy.is_some() == master.is_some(), "事件处理后保留策略流");
+            }
+        }
+        c.finish()
     }
 
     #[test]

@@ -392,14 +392,6 @@ struct TrainPreview {
 pub struct LocalRamenTrainer {
     policy: RamenPolicy,
     config: LocalRamenConfig,
-    /// 是否采集评分分解文本（供 `LoggingTrainer` 取用）
-    ///
-    /// 作为**搜索的 rollout 基策**时必须关掉：`stash` 每次决策都无条件
-    /// `format!` 出全候选分解并锁同一把 `Mutex`，而所有 rayon 线程共享同一个
-    /// rollout trainer。单次 rollout 约 170 次决策 × 24 线程 = 高频锁争用，
-    /// 而 rollout 内部的分解文本没有任何消费者。不影响分数，只影响吞吐。
-    /// （与 `RamenHandwrittenTrainer::collect_breakdown` 同构。）
-    collect_breakdown: bool,
     last_breakdown: Mutex<Option<String>>
 }
 impl Default for LocalRamenTrainer {
@@ -415,16 +407,14 @@ impl LocalRamenTrainer {
         Self {
             policy: RamenPolicy::new(policy),
             config,
-            collect_breakdown: true,
             last_breakdown: Mutex::new(None)
         }
     }
-    /// 创建 rollout 专用实例（关闭分解采集，见 [`collect_breakdown`](Self::collect_breakdown)）
+    /// 创建 rollout 专用实例，关闭原因字符串生成和日志文本采集。
     pub fn for_rollout() -> Self {
-        Self {
-            collect_breakdown: false,
-            ..Self::new()
-        }
+        let mut trainer = Self::new();
+        trainer.policy.collect_reason = false;
+        trainer
     }
     pub fn matrix_variant(name: &str) -> Result<Self> {
         let mut policy = RamenPolicyConfig::default();
@@ -569,7 +559,7 @@ impl LocalRamenTrainer {
             .unwrap_or(0)
     }
     fn stash(&self, o: &[RamenPolicyOutput]) {
-        if !self.collect_breakdown {
+        if !self.policy.collect_reason {
             return;
         }
         let t = o
@@ -710,7 +700,11 @@ impl LocalRamenTrainer {
     fn dynamic_friend_outing_value(&self, g: &RamenGame) -> Result<(f32, Vec<(&'static str, f32)>, String)> {
         let used = g.friend.out_used.iter().filter(|&&x| x).count();
         if used >= 5 {
-            return Ok((f32::NEG_INFINITY, vec![], "友人外出已完成".to_string()));
+            return Ok((f32::NEG_INFINITY, vec![], if self.policy.collect_reason {
+                "友人外出已完成".to_string()
+            } else {
+                String::new()
+            }));
         }
         let data = RAMENDATA.get().ok_or_else(|| anyhow::anyhow!("RAMENDATA 未初始化"))?;
         let event = data
@@ -778,16 +772,20 @@ impl LocalRamenTrainer {
                 ("friend_hidden_future", supply),
                 ("friend_proactive", proactive),
             ],
-            format!(
-                "友人外出#{} 选项{} 动态事件{:.0} 材料+2(库存{}也不禁用) 饥饿+{:.0} 未来+{:.0} 主动+{:.0}",
-                used + 1,
-                choice + 1,
-                event_value,
-                g.ramen.special_feeling,
-                starve,
-                supply,
-                proactive
-            )
+            if self.policy.collect_reason {
+                format!(
+                    "友人外出#{} 选项{} 动态事件{:.0} 材料+2(库存{}也不禁用) 饥饿+{:.0} 未来+{:.0} 主动+{:.0}",
+                    used + 1,
+                    choice + 1,
+                    event_value,
+                    g.ramen.special_feeling,
+                    starve,
+                    supply,
+                    proactive
+                )
+            } else {
+                String::new()
+            }
         ))
     }
 
@@ -821,8 +819,8 @@ impl LocalRamenTrainer {
         // 与永久最大体力（与 apply_friend_bonus 规则一致），避免友人事件价值被低估。
         let event_mult = (100 + g.friend.event_bonus) as f32 / 100.0;
         let vital_mult = (100 + g.friend.vital_bonus) as f32 / 100.0;
-        let mut values = Vec::with_capacity(choices.len());
-        for group in choices {
+        let mut best: Option<(usize, f32)> = None;
+        for (i, group) in choices.iter().enumerate() {
             let mut val = 0.0;
             for c in group {
                 let prob = if c.prob == 0 { 1.0 } else { c.prob as f32 / 100.0 };
@@ -838,15 +836,11 @@ impl LocalRamenTrainer {
                     * self.policy.config.event_motivation_weight
                     * prob;
             }
-            values.push(val);
+            if best.is_none_or(|(_, best_val)| val.total_cmp(&best_val).is_gt()) {
+                best = Some((i, val));
+            }
         }
-        let choice = values
-            .iter()
-            .enumerate()
-            .max_by(|(li, l), (ri, r)| l.total_cmp(r).then_with(|| ri.cmp(li)))
-            .map(|(i, _)| i)
-            .unwrap_or(0);
-        Ok((choice, values.get(choice).copied().unwrap_or(0.0)))
+        Ok(best.unwrap_or((0, 0.0)))
     }
 
     /// 整回合 Train 阶段打分（5 train 候选 + 修复路径）
@@ -1429,7 +1423,9 @@ impl LocalRamenTrainer {
             let future = (craftable * 18.0 + balance * 4.0) * year_left;
             score.score += future;
             score.add("future_craftability", future);
-            score.reason = format!("隐藏方案{:?} 后续可做{}种", targets, craftable as i32);
+            if self.policy.collect_reason {
+                score.reason = format!("隐藏方案{:?} 后续可做{}种", targets, craftable as i32);
+            }
         }
         Ok((Self::choose(&out), out))
     }
@@ -1448,10 +1444,14 @@ impl LocalRamenTrainer {
                 .ok_or_else(|| anyhow::anyhow!("需要休息/外出时 RamenSelect 却没有不吃面候选"))?;
             for (i, candidate) in out.iter_mut().enumerate() {
                 if i == no_eat {
-                    candidate.reason = "不吃面：本回合基础决策不是训练".to_string();
+                    if self.policy.collect_reason {
+                        candidate.reason = "不吃面：本回合基础决策不是训练".to_string();
+                    }
                 } else {
                     candidate.score = f32::NEG_INFINITY;
-                    candidate.reason = "禁止吃面：本回合应先休息/外出/治病/比赛".to_string();
+                    if self.policy.collect_reason {
+                        candidate.reason = "禁止吃面：本回合应先休息/外出/治病/比赛".to_string();
+                    }
                 }
             }
             return Ok((no_eat, out));
@@ -1491,7 +1491,9 @@ impl LocalRamenTrainer {
                     && !self.eat_covered_train_passes(&preview, region_id)?
                 {
                     o.score = f32::NEG_INFINITY;
-                    o.reason = "禁止吃面：吃完后最优训练位不在该面 at_trains 内".to_string();
+                    if self.policy.collect_reason {
+                        o.reason = "禁止吃面：吃完后最优训练位不在该面 at_trains 内".to_string();
+                    }
                     o.add("eat_covered_train_gate", f32::NEG_INFINITY);
                     continue;
                 }
@@ -1501,13 +1503,15 @@ impl LocalRamenTrainer {
                         && post_vital < self.config.y3_post_train_hard_floor
                     {
                         o.score = f32::NEG_INFINITY;
-                        o.reason = format!(
-                            "禁止吃面：{}训练体力{}→{}低于硬底线{}",
-                            ["速", "耐", "力", "根", "智"][train],
-                            pre_vital,
-                            post_vital,
-                            self.config.y3_post_train_hard_floor
-                        );
+                        if self.policy.collect_reason {
+                            o.reason = format!(
+                                "禁止吃面：{}训练体力{}→{}低于硬底线{}",
+                                ["速", "耐", "力", "根", "智"][train],
+                                pre_vital,
+                                post_vital,
+                                self.config.y3_post_train_hard_floor
+                            );
+                        }
                         o.add("y3_vital_hard_guard", f32::NEG_INFINITY);
                         continue;
                     }
@@ -1607,7 +1611,7 @@ pub struct RecommendedRamenTrainer {
     last_year: Mutex<Option<usize>>,
     /// 是否记录 `last_year`。rollout 下关闭：24 线程共享同一实例，每次决策都抢同
     /// 一把 `Mutex`，而 `last_year` 的唯一读者是 [`Trainer::last_breakdown`]，
-    /// 该场景下三份年策略的 `collect_breakdown` 也已关闭、必然返回 `None`。
+    /// 该场景下三份年策略的 `collect_reason` 也已关闭、必然返回 `None`。
     record_last_year: bool
 }
 
@@ -1808,27 +1812,16 @@ impl RecommendedRamenTrainer {
         }
     }
 
-    /// 创建 rollout 专用实例（关闭 breakdown 采集**与** `last_year` 记录）
+    /// 创建 rollout 专用实例，关闭原因字符串、日志文本和 `last_year` 记录。
     ///
-    /// 搜索/批跑场景必须用本构造器：24 线程共享同一个 rollout trainer，
-    /// `stash` 每次决策都无条件 `format!` 出全候选分解并锁同一把 `Mutex`，
-    /// 而 rollout 内部的分解文本没有任何消费者——纯锁争用开销。
-    ///
-    /// 本构造器关掉**两样**东西：三份年策略的 `collect_breakdown`，以及本结构
-    /// 自己的 [`Self::record_last_year`]。只关前者的话，三个 `select_*` 每次决策
-    /// 仍会锁 `last_year`，锁争用只消掉一半。两者的唯一读者都是
-    /// [`Trainer::last_breakdown`]，决策链不消费，故整局逐位不变
-    /// （守门见 `recommended_for_rollout_decisions_identical`）。
-    ///
-    /// 比 [`LocalRamenTrainer::for_rollout`] / [`RamenHandwrittenTrainer::for_rollout`]
-    /// 多关一项——那两者没有 `last_year` 这层年份转发。
+    /// rollout 不消费这些观测数据；参与决策的数值评分分解继续保留。
+    /// `recommended_for_rollout_decisions_identical` 核对整局动作和事件记录一致。
     pub fn for_rollout() -> Self {
         let mut trainer = Self::new();
         for year in trainer.years.iter_mut() {
-            year.collect_breakdown = false;
+            year.policy.collect_reason = false;
         }
-        // 连 last_year 的写入一并关掉：只关 collect_breakdown 的话，三个 select_*
-        // 每次决策仍会锁同一把 Mutex，「避免锁争用」只做了一半。
+        // 年份转发记录同样只供日志文本读取。
         trainer.record_last_year = false;
         trainer
     }
@@ -1893,7 +1886,7 @@ impl Trainer<RamenGame> for LocalRamenTrainer {
     fn select_action(&self, g: &RamenGame, a: &[RamenAction], _r: &mut StdRng) -> Result<usize> {
         // 单个候选直接返回（无选择空间）；仍记录 breakdown 供决策日志展示
         if a.len() <= 1 {
-            if self.collect_breakdown {
+            if self.policy.collect_reason {
                 if let Ok(mut slot) = self.last_breakdown.lock() {
                     *slot = Some(format!("仅1候选: {}", a[0]));
                 }
@@ -1963,6 +1956,7 @@ mod tests {
     #[test]
     #[allow(clippy::panic)]
     fn recommended_region_select_year1_runs_policy() -> Result<()> {
+        use crate::utils::Checks;
         use rand::{SeedableRng, prelude::StdRng};
 
         use crate::{
@@ -2006,12 +2000,17 @@ mod tests {
                 game.stage
             );
         }
-        Ok(())
+        let rollout = RecommendedRamenTrainer::for_rollout();
+        let rollout_idx = rollout.select_action(&game, &actions, &mut rng)?;
+        let mut c = Checks::new();
+        c.check(idx == rollout_idx, "普通实例与 rollout 的第1年地区选择一致");
+        c.check(matches!(trainer.last_year.lock().as_deref(), Ok(Some(0))), "普通实例记录本次决策年份");
+        c.check(matches!(rollout.last_year.lock().as_deref(), Ok(None)), "rollout 跳过决策年份记录");
+        c.check(rollout.last_breakdown().is_none(), "rollout 不采集原因日志");
+        c.finish()
     }
 
-    /// 单候选决策点必须记录「仅1候选」breakdown（决策日志完整性）；
-    /// `for_rollout` 实例关闭分解采集（搜索 rollout 高频锁争用，与
-    /// `RamenHandwrittenTrainer::collect_breakdown` 同构）。
+    /// 单候选决策点必须记录「仅1候选」breakdown；rollout 关闭原因文本采集。
     #[test]
     #[allow(clippy::panic)]
     fn local_single_candidate_breakdown_and_for_rollout() -> Result<()> {
@@ -2058,22 +2057,15 @@ mod tests {
         Ok(())
     }
 
-    /// `RecommendedRamenTrainer::for_rollout()` 只许省掉观测开销，不许改决策。
-    ///
-    /// 它关掉两样东西——三份年策略的 `collect_breakdown`、以及 `last_year` 的
-    /// `Mutex` 写入。两者的唯一读者都是 [`Trainer::last_breakdown`]，决策链
-    /// （`choose` / `select_*`）不消费任何一个，所以整局必须逐位相同。
-    /// 这条守门存在的意义：将来若有人把某个字段挪进决策路径，这里会红。
-    ///
-    /// ⚠ 单看 `last_breakdown().is_none()` **区分不出**两个开关——任一关闭它都返回
-    /// `None`（见 `last_breakdown`：先解 `last_year`，再问年策略要文本）。所以本测试
-    /// 直接读 `record_last_year` 字段，并在整局跑完后核对 `last_year` 确实没被写过。
+    /// 普通实例与 rollout 的整局动作、事件和终局数值一致；仅普通实例提供原因日志。
     #[test]
     fn recommended_for_rollout_decisions_identical() -> Result<()> {
         use crate::{
             bench::seeded_rngs,
             game::{InheritInfo, ramen::RamenGame, traits::Game},
             gamedata::init_global,
+            output::decision_log::DecisionLog,
+            trainer::LoggingTrainer,
             utils::{Checks, get_workspace_root, init_test_logger}
         };
 
@@ -2086,15 +2078,12 @@ mod tests {
         let inherit =
             InheritInfo { blue_count: [15, 0, 0, 0, 3], extra_count: [10, 10, 20, 20, 20, 40] };
 
-        /// 一局跑完后的观测量：终局三项 + 两个开关的实际效果。
+        /// 一局跑完后的终局数值与完整决策日志。
         struct Observed {
             score: i32,
             five: [i32; 5],
             skill_pt: i32,
-            /// 观测出口是否有内容
-            has_breakdown: bool,
-            /// 整局跑完后 `last_year` 是否被写过——直接看这局用的那个实例
-            last_year_written: bool
+            log: DecisionLog
         }
 
         // 同一 base_seed / run_idx ⇒ 决策 RNG 与规则 RNG 都逐位相同
@@ -2107,38 +2096,44 @@ mod tests {
             } else {
                 RecommendedRamenTrainer::new()
             };
-            game.run_full_game(&trainer, &mut rng)?;
-            let last_year_written = matches!(trainer.last_year.lock().as_deref(), Ok(Some(_)));
+            let logged = LoggingTrainer::new(trainer, 61444);
+            game.run_full_game(&logged, &mut rng)?;
             Ok(Observed {
                 score: game.uma.calc_score(),
                 five: game.uma.five_status,
                 skill_pt: game.uma.skill_pt,
-                has_breakdown: trainer.last_breakdown().is_some(),
-                last_year_written
+                log: logged.take_records()
             })
         };
 
-        let n = run(false)?;
-        let r = run(true)?;
+        let mut n = run(false)?;
+        let mut r = run(true)?;
         println!(
-            "new():         评分={} 五维={:?} PT={} breakdown={} last_year 被写={}",
-            n.score, n.five, n.skill_pt, n.has_breakdown, n.last_year_written
+            "new():         评分={} 五维={:?} PT={} 决策记录={}",
+            n.score, n.five, n.skill_pt, n.log.rows.len()
         );
         println!(
-            "for_rollout(): 评分={} 五维={:?} PT={} breakdown={} last_year 被写={}",
-            r.score, r.five, r.skill_pt, r.has_breakdown, r.last_year_written
+            "for_rollout(): 评分={} 五维={:?} PT={} 决策记录={}",
+            r.score, r.five, r.skill_pt, r.log.rows.len()
         );
 
         let mut c = Checks::new();
         c.check(n.score == r.score, "整局评分逐位相同");
         c.check(n.five == r.five, "整局五维逐位相同");
         c.check(n.skill_pt == r.skill_pt, "整局技能点逐位相同");
-        c.check(n.has_breakdown, "new() 仍暴露 breakdown（决策日志依赖）");
-        c.check(!r.has_breakdown, "for_rollout() 不暴露 breakdown（rollout 无消费者）");
-        // 上面两条只证明「观测出口是空的」——两个开关任一关闭都会让 last_breakdown
-        // 返回 None。下面两条才区分得出「锁写入确实被跳过」。
-        c.check(n.last_year_written, "new() 整局跑完后 last_year 被写过");
-        c.check(!r.last_year_written, "for_rollout() 整局跑完后 last_year 仍为 None");
+        c.check(!n.log.rows.is_empty() && !r.log.rows.is_empty(), "两种实例均记录完整决策轨迹");
+        c.check(
+            n.log.rows.iter().filter(|row| row.stage != "Event").all(|row| {
+                row.score_breakdown.as_deref().is_some_and(|text| !text.is_empty())
+            }),
+            "普通实例的每次动作决策均向 LoggingTrainer 提供原因文本"
+        );
+        c.check(r.log.rows.iter().all(|row| row.score_breakdown.is_none()), "rollout 的全部决策日志均不含原因文本");
+        for row in n.log.rows.iter_mut().chain(&mut r.log.rows) {
+            row.elapsed_us = 0;
+            row.score_breakdown = None;
+        }
+        c.check(n.log == r.log, "排除耗时和原因文本后，整局动作及事件记录完全一致");
         c.finish()
     }
 
@@ -2221,6 +2216,45 @@ mod tests {
             panic!("非覆盖位不应有 ramen_train_coupling，实际 {other_coupling_max}");
         }
         Ok(())
+    }
+
+    /// 友人事件按价值取最高项，平局取首项，并保留全负收益和空候选的结果。
+    #[test]
+    fn friend_event_choice_values_and_ties() -> Result<()> {
+        use std::env::set_current_dir;
+
+        use crate::{
+            game::{InheritInfo, ramen::RamenGame},
+            gamedata::{ActionValue, EventChoice, init_global},
+            utils::{Checks, get_workspace_root}
+        };
+
+        set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let trainer = LocalRamenTrainer::new();
+        let game = RamenGame::newgame(
+            102601,
+            &[302424, 302894, 303044, 302924, 303024, 303054],
+            InheritInfo { blue_count: [15, 3, 0, 0, 0], extra_count: [0, 30, 0, 0, 30, 30] }
+        )?;
+        let mut c = Checks::new();
+        let choices = [0, 10, 10].map(|friendship| vec![EventChoice {
+            value: ActionValue { friendship, ..Default::default() },
+            ..Default::default()
+        }]);
+        let best = trainer.dynamic_friend_event_choice(&game, &choices)?;
+        println!("友人事件正收益及平局: {best:?}");
+        c.check(best == (1, 50.0), "选择最高收益，平局保留首项");
+
+        let losses = [-10, -5].map(|friendship| vec![EventChoice {
+            value: ActionValue { friendship, ..Default::default() },
+            ..Default::default()
+        }]);
+        let best = trainer.dynamic_friend_event_choice(&game, &losses)?;
+        println!("友人事件全负收益: {best:?}");
+        c.check(best == (1, -25.0), "全负收益时选择损失较小项并保留负分");
+        c.check(trainer.dynamic_friend_event_choice(&game, &[])? == (0, 0.0), "空候选返回 (0, 0)");
+        c.finish()
     }
 
     /// 友人隐藏风味饥饿加成：special_feeling 缺口越大友人外出价值越高；
