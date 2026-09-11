@@ -16,7 +16,7 @@ use crate::{
             RamenAction,
             RamenGame,
             RamenStage,
-            policy::{EMPTY_TRAIN_EVAL_CACHE, RamenPolicy, RamenPolicyConfig, RamenPolicyOutput, TrainEvalCache},
+            policy::{RamenPolicy, RamenPolicyConfig, RamenPolicyOutput, TrainEvalCache},
             rules::{
                 calc_ramen_pt_gain, calc_region_bonus, consume_for_ramen, get_recipe, get_turn_special_feeling,
                 min_special_targets
@@ -383,10 +383,12 @@ impl Default for LocalRamenConfig {
         }
     }
 }
-/// 一次训练预演的局面与选中动作，供覆盖检查和体力评估共同使用。
-struct TrainPreview {
-    game: RamenGame,
-    operation: Operation,
+/// 同一基础局面的训练与策略评估；只有当前拉面可以在预演间改变。
+#[derive(Default)]
+struct LocalTrainCache {
+    training: TrainEvalCache,
+    long_term: [[Option<f32>; 2]; 5],
+    friend: Option<RamenPolicyOutput>
 }
 
 pub struct LocalRamenTrainer {
@@ -847,39 +849,103 @@ impl LocalRamenTrainer {
         Ok(best.unwrap_or((0, 0.0)))
     }
 
+    /// 按原人头顺序计算羁绊与 Hint 的长远价值，隐藏 Hint 模式由当前训练位决定。
+    fn train_long_term(&self, g: &RamenGame, tr: usize, all_hint: bool) -> f32 {
+        let ph = Self::phase(g.turn());
+        let people = g
+            .distribution()
+            .get(tr)
+            .into_iter()
+            .flatten()
+            .copied()
+            .filter(|&x| x >= 0 && (x as usize) < g.persons().len())
+            .map(|x| x as usize);
+        let hn = people
+            .clone()
+            .filter(|&i| g.persons()[i].hint() && matches!(g.persons()[i].person_type(), PersonType::Card))
+            .count();
+        let hp = if self.config.probabilistic_hint && hn > 0 && !all_hint {
+            1. / hn as f32
+        } else {
+            1.
+        };
+        let mut lt = 0.;
+        for i in people {
+            let x = &g.persons()[i];
+            match x.person_type() {
+                PersonType::ScenarioCard => {
+                    lt += match g.friend.out_state {
+                        FriendOutState::UnClicked => self.config.first_friend_click_value,
+                        _ if x.friendship() < 60 => self.config.low_friend_bond_value * ph,
+                        _ => self.config.active_friend_value
+                    }
+                }
+                PersonType::Card if x.friendship() < 80 => {
+                    let mut b = if g.uma.flags.aijiao { 9. } else { 7. };
+                    if x.hint() {
+                        b += 5. * hp
+                    }
+                    b = b.min((80 - x.friendship()) as f32);
+                    lt += b * self.config.early_bond_value * ph;
+                    if x.hint() {
+                        let repeats = if all_hint && i < g.deck().len() {
+                            1 + g.deck()[i].effect.hint_count_bonus
+                        } else {
+                            1
+                        };
+                        lt += self.config.hint_bonus * hp * repeats as f32
+                    }
+                }
+                PersonType::Card if x.hint() => {
+                    let repeats = if all_hint && i < g.deck().len() {
+                        1 + g.deck()[i].effect.hint_count_bonus
+                    } else {
+                        1
+                    };
+                    lt += self.config.hint_bonus * hp * repeats as f32
+                }
+                _ => {}
+            }
+        }
+        lt
+    }
+
     /// 整回合 Train 阶段打分（5 train 候选 + 修复路径）
     ///
     /// 注：原为私有方法，提升为 `pub` 是给 `tools/data_collection/calc_training_value_microbench.rs`
     /// 性能调优工具用的；产品路径仍走 `select_action`。
     pub fn decide_train(&self, g: &RamenGame, a: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
-        let mut eval_cache = EMPTY_TRAIN_EVAL_CACHE;
-        self.decide_train_cached(g, a, &mut eval_cache)
+        let mut eval_cache = LocalTrainCache::default();
+        let mut out = Vec::new();
+        let chosen = self.decide_train_cached(g, a, g.ramen.current_ramen, &mut eval_cache, &mut out)?;
+        Ok((chosen, out))
     }
 
     /// 复用同一局面的训练评估；选面预演只改变当前面时，由 policy 刷新各面的训练上层值。
     fn decide_train_cached(
-        &self, g: &RamenGame, a: &[RamenAction], eval_cache: &mut TrainEvalCache
-    ) -> Result<(usize, Vec<RamenPolicyOutput>)> {
-        let (mut guard, mut out) = self.policy.decide_train_cached(g, a, eval_cache)?;
+        &self, g: &RamenGame, a: &[RamenAction], ramen: Option<usize>, eval_cache: &mut LocalTrainCache,
+        out: &mut Vec<RamenPolicyOutput>
+    ) -> Result<usize> {
+        let mut guard = self.policy.decide_train_cached(g, a, ramen, &mut eval_cache.training, out)?;
         let recovery_guard = self.config.friend_outing_replaces_rest
             && a.get(guard).is_some_and(|x| x.operation == Operation::Rest)
             && out.len() != a.len();
         if recovery_guard && a.iter().any(|x| x.operation == Operation::FriendOuting) {
             // 展开完整候选以便真正执行五段动态估值；最终仍只允许休息/友人恢复动作获胜。
-            out = self.policy.score_train_actions_cached(g, a, eval_cache)?;
+            self.policy.score_train_actions_cached(g, a, ramen, &mut eval_cache.training, out)?;
             guard = a.iter().position(|x| x.operation == Operation::Rest).unwrap_or(guard);
         }
         if out.len() != a.len() {
-            let ate_this_turn = self.config.eat_requires_training && g.ramen.current_ramen.is_some();
+            let ate_this_turn = self.config.eat_requires_training && ramen.is_some();
             let selected_is_train = a
                 .get(guard)
                 .is_some_and(|action| matches!(action.operation, Operation::Train(_)));
             if !ate_this_turn || selected_is_train {
-                return Ok((guard, out));
+                return Ok(guard);
             }
             // 已吃面但旧硬守门想休息/外出：重新计算全部候选，并只允许五种训练。
             // 生病/自选比赛通常不会经过吃面前门控；这里仍以“拉面只为训练使用”为最终不变量。
-            out = self.policy.score_train_actions_cached(g, a, eval_cache)?;
+            self.policy.score_train_actions_cached(g, a, ramen, &mut eval_cache.training, out)?;
             let _ = out
                 .iter()
                 .enumerate()
@@ -889,81 +955,31 @@ impl LocalRamenTrainer {
                 .ok_or_else(|| anyhow::anyhow!("已吃面但 Train 阶段没有训练候选"))?;
         }
         if let Some(friend_idx) = a.iter().position(|x| x.operation == Operation::FriendOuting) {
-            let (score, breakdown, reason) = self.dynamic_friend_outing_value(g)?;
+            let cached = match &mut eval_cache.friend {
+                Some(cached) => cached,
+                slot => {
+                    let (score, breakdown, reason) = self.dynamic_friend_outing_value(g)?;
+                    slot.insert(RamenPolicyOutput { score, breakdown, reason, ..Default::default() })
+                }
+            };
             if let Some(friend) = out.get_mut(friend_idx) {
-                friend.score = score;
-                friend.breakdown = breakdown;
-                friend.reason = reason;
+                *friend = cached.clone();
             }
         }
-        let bb = Self::choose(&out);
+        let bb = Self::choose(out);
         let best_base = out[bb].score;
         // 同训练位复用相同 eval，重复候选的原分相同；非训练分数不参与下方调整。
         let mut train_base = [0.0; 5];
-        let ph = Self::phase(g.turn());
         for (act, o) in a.iter().zip(out.iter_mut()) {
             let Operation::Train(tt) = act.operation else { continue };
             let tr = tt as usize;
             train_base[tr] = o.score;
             // B2：复用 policy 层已算好的 eval（`decide_train_cached` 首次求值）
-            let eval = eval_cache[tr].as_ref().expect("Train eval 应由 policy 层预填");
+            let eval = eval_cache.training[tr].as_ref().expect("Train eval 应由 policy 层预填");
             let val = &eval.value;
-            let people = g
-                .distribution()
-                .get(tr)
-                .into_iter()
-                .flatten()
-                .copied()
-                .filter(|&x| x >= 0 && (x as usize) < g.persons().len())
-                .map(|x| x as usize);
-            let hn = people
-                .clone()
-                .filter(|&i| g.persons()[i].hint() && matches!(g.persons()[i].person_type(), PersonType::Card))
-                .count();
-            let all_hint = g.is_hint_special_active_for_train(tr);
-            let hp = if self.config.probabilistic_hint && hn > 0 && !all_hint {
-                1. / hn as f32
-            } else {
-                1.
-            };
-            let mut lt = 0.;
-            for i in people {
-                let x = &g.persons()[i];
-                match x.person_type() {
-                    PersonType::ScenarioCard => {
-                        lt += match g.friend.out_state {
-                            FriendOutState::UnClicked => self.config.first_friend_click_value,
-                            _ if x.friendship() < 60 => self.config.low_friend_bond_value * ph,
-                            _ => self.config.active_friend_value
-                        }
-                    }
-                    PersonType::Card if x.friendship() < 80 => {
-                        let mut b = if g.uma.flags.aijiao { 9. } else { 7. };
-                        if x.hint() {
-                            b += 5. * hp
-                        }
-                        b = b.min((80 - x.friendship()) as f32);
-                        lt += b * self.config.early_bond_value * ph;
-                        if x.hint() {
-                            let repeats = if all_hint && i < g.deck().len() {
-                                1 + g.deck()[i].effect.hint_count_bonus
-                            } else {
-                                1
-                            };
-                            lt += self.config.hint_bonus * hp * repeats as f32
-                        }
-                    }
-                    PersonType::Card if x.hint() => {
-                        let repeats = if all_hint && i < g.deck().len() {
-                            1 + g.deck()[i].effect.hint_count_bonus
-                        } else {
-                            1
-                        };
-                        lt += self.config.hint_bonus * hp * repeats as f32
-                    }
-                    _ => {}
-                }
-            }
+            let all_hint = g.is_hint_special_active_for_train_with_ramen(tr, ramen);
+            let lt = *eval_cache.long_term[tr][usize::from(all_hint)]
+                .get_or_insert_with(|| self.train_long_term(g, tr, all_hint));
             o.score += lt;
             let rp = -self.reserve_penalty(g, &val.status_pt);
             o.score += rp;
@@ -1008,7 +1024,7 @@ impl LocalRamenTrainer {
             // 加地区效果强度 × 权重。calc_training_value 已隐含数值加成，本项让
             // 策略在彩圈/羁绊/属性缺口占优时仍倾向兑现吃面成本。
             if self.config.ramen_train_coupling_weight > 0.0 {
-                if let Some(rid) = g.ramen.current_ramen {
+                if let Some(rid) = ramen {
                     if let Some(region) = RAMENDATA
                         .get()
                         .and_then(|d| d.ramen_region_effect.get(rid))
@@ -1038,7 +1054,7 @@ impl LocalRamenTrainer {
                 if g.card_type_count[tr] <= 1
                     && g.uma.five_status[tr] < g.uma.five_status_limit[tr]
                 {
-                    if let Some(rid) = g.ramen.current_ramen {
+                    if let Some(rid) = ramen {
                         if let Some(region) = RAMENDATA
                             .get()
                             .and_then(|d| d.ramen_region_effect.get(rid))
@@ -1058,7 +1074,7 @@ impl LocalRamenTrainer {
                 }
             }
         }
-        let lb = Self::choose(&out);
+        let lb = Self::choose(out);
         let local_base = match a[lb].operation {
             Operation::Train(t) => train_base[t as usize],
             _ => out[lb].score
@@ -1099,7 +1115,7 @@ impl LocalRamenTrainer {
                 .map(|(i, _)| i)
                 .ok_or_else(|| anyhow::anyhow!("友人外出达到跨年总配额后没有其他合法动作"))?;
         }
-        Ok((c, out))
+        Ok(c)
     }
     fn pt_effect(pt: i32) -> Result<(i32, i32, i32)> {
         let d = RAMENDATA.get().ok_or_else(|| anyhow::anyhow!("RAMENDATA 未初始化"))?;
@@ -1144,31 +1160,27 @@ impl LocalRamenTrainer {
         };
         Ok((checkpoint, rmj, great))
     }
-    /// 在指定吃面状态下预演一次训练决策，接收可复用的副本，不落地随机分身或消费真实随机流。
+    /// 借用原局面与训练候选预演指定面，复用评分空间，不落地分身或消费随机流。
     fn preview_train(
-        &self, mut preview: RamenGame, ramen: Option<usize>, eval_cache: &mut TrainEvalCache
-    ) -> Result<TrainPreview> {
-        preview.stage = RamenStage::Train;
-        preview.ramen.current_ramen = ramen;
-        preview.ramen.clear_pending();
-        let actions = preview.list_actions()?;
-        let (idx, _) = self.decide_train_cached(&preview, &actions, eval_cache)?;
-        let operation = actions
+        &self, g: &RamenGame, actions: &[RamenAction], ramen: Option<usize>, eval_cache: &mut LocalTrainCache,
+        scores: &mut Vec<RamenPolicyOutput>
+    ) -> Result<Operation> {
+        let idx = self.decide_train_cached(g, actions, ramen, eval_cache, scores)?;
+        actions
             .get(idx)
             .map(|a| a.operation)
-            .ok_or_else(|| anyhow::anyhow!("预演训练决策索引越界: {idx}/{}", actions.len()))?;
-        Ok(TrainPreview { game: preview, operation })
+            .ok_or_else(|| anyhow::anyhow!("预演训练决策索引越界: {idx}/{}", actions.len()))
     }
 
     /// "吃面后必训练 at_trains 覆盖位" 门控：该面落地后，最优训练位是否落在面的 at_trains 内
     ///
     /// 与体力评估复用同一次预演；非训练动作或未覆盖的训练位返回 `false`。
-    fn eat_covered_train_passes(&self, preview: &TrainPreview, region_id: usize) -> Result<bool> {
+    fn eat_covered_train_passes(&self, operation: Operation, region_id: usize) -> Result<bool> {
         let region = RAMENDATA
             .get()
             .and_then(|d| d.ramen_region_effect.get(region_id))
             .ok_or_else(|| anyhow::anyhow!("地区效果缺失: {region_id}"))?;
-        match preview.operation {
+        match operation {
             Operation::Train(tt) => {
                 let covered = region.at_trains.contains(&(tt as i32));
                 if !covered {
@@ -1194,18 +1206,17 @@ impl LocalRamenTrainer {
 
     /// 从已有预演计算训练前后体力，返回 `(训练类型, 训练前体力, 训练后体力)`。
     fn post_ramen_vital_transition(
-        &self, preview: &TrainPreview, eval_cache: &TrainEvalCache
+        &self, g: &RamenGame, operation: Operation, eval_cache: &LocalTrainCache
     ) -> Result<Option<(usize, i32, i32)>> {
-        let g = &preview.game;
         // 每年吃面决策都评估吃面后的体力（turn>=72 超级拉面回合不吃面，防御性返回 None）
         if g.turn() >= 72 {
             return Ok(None);
         }
-        let Operation::Train(tt) = preview.operation else {
+        let Operation::Train(tt) = operation else {
             return Ok(None);
         };
         let train = tt as usize;
-        let value = &eval_cache[train]
+        let value = &eval_cache.training[train]
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("预演训练缺少评估结果: {train}"))?
             .value;
@@ -1464,9 +1475,10 @@ impl LocalRamenTrainer {
     fn decide_ramen(&self, g: &RamenGame, a: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         let (_, mut out) = self.policy.decide_ramen(g, a)?;
         // 仅限此次只切换当前面的预演；真实吃面落地或局面改变后必须使用新缓存。
-        let mut eval_cache = EMPTY_TRAIN_EVAL_CACHE;
-        let mut preview = self.preview_train(g.clone(), None, &mut eval_cache)?;
-        let pre_action = preview.operation;
+        let mut eval_cache = LocalTrainCache::default();
+        let train_actions = g.list_train_actions();
+        let mut train_scores = Vec::new();
+        let pre_action = self.preview_train(g, &train_actions, None, &mut eval_cache, &mut train_scores)?;
         let year = (g.current_year() - 1) as usize;
         let eat_post = g.ramen.scenario_pt + calc_ramen_pt_gain(year, g.ramen.eat_count)?;
         let deadline_exception = self.deadline_urgency(g, eat_post)? > 0.0
@@ -1519,11 +1531,11 @@ impl LocalRamenTrainer {
         let mut window_cache = [None; 5];
         for (act, o) in a.iter().zip(out.iter_mut()) {
             if let Some(region_id) = act.ramen {
-                preview = self.preview_train(preview.game, Some(region_id), &mut eval_cache)?;
+                let preview = self.preview_train(g, &train_actions, Some(region_id), &mut eval_cache, &mut train_scores)?;
                 // 吃面后必训练 at_trains 覆盖位（C 方案简化约束）：预演该面落地后的最优训练位，
                 // 若不在 at_trains 内则否决（吃面加成浪费——玩家 87% 覆盖 vs 自动 52%）。
                 if self.config.eat_requires_covered_train
-                    && !self.eat_covered_train_passes(&preview, region_id)?
+                    && !self.eat_covered_train_passes(preview, region_id)?
                 {
                     o.score = f32::NEG_INFINITY;
                     if self.policy.collect_details {
@@ -1532,7 +1544,7 @@ impl LocalRamenTrainer {
                     }
                     continue;
                 }
-                if let Some((train, pre_vital, post_vital)) = self.post_ramen_vital_transition(&preview, &eval_cache)? {
+                if let Some((train, pre_vital, post_vital)) = self.post_ramen_vital_transition(g, preview, &eval_cache)? {
                     if train != 4
                         && self.config.y3_post_train_hard_floor > 0
                         && post_vital < self.config.y3_post_train_hard_floor
@@ -1988,7 +2000,7 @@ mod tests {
 
     use crate::game::{Game, Trainer};
 
-    use super::{EMPTY_TRAIN_EVAL_CACHE, LocalRamenConfig, LocalRamenTrainer, RamenPolicyConfig, RecommendedRamenTrainer};
+    use super::{LocalRamenConfig, LocalRamenTrainer, LocalTrainCache, RamenPolicyConfig, RecommendedRamenTrainer};
 
     /// 第1年地区选择（turn 2 在 run_begin 内联触发、stage=Begin）必须走 decide_region 打分。
     ///
@@ -2391,7 +2403,9 @@ mod tests {
     fn eat_covered_train_gate_blocks_mismatched_ramen() -> Result<()> {
         use crate::{
             game::{
+                FriendOutState,
                 InheritInfo,
+                PersonType,
                 ramen::{Operation, RamenAction, RamenGame, RamenStage, action::list_ramen_select_actions}
             },
             gamedata::init_global,
@@ -2427,14 +2441,18 @@ mod tests {
         game.ramen.special_feeling = 2;
         game.ramen.feeling_stock = [2, 2, 2]; // 库存充足，确保候选面可做
         game.ramen.selected_regions = [0, 1, 4]; // 第1年地区：0 速面 / 1 耐面 / 4 智面
+        game.stage = RamenStage::RamenSelect;
+        game.ramen.pending_ramen = Some(0);
+        let train_actions = game.list_train_actions();
+        let mut train_scores = Vec::new();
 
         // 局面 A：速低有空间 + 智满 → 最优训练必非智 → 智面 (id 4) 应被门控拒绝
         // 「满」一律从实际上限取，不写字面量：上限 = 剧本基值 + 继承，会随剧本数据与
         // 蓝因子变化，写死数字会让夹具在上限变动后静默失去「满」的语义。
         game.uma.five_status = [600, 1000, 1000, 1000, game.uma.five_status_limit[4]];
-        let mut eval_cache = EMPTY_TRAIN_EVAL_CACHE;
-        let preview = on.preview_train(game.clone(), Some(4), &mut eval_cache)?;
-        let pass_rid4 = on.eat_covered_train_passes(&preview, 4)?;
+        let mut eval_cache = LocalTrainCache::default();
+        let preview = on.preview_train(&game, &train_actions, Some(4), &mut eval_cache, &mut train_scores)?;
+        let pass_rid4 = on.eat_covered_train_passes(preview, 4)?;
         println!("局面A(智满): 智面通过={pass_rid4}");
         if pass_rid4 {
             panic!("智已满且最优训练非智时，智面 (id 4) 应被 eat_covered_train_passes 拒绝");
@@ -2454,18 +2472,18 @@ mod tests {
             let (idx, outs) = on.decide_train(&preview, &acts)?;
             println!("局面B 智面落地最优: {:?} score={:.1}", acts[idx].operation, outs[idx].score);
         }
-        let mut eval_cache = EMPTY_TRAIN_EVAL_CACHE;
-        let preview = on.preview_train(game.clone(), Some(4), &mut eval_cache)?;
-        let pass_rid4_b = on.eat_covered_train_passes(&preview, 4)?;
-        let vital = on.post_ramen_vital_transition(&preview, &eval_cache)?;
+        let mut eval_cache = LocalTrainCache::default();
+        let preview = on.preview_train(&game, &train_actions, Some(4), &mut eval_cache, &mut train_scores)?;
+        let pass_rid4_b = on.eat_covered_train_passes(preview, 4)?;
+        let vital = on.post_ramen_vital_transition(&game, preview, &eval_cache)?;
         println!("局面B 智面预演体力: {vital:?}");
         let mut checks = Checks::new();
         checks.check(
             matches!(vital, Some((4, before, after)) if before == original.uma.vital && after > before),
             "智面覆盖与体力评估使用同一智力训练，训练前体力来自原局面且训练后恢复"
         );
-        let preview = on.preview_train(game.clone(), Some(0), &mut eval_cache)?;
-        let pass_rid0_b = on.eat_covered_train_passes(&preview, 0)?;
+        let preview = on.preview_train(&game, &train_actions, Some(0), &mut eval_cache, &mut train_scores)?;
+        let pass_rid0_b = on.eat_covered_train_passes(preview, 0)?;
         println!("局面B(智低): 智面通过={pass_rid4_b} 速面通过={pass_rid0_b}");
         if !pass_rid4_b {
             panic!("其他位全满、只剩智位有空间时，覆盖智位的面 (id 4) 应通过门控");
@@ -2473,26 +2491,34 @@ mod tests {
         if pass_rid0_b {
             panic!("其他位全满、最优训练为智时，不覆盖智位的面 (id 0 速) 应被门控拒绝");
         }
-        let mut eval_cache = EMPTY_TRAIN_EVAL_CACHE;
-        let mut reused = on.preview_train(game.clone(), None, &mut eval_cache)?;
-        for ramen in [Some(4), Some(0), None, Some(4)] {
-            let mut fresh_cache = EMPTY_TRAIN_EVAL_CACHE;
-            let fresh = on.preview_train(game.clone(), ramen, &mut fresh_cache)?;
-            reused = on.preview_train(reused.game, ramen, &mut eval_cache)?;
-            println!("预演 {ramen:?}: 复用={:?} 独立={:?}", reused.operation, fresh.operation);
-            checks.check(reused.game == fresh.game, "切换预演候选后完整局面与独立副本一致");
-            checks.check(reused.operation == fresh.operation, "切换预演候选后训练决策与独立副本一致");
-            let actions = reused.game.list_actions()?;
-            let (chosen, scores) = on.decide_train_cached(&reused.game, &actions, &mut eval_cache)?;
-            let (fresh_chosen, fresh_scores) = on.decide_train(&fresh.game, &actions)?;
-            checks.check(chosen == fresh_chosen && scores == fresh_scores, "逐碗复用基础值后完整评分与独立计算一致");
+        let mut eval_cache = LocalTrainCache::default();
+        for ramen in [None, Some(4), Some(0), None, Some(4)] {
+            let mut fresh = game.clone();
+            fresh.stage = RamenStage::Train;
+            fresh.ramen.current_ramen = ramen;
+            fresh.ramen.clear_pending();
+            let actions = fresh.list_actions()?;
+            let (fresh_chosen, fresh_scores) = on.decide_train(&fresh, &actions)?;
+            let fresh_operation = actions[fresh_chosen].operation;
+            let reused = on.preview_train(&game, &train_actions, ramen, &mut eval_cache, &mut train_scores)?;
+            println!("预演 {ramen:?}: 借用={reused:?} 独立={fresh_operation:?}");
+            checks.check(train_actions == actions, "训练候选不受原阶段或 pending 面影响");
+            checks.check(reused == fresh_operation, "借用原局面的训练决策与独立副本一致");
+            checks.check(train_scores == fresh_scores, "逐碗复用基础值后完整评分与独立计算一致");
             checks.check(
-                scores.iter().zip(&fresh_scores).all(|(a, b)| a.score.to_bits() == b.score.to_bits()),
+                train_scores.iter().zip(&fresh_scores).all(|(a, b)| a.score.to_bits() == b.score.to_bits()),
                 "逐碗最终评分的浮点位模式一致"
             );
+            let fresh_vital = if let Operation::Train(tt) = fresh_operation {
+                let train = tt as usize;
+                let buffs = fresh.calc_training_buff(train)?;
+                let value = fresh.calc_training_value(&buffs, train)?;
+                Some((train, fresh.uma.vital, fresh.uma.vital + value.vital))
+            } else {
+                None
+            };
             checks.check(
-                on.post_ramen_vital_transition(&reused, &eval_cache)?
-                    == on.post_ramen_vital_transition(&fresh, &fresh_cache)?,
+                on.post_ramen_vital_transition(&game, reused, &eval_cache)? == fresh_vital,
                 "复用已选训练值后的体力变化一致"
             );
         }
@@ -2507,6 +2533,91 @@ mod tests {
             "前面的候选被拒绝后，后续智面仍完成评分"
         );
         checks.check(game == original, "覆盖与体力预演不改变原局面");
+
+        // 第三年非合宿、多 Hint 与友人已解锁的局面，当前面覆盖位会切换长期价值的 Hint 模式。
+        game.base.turn = 64;
+        game.stage = RamenStage::Train;
+        game.uma.motivation = 5;
+        game.friend.out_state = FriendOutState::AfterUnlock;
+        game.base.distribution = vec![vec![0, 1], vec![2], vec![3], vec![4], Vec::new()];
+        for person in &mut game.persons {
+            if person.person_type == PersonType::Card {
+                person.friendship = 40;
+                person.is_hint = true;
+            }
+        }
+        for card in &mut game.base.deck {
+            card.friendship = 40;
+        }
+        let mut local = on.config.clone();
+        local.probabilistic_hint = true;
+        for collect_details in [true, false] {
+            let mut trainer = LocalRamenTrainer::with_configs(on.policy.config.clone(), local.clone());
+            trainer.policy.collect_details = collect_details;
+            let mut cache = LocalTrainCache::default();
+            let actions = game.list_train_actions();
+            let mut scores = Vec::new();
+            for ramen in [None, Some(15), Some(17), None, Some(15)] {
+                let operation = trainer.preview_train(&game, &actions, ramen, &mut cache, &mut scores)?;
+                let mut fresh = game.clone();
+                fresh.stage = RamenStage::Train;
+                fresh.ramen.current_ramen = ramen;
+                fresh.ramen.clear_pending();
+                let fresh_actions = fresh.list_actions()?;
+                let (fresh_chosen, fresh_scores) = trainer.decide_train(&fresh, &fresh_actions)?;
+                checks.check(
+                    actions == fresh_actions && operation == fresh_actions[fresh_chosen].operation && scores == fresh_scores,
+                    "Local 借用预演的动作、数值分解与原因完整一致"
+                );
+                checks.check(
+                    scores.iter().zip(&fresh_scores).all(|(a, b)| {
+                        a.score.to_bits() == b.score.to_bits() && a.train_fail_adj.to_bits() == b.train_fail_adj.to_bits()
+                    }),
+                    "Local 复用的最终分数与失败损失逐位一致"
+                );
+            }
+            println!("Local 复用 details={collect_details} speed_hint={:?} friend={}", cache.long_term[0], cache.friend.is_some());
+            checks.check(
+                matches!(cache.long_term[0], [Some(normal), Some(special)] if normal.to_bits() != special.to_bits()),
+                "多 Hint 训练实际覆盖两种不同的长期价值"
+            );
+            checks.check(cache.friend.is_some(), "已解锁友人的动态估值实际参与复用");
+
+            let mut guarded = game.clone();
+            guarded.ramen.current_ramen = None;
+            guarded.uma.vital = 0;
+            let mut cache = LocalTrainCache::default();
+            let guarded_actions = guarded.list_train_actions();
+            let chosen = trainer.decide_train_cached(&guarded, &guarded_actions, None, &mut cache, &mut scores)?;
+            checks.check(
+                cache.training.iter().all(Option::is_none)
+                    && cache.long_term.iter().flatten().all(Option::is_none)
+                    && cache.friend.is_none()
+                    && scores.len() == 1
+                    && guarded_actions[chosen].operation == Operation::Rest,
+                "休息守门直接返回时不提前计算训练或友人估值"
+            );
+        }
+        game.base.turn = 11;
+        game.stage = RamenStage::RamenSelect;
+        let actions = game.list_train_actions();
+        let mut cache = LocalTrainCache::default();
+        for ramen in [None, Some(4)] {
+            let operation = on.preview_train(&game, &actions, ramen, &mut cache, &mut train_scores)?;
+            let mut fresh = game.clone();
+            fresh.stage = RamenStage::Train;
+            fresh.ramen.current_ramen = ramen;
+            fresh.ramen.clear_pending();
+            let fresh_actions = fresh.list_actions()?;
+            let (fresh_chosen, fresh_scores) = on.decide_train(&fresh, &fresh_actions)?;
+            checks.check(
+                actions == vec![RamenAction::no_ramen(Operation::Race)]
+                    && actions == fresh_actions
+                    && operation == fresh_actions[fresh_chosen].operation
+                    && train_scores == fresh_scores,
+                "必赛回合借用原选面阶段预演时仍只有比赛动作"
+            );
+        }
         checks.finish()
     }
 
@@ -2554,8 +2665,9 @@ mod tests {
         game.ramen.feeling_stock = [2, 2, 2]; // 库存充足，确保候选面可做
 
         let actions = list_ramen_select_actions(&game.ramen, &game.ramen.selected_regions);
-        let mut eval_cache = EMPTY_TRAIN_EVAL_CACHE;
-        let pre = trainer.preview_train(game.clone(), None, &mut eval_cache)?.operation;
+        let mut eval_cache = LocalTrainCache::default();
+        let mut train_scores = Vec::new();
+        let pre = trainer.preview_train(&game, &game.list_train_actions(), None, &mut eval_cache, &mut train_scores)?;
         let (_, outs) = trainer.decide_ramen(&game, &actions)?;
         let mut guarantee = 0.0f32;
         let mut has_eat = false;

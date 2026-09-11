@@ -322,7 +322,7 @@ pub fn system_event(key: &str) -> Result<&'static EventData> {
     global_events()
         .system_events
         .get(key)
-        .ok_or(anyhow!("未知系统事件: {key}"))
+        .ok_or_else(|| anyhow!("未知系统事件: {key}"))
 }
 /// 获得constants.json里记载的指定事件概率
 pub fn system_event_prob(key: &str) -> Result<f64> {
@@ -330,7 +330,7 @@ pub fn system_event_prob(key: &str) -> Result<f64> {
         .event_probs
         .get(key)
         .map(|x| *x as f64)
-        .ok_or(anyhow!("未知事件概率: {key}"))
+        .ok_or_else(|| anyhow!("未知事件概率: {key}"))
 }
 
 pub trait AttributeArray {

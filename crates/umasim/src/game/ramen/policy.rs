@@ -16,7 +16,7 @@
 use anyhow::Result;
 
 use super::{
-    effects::{RamenTrainingEffect, apply_ramen_training_effect, calc_ramen_training_effect},
+    effects::{RamenTrainingEffect, apply_ramen_training_effect, calc_ramen_training_effect_with_ramen},
     rules::{calc_ramen_pt_gain, get_region_range, get_super_ramen_clone_train_options},
 };
 use crate::{
@@ -305,14 +305,19 @@ impl RamenPolicy {
     /// 守门触发时评分列表为单元素（记录守门原因），不重复打分。
     pub fn decide_train(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         let mut cache = EMPTY_TRAIN_EVAL_CACHE;
-        self.decide_train_cached(game, actions, &mut cache)
+        let mut scores = Vec::new();
+        let chosen = self.decide_train_cached(game, actions, game.ramen.current_ramen, &mut cache, &mut scores)?;
+        Ok((chosen, scores))
     }
 
     /// [`decide_train`](Self::decide_train) 的缓存版：`eval_cache` 由调用方（如
     /// `LocalRamenTrainer::decide_train`）跨整轮传入，守门与打分共用同一份 eval。
+    /// `ramen` 指定本次候选面，结果写入复用的 `scores`；守门仍只写一个评分。
     pub fn decide_train_cached(
-        &self, game: &RamenGame, actions: &[RamenAction], eval_cache: &mut TrainEvalCache
-    ) -> Result<(usize, Vec<RamenPolicyOutput>)> {
+        &self, game: &RamenGame, actions: &[RamenAction], ramen: Option<usize>,
+        eval_cache: &mut TrainEvalCache, scores: &mut Vec<RamenPolicyOutput>
+    ) -> Result<usize> {
+        scores.clear();
         if actions.is_empty() {
             anyhow::bail!("Train 阶段候选为空");
         }
@@ -321,7 +326,7 @@ impl RamenPolicy {
 
         // 守门 0：自选比赛达标（优先于一切——不达标直接育成失败）
         if let Some(idx) = self.free_race_gate(game, actions) {
-            return Ok((idx, vec![RamenPolicyOutput {
+            scores.push(RamenPolicyOutput {
                 score: f32::MAX,
                 reason: if self.collect_details {
                     format!("守门: {}", self.free_race_gate_reason(game))
@@ -329,7 +334,8 @@ impl RamenPolicy {
                     String::new()
                 },
                 ..Default::default()
-            }]));
+            });
+            return Ok(idx);
         }
         // 守门 1：生病 → 治病（夏合宿无治病候选，休息自动治病）
         if uma.flags.ill || uma.flags.bad_trainer {
@@ -337,26 +343,28 @@ impl RamenPolicy {
                 .iter()
                 .position(|a| a.operation == Operation::Clinic && !is_xiahesu)
             {
-                return Ok((idx, vec![RamenPolicyOutput {
+                scores.push(RamenPolicyOutput {
                     score: f32::MAX,
                     reason: if self.collect_details { "守门: 生病治病".to_string() } else { String::new() },
                     ..Default::default()
-                }]));
+                });
+                return Ok(idx);
             }
             if is_xiahesu {
                 if let Some(idx) = actions.iter().position(|a| a.operation == Operation::Rest) {
-                    return Ok((idx, vec![RamenPolicyOutput {
+                    scores.push(RamenPolicyOutput {
                         score: f32::MAX,
                         reason: if self.collect_details { "守门: 夏合宿休息(自动治病)".to_string() } else { String::new() },
                         ..Default::default()
-                    }]));
+                    });
+                    return Ok(idx);
                 }
             }
         }
         // 守门 2：体力低 → 休息（防失败率崩盘；优先于心情、训练）
         // 回合级差异化：吃面回合训练必成（fail_rate_drop），体力门限放掉；
         // 不吃面回合保留阈值（避免打空体力后下回合被迫休息/失败）。
-        let rest_threshold = if game.ramen.current_ramen.is_some() {
+        let rest_threshold = if ramen.is_some() {
             self.config.vital_rest_eating
         } else {
             self.config.vital_rest
@@ -372,7 +380,7 @@ impl RamenPolicy {
                 .any(|a| matches!(&a.operation, Operation::Train(t) if *t as usize == 4));
         if uma.vital < rest_threshold && !wisdom_exempt {
             if let Some(idx) = actions.iter().position(|a| a.operation == Operation::Rest) {
-                return Ok((idx, vec![RamenPolicyOutput {
+                scores.push(RamenPolicyOutput {
                     score: f32::MAX,
                     reason: if self.collect_details {
                         format!("守门: 体力{}<{}休息", uma.vital, rest_threshold)
@@ -380,7 +388,8 @@ impl RamenPolicy {
                         String::new()
                     },
                     ..Default::default()
-                }]));
+                });
+                return Ok(idx);
             }
         }
         // 守门 3：心情低 → 外出（回干劲）
@@ -389,7 +398,7 @@ impl RamenPolicy {
                 .iter()
                 .position(|a| matches!(a.operation, Operation::NormalOuting | Operation::FriendOuting))
             {
-                return Ok((idx, vec![RamenPolicyOutput {
+                scores.push(RamenPolicyOutput {
                     score: f32::MAX,
                     reason: if self.collect_details {
                         format!("守门: 心情{}<{}外出", uma.motivation, self.config.motivation_outing)
@@ -397,46 +406,51 @@ impl RamenPolicy {
                         String::new()
                     },
                     ..Default::default()
-                }]));
+                });
+                return Ok(idx);
             }
         }
 
         // 打分选择
-        let scores = self.score_train_actions_cached(game, actions, eval_cache)?;
-        Ok((argmax_index(&scores), scores))
+        self.score_train_actions_cached(game, actions, ramen, eval_cache, scores)?;
+        Ok(argmax_index(scores))
     }
 
     /// 对所有 Train 阶段候选打分（守门通过后调用）
     pub fn score_train_actions(&self, game: &RamenGame, actions: &[RamenAction]) -> Result<Vec<RamenPolicyOutput>> {
         let mut cache = EMPTY_TRAIN_EVAL_CACHE;
-        self.score_train_actions_cached(game, actions, &mut cache)
+        let mut scores = Vec::with_capacity(actions.len());
+        self.score_train_actions_cached(game, actions, game.ramen.current_ramen, &mut cache, &mut scores)?;
+        Ok(scores)
     }
 
     /// [`score_train_actions`](Self::score_train_actions) 的缓存版：Train 候选复用
     /// `eval_cache` 中已算好的 eval（`eval_train` 首次求值后填入），非 Train 候选
-    /// 直接走 `score_train_action_other`，不产生 eval。
+    /// 直接走 `score_train_action_other`，不产生 eval。候选面只刷新训练上层值，结果覆盖 `scores`。
     pub fn score_train_actions_cached(
-        &self, game: &RamenGame, actions: &[RamenAction], eval_cache: &mut TrainEvalCache
-    ) -> Result<Vec<RamenPolicyOutput>> {
-        let mut scores: Vec<RamenPolicyOutput> = Vec::with_capacity(actions.len());
+        &self, game: &RamenGame, actions: &[RamenAction], ramen: Option<usize>,
+        eval_cache: &mut TrainEvalCache, scores: &mut Vec<RamenPolicyOutput>
+    ) -> Result<()> {
+        scores.clear();
+        scores.reserve(actions.len());
         for a in actions {
             if let Operation::Train(t) = a.operation {
                 let train = t as usize;
                 let eval = match &mut eval_cache[train] {
                     Some(eval) => eval,
-                    slot => slot.insert(self.eval_train(game, train)?)
+                    slot => slot.insert(self.eval_train(game, train, ramen)?)
                 };
-                if eval.ramen != game.ramen.current_ramen {
-                    eval.ramen_effect = calc_ramen_training_effect(game, train, eval.shining > 0);
+                if eval.ramen != ramen {
+                    eval.ramen_effect = calc_ramen_training_effect_with_ramen(game, train, eval.shining > 0, ramen);
                     eval.value.status_pt = apply_ramen_training_effect(eval.base_status, &eval.ramen_effect);
-                    eval.ramen = game.ramen.current_ramen;
+                    eval.ramen = ramen;
                 }
                 scores.push(self.score_train_action_eval(game, a, eval)?);
             } else {
                 scores.push(self.score_train_action_other(game, a)?);
             }
         }
-        Ok(scores)
+        Ok(())
     }
 
     /// Train 阶段：守门（生病/体力/心情）→ 否则按收益打分选最优（仅索引）
@@ -716,13 +730,13 @@ impl RamenPolicy {
     ///
     /// 唯一数据源（B2）：`score_train_action` / `decide_train` 双层共享这一份，
     /// 消除同回合同 train 的重复计算，并保存独立于拉面的训练下层属性。
-    /// 上层属性与 `calc_training_value_with_effect` 共用同一公式。
+    /// 上层属性按 `ramen` 候选计算，与 `calc_training_value_with_effect` 共用同一公式。
     ///
     /// 注：原为私有方法，提升为 `pub` 是给性能调优工具与守门测试用的。
-    pub fn eval_train(&self, game: &RamenGame, train: usize) -> Result<RamenTrainEval> {
+    pub fn eval_train(&self, game: &RamenGame, train: usize, ramen: Option<usize>) -> Result<RamenTrainEval> {
         let buffs = game.calc_training_buff(train)?;
         let shining = game.shining_count(train);
-        let ramen_effect = calc_ramen_training_effect(game, train, shining > 0);
+        let ramen_effect = calc_ramen_training_effect_with_ramen(game, train, shining > 0, ramen);
         let mut value = game.default_calc_training_value(&buffs, train)?;
         let base_status = value.status_pt;
         value.status_pt = apply_ramen_training_effect(base_status, &ramen_effect);
@@ -731,7 +745,7 @@ impl RamenPolicy {
             buffs,
             value,
             base_status,
-            ramen: game.ramen.current_ramen,
+            ramen,
             ramen_effect,
             fail_rate,
             shining
@@ -745,7 +759,7 @@ impl RamenPolicy {
     pub fn score_train_action(&self, game: &RamenGame, a: &RamenAction) -> Result<RamenPolicyOutput> {
         match a.operation {
             Operation::Train(t) => {
-                let eval = self.eval_train(game, t as usize)?;
+                let eval = self.eval_train(game, t as usize, game.ramen.current_ramen)?;
                 self.score_train_action_eval(game, a, &eval)
             }
             _ => self.score_train_action_other(game, a),
@@ -2121,8 +2135,8 @@ mod tests {
         // 守门 1：eval 确定性（同 game、同 train 两次求值逐位一致）
         // ——B2 缓存可复用的前提：同一 &game 下 calc 链是纯只读、逐位确定
         for tr in 0..5 {
-            let e1 = policy.eval_train(&game, tr)?;
-            let e2 = policy.eval_train(&game, tr)?;
+            let e1 = policy.eval_train(&game, tr, game.ramen.current_ramen)?;
+            let e2 = policy.eval_train(&game, tr, game.ramen.current_ramen)?;
             c.check(
                 e1 == e2,
                 &format!("eval_train(train={tr}) 同局面两次求值逐位一致"),
@@ -2141,7 +2155,8 @@ mod tests {
         ]);
         let uncached = policy.score_train_actions(&game, &actions)?;
         let mut cache: TrainEvalCache = EMPTY_TRAIN_EVAL_CACHE;
-        let cached = policy.score_train_actions_cached(&game, &actions, &mut cache)?;
+        let mut cached = Vec::new();
+        policy.score_train_actions_cached(&game, &actions, game.ramen.current_ramen, &mut cache, &mut cached)?;
         c.check(
             uncached.len() == cached.len(),
             "cached/uncached 候选数一致",
@@ -2164,10 +2179,15 @@ mod tests {
         let mut changed = false;
         let mut had_shining = false;
         let mut had_failure = false;
+        // 基础状态故意保留另一碗面；首次填充与后续刷新都必须使用显式候选。
+        game.ramen.current_ramen = Some(6);
+        cache = EMPTY_TRAIN_EVAL_CACHE;
+        let mut shared_scores = Vec::new();
         for ramen in [None, Some(5), Some(6), Some(6), None] {
-            game.ramen.current_ramen = ramen;
-            let full_scores = policy.score_train_actions(&game, &actions)?;
-            let shared_scores = policy.score_train_actions_cached(&game, &actions, &mut cache)?;
+            let mut reference = game.clone();
+            reference.ramen.current_ramen = ramen;
+            let full_scores = policy.score_train_actions(&reference, &actions)?;
+            policy.score_train_actions_cached(&game, &actions, ramen, &mut cache, &mut shared_scores)?;
             c.check(
                 full_scores == shared_scores
                     && full_scores.iter().zip(&shared_scores).all(|(full, shared)| {
@@ -2177,10 +2197,10 @@ mod tests {
                 "切换拉面后缓存与完整候选评分一致"
             );
             for tr in 0..5 {
-                let full = policy.eval_train(&game, tr)?;
+                let full = policy.eval_train(&reference, tr, ramen)?;
                 let shared = cache[tr].as_ref().ok_or_else(|| anyhow::anyhow!("训练 {tr} 缓存未填充"))?;
-                let via_trait = game.calc_training_value(&full.buffs, tr)?;
-                let via_with_effect = game.calc_training_value_with_effect(&full.buffs, tr, &full.ramen_effect)?;
+                let via_trait = reference.calc_training_value(&full.buffs, tr)?;
+                let via_with_effect = reference.calc_training_value_with_effect(&full.buffs, tr, &full.ramen_effect)?;
                 let full_bits = [full.buffs.youqing, full.buffs.deyilv, full.buffs.fail_rate_drop, full.buffs.vital_cost_drop];
                 let shared_bits = [shared.buffs.youqing, shared.buffs.deyilv, shared.buffs.fail_rate_drop, shared.buffs.vital_cost_drop];
                 c.check(
@@ -2209,13 +2229,14 @@ mod tests {
         game.ramen.current_ramen = None;
         let mut cache = EMPTY_TRAIN_EVAL_CACHE;
         let guard_actions: Vec<_> = actions.iter().copied().filter(|action| action.operation != Operation::Race).collect();
-        let (chosen, _) = policy.decide_train_cached(&game, &guard_actions, &mut cache)?;
+        let chosen = policy.decide_train_cached(&game, &guard_actions, None, &mut cache, &mut shared_scores)?;
         c.check(guard_actions[chosen].operation == Operation::Rest, "低体力不吃面走休息守门");
+        c.check(shared_scores.len() == 1, "复用完整评分列表后，守门结果只保留一项");
         c.check(cache.iter().all(Option::is_none), "守门早退不提前计算训练基础值");
+        policy.decide_train_cached(&game, &guard_actions, Some(5), &mut cache, &mut shared_scores)?;
         game.ramen.current_ramen = Some(5);
-        let (_, shared) = policy.decide_train_cached(&game, &guard_actions, &mut cache)?;
         let (_, full) = policy.decide_train(&game, &guard_actions)?;
-        c.check(cache.iter().all(Option::is_some) && shared == full, "吃面展开训练候选后才填充缓存，评分与完整路径一致");
+        c.check(cache.iter().all(Option::is_some) && shared_scores == full, "吃面展开训练候选后才填充缓存，评分与完整路径一致");
         c.finish()
     }
 }

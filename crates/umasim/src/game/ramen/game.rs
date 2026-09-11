@@ -311,12 +311,8 @@ impl Game for RamenGame {
             RamenStage::RegionSelect => {
                 return super::action::list_region_select_actions(self.base.turn);
             }
+            RamenStage::Train => return Ok(self.list_train_actions()),
             _ => {}
-        }
-
-        // race_turn 短路：仅"比赛"一个动作，跳过 RamenSelect/SpecialSelect
-        if self.is_race_turn() && self.stage == RamenStage::Train {
-            return Ok(vec![RamenAction::no_ramen(Operation::Race)]);
         }
 
         // 公共判定：friend_outing / ill（复用 BaseGame 通用规则）
@@ -346,12 +342,6 @@ impl Game for RamenGame {
                     .ok_or_else(|| anyhow::anyhow!("SpecialSelect 阶段要求 pending_ramen 已设置"))?;
                 super::action::list_special_select_actions(&self.ramen, ramen_idx)
             }
-            RamenStage::Train => Ok(super::action::list_train_actions(
-                can_friend_outing,
-                is_ill,
-                self.is_xiahesu(),
-                can_race
-            )),
             // 其他阶段的 list_actions 保留旧行为（虽然外部不会在此阶段调）
             _ => {
                 let available_ramens = if self.base.turn >= 2 && !self.is_super_ramen_turn() {
@@ -739,9 +729,9 @@ impl Game for RamenGame {
         let hint_bonus_pct = self.calc_hint_bonus_pct() as f64;
         // hint_special 生效时，位于 at_trains 训练位置的所有支援卡 (PersonType::Card) is_hint 都强制为 true
         // 生效条件：当前回合吃了面 + ramen_basic_effect[year].hint_special == true + 支援卡种类>=4
-        let hint_special_active = self.calc_hint_special_active();
+        let hint_special_active = self.calc_hint_special_active(self.ramen.current_ramen);
         let special_trains = if hint_special_active {
-            self.calc_hint_special_at_trains()
+            self.calc_hint_special_at_trains(self.ramen.current_ramen)
         } else {
             Default::default()
         };
@@ -781,6 +771,16 @@ impl Game for RamenGame {
 }
 
 impl RamenGame {
+    /// 列出当前基础局面的训练阶段动作；必赛回合只有比赛，候选面与当前阶段不影响列表。
+    pub(crate) fn list_train_actions(&self) -> Vec<RamenAction> {
+        if self.is_race_turn() {
+            return vec![RamenAction::no_ramen(Operation::Race)];
+        }
+        super::action::list_train_actions(
+            self.can_friend_outing(), self.uma.flags.ill, self.is_xiahesu(), self.can_self_race()
+        )
+    }
+
     /// 使用已计算的拉面效果求训练值，与策略评估共用上层加成公式。
     #[inline(always)]
     pub fn calc_training_value_with_effect(
@@ -1080,8 +1080,8 @@ impl RamenGame {
     ///
     /// 超级拉面期间虽然 basic.hint_special 也生效，但此时不进行 hint 判定（直接享受 final 效果），
     /// 故此处判断为 false（不吃面时通过 current_ramen 短路掉即可）。
-    fn calc_hint_special_active(&self) -> bool {
-        if self.ramen.current_ramen.is_none() {
+    fn calc_hint_special_active(&self, ramen: Option<usize>) -> bool {
+        if ramen.is_none() {
             return false;
         }
         let ramen_data = global!(RAMENDATA);
@@ -1097,9 +1097,9 @@ impl RamenGame {
     }
 
     /// 计算当前回合 hint_special 生效的训练位置集合（地区拉面 at_trains）
-    fn calc_hint_special_at_trains(&self) -> &'static [i32] {
+    fn calc_hint_special_at_trains(&self, ramen: Option<usize>) -> &'static [i32] {
         let ramen_data = global!(RAMENDATA);
-        if let Some(region_idx) = self.ramen.current_ramen {
+        if let Some(region_idx) = ramen {
             if let Some(region) = ramen_data.ramen_region_effect.get(region_idx) {
                 return &region.at_trains;
             }
@@ -1113,10 +1113,15 @@ impl RamenGame {
     /// hint_special 生效需要同时满足全局条件（吃面 + 第3年 + 支援卡种类>=4）
     /// 以及该 train 在当前回合吃的地区拉面的 at_trains 列表中。
     pub fn is_hint_special_active_for_train(&self, train: usize) -> bool {
-        if !self.calc_hint_special_active() {
+        self.is_hint_special_active_for_train_with_ramen(train, self.ramen.current_ramen)
+    }
+
+    /// 按指定候选面判断训练位的隐藏 Hint，复用真实吃面状态的年度、卡种和覆盖规则。
+    pub fn is_hint_special_active_for_train_with_ramen(&self, train: usize, ramen: Option<usize>) -> bool {
+        if !self.calc_hint_special_active(ramen) {
             return false;
         }
-        let at_trains = self.calc_hint_special_at_trains();
+        let at_trains = self.calc_hint_special_at_trains(ramen);
         at_trains.contains(&(train as i32))
     }
 }
@@ -3856,7 +3861,7 @@ struct AlwaysTrueRng;
         let _ = init_global();
 
         let game = make_hint_special_test_game();
-        assert!(!game.calc_hint_special_active(), "不吃面时 hint_special 必须为 false");
+        assert!(!game.calc_hint_special_active(game.ramen.current_ramen), "不吃面时 hint_special 必须为 false");
         // 任何 train 都应返回 false
         for train in 0..5 {
             assert!(
@@ -3882,14 +3887,14 @@ struct AlwaysTrueRng;
         game.base.turn = 5;
         game.ramen.current_ramen = Some(5);
         assert!(
-            !game.calc_hint_special_active(),
+            !game.calc_hint_special_active(game.ramen.current_ramen),
             "year1 吃面时 hint_special 必须为 false（basic.year0.hint_special=false）"
         );
 
         // year 2
         game.base.turn = 30;
         assert!(
-            !game.calc_hint_special_active(),
+            !game.calc_hint_special_active(game.ramen.current_ramen),
             "year2 吃面时 hint_special 必须为 false（basic.year1.hint_special=false）"
         );
 
@@ -3909,12 +3914,12 @@ struct AlwaysTrueRng;
         game.base.turn = 60;
         game.ramen.current_ramen = Some(5);
         assert!(
-            game.calc_hint_special_active(),
+            game.calc_hint_special_active(game.ramen.current_ramen),
             "year3 + 吃面 + 支援卡种类>=4 时 hint_special 应生效"
         );
 
         // 检查 at_trains 是否正确（region 5 的 at_trains）
-        let at_trains = game.calc_hint_special_at_trains();
+        let at_trains = game.calc_hint_special_at_trains(game.ramen.current_ramen);
         println!("region 5 at_trains={:?}", at_trains);
         // ramen_region_effect[5] 的 at_trains=[0,1,2,3,4]（全位置）
         assert_eq!(at_trains, vec![0, 1, 2, 3, 4]);
@@ -3943,7 +3948,7 @@ struct AlwaysTrueRng;
         game.base.turn = 60;
         // region 0 的 at_trains=[0]，只对速训练生效
         game.ramen.current_ramen = Some(0);
-        assert!(game.calc_hint_special_active(), "hint_special 应生效");
+        assert!(game.calc_hint_special_active(game.ramen.current_ramen), "hint_special 应生效");
 
         assert!(
             game.is_hint_special_active_for_train(0),
@@ -3957,14 +3962,25 @@ struct AlwaysTrueRng;
             );
         }
 
-        let at_trains = game.calc_hint_special_at_trains();
+        let at_trains = game.calc_hint_special_at_trains(game.ramen.current_ramen);
         println!("region 0 at_trains={:?}", at_trains);
         let mut checks = Checks::default();
         checks.check(at_trains == [0], "region 0 只包含速训练位置");
         game.ramen.current_ramen = None;
-        checks.check(game.calc_hint_special_at_trains().is_empty(), "未吃面时训练位置集合为空");
+        checks.check(game.calc_hint_special_at_trains(game.ramen.current_ramen).is_empty(), "未吃面时训练位置集合为空");
+        for ramen in [None, Some(0), Some(5)] {
+            let mut reference = game.clone();
+            reference.ramen.current_ramen = ramen;
+            for train in 0..5 {
+                checks.check(
+                    game.is_hint_special_active_for_train_with_ramen(train, ramen)
+                        == reference.is_hint_special_active_for_train(train),
+                    "借用基础局面的候选 Hint 与真实吃面状态一致"
+                );
+            }
+        }
         game.ramen.current_ramen = Some(global!(RAMENDATA).ramen_region_effect.len());
-        checks.check(game.calc_hint_special_at_trains().is_empty(), "地区索引不存在时训练位置集合为空");
+        checks.check(game.calc_hint_special_at_trains(game.ramen.current_ramen).is_empty(), "地区索引不存在时训练位置集合为空");
         println!("hint_special 仅在 at_trains 训练位置生效 ✓");
         checks.finish()
     }
@@ -3984,7 +4000,7 @@ struct AlwaysTrueRng;
         game.card_type_count = [1, 1, 1, 0, 0, 0, 0];
         game.deck_can_split = false;
         assert!(
-            !game.calc_hint_special_active(),
+            !game.calc_hint_special_active(game.ramen.current_ramen),
             "支援卡种类<4 时 hint_special 必须为 false"
         );
         println!("支援卡种类<4 时 hint_special 不生效 ✓");
@@ -4089,7 +4105,7 @@ struct AlwaysTrueRng;
         println!(
             "最终回合: {}, is_hint_special_active={}",
             game.turn(),
-            game.calc_hint_special_active()
+            game.calc_hint_special_active(game.ramen.current_ramen)
         );
         println!("ManualTrainer + hint_special 路径未崩溃 ✓");
         Ok(())
@@ -4863,6 +4879,34 @@ struct AlwaysTrueRng;
             );
         }
         c.finish()
+    }
+
+    /// 选面预演借用训练候选时保留普通训练和必赛规则，且不改动阶段或 pending。
+    #[test]
+    fn test_train_actions_independent_of_selection_stage() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        game.stage = RamenStage::RamenSelect;
+        game.ramen.pending_ramen = Some(0);
+        game.ramen.pending_special_targets = [1, 0, 0];
+        let mut checks = Checks::new();
+        let actions = game.list_train_actions();
+        checks.check(
+            actions.iter().filter(|a| matches!(a.operation, Operation::Train(_))).count() == 5
+                && actions.iter().any(|a| a.operation == Operation::Rest),
+            "普通回合的训练候选包含五训练位和休息"
+        );
+        game.base.turn = 11;
+        let race = game.list_train_actions();
+        println!("训练候选普通={actions:?}，必赛={race:?}");
+        checks.check(race.len() == 1 && race[0].operation == Operation::Race, "必赛回合仅允许比赛");
+        checks.check(
+            game.stage == RamenStage::RamenSelect && game.ramen.pending_ramen == Some(0)
+                && game.ramen.pending_special_targets == [1, 0, 0],
+            "候选生成保留原阶段与 pending"
+        );
+        checks.finish()
     }
 
     /// 第 3 年 `fixed` 策略 `list_actions` 必须是单候选，第 1 年不受影响

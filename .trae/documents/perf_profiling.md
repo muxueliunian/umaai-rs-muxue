@@ -268,6 +268,33 @@ cargo build --release --locked -p umasim --no-default-features --lib --target-di
 
 本地证据：`target/perf-results/round9-wisdom.csv`、`round9-root.csv` 和 `round9-production-game-wisdom-<版本>/` 的结果与决策 CSV；脚本为 `measure-round9-wisdom.ps1`、`measure-round9-roots.ps1`、`test-round9.ps1`、`build-round9-probes.ps1`。`round9-manifest.json` 记录基线来源及源码、配置和产物 SHA256；`round9-final.patch` 是相对 `2f90edc` 的累计源码差异，包含第六至八轮改动。基线与候选程序位于 `target/perf-round9-base/release/` 和 `target/perf-round9-candidate/release/`，均为构建目录中的临时产物。
 
+### 第十轮：借用选面预演并复用评分空间（2026-09-11）
+
+本轮以第九轮提交 `a61526f` 为基线，保持相同 Release 配置、数据和搜索预算：
+
+- 选面预演直接借用原 `RamenGame`，将候选面显式传入体力守门、训练评估、Hint 和 Local 吃面调整。训练候选只生成一次，保留必赛回合短路；各面的评分写入同一 `Vec`，每次清空后按原顺序重新计算。
+- 同次选面复用训练位的羁绊/Hint 长期价值和友人动态估值。Hint 按普通、全员两种模式分别缓存，卡种计数包含友人；真实吃面、分身或基础局面变化后重新建立缓存，lookahead 的真实状态副本继续独立评估。
+- `system_event`、`system_event_prob` 只在查找失败时构造错误，去掉成功路径的错误文本和错误对象分配，错误文本保持一致。
+
+策略缓存入口增加显式候选面和复用评分参数，`eval_train` 增加候选面参数；直接调用这些 Rust 方法的源码需要调整。`Trainer` trait 和通信字段未改动。
+
+| 测量 | `a61526f` | 本轮 | 耗时变化 |
+|---|---:|---:|---:|
+| wisdom 完整育成，先基线后优化版 | 59.607 s | 49.861 s | -16.4% |
+| wisdom 完整育成，先优化版后基线 | 60.939 s | 48.803 s | -19.9% |
+| speed 第 32 回合训练根，三轮中位数 | 426.412 ms | 340.248 ms | -20.2% |
+| speed 第 60 回合训练根，三轮中位数 | 82.228 ms | 70.260 ms | -14.6% |
+
+完整育成采用 benchmark 的固定 `wisdom` 卡组、基础种子 `61444`，生产搜索参数为 32 线程、N4096、UCB、group512、`train,ramen` 阶段。两组各双方一局；四次终分均为 `70876`，每局 200 条决策记录及结果 CSV 仅排除耗时后，组内与跨组全部一致。搜索日志中的 123 次搜索、1,203 个候选计数合计为每局 3,491,328 次 rollout，未缩减搜索量。计时覆盖 `run_full_game`，包含决策采集，排除初始化及 CSV 落盘。
+
+固定根交替三轮的全部非耗时输出一致，包括候选次数、实际预算和浮点统计位模式。整局 CSV 部分展示值经过取整，因此只声明记录一致；完整浮点位模式对照限定于固定根及针对性检查。第 60 回合候选根耗时在 65.649–85.328 ms 间波动，整体收益以两组完整育成为主要依据；上述结果不外推到其他卡组、种子或机器。
+
+单独加入 Local 策略缓存的先行对照为 62.765 → 62.227 s（-0.9%）；最终增益来自上述组合，其他单项未分别归因。独立分配计数入口在推荐 rollout 正常推进的 wisdom 第 12、32、60 回合局面测得，单次选面分配次数（不含重分配）从 28/33/30 降至 8/11/10，重分配从 3/2/2 降至 1/1/1。三个捕获局面及 15 项操作校验和一致。计数版安装分配 hook、不计时；计时版不安装 hook，这些局部计数不表示整局热点占比或峰值内存。
+
+7 项针对性 Release 检查与正式 `umaai` Release 构建通过：超级拉面效果、独立训练候选与必赛短路、各面训练值及浮点评分对照、原阶段/pending 保持与 Hint/友人缓存切换、风险训练的吃面必成价值、重叠地区窗口复用，以及普通和 rollout 实例的整局动作/事件记录一致。友人缓存夹具使用非合宿回合，明细开启和关闭均实际命中友人估值。
+
+本地证据：`target/perf-results/round10-summary.json`、`round10-borrow-wisdom.csv`、`round10-reverse-wisdom.csv`、`round10-root.csv` 及对应完整育成 CSV；复现脚本为 `measure-round10-borrow-wisdom.ps1`、`measure-round10-reverse-wisdom.ps1`、`measure-round10-roots.ps1`、`test-round10.ps1` 和 `build-round10-probes.ps1`。`round10-manifest.json` 保存源码、配置与产物 SHA256，`round10-final.patch` 是相对 `a61526f` 的本轮源码差异。首组完整育成使用 `round10-borrow.patch`，与最终补丁的差异仅为上述测试夹具的回合及注释，生产逻辑相同。基线、首组候选和最终候选程序分别位于 `target/perf-round10-base/`、`target/perf-round10-borrow/`、`target/perf-round10-candidate/`；分配工具源码及同源两种入口位于 `target/perf-results/round10-profile*`，均为本地构建产物。
+
 ## 1. 背景
 
 项目当前三类 CPU 性能 / 延迟分析工具（覆盖全栈 vs 按段 vs 全局三层视角）：

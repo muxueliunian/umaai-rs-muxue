@@ -193,7 +193,8 @@ fn calc_finals_effect(game: &RamenGame, _year_idx: usize) -> RamenTrainingEffect
 /// - `game`: 拉面杯游戏状态
 /// - `train`: 训练位置（0=速, 1=耐, 2=力, 3=根, 4=智）
 /// - `year_idx`: 年份索引（0-2）
-fn calc_normal_effect(game: &RamenGame, train: usize, year_idx: usize) -> RamenTrainingEffect {
+/// - `ramen`: 本次评估的候选面，None 表示不吃面
+fn calc_normal_effect(game: &RamenGame, train: usize, year_idx: usize, ramen: Option<usize>) -> RamenTrainingEffect {
     let ramen_data = global!(RAMENDATA);
     let mut effect = RamenTrainingEffect::default();
 
@@ -221,7 +222,7 @@ fn calc_normal_effect(game: &RamenGame, train: usize, year_idx: usize) -> RamenT
     }
 
     // 3. ramen_basic_effect（仅吃面后生效）
-    let eating = game.ramen.current_ramen.is_some();
+    let eating = ramen.is_some();
     if eating && year_idx < ramen_data.ramen_basic_effect.len() {
         let basic = &ramen_data.ramen_basic_effect[year_idx];
         effect.xunlian += basic.xunlian;
@@ -234,7 +235,7 @@ fn calc_normal_effect(game: &RamenGame, train: usize, year_idx: usize) -> RamenT
 
     // 4. ramen_region_effect（仅吃面后且在 at_trains 标注位置生效）
     if eating {
-        if let Some(ramen_idx) = game.ramen.current_ramen {
+        if let Some(ramen_idx) = ramen {
             let region = &ramen_data.ramen_region_effect[ramen_idx];
             if region.at_trains.contains(&(train as i32)) {
                 // 地区词条加成随当年剧本PT增加
@@ -263,6 +264,13 @@ fn calc_normal_effect(game: &RamenGame, train: usize, year_idx: usize) -> RamenT
 /// - `train`: 训练位置（0=速, 1=耐, 2=力, 3=根, 4=智）
 /// - `is_shining`: 是否友情训练（非友情训练时 youqing 视为 0）
 pub fn calc_ramen_training_effect(game: &RamenGame, train: usize, is_shining: bool) -> RamenTrainingEffect {
+    calc_ramen_training_effect_with_ramen(game, train, is_shining, game.ramen.current_ramen)
+}
+
+/// 按指定候选面计算训练效果；基础局面保持借用，超级拉面回合仍使用决赛效果。
+pub fn calc_ramen_training_effect_with_ramen(
+    game: &RamenGame, train: usize, is_shining: bool, ramen: Option<usize>
+) -> RamenTrainingEffect {
     let super_ramen = game.is_super_ramen_turn();
     let year_idx = (game.current_year() - 1) as usize;
 
@@ -271,7 +279,7 @@ pub fn calc_ramen_training_effect(game: &RamenGame, train: usize, is_shining: bo
         calc_finals_effect(game, year_idx)
     } else {
         // 普通回合：PT常驻 + RMJ常驻 + 吃面基础 + 地区效果
-        calc_normal_effect(game, train, year_idx)
+        calc_normal_effect(game, train, year_idx, ramen)
     };
 
     // 非友情训练时，youqing 不生效（强制归零）
@@ -396,7 +404,7 @@ mod tests {
     use crate::{
         game::ramen::RamenState,
         gamedata::init_global,
-        utils::{get_workspace_root, init_test_logger}
+        utils::{Checks, get_workspace_root, init_test_logger}
     };
 
     /// 创建一个用于测试的 RamenGame 实例
@@ -534,8 +542,14 @@ mod tests {
         // finals base: youqing=150
         // finals extra (deck_can_split=false 默认): 不生效
         println!("  => 期望: xunlian=35, youqing=195, pt_bonus=0, status_limit=40");
-
-        Ok(())
+        let mut checks = Checks::new();
+        for ramen in [None, Some(0), Some(5)] {
+            checks.check(
+                calc_ramen_training_effect_with_ramen(&game, 0, true, ramen) == effect,
+                "超级拉面效果不受普通候选面影响"
+            );
+        }
+        checks.finish()
     }
 
     #[test]
