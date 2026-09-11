@@ -110,9 +110,6 @@ impl RamenTerminal {
         let uma = &game.uma;
         let parts = uma.score_parts();
 
-        // 查表下标必须与 score_parts 同一套截断口径，否则七分量对不上总分
-        let lookup = |v: i32| -> i32 { cons.status_final_score(v) };
-
         let mut headroom = [0.0f64; 5];
         let mut final_status = [0.0f64; 5];
         // 单维「评分缺口」= 把这一维补满到上限还能拿到的分数。
@@ -135,7 +132,7 @@ impl RamenTerminal {
             let limit = uma.five_status_limit[i].max(0);
             final_status[i] = status as f64;
             headroom[i] = (limit - status) as f64;
-            let gap = (lookup(limit) - lookup(status)).max(0) as f64;
+            let gap = (cons.status_final_score(limit) - parts.five_status[i]).max(0) as f64;
             gap_sum += gap;
             gap_min = gap_min.min(gap);
             gap_max = gap_max.max(gap);
@@ -315,6 +312,11 @@ mod tests {
         println!("全员荒废 sum={:.0}", all_low.status_gap_sum);
         println!("单维荒废 sum={:.0}", one_low.status_gap_sum);
         c.check(all_low.status_gap_sum > one_low.status_gap_sum, "缺口之和能分开全员荒废与单维荒废");
+        c.check(one_low.status_gap_spread == one_low.status_gap_sum, "仅单维未满时缺口极差等于缺口之和");
+
+        let full = build(limit);
+        println!("全员满额 sum={:.0} spread={:.0}", full.status_gap_sum, full.status_gap_spread);
+        c.check(full.status_gap_sum == 0.0 && full.status_gap_spread == 0.0, "全员满额时缺口之和与极差均为 0");
 
         c.finish()
     }

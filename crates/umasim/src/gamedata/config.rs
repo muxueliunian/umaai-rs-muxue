@@ -121,10 +121,10 @@ impl GameConstants {
     }
 
     /// 随机事件为支援卡，马娘，掉心情和不发生的分布
-    pub fn get_event_distribution(&self) -> Vec<f64> {
+    pub fn get_event_distribution(&self) -> [f64; 4] {
         let probs = &self.event_probs;
-        let mut ret = vec![probs["card_event"], probs["uma_event"], probs["drop_motivation"]];
-        ret.push(1.0 - ret[0] - ret[1] - ret[2]);
+        let mut ret = [probs["card_event"], probs["uma_event"], probs["drop_motivation"], 0.0];
+        ret[3] = 1.0 - ret[0] - ret[1] - ret[2];
         ret
     }
 }

@@ -10,7 +10,7 @@ use anyhow::{Result, anyhow};
 use comfy_table::{ColumnConstraint, Table, Width};
 use enum_iterator::Sequence;
 use rand::{Rng, rngs::StdRng, seq::IndexedRandom};
-use rand_distr::{Distribution, weighted::WeightedIndex};
+use rand_distr::Distribution;
 
 use crate::{
     diag,
@@ -28,7 +28,7 @@ use crate::{
     },
     gamedata::{onsen::ONSENDATA, *},
     global,
-    utils::{AttributeArray, global_events, system_event, system_event_prob}
+    utils::{AttributeArray, global_event_distribution, global_events, system_event, system_event_prob}
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -339,8 +339,7 @@ impl Game for BasicGame {
                 }
             }
             // 之后处理一般随机事件
-            let weights = WeightedIndex::new(global!(GAMECONSTANTS).get_event_distribution()).expect("event weights");
-            match weights.sample(rng) {
+            match global_event_distribution().sample(rng) {
                 0 => {
                     // 支援卡事件. 再精细一点模拟 后一段事件发生次数不能多于前一段事件
                     let card_event_times: Vec<_> = vec![8001, 8002, 8003]
