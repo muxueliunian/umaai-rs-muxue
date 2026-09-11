@@ -1,7 +1,7 @@
 //! Luck score 跟踪器：累计 T(n) baseline 与回合 / 全局运气分
 //!
 //! 口径与文档 §3.3 一致：
-//! - T(n) baseline 由 `main.rs` 主循环从 MCTS `candidate_scores` + `candidate_n`
+//! - T(n) baseline 由 `umaai::main` 主循环从 MCTS `candidate_scores` + `candidate_n`
 //!   **按局数加权**计算（`Σ (score × n) / Σ n`，与 onsen `update_score` 同口径）。
 //! - **显示分换算**：baseline 存的是「原期望评分」，`on_new_turn` 入参把
 //!   `mcts_turn_bonus` 叠加为显示分再存储/比较。公式
@@ -42,7 +42,7 @@ pub struct LuckScoreSnapshot {
 /// Luck score 跟踪器（状态机）
 ///
 /// 持有 chara_id 切局检测、初始 / 上回合 baseline（**显示分**）两份内部状态。
-/// 每次 AI 推荐完成后由 `main.rs` 调 [`Self::on_new_turn`] 更新。
+/// 每次 AI 推荐完成后由 `umaai` 调 [`Self::on_new_turn`] 更新。
 ///
 /// **切局键**：`single_mode_chara_id`（C# 端 `single_mode_chara_id`，单调递增）——
 /// 比 `uma_id` 更准确（同一马娘 `uma_id` 重复训练时也能识别新局）。

@@ -11,6 +11,10 @@
 ## 2026-09-10
 - **本机 Release 性能优化**：启用速度优先优化、ThinLTO 和本机 CPU 指令集，减少模拟、评分与搜索中的重复分配、复制和计算，复用事件队列与地区评分，候选内部模拟并行执行并按原序归并；rollout 跳过原因文本生成，保留数值评分分解、正常决策日志与协议输出。
 - **性能基准与验证**：基准继承游戏线程和搜索配置，补充分配复用、评分、随机流、动作与事件轨迹、协议输出及跨线程失败槽一致性检查，记录生产参数整局与高预算搜索根的配对测量口径和复测步骤。
+- **main.rs 按职责拆分重构**：主程序收敛为薄调度（CLI / 初始化 / watch 循环分发）；新增 `decision/` 目录（决策后处理：luck 计算与决策输出，`luck_score` 一并移入）与 `scenario/` 目录（温泉 / 拉面各一幕块：含 newgame 检测、切局、决策计算与 emit）；行为等价
+- **连续决策中间状态输出时机修正**：中间决策的「计算后续动作」提示与 `compute_next_step` 通知从主循环移到决策循环内部、在真正执行下一步决策（可能耗时）之前发出
+- **比赛回合策略输出修复**：拉面比赛回合仅一个固定动作、MCTS 不搜索导致无输出——为固定动作合成决策信息使其在屏幕 / JSON 上可见，不挂 luck
+- **`--json` 开始接受数据时发 `connected`**：仅 json 模式、watcher 就绪进入监听时 `emit_info("connected")` 通知 AIRed 连接成功
 
 ## 2026-09-09
 - **决策间 `decision_kind` 顶层字段 + `scenario_extra.ramen_action`**：partial decision 类型分发——main.rs 在 select_action 前按 `RamenStage` 填 `decision_kind`，onsen 填 `train`/`event`；`ramen_action` 由 `RamenAction.to_string()` 给出含吃面 + 隐藏诀窍 + 操作三阶段动作串（AIRed 端只显示不解析），合并路径一条 JSON 表达、三阶段路径按 chain 顺序分条

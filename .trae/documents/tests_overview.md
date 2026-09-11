@@ -1,37 +1,43 @@
 # 测试一览
 
 本文件按模块分类、用一行描述每个测试的功能，便于快速定位和评估覆盖率。
-基于 2026-08-28 master 实测口径：`cargo test --release --lib` 共 **330 个**（326 passed / 4 ignored）；
-另 `umaai` bin 有 2 个测试（test_watch / test_urafile），因依赖环境变量与工作目录当前失败，属历史遗留。
+基于 2026-09-10 当前 master 实测口径：`cargo test --release --lib` 共 **387 个**
+（382 passed / 5 ignored），其中 umasim lib **375 个**（370 passed / 5 ignored）、
+umaai lib **12 个**（全部通过）。
+另 `umaai` bin（`src/main.rs`，含其引用的 `protocol` / `decision` 模块）共 **23 个测试**，
+其中 `test_watch` / `test_urafile` 依赖环境变量与工作目录、当前挂起不返回，属历史遗留。
 
 ## 目录
 
-- [拉面杯规则层](#拉面杯规则层) — 157
-  - [`ramen/game.rs`](#ramengamers-48) — 48
+- [拉面杯规则层](#拉面杯规则层) — 174
+  - [`ramen/game.rs`](#ramengamers-49) — 49
   - [`ramen/rules.rs`](#ramenrulesrs-30) — 30
-  - [`ramen/policy.rs`](#ramenpolicyrs-24) — 24
+  - [`ramen/policy.rs`](#ramenpolicyrs-25) — 25
   - [`ramen/action.rs`](#ramenactionrs-21) — 21
   - [`ramen/effects.rs`](#rameneffectsrs-15) — 15
   - [`ramen/features.rs`](#ramenfeaturesrs-9) — 9
   - [`ramen/events.rs`](#rameneventsrs-5) — 5
   - [`ramen/rng_consistency.rs`](#ramenrng_consistencyrs-4) — 4
   - [`ramen/state.rs`](#ramenstaters-1) — 1
-- [基础游戏](#基础游戏) — 20
-- [搜索层](#搜索层search) — 34
-- [训练员](#训练员trainer) — 32
-- [输出层](#输出层output) — 30
+  - [`ramen/policy_schema.rs`](#ramenpolicy_schemars-8) — 8
+  - [`ramen/training_sample.rs`](#ramentraining_samplers-7) — 7
+- [基础游戏](#基础游戏) — 22
+- [搜索层](#搜索层search) — 38
+- [训练员](#训练员trainer) — 36
+- [输出层](#输出层output) — 42
 - [配置 / 数据加载](#配置--数据加载) — 26
-- [采样器](#采样器sampler) — 13
+- [采样器](#采样器sampler) — 19
 - [基准设施](#基准设施bench) — 9
 - [RNG](#rngrng) — 8
 - [神经评估](#神经评估neural) — 1
+- [协议层（umaai lib）](#协议层umaai-lib) — 12
 - [基准测试运行说明](#基准测试运行说明)
 
 ---
 
 ## 拉面杯规则层
 
-### `ramen/game.rs` (48)
+### `ramen/game.rs` (49)
 
 **初始化 / 端到端**
 - `test_ramen_game_newgame` — 新建游戏合法性
@@ -46,6 +52,7 @@
 - `test_random_distribution_training_value` — 随机分配下训练数值计算
 - `test_ramen_deyilv_includes_scenario_bonus` — 得意率叠加剧本加成
 - `test_random_event_generation` — 随机事件生成
+- `test_eat_ramen_pt_gain_defers_to_next_turn` — 吃面 PT/吃面数延迟到 NextTurn 结算，避免本次吃面立即抬高档位
 
 **决策路径（三阶段 / 合并）**
 - `test_three_stage_decision_flow` — 三阶段（RamenSelect→SpecialSelect→Train）衔接
@@ -139,7 +146,7 @@
 - `test_validate_region_selection` — 地区组合合法性校验
 - `test_npc_chara_ids` — NPC chara_id 集合正确
 
-### `ramen/policy.rs` (24)
+### `ramen/policy.rs` (25)
 
 **固定策略**
 - `test_fixed_region_selection` — 各年份固定地区选择
@@ -172,6 +179,9 @@
 - `test_region_build_sensitivity` — 地区打分对 build 卡组构成有区分度
 - `test_breakdown_sums_to_score` — 打分 breakdown 各项之和等于 score（决策日志自洽）
 - `test_status_rate_is_linear` — `status_rate` 线性生效（防止重复相乘成平方）
+
+**评估缓存守门**
+- `test_train_eval_deterministic_and_cached_consistent` — B2 单源评估守门：eval 两次逐位一致 + 缓存/无缓存入口决策语义一致
 
 ### `ramen/action.rs` (21)
 
@@ -258,11 +268,34 @@ RNG 三流受控重构的集成验证：
 
 - `test_region_archive_year_idx_not_current_year` — 地区归档下标陷阱：turn 23 归档到第 1 年（current_year()-1）
 
+### `ramen/policy_schema.rs` (8)
+
+拉面策略格位 schema（教师数据/搜索观测编码，段偏移守门）：
+- `test_layout_contiguous` — 五大段布局首尾相接、宽度之和等于 `POLICY_DIM`=234（防改宽度忘改偏移）
+- `test_triples_are_exactly_sum_le_2` — `TRIPLES` 恰为「和≤2 非负三元组」全集且无重复
+- `test_triple_roundtrip` — `triple_id` / `triple_of` 互为逆，拒绝和为3/负数/越界输入
+- `test_eat_index_unique_and_in_range` — 吃面格位互不碰撞且全部落在吃面段内（含合并形态 None+[0,0,0]）
+- `test_train_index_covers_ten_ops` — 基础操作十种互异落在本段，StageOnly/SuperRamenSelect 拒绝
+- `test_slots_of_dispatch` — `slots_of` 按阶段分派正确并拒绝阶段/动作不匹配与地区重复
+- `test_real_actions_map_to_slots` — 真实采样决策点全部候选正确落格不碰撞（含合并候选）
+- `test_rules_special_targets_stay_in_schema` — `list_special_targets_for` 产物全部落在 `TRIPLES` 内（钉死 total_cap 不变量）
+
+### `ramen/training_sample.rs` (7)
+
+拉面训练样本采样容器：
+- `test_stage_code_roundtrip` — 阶段编码与 `RamenStage` 互为逆，拒绝非决策点与未定义编码
+- `test_valid_mask_tail_bits` — 位图尾部未用位必须清零，否则 `count_valid` 多算
+- `test_candidate_stats_match_action_result` — 候选统计与 `ActionResult` 逐位同口径（CRN 配对基准）
+- `test_sample_rejects_bad_input` — 拒绝四类会污染数据集的输入（维度/NaN/空/CRN 不对齐）
+- `test_batch_binary_roundtrip` — 批次落盘可往返（pilot 用，非冻结格式）
+- `test_build_sample_from_real_position` — 真实局面/特征/格位串起装样本（含失败槽位路径）
+- `test_export_ramen_sample_from_real_search` — 真实搜索走通 export，须开 `record_ordered_rollouts`（关时报错）
+
 ---
 
 ## 基础游戏
 
-**`game/base/mod.rs`**
+**`game/base/mod.rs` (12)**
 - `test_newgame` — 新建基础游戏
 - `test_explain` — BaseGame explain
 - `test_newgame_status_limit_is_scenario_base_plus_inherit` — 开局上限＝剧本基值＋继承增量（PR #25 契约）
@@ -276,14 +309,18 @@ RNG 三流受控重构的集成验证：
 - `test_apply_event_friend_bonus_integration` — 事件 apply 集成友人词条 bonus
 - `test_apply_event_no_friend_bonus_backward_compatible` — 无友人时事件 apply 向后兼容
 
-**`game/base/basic.rs`**
+**`game/base/basic.rs` (2)**
 - `test_newgame` — 新建基础游戏（BasicGame）
 - `test_view_default` — BasicGame 默认 GameView
 
-**`game/uma.rs`**
+**`game/uma.rs` (3)**
 - `test_uma` — Uma 基础结构
 - `test_win_races` — 比赛胜场计算
 - `test_score_parts_matches_calc_score` — 评分分项之和等于 calc_score
+
+**`game/traits.rs` (2)** — 得意率加权分桶采样
+- `test_sample_bucket_matches_weighted_index` — 零分配分桶采样与 rand 整数 `WeightedIndex` 逐位等价（5 权重位典型组合）
+- `bench_sample_bucket_vs_weighted_index`（ignored）— 分桶 vs `WeightedIndex` 完整路径进程内 microbench
 
 **其他文件**
 - `test_inherit`（game/inherit.rs）— 继承值生成
@@ -294,7 +331,7 @@ RNG 三流受控重构的集成验证：
 
 ## 搜索层（search）
 
-**`flat_search.rs` (20)**
+**`flat_search.rs` (23)**
 - `test_search_reproducible_same_seed` — 同种子两次搜索逐位一致
 - `test_search_seed_actually_used` — 换种子结果确实变化
 - `test_search_invariant_to_action_order` — 搜索结果对动作顺序的不变量
@@ -312,6 +349,9 @@ RNG 三流受控重构的集成验证：
 - `test_ramen_combined_action_preserves_targets` — 合并动作保留 targets
 - `test_ramen_combined_action_rejects_illegal_targets` — 合并动作拒绝非法 targets
 - `test_crn_pair_alignment_keeps_original_j` — CRN 配对按原始序号 j 对齐（不因失败过滤错位）
+- `test_ordered_rollouts_records_and_neutral` — 有序 rollout：开关开时按序号记录、关时不分配、开/关不扰动搜索
+- `test_ordered_rollouts_align_with_crn_seeds` — 有序行把种子当分数返回，逐位对照 `seed_at(k)` 验证 CRN 对齐
+- `test_ordered_rollouts_ucb_keeps_failed_slots` — UCB 路径失败序号必须留空，不能把后续成功项前移
 - `test_crn_pairing_gain`（ignored）— CRN 配对收益测量（耗时，按需手动）
 - `test_crn_pairing_gain_ramen`（ignored）— CRN 配对收益测量·拉面（耗时，按需手动）
 - `test_crn_pairing_gain_ramen_small` — CRN 配对收益测量（拉面小样本，常规运行）
@@ -335,14 +375,15 @@ RNG 三流受控重构的集成验证：
 - `test_moment_result` — MomentResult 统计（count/sum/mean/stdev）
 - `test_no_terminal_is_zst` — 无终局记录时零尺寸
 
-**`config.rs` (1)**
+**`config.rs` (2)**
 - `test_new_game_config_follows_crn_stage_reseed` — new_game_config 的 crn_stage_reseed 跟随 GameConfig
+- `test_record_ordered_rollouts_defaults_off` — `record_ordered_rollouts` 默认关闭且 toml 路径不会悄悄打开
 
 ---
 
 ## 训练员（trainer)
 
-**`ramen_mcts_trainer.rs` (15)**
+**`ramen_mcts_trainer.rs` (17)**
 - `test_mcts_reproducible` — MCTS 整局可复现（同 seed 逐位一致）
 - `test_mcts_train_only_full_game` — train_only 阶段门控整局快照（逐位 62698/[3337,…]/searched=66）
 - `test_combined_default_on` — 合并搜索缺省开启
@@ -357,6 +398,8 @@ RNG 三流受控重构的集成验证：
 - `test_super_ramen_gate_searches_once` — 超级拉面门控只搜一次
 - `test_super_ramen_search_root_smoke` — 超级拉面搜索根冒烟
 - `test_root_action_uses_strategy_stream` — 根动作决策走策略流（与规则流解耦）
+- `test_last_decision_exposes_search_protocol` — last_decision 协议字段：评分/局数同步截断 `reason_max_display` 且严格同长
+- `test_last_decision_none_on_singleton` — 早退（单候选）last_decision 返回 None，避免上一次搜索的陈旧数据
 - `test_terminal_breakdown_demo`（ignored）— 终局差异日志整局演示（按需手动）
 
 **`local_ramen_trainer.rs` (13)**
@@ -374,34 +417,40 @@ RNG 三流受控重构的集成验证：
 - `friend_future_hidden_supply` — 友人未来隐藏风味供给预估
 - `microbench_top_fns`（ignored）— 热点函数微基准（进程级 CWD，按需手动）
 
-**`ramen_handwritten_trainer.rs` (2)**
+**`ramen_handwritten_trainer.rs` (3)**
 - `test_handwritten_full_game` — 完整 77 回合跑通（评分/RMJ/吃面数输出）
 - `test_handwritten_reproducible` — 同 seed 两次整局评分一致
+- `test_handwritten_last_decision` — last_decision 协议字段：候选按 score 降序截断 5、`candidate_n`/`reason` 留空
 
 **`logging_trainer.rs` (2)**
 - `test_logging_trainer_records_full_game` — 完整局决策记录覆盖（三阶段/事件/地区选择）
 - `test_reproducible_same_seed` — 同 seed 两次整局决策序列与评分一致（可复现性）
 
+**`ramen_special_root.rs` (1)**
+- `test_canonical_special_root_matches_ramen_select` — 还原后特征与联合决策根逐位相同（且不还原时确实不同，防空守门）
+
 ---
 
 ## 输出层（output)
 
-**`reason.rs` (7)** — 险胜决策理由
-- `test_narrow_win_analysis` — 险胜分析：门限内选出 rivals 与分差
-- `test_landslide_silent` — 悬殊局（超门限）静默不输出理由
-- `test_max_display_truncate` — 未中选候选按 reason_max_display 截断
-- `test_pt_metric` — pt_score 维度除回系数还原（-66/2=-33）
-- `test_render_lines` — render_reason_lines 数据驱动渲染格式
+**`reason.rs` (9)** — 险胜决策理由
+- `test_landslide_still_emits` — 悬殊局不再静默：门限不作触发器，每回合都返回数据（分差仅用于着色）
+- `test_ranking_by_score` — 评分排序：rivals = 评分降序前 N 排除中选（允许未选项更高，分差可为正）
+- `test_pt_metric` — PT 口径跟随所选口径而非默认 score
+- `test_max_display_truncate` — 前 N 截断（N 之外不分析），max_display=0 兜底 1
+- `test_render_lines` — 可读渲染：首选行 + 未中选 ±分差与子项；编号从 #2 起，置信度不上屏
+- `test_color_thresholds` — 着色档位：与首选差距 `<30` 亮绿 /`<100` 绿 /`<300` 黄 /其余真彩灰
+- `test_render_only_chosen` — 唯一候选仅输出首选行，rivals 为空
 - `test_gap_confidence_degenerate` — 零误差/零分差退化输入置信度不产生 NaN
 - `test_noop_sink` — NoopSink 默认静默
 
 **`decision.rs` (6)**
+- `test_default_is_zero_index` — 默认构造下标 0（简化后 7 字段）
 - `test_from_index_minimal` — DecisionInfo 最小构造
 - `test_from_index_and_score` — DecisionInfo 带评分构造
-- `test_default_is_zero_index` — 默认构造下标为 0
 - `test_serde_roundtrip_minimal` — serde 往返（最小）
-- `test_serde_roundtrip_full` — serde 往返（全字段）
-- `test_serde_json_value_conversion` — serde_json::Value 转换
+- `test_serde_roundtrip_with_scenario_extra` — 含 `scenario_extra`（luck_score/reason 等）往返
+- `test_json_top_level_omits_stub_fields` — 顶层 JSON 不含已删 5 个 stub 字段（reason/search_depth/…），candidate_descriptions 与 scores 严格同长
 
 **`diagnostic.rs` (5)** — 诊断日志运行时开关
 - `test_diag_expands_to_info` — feature 开时 diag! 展开为真实 info
@@ -427,6 +476,18 @@ RNG 三流受控重构的集成验证：
 - `test_csv_row_and_header` — 单行序列化 + 表头格式
 - `test_empty_log` — 空日志 CSV 输出
 - `test_save_to_roundtrip` — 落盘与读取往返
+
+**`sink.rs` (10)** — 决策输出 sinks（人读/JSON）
+- `test_empty_sink_does_not_panic` — EmptySink 静默丢弃不 panic
+- `test_human_readable_sink_does_not_panic` — HumanReadableSink 不 panic
+- `test_human_readable_sink_no_extra` — 无 `scenario_extra` 时静默跳过
+- `test_human_readable_sink_with_luck_extra` — 带 luck snapshot 时只输出运气行
+- `test_human_readable_sink_luck_color_brackets` — 本局运气各颜色档位均不 panic
+- `test_stdout_json_sink_emits_json` — 顶层 10 字段 JSON + `candidate_descriptions` 映射动作名 + `scenario_extra` 四类信息透传
+- `test_stdout_json_sink_fallback_on_serialize_failure` — 序列化失败（NaN）走占位 JSON 不 panic
+- `test_stdout_json_sink_info` — `emit_info` 格式 `{"type":"info","event":...}`（4 种 event）
+- `test_stdout_json_sink_error` — `emit_error` 格式 `{"type":"error","message":...}`（中文不转义）
+- `test_stdout_json_sink_info_error_does_not_panic` — info/error 序列化失败只打 stderr，不污染 stdout JSON 流
 
 ---
 
@@ -477,13 +538,19 @@ RNG 三流受控重构的集成验证：
 - `test_sample_seed_actually_used` — 采样种子生效（换种子采样变）
 - `test_sample_covers_all_turns` — 采样覆盖全部回合
 - `test_combinations_boundaries` — 分层组合边界（首末组合）
-- `test_gen1_space_size` — gen1 采样空间大小
+- `test_gen1_space_size` — gen1 采样空间大小（5×85 + 2×50，含角色冲突缩池）
 - `test_gen1_decks_wellformed` — gen1 卡组合法性
 - `test_gen1_space_excludes_chara_conflict` — gen1 空间排除 chara 冲突
+- `test_gen1_space_hash_pinned` — gen1 空间枚举指纹钉死 `GEN1_SPACE_HASH_V1`（卡池/构成变更防护，顺序敏感）
+- `test_custom_space_two_wisdom` — 分布外空间追加智力卡能组出 2 智，规模符合手算
+- `test_custom_space_ignores_duplicate_extra` — 自定义空间忽略池内本就存在的重复追加卡
 - `test_epsilon_perturbs_trajectory` — epsilon 扰动改变轨迹
 - `test_epsilon_out_of_range_rejected` — 非法 epsilon 拒绝
 - `test_sampled_position_is_advanceable` — 采样局面可推进（阶段入口契约）
 - `test_sampled_position_feeds_search` — 采样局面可喂给搜索
+- `test_region_select_undersampled_without_quota` — 回归：关配额后第 2/3 年地区样本占比 <5%（配额机制存在的理由）
+- `test_region_quota_captures_year2_and_year3` — 配额打开后第 2/3 年地区都能采到，候选为完整组合枚举（C(5,3)/C(10,3)）
+- `test_region_quota_does_not_perturb_other_samples` — 配额走独立频道，不落在普通配额的任务上（分片续跑可复现契约）
 
 ---
 
@@ -521,6 +588,28 @@ RNG 三流受控重构的集成验证：
 
 ---
 
+## 协议层（umaai lib)
+
+umaai lib 对外协议解析（`src/protocol/`）：
+
+**`protocol/mod.rs` (7)**
+- `test_extract_scenario_id_ok` — 正常从 baseGame 解析 scenarioId
+- `test_extract_scenario_id_missing_basegame` — 缺 baseGame 层返回错误
+- `test_extract_scenario_id_missing_field` — 缺 scenarioId 字段返回错误
+- `test_extract_scenario_id_wrong_type` — scenarioId 类型错误返回错误
+- `test_parse_game_by_scenario_onsen` — 按剧本 id 解析为温泉局
+- `test_parse_game_by_scenario_ramen` — 按剧本 id 解析为拉面局
+- `test_parse_game_by_scenario_unknown_id` — 未知剧本 id 拒绝
+
+**`protocol/ramen.rs` (5)**
+- `test_feeling_stock_mapping` — 诀窍库存协议 → A/B/C 计数映射
+- `test_train_feeling_type_mapping` — 训练角标协议 → `FeelingType` 数组
+- `test_selected_regions_mapping` — 已选地区协议 → `[usize;3]`
+- `test_optional_mappings` — 可选字段（-1→None）映射
+- `test_turn_import_v2_full_samples` — turn 导入 v2 全样本
+
+---
+
 ## 基准测试运行说明
 
 ### `bin/bench_base.rs`
@@ -549,4 +638,5 @@ cargo run --release --bin bench_compositions -- --runs 100 --seed 42 --trainer h
 
 ## 附注
 
-- **ignored 测试（4 个）**：`test_crn_pairing_gain` / `test_crn_pairing_gain_ramen`（CRN 收益测量，耗时）、`microbench_top_fns`（微基准）、`test_terminal_breakdown_demo`（整局诊断演示）——均按需手动运行
+- **ignored 测试（5 个）**：`bench_sample_bucket_vs_weighted_index`（game/traits，分桶 microbench）、`test_crn_pairing_gain` / `test_crn_pairing_gain_ramen`（CRN 收益测量，耗时）、`microbench_top_fns`（微基准）、`test_terminal_breakdown_demo`（整局诊断演示）——均按需手动运行
+- **umaai bin 历史遗留**：`src/main.rs` 的 `test_watch` / `test_urafile` 依赖环境变量（`LOCALAPPDATA`）与工作目录，当前挂起不返回，需手动或跳过执行

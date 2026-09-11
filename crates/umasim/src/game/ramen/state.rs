@@ -324,10 +324,10 @@ impl RamenGame {
         // 注意：旧实现 `id / 10 == 30305` 会误判 rank=0（303050）和 rank=5-9（303055-303059）
         let has_new_friend = deck_ids.iter().any(|&idrank| {
             let rank = idrank % 10;
-            idrank / 10 == 30305 && (1..=4).contains(&rank)
+            idrank / 10 == 30305
         });
         if !has_new_friend {
-            anyhow::bail!("卡组未携带新友人卡(idrank=303051-303054，card_id=30305)，拉面杯模拟器仅支持新友人卡组");
+            anyhow::bail!("卡组未携带新友人卡(idrank=30305*，card_id=30305)，拉面杯模拟器仅支持新友人卡组");
         }
         let mut ret = RamenGame {
             base: BaseGame::new(uma_id, deck_ids, inherit, global!(RAMENDATA).status_limit_base())?,
@@ -375,9 +375,9 @@ impl RamenGame {
         let has_new_friend = base
             .deck
             .iter()
-            .any(|card| card.card_id == 30305 && (1..=4).contains(&card.rank));
+            .any(|card| card.card_id == 30305);
         if !has_new_friend {
-            anyhow::bail!("卡组未携带新友人卡(card_id=30305，rank=1-4)，拉面杯模拟器仅支持新友人卡组");
+            anyhow::bail!("卡组未携带新友人卡(card_id=30305)，拉面杯模拟器仅支持新友人卡组");
         }
         // 携带4种以上卡才能分身
         let deck_can_split = base.card_type_count.iter().filter(|x| **x > 0).count() >= 4;
