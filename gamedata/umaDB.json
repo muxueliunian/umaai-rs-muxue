@@ -9828,5 +9828,44 @@
       71
     ],
     "star": 5
+  },
+  "114901": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      10,
+      10,
+      10,
+      0
+    ],
+    "fiveStatusInitial": [
+      111,
+      99,
+      113,
+      120,
+      107
+    ],
+    "freeRaces": [
+      {
+        "startTurn": 12,
+        "endTurn": 22,
+        "count": 1
+      }
+    ],
+    "gameId": 114901,
+    "name": "[绝佳之晓暗]蝴蝶兰",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      30,
+      33,
+      43,
+      55,
+      56,
+      63,
+      68
+    ],
+    "star": 5
   }
 }
