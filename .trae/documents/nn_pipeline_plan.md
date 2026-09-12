@@ -1932,8 +1932,10 @@ https://claude.ai/code/artifact/f49b7879-0bf0-460e-990c-9477dd6b8940
   - ❗`ModelConfig.for_dataset` 在训练样本 ≥120000 时会自动换成 128/384/3 层/0.05，
     实验必须显式传入全部结构参数。
 - **标签**：`labels.py` bootstrap 512 / seed 20260830 / radical 1.4 / temperature 1.0 / tie_atol 1e-5，各批逐字段相同。
-- **教师数据**：FlatSearch 均匀分配，手写 rollout 基策，每候选 search_n 1024，有序 rollout，
-  不开 UCB，地区策略 all。roll-in 为冻结的学生集成。
+- **教师数据**：本节第四、第五轮**新增采集**的数据（`npy_r3roll`、`npy_r4roll`、`npy_r4roll2`）采用
+  FlatSearch 均匀分配、每候选 1024 次手写 rollout，有序 rollout，不开 UCB，地区策略 all；roll-in 为冻结学生集成。
+  完整训练集仍包含历史 512 预算、不同 roll-in 来源（含手写 roll-in）的数据；4096 采集截断到 1024 的批次
+  （`npy_n4096_w1024`）等见 [nn_model_registry.md](nn_model_registry.md) §2.1 的数据配方登记。
 - **评估**：`ramen_space_bench --trainer nn --special-mode canonical`，自选比赛守门开，
   seed 61444，gen1 空间 525 plan × 16 局（每套 8400 局），各臂同世界。
 - **统计**：每组逐 (plan, world) 配对差；合并时先在同一 (plan, world) 内平均两组差；
