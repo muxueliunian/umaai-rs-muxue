@@ -38,6 +38,28 @@ def _splitmix64(value: int, seed: int) -> int:
     return (z ^ (z >> 31)) & UINT64_MASK
 
 
+def _read_rollout_width(data_dir: Path) -> int | None:
+    """从导出目录的 meta.json 读 rollout 列宽；旧版导出没有该字段则返回 None。"""
+
+    meta_path = data_dir / "meta.json"
+    if not meta_path.is_file():
+        return None
+    with meta_path.open(encoding="utf-8") as handle:
+        value = json.load(handle).get("stats", {}).get("rollout_width")
+    return None if value is None else int(value)
+
+
+def _read_label_rollouts(label_dir: Path) -> int | None:
+    """从标签目录的 labels.json 读生成标签时用掉的 rollout 数。"""
+
+    meta_path = label_dir / "labels.json"
+    if not meta_path.is_file():
+        return None
+    with meta_path.open(encoding="utf-8") as handle:
+        value = json.load(handle).get("rollouts")
+    return None if value is None else int(value)
+
+
 def _read_plan_count(data_dir: Path) -> int | None:
     """从导出目录的 meta.json 读采样计划数；旧版导出没有该字段则返回 None。"""
 
@@ -114,6 +136,15 @@ class NpyShard:
         self.value_target = _load(self.label_dir, "value_target")
         label_index = _load(self.label_dir, "index")
         self.plan_count = _read_plan_count(self.data_dir)
+        # rollout 预算防错配：同一批根可以派生出多套只有列宽不同的数据/标签，它们的
+        # index、cand_ptr 完全相同，错配不会被主键校验拦住。直接比对两侧记录的列宽。
+        self.rollout_width = _read_rollout_width(self.data_dir)
+        label_rollouts = _read_label_rollouts(self.label_dir)
+        if self.rollout_width is not None and label_rollouts is not None and self.rollout_width != label_rollouts:
+            raise ValueError(
+                f"{self.label_dir}: 标签用了 {label_rollouts} 个 rollout，"
+                f"但 {self.data_dir} 的列宽是 {self.rollout_width}"
+            )
         # 组合键：由导出器按 (马娘, 卡组) 直接算出，与采样空间无关。缺失说明是加入该列
         # 之前导出的目录，此时按组合切分回落到 `index % plan_count` 的旧口径。
         combo_path = self.data_dir / "combo_key.npy"
@@ -333,6 +364,28 @@ def subsample_train_refs(
         keys[i] = _splitmix64(sample_id, seed)
     order = np.argsort(keys, kind="stable")[:max_samples]
     return train_refs[np.sort(order)]
+
+
+def repeat_train_refs(train_refs: np.ndarray, repeats: dict[int, int]) -> np.ndarray:
+    """把指定分片的训练引用重复成 ``repeats[shard]`` 倍，用于按数据来源调抽样权重。
+
+    只作用于**已经划分好**的训练引用：验证集不经过这里，训练/验证不会因重复而交叉。
+    返回的是抽样条目，唯一样本仍以传入的 ``train_refs`` 为准——模型规模、归一化、
+    阶段权重都应按唯一样本算，否则重复会被当成新增数据。
+
+    ``repeats`` 为空时原样返回同一个数组，默认训练路径逐位不变。
+    """
+
+    if any(count < 1 for count in repeats.values()):
+        raise ValueError("重复次数必须 ≥ 1")
+    extra = [
+        train_refs[train_refs[:, 0] == shard_idx]
+        for shard_idx, count in sorted(repeats.items())
+        for _ in range(count - 1)
+    ]
+    if not extra:
+        return train_refs
+    return np.concatenate([train_refs, *extra], axis=0)
 
 
 class RamenDataset(Dataset):

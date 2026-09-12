@@ -28,12 +28,14 @@ from torch.utils.data import DataLoader
 
 try:
     from .data import (
+        STAGE_COUNT,
         RamenDataset,
         ValueNormalization,
         compute_stage_weights,
         describe_split,
         fit_value_normalization,
         load_shards,
+        repeat_train_refs,
         stable_split_refs,
         subsample_train_refs,
     )
@@ -41,12 +43,14 @@ try:
     from .model import POLICY_DIM, ModelConfig, RamenNetwork, model_from_checkpoint
 except ImportError:
     from data import (
+        STAGE_COUNT,
         RamenDataset,
         ValueNormalization,
         compute_stage_weights,
         describe_split,
         fit_value_normalization,
         load_shards,
+        repeat_train_refs,
         stable_split_refs,
         subsample_train_refs,
     )
@@ -463,6 +467,21 @@ def _parse_args() -> argparse.Namespace:
         help="按 optimizer step 计的训练上限，**精确截到该步**（在 batch 边界收尾）。"
         "给出时覆盖 --epochs。最后一轮通常是半轮，其 train 指标只覆盖实跑的那些 batch",
     )
+    parser.add_argument(
+        "--frozen-constants",
+        type=Path,
+        help="从一份既有 run.json 读取 value_normalization 与 stage_weights，覆盖按本臂数据"
+        "算出来的值。数据对照实验必须给：这两个常量都是从训练集统计出来的，各臂数据不同"
+        "就会各自变一套，「只加了一批数据」的对照里会混进目标尺度与阶段配比的变化",
+    )
+    parser.add_argument(
+        "--train-repeat",
+        nargs=2,
+        action="append",
+        metavar=("DATA_DIR", "N"),
+        help="把该 --data 目录的训练引用重复成 N 倍（划分之后才重复，验证集不变）。可重复。"
+        "只改抽样比例：模型规模、归一化、阶段权重、早停耐心仍按唯一样本算",
+    )
     parser.add_argument("--token-dim", type=int)
     parser.add_argument("--heads", type=int)
     parser.add_argument("--encoder-blocks", type=int)
@@ -526,6 +545,22 @@ def main() -> None:
         # 落在同一份训练子集上，散布只来自优化路径。同一 split_seed 下各数据量点严格嵌套
         train_refs = subsample_train_refs(shards, train_refs, args.max_train_samples, split_seed)
     split_summary = describe_split(shards, train_refs, validation_refs)
+    train_repeats: dict[int, int] = {}
+    for data_dir, count in args.train_repeat or []:
+        matches = [i for i, shard in enumerate(shards) if shard.data_dir.resolve() == Path(data_dir).resolve()]
+        if len(matches) != 1:
+            raise ValueError(f"--train-repeat {data_dir}: 应恰好匹配一个 --data 目录，实际 {len(matches)} 个")
+        if matches[0] in train_repeats:
+            raise ValueError(f"--train-repeat {data_dir}: 重复指定")
+        train_repeats[matches[0]] = int(count)
+    # 唯一样本仍是 train_refs；只有 DataLoader 与每轮步数用重复后的抽样条目
+    sampled_train_refs = repeat_train_refs(train_refs, train_repeats)
+    if train_repeats:
+        split_summary["train_sampled"] = int(len(sampled_train_refs))
+        split_summary["train_repeat"] = {
+            split_summary["data_dirs"][shard_idx]: count for shard_idx, count in sorted(train_repeats.items())
+        }
+        print(f"训练唯一样本 {len(train_refs)}，重复后抽样条目 {len(sampled_train_refs)}")
     stage_weights, stage_counts = compute_stage_weights(shards, train_refs)
     stage_weights = stage_weights.to(device)
     train_action_weights = None
@@ -542,11 +577,27 @@ def main() -> None:
         model = RamenNetwork(config).to(device)
         normalization = fit_value_normalization(shards, train_refs)
 
+    frozen_constants = None
+    if args.frozen_constants is not None:
+        frozen_constants = json.loads(args.frozen_constants.read_text(encoding="utf-8"))
+        frozen_weights = frozen_constants["stage_weights"]
+        if len(frozen_weights) != STAGE_COUNT:
+            raise ValueError(f"{args.frozen_constants}: stage_weights 长度不是 {STAGE_COUNT}")
+        if any(w > 0.0 for w, c in zip(frozen_weights, stage_counts) if c == 0) or any(
+            w == 0.0 for w, c in zip(frozen_weights, stage_counts) if c > 0
+        ):
+            raise ValueError(f"{args.frozen_constants}: stage_weights 的零值位置与本次训练集的空阶段不一致")
+        stage_weights = torch.tensor(frozen_weights, dtype=torch.float32, device=device)
+        if resume_checkpoint is None:
+            normalization = ValueNormalization.from_dict(frozen_constants["value_normalization"])
+
     optimizer = make_optimizer(
         model, args.lr, args.head_lr, args.weight_decay, args.eat_interaction_weight_decay
     )
     # 每轮的 optimizer step 数。DataLoader 不丢尾批，故向上取整。
-    steps_per_epoch = max(1, math.ceil(len(train_refs) / min(args.batch_size, max(1, len(train_refs)))))
+    steps_per_epoch = max(
+        1, math.ceil(len(sampled_train_refs) / min(args.batch_size, max(1, len(sampled_train_refs))))
+    )
     patience = args.patience if args.patience is not None else (20 if len(train_refs) < 25_000 else 12)
     epochs = args.epochs
     if args.patience_steps is not None:
@@ -624,7 +675,7 @@ def main() -> None:
             step_scheduler.step()
 
     generator = torch.Generator().manual_seed(init_seed)
-    train_dataset = RamenDataset(shards, train_refs)
+    train_dataset = RamenDataset(shards, sampled_train_refs)
     validation_dataset = RamenDataset(shards, validation_refs)
     common_loader = {
         "batch_size": min(args.batch_size, len(train_dataset)),
@@ -651,6 +702,7 @@ def main() -> None:
         "value_component_weights": list(VALUE_COMPONENT_WEIGHTS),
         "stage_weights": stage_weights.cpu().tolist(),
         "stage_counts": stage_counts,
+        "frozen_constants_source": None if args.frozen_constants is None else str(args.frozen_constants),
         "train_action_weights": None if train_action_weights is None else train_action_weights.cpu().tolist(),
         "train_action_counts": train_action_counts,
         "split": split_summary,

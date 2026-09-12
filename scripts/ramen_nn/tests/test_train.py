@@ -21,11 +21,26 @@ from model import (  # noqa: E402
     ModelConfig,
     RamenNetwork,
 )
+from data import repeat_train_refs  # noqa: E402
 from train import make_optimizer, policy_kl_per_sample  # noqa: E402
 
 
 class TrainTests(unittest.TestCase):
     """训练数值稳定性与冻结占位行。"""
+
+    def test_repeat_train_refs_only_multiplies_selected_shard(self) -> None:
+        refs = torch.tensor([[0, 0], [1, 0], [0, 1], [2, 5], [1, 3]]).numpy()
+        self.assertIs(repeat_train_refs(refs, {}), refs)
+        self.assertIs(repeat_train_refs(refs, {1: 1}), refs)
+        sampled = repeat_train_refs(refs, {1: 3})
+        print("repeat_train_refs sampled:", sampled.tolist())
+        self.assertEqual(sampled[: len(refs)].tolist(), refs.tolist())
+        for shard_idx, expected in ((0, 2), (1, 6), (2, 1)):
+            self.assertEqual(int((sampled[:, 0] == shard_idx).sum()), expected)
+        expected_rows = refs.tolist() + [[1, 0], [1, 3], [1, 0], [1, 3]]
+        self.assertEqual(sorted(map(tuple, sampled.tolist())), sorted(map(tuple, expected_rows)))
+        with self.assertRaises(ValueError):
+            repeat_train_refs(refs, {0: 0})
 
     def test_masked_kl_is_finite_and_has_zero_lower_bound(self) -> None:
         logits = torch.tensor([[2.0, 1.0, 99.0]])

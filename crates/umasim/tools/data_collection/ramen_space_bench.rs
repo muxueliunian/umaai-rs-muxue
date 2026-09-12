@@ -1006,7 +1006,9 @@ fn main() -> Result<()> {
             all.push(score);
             by_shape.entry(plan.shape.to_string()).or_default().push(score);
             by_uma.entry(format!("{}", plan.uma)).or_default().push(score);
-            if cell(free_race_col)? != "true" {
+            // ❗`bench::result_cells` 把这一列写成 `u8::from(bool)`，即 "0" / "1"。
+            // 原先在这里比 "true"，导致每一局都被记成未达标、打印出的比例恒为 100%。
+            if cell(free_race_col)? != "1" {
                 free_race_fail += 1;
             }
             if args.csv.is_some() {
