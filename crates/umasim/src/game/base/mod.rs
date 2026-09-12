@@ -1,7 +1,7 @@
 pub mod action;
 pub mod basic;
 pub mod person;
-use std::{collections::HashSet, default::Default, sync::Arc};
+use std::{collections::HashSet, default::Default};
 
 pub use action::*;
 use anyhow::Result;
@@ -31,7 +31,7 @@ pub struct BaseGame {
     /// 卡组信息
     pub deck: Vec<SupportCard>,
     /// 继承因子信息，在育成中不变但是要随时取
-    pub inherit: Arc<InheritInfo>,
+    pub inherit: InheritInfo,
     /// 友人数据
     pub friend: FriendState,
     /// 设施等级计数 (设施等级x4)
@@ -46,7 +46,7 @@ pub struct BaseGame {
     /// 本回合内还没触发的事件(Hint, 点击友人等)
     pub unresolved_events: Vec<EventData>,
     /// 每种训练卡数量，用于训练倾向和固有判断
-    pub card_type_count: Arc<[i32; 7]>,
+    pub card_type_count: [i32; 7],
     /// 友人事件 ID 集合（base/onsen 从 global_events.friend_events 派生；
     /// ramen 在 `RamenGame::newgame` 中额外合并 `RAMENDATA.friend_events`）
     pub friend_event_ids: HashSet<u32>
@@ -137,14 +137,14 @@ impl BaseGame {
             stage: TurnStage::Begin,
             uma,
             deck,
-            inherit: Arc::new(inherit),
+            inherit,
             friend: FriendState::new(friend_id, friend_index)?,
             train_level_count: [0; 5],
             distribution: vec![],
             events: HashMap::new(),
             absent_rate_drop: 0,
             unresolved_events: vec![],
-            card_type_count: Arc::new(card_type_count),
+            card_type_count,
             // 从 global_events().friend_events.values() 派生友人事件 ID
             // （base/onsen 用；ramen 在 RamenGame::newgame 中额外合并 RAMENDATA.friend_events）
             friend_event_ids: global_events().friend_events.values().map(|e| e.id).collect()
@@ -244,10 +244,7 @@ impl BaseGame {
 
     pub fn generate_card_event(&self, person_index: i32, rng: &mut impl Rng) -> Option<EventData> {
         // 支援卡事件. 再精细一点模拟 后一段事件发生次数不能多于前一段事件
-        let card_event_times: Vec<_> = vec![8001, 8002, 8003]
-            .iter()
-            .map(|x| *self.events.get(x).unwrap_or(&0))
-            .collect();
+        let card_event_times = [8001, 8002, 8003].map(|id| *self.events.get(&id).unwrap_or(&0));
         let mut available_events = vec![];
         if card_event_times[0] < 5 {
             available_events.push(0);
@@ -335,20 +332,35 @@ mod tests {
         Ok(())
     }
 
+    /// 开局保留继承和卡组计数，克隆后的修改不影响原局。
     #[test]
     fn test_newgame() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         init_test_logger("info")?;
         init_global()?;
-        let game = BaseGame::new(101901, &[302424, 302464, 302484, 302564, 302574, 302644], InheritInfo {
+        let inherit = InheritInfo {
             blue_count: [15, 3, 0, 0, 0],
             extra_count: [0, 30, 0, 0, 30, 30]
-        }, global!(GAMECONSTANTS).five_status_limit_base)?;
+        };
+        let game = BaseGame::new(101901, &[302424, 302464, 302484, 302564, 302574, 302644], inherit.clone(),
+            global!(GAMECONSTANTS).five_status_limit_base)?;
         println!("{}", game.explain()?);
         let score = game.uma.calc_score();
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
-        Ok(())
+
+        let mut checks = Checks::new();
+        checks.check(game.inherit == inherit, "开局保留全部继承因子");
+        checks.check(game.card_type_count == [2, 0, 1, 1, 1, 1, 0], "卡组包含两速、一力、一根、一智、一友人");
+        let mut branch = game.clone();
+        checks.check(branch == game, "克隆保留完整基础状态");
+        branch.inherit.blue_count[0] += 1;
+        branch.inherit.extra_count[5] += 1;
+        branch.card_type_count[0] -= 1;
+        println!("副本继承: {:?}，卡组计数: {:?}", branch.inherit, branch.card_type_count);
+        checks.check(game.inherit == inherit, "修改副本的两组继承因子不影响原局");
+        checks.check(game.card_type_count == [2, 0, 1, 1, 1, 1, 0], "修改副本的卡组计数不影响原局");
+        checks.finish()
     }
 
     // ========== 通用规则：自选比赛 / 友人出行 ==========

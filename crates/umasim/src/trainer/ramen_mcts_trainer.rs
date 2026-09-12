@@ -199,7 +199,15 @@ pub enum RamenSelection {
 ///
 /// **只缓存决策协议需要的字段**，不复制整个 [`RamenSearchOutput`]（含每个候选
 /// 的 `ActionResult.distribution` 数组，clone 成本过大）。`last_decision` 要的
-/// 三件套：分数 / 局数 / 选中下标，加上 reason 字段用的维度差文本。
+/// 三件套：分数 / 局数 / 选中下标，加上候选可读描述（`descriptions`）。
+///
+/// 2026-09 简化：移除 `reason_text` 字段——`DecisionInfo::reason` 已删除，
+/// 终局维度差值改走 `LastReasonSink` 缓存的 `DecisionReasonData` 挂到
+/// `scenario_extra.reason`（main.rs `emit_with_luck_decision` 接线）。
+///
+/// 2026-09 扩展：新增 `descriptions` 字段——拉面组合动作（吃面配方 + 特殊目标 +
+/// 操作三阶段）名字极长，AIRedirector 仅靠 `action_index` 数字完全无法映射
+/// 动作名，必须挂描述才能展示。
 #[derive(Debug, Clone)]
 struct LastSearchSummary {
     /// 中选者在 `action_results` 中的下标
@@ -208,14 +216,19 @@ struct LastSearchSummary {
     scores: Vec<f64>,
     /// 全候选的 rollout 样本数（按 action_results 顺序）
     counts: Vec<u32>,
-    /// 终局维度差值文本（供 `DecisionInfo::reason`；`None` 表示维度不可用或 rivals 为空）
-    reason_text: Option<String>
+    /// 全候选的可读描述（按 action_results 顺序，与 scores / counts 严格同长同序）
+    descriptions: Vec<String>
 }
 
 /// 从 [`DecisionReasonData`] 抽出"评分最高的未中选候选"的最显著维度差，拼成简短文本
 ///
 /// 输出形如 `vs #2 智+180 PT-33`，对应 `render_reason_lines` 给 rivals[0] 编的 `#2` 号。
 /// rivals 为空（单候选/中选者评分最高）时返回 `None`——与 `analyze_narrow_win` 同口径。
+///
+/// 2026-09 简化：当前**未被使用**——`DecisionInfo::reason` 删除后，简化文本
+/// 改由 `scenario_extra.reason.rivals[0].pros[0] + cons[0]` 表达。保留函数
+/// 以备 human mode 调试或 AIRed 端简化展示需要。
+#[allow(dead_code)]
 fn summarize_ramen_reason(data: &DecisionReasonData) -> Option<String> {
     let best_rival = data.rivals.first()?;
     let mut parts: Vec<String> = Vec::new();
@@ -376,14 +389,15 @@ impl RamenMctsTrainer {
     }
 
     /// 输出决策理由：原始 JSON 经 [`Self::reason_sink`] 发出，可读文字上屏
-    ///
-    /// 每回合都调用 [`analyze_narrow_win`]；当前不再用分差门限决定是否输出，
-    /// 分差仅用于着色档位。比较口径跟随 [`Self::selection`]——理由解释的是
-    /// 实际选择。终局差异日志之后调用，两段日志可互相印证。
-    fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
-        if !self.verbose {
-            return;
-        }
+///
+/// 每回合都调用 [`analyze_narrow_win`]；当前不再用分差门限决定是否输出，
+/// 分差仅用于着色档位。比较口径跟随 [`Self::selection`]——理由解释的是
+/// 实际选择。终局差异日志之后调用，两段日志可互相印证。
+///
+/// **2026-09 修改**：`reason_sink.emit` 与 `info!` 上屏解耦——sink 始终发出
+/// 原始数据（供宿主程序缓存、自行决定何时打印），`info!` 仅在 `verbose=true`
+/// 时上屏。这样 JSON 通道下宿主可以自己渲染 / 上报，文字日志也不会双打印。
+fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
         let metric = match self.selection {
             RamenSelection::Pt => ReasonMetric::Pt,
             RamenSelection::Score => ReasonMetric::Score
@@ -399,8 +413,10 @@ impl RamenMctsTrainer {
             return;
         };
         self.reason_sink.emit(&data);
-        for line in render_reason_lines(&data) {
-            info!("{line}");
+        if self.verbose {
+            for line in render_reason_lines(&data) {
+                info!("{line}");
+            }
         }
     }
 
@@ -565,12 +581,12 @@ impl RamenMctsTrainer {
 
     /// 把本次搜索摘要写入 `last_search_summary`（供 [`Trainer::last_decision`](crate::game::Trainer::last_decision) 读取）
     ///
-    /// 仅缓存决策协议需要的字段（分数 / 局数 / 选中下标 + reason 文本），不复制整个
+    /// 仅缓存决策协议需要的字段（分数 / 局数 / 选中下标 + 候选描述），不复制整个
     /// [`RamenSearchOutput`]——`ActionResult.distribution` 数组 clone 成本过大。
     ///
-    /// reason 文本独立算一份：与 `emit_decision_reason` 的 `analyze_narrow_win`
-    /// 解耦，避免 `verbose=false` 时漏算。verbose=true 路径会算两次，代价
-    /// 忽略（analyze_narrow_win 不在 hot path）。
+    /// 2026-09 简化：移除 `reason_text` 计算——`DecisionInfo::reason` 删除后
+    /// 该文本不再挂到决策协议。完整 `DecisionReasonData` 改由 `emit_decision_reason`
+    /// 通过 `LastReasonSink` 缓存，挂到 `scenario_extra.reason`（main.rs 接线）。
     fn stash_last_summary(&self, output: &RamenSearchOutput, chosen_idx: usize) {
         let (scores, counts): (Vec<f64>, Vec<u32>) = match self.selection {
             RamenSelection::Score => (
@@ -586,23 +602,14 @@ impl RamenMctsTrainer {
                 output.action_results.iter().map(|(s, _)| s.count()).collect()
             )
         };
-        let reason_text = {
-            let metric = match self.selection {
-                RamenSelection::Pt => ReasonMetric::Pt,
-                RamenSelection::Score => ReasonMetric::Score
-            };
-            let threshold = self.search.config().reason_gap_threshold;
-            let max_display = self.search.config().reason_max_display;
-            analyze_narrow_win(0, metric, threshold, max_display, chosen_idx, output)
-                .and_then(|data| summarize_ramen_reason(&data))
-        };
+        // 候选可读描述：与 scores / counts 严格同长同序（按 action_results 顺序）
+        let descriptions: Vec<String> = output
+            .actions
+            .iter()
+            .map(|a| a.to_string())
+            .collect();
         if let Ok(mut slot) = self.last_search_summary.lock() {
-            *slot = Some(LastSearchSummary {
-                chosen_idx,
-                scores,
-                counts,
-                reason_text
-            });
+            *slot = Some(LastSearchSummary { chosen_idx, scores, counts, descriptions });
         }
     }
 
@@ -822,16 +829,20 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
         };
 
         let action_index = ordered.iter().position(|(i, _, _)| *i == summary.chosen_idx).unwrap_or(0);
+        // 候选描述按 ordered 顺序取（与 candidate_scores / candidate_n 严格同长同序同截断）
+        let candidate_descriptions: Vec<String> = ordered
+            .iter()
+            .map(|(i, _, _)| summary.descriptions[*i].clone())
+            .collect();
         Some(DecisionInfoProto {
             action_index,
             score: summary.scores[summary.chosen_idx] as f32,
+            // decision_kind 由 main.rs calc_ramen_training 内部 snapshot stage 填——
+            // trainer 不感知 stage，按用户拍板"由发起决策的 umaai 从外部保存状态"
+            decision_kind: String::new(),
             candidate_scores: ordered.iter().map(|(_, s, _)| *s as f32).collect(),
+            candidate_descriptions,
             candidate_n: ordered.iter().map(|(_, _, n)| *n).collect(),
-            reason: summary.reason_text,
-            elapsed_ms: None,
-            search_depth: None,
-            visit_count: None,
-            score_breakdown: None,
             scenario_extra: None
         })
     }
@@ -1625,9 +1636,6 @@ mod tests {
                         c.check(info.action_index < info.candidate_scores.len(), "选中下标在截断后范围内");
                         // reason_max_display 默认 5
                         c.check(info.candidate_scores.len() <= 5, "截断到 reason_max_display=5");
-                        c.check(info.elapsed_ms.is_none(), "elapsed_ms 暂留 None（Step 5 再填）");
-                        c.check(info.search_depth.is_none(), "search_depth 留 None（AIRedirector 不需要）");
-                        c.check(info.visit_count.is_none(), "visit_count 留 None（AIRedirector 不需要）");
                         // candidate_n 各元素 > 0（真实 MCTS rollout 数）
                         c.check(info.candidate_n.iter().all(|&n| n > 0), "每个候选都有正样本数");
                         c.finish()?;

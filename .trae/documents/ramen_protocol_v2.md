@@ -81,15 +81,15 @@
 
 ```text
 {
-  "feeling_guage_gains": [[i32;3]; 5],   // 每训练×每类型回合增量（部分填）
-  "feeling_guage":       [i32; 3],        // 诀窍槽当前值
+  "feeling_gauge_gains": [[i32;3]; 5],   // 每训练×每类型回合增量（部分填）
+  "feeling_gauge":       [i32; 3],        // 诀窍槽当前值
   "feeling_stock":       [i32],           // 诀窍队列（按获得顺序）
   "special_feeling":     i32,             // 隐藏风味数量
   "train_feeling_type":  [i32; 5],        // 训练角标（A=1/B=2/C=3, 0=无）
   "active_effect_array": [{category, id, value}], // 当前生效效果
   "super_ramen":         i32,             // -1=未选 / 0/1/2=已选超级拉面档位
   "selected_regions":    [i32; 3],        // 当年已选地区（region_id）
-  "feeling_guage_gain_base": [i32; 3],    // 基础增量（按 region 配方）
+  "feeling_gauge_gain_base": [i32; 3],    // 基础增量（按 region 配方）
   "last_ramen":          i32,             // **直接 = region_id**（关键）
   "scenario_pt":         i32,             // 当前累计剧本 PT（RMJ 失败归零）
   "next_scenario_pt":    i32              // 下次吃面可获 PT
@@ -98,7 +98,7 @@
 
 ### 2.1 字段语义要点
 
-- **`feeling_guage_gains[5][3]`**：训练索引按 command_id 严格顺序 `[101, 105, 102, 103, 106]`（速/耐/力/根/智），feel_id 按 `[1,2,3]`（A/B/C）。
+- **`feeling_gauge_gains[5][3]`**：训练索引按 command_id 严格顺序 `[101, 105, 102, 103, 106]`（速/耐/力/根/智），feel_id 按 `[1,2,3]`（A/B/C）。
 - **`train_feeling_type[5]`**：0=本回合无角标 / 1/2/3=A/B/C。
 - **`selected_regions[3]`**：当年度选定的 3 个 region_id；年初为 `[0,0,0]`，下回合起为实际选定值。
 - **`last_ramen`**：**实测就是 region_id**，与 selected_regions 严格对齐。每次吃完面更新，可同回合多次变化（如 turn12 1→4），跨回合保持显示直到下回合。
@@ -111,15 +111,15 @@
 
 | 协议字段 | Rust 字段 | 备注 |
 |---|---|---|
-| `feeling_guage_gains` | `RamenState::feeling_guage_gains`（新增） | 直接覆写 |
-| `feeling_guage` | `RamenState::feeling_slot`（or 新增 `feeling_guage`） | 直接覆写 |
+| `feeling_gauge_gains` | `RamenState::feeling_gauge_gains`（新增） | 直接覆写 |
+| `feeling_gauge` | `RamenState::feeling_slot`（or 新增 `feeling_gauge`） | 直接覆写 |
 | `feeling_stock` | `RamenState::feeling_stock` | 直接覆写 |
 | `special_feeling` | `RamenState::special_feeling` | 直接覆写 |
 | `train_feeling_type` | `RamenState::train_feeling_type` | 直接覆写 |
 | `active_effect_array` | `RamenState::active_effect` 或拆为 `current_effect` + `scenario_buff` | 拆分逻辑见 §3 |
 | `super_ramen` | `RamenState::super_ramen` | 直接覆写 |
 | `selected_regions` | `RamenState::selected_regions` | 直接覆写 |
-| `feeling_guage_gain_base` | `RamenState::feeling_guage_gain_base`（新增） | 直接覆写 |
+| `feeling_gauge_gain_base` | `RamenState::feeling_gauge_gain_base`（新增） | 直接覆写 |
 | `last_ramen` | `RamenState::current_ramen` 或 `last_ramen` | 直接覆写 |
 | `scenario_pt` | `RamenState::scenario_pt` | 直接覆写 |
 | `next_scenario_pt` | `RamenState::next_scenario_pt`（新增） | 直接覆写 |
@@ -127,7 +127,7 @@
 ### 2.3 派生字段处理策略
 
 **C# 端已归一化**：所有派生字段都已填好，Rust 端**直接覆写**即可，不需要：
-- 从 `feeling_turn_info_array.remain_turn` 反推 `feeling_guage`（已给值）
+- 从 `feeling_turn_info_array.remain_turn` 反推 `feeling_gauge`（已给值）
 - 从 `feeling_info_array` 过滤 `feeling_id==0`（已给队列）
 - 从 `active_effect_array` 反推 `last_ramen`（已独立给出）
 
@@ -172,7 +172,7 @@ snapshot 72:   ps=1   source=command  super_ramen=2    ← 玩家选定
 ```text
 test_ramen_turn_import_v2:
   - 驱动 151 份样本，逐份调用 RamenGame::from_external_state
-  - 验证关键字段 roundtrip（last_ramen / selected_regions / feeling_guage / scenario_pt）
+  - 验证关键字段 roundtrip（last_ramen / selected_regions / feeling_gauge / scenario_pt）
   - 验证 playing_state → stage dispatch 全覆盖
   - 验证 active_effect_array 拆分不改变训练数值（与 C# 端对齐）
 ```

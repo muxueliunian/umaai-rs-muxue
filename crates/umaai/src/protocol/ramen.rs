@@ -6,12 +6,20 @@
 //! **Step 7 现状**：`GameStatusRamen::into_game` 完整实现，从 `thisTurn.json`
 //! 覆写所有 ramen 段字段到 `RamenGame`：
 //! - baseGame 增量字段（`source` + `playingState` + `active_effect_array` 三方联合 stage dispatch）
-//! - ramen 段全字段（last_ramen / feeling_stock / feeling_slot / feeling_guage_gains /
-//!   active_effect_array / super_ramen / selected_regions / scenario_pt / next_scenario_pt /
-//!   feeling_guage_gain_base / train_feeling_type / special_feeling）
+//! - ramen 段（last_ramen / feeling_stock / feeling_slot / super_ramen /
+//!   selected_regions / scenario_pt / train_feeling_type / special_feeling 落入
+//!   `RamenState`；`feeling_gauge_gains` / `feeling_gauge_gain_base` /
+//!   `next_scenario_pt` / `active_effect_array` 仅用于 stage dispatch 判断，
+//!   **不**存进 `RamenState`）
 //!
-//! 拆分 `active_effect_array` 到 `RamenEffect` 各字段**搁置**（按 §5 第 5 条）：
-//! 当前只做忠实映射（`Vec<ActiveEffectEntry>` 直接覆写），后续按训练数值需求再补。
+//! `active_effect_array` 拆分到 `RamenEffect` 各字段**搁置**（按 §5 第 5 条）：
+//! 当前只用其长度判 stage dispatch，不解读单项语义，后续按训练数值需求再补。
+//!
+//! **base 重建口径**：`into_game` 不采用 `RamenGame::newgame` 打补丁，而是严格用
+//! [`GameStatusBase::parse_basegame`] 从协议重建 `BaseGame`（Uma / Friend 走
+//! `parse_uma` / `parse_friend`，`five_status_limit` 取协议值，`friend_event_ids`
+//! 不合并），再由 [`RamenGame::from_base_game`] 组装剧本专用状态。友人事件、
+//! 五维上限等均视为外部输入，不做本地推算。
 //!
 //! ## stage dispatch 规则（adapter_spec §source / §playing_state）
 //!
@@ -47,7 +55,7 @@
 //! 规则：把 `person_distribution` 中**全局按出现次序**的 `8` 依次改写为 `8, 9, 10, 11, 12`，
 //! 改写后的数字即 NPC chara_id 来源（与 `NPC_CHARA_IDS` 一一对齐）。
 
-use anyhow::{Result, anyhow};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::ops::Deref;
 
@@ -56,7 +64,6 @@ use umasim::{
     game::{
         BasePerson,
         PersonType,
-        SupportCard,
         ramen::{RamenGame, RamenStage, rules::NPC_CHARA_IDS}
     }
 };
@@ -77,17 +84,17 @@ pub struct GameStatusRamen {
 /// 拉面段通信状态（完整字段映射表见 `ramen_protocol_v2.md` §2）
 ///
 /// 字段命名遵循协议 **snake_case**（实测样本 `scenario_pt` / `next_scenario_pt` /
-/// `feeling_guage` / `last_ramen` 等都是 snake_case，**不**走 `camelCase` —— 这是
+/// `feeling_gauge` / `last_ramen` 等都是 snake_case，**不**走 `camelCase` —— 这是
 /// ramen 段与 baseGame 段（`GameStatusBase` 走 camelCase + 个别 rename 覆盖）
 /// 的字段命名约定差异）。
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RamenStatus {
     /// 每训练×每类型回合增量 `[[i32; 3]; 5]`
     #[serde(default)]
-    pub feeling_guage_gains: [[i32; 3]; 5],
+    pub feeling_gauge_gains: [[i32; 3]; 5],
     /// 三种诀窍（A/B/C）当前槽值
     #[serde(default)]
-    pub feeling_guage: [i32; 3],
+    pub feeling_gauge: [i32; 3],
     /// 诀窍队列（按获得顺序；C# 端会过滤 feeling_id==0 的项目）
     #[serde(default)]
     pub feeling_stock: Vec<i32>,
@@ -108,7 +115,7 @@ pub struct RamenStatus {
     pub selected_regions: [i32; 3],
     /// 基础增量（按 region 配方）
     #[serde(default)]
-    pub feeling_guage_gain_base: [i32; 3],
+    pub feeling_gauge_gain_base: [i32; 3],
     /// **直接 = region_id**（实测；与 `selected_regions` 严格对齐）
     #[serde(default = "default_last_ramen")]
     pub last_ramen: i32,
@@ -129,7 +136,7 @@ fn default_last_ramen() -> i32 {
 
 /// 协议 `active_effect_array` 的单项 `{category, id, value}`
 ///
-/// 直接 `Vec<ActiveEffectEntry>` 落到 `RamenState::active_effect_array`。
+/// 仅在 `into_game` 内用其长度做 stage dispatch 判断，不落入 `RamenState`；
 /// 按 category 拆分到 `RamenEffect` 各字段暂不实现。
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ActiveEffectEntry {
@@ -158,69 +165,35 @@ impl GameStatus for GameStatusRamen {
     /// 完整协议 → RamenGame 转换（Step 7 实现）
     fn into_game(self) -> Result<Self::Game> {
         let base = self.base_game;
-        let inherit = base.parse_inherit()?;
 
-        // 1. 构造基础 RamenGame（newgame 已校验卡组含新友人卡 + BaseGame 字段初始化）
-        let deck_ids: [u32; 6] = base
-            .card_id
-            .iter()
-            .copied()
-            .collect::<Vec<_>>()
-            .try_into()
-            .map_err(|_| anyhow!("拉面协议要求 6 张卡"))?;
-        let mut game = RamenGame::newgame(base.uma_id, &deck_ids, inherit)?;
+        // 1. 从协议**严格重建** base（非 `RamenGame::newgame` 打补丁）：
+        //    Uma / Friend 经 `parse_uma` / `parse_friend` 重建，`five_status_limit` 取协议值，
+        //    `friend_event_ids` 不合并（丢弃）；deck / card_type_count / train_level_count /
+        //    distribution / unresolved_events(story) 均由 `parse_basegame` 落地。
+        let mut game = RamenGame::from_base_game(base.parse_basegame(9001)?)?;
 
-        // 2. 覆写 base 字段（newgame 用 defaults / gamedata 五维上限；协议覆写覆盖）
-        game.base.turn = base.turn;
-        game.base.uma.vital = base.vital;
-        game.base.uma.max_vital = base.max_vital;
-        game.base.uma.motivation = base.motivation;
-        game.base.uma.five_status = base.five_status.clone();
-        game.base.uma.skill_pt = base.skill_pt;
-        game.base.uma.skill_score = base.skill_score;
-        game.base.uma.total_hints = base.total_hints;
-        game.base.uma.race_bonus = base.parse_uma()?.race_bonus;
-        // 五维上限 / 训练等级 / 卡组羁绊等也由协议覆写（下面 persons 路径处理）
-
-        // 3. 构造 deck（按协议 card_id + persons.friendship）
-        let mut deck = vec![];
-        let mut card_type_count = [0; 7];
-        for (index, idrank) in base.card_id.iter().enumerate() {
-            let mut card = SupportCard::new(*idrank)?;
-            if index < base.persons.len() {
-                card.friendship = base.persons[index].friendship;
-            }
-            game.base.uma.race_bonus += card.effect.saihou;
-            if card.card_type < 7 {
-                card_type_count[card.card_type as usize] += 1;
-            }
-            deck.push(card);
-        }
-        game.base.deck = deck;
-        game.base.card_type_count = std::sync::Arc::new(card_type_count);
-        game.base.train_level_count = base.train_level_count.clone();
-        game.base.distribution = base.person_distribution.clone();
-
-        // 4. 构造 persons。按 spec §'理事長、记者、NPC生成' 的 layout：
+        // 2. 构造 persons。按 spec §'理事長、记者、NPC生成' 的 layout：
         //   0..5 = deck 6 张（友人 chara_id=9001 / 其他友人改 OtherFriend）
         //   6 = 理事長（始终在场，turn=0 也有）
         //   7 = 记者（turn > 12 时才有，不包含 12）
         //   8..12 = 5 个 NPC（turn >= 2 时才有，chara_id 来自 NPC_CHARA_IDS 一一对齐）
-        // 规则层查找走 PersonType，不依赖 person_index 数字；这里赋的 person_index
-        // 仅供 distribute_all / 日志观测。NPC chara_id 派发见 §'personDistribution 适配'。
-        game.persons.clear();
+        //   规则层查找走 PersonType，不依赖 person_index 数字；这里赋的 person_index
+        //   仅供 distribute_all / 日志观测。NPC chara_id 派发见 §'personDistribution 适配'。
         let mut persons = vec![];
-        for (index, card) in game.base.deck.iter().enumerate() {
+        for card in game.base.deck.iter() {
             let mut person = BasePerson::try_from(card)?;
             person.person_index = persons.len() as i32;
             if person.person_type == PersonType::ScenarioCard && person.chara_id != 9001 {
                 person.person_type = PersonType::OtherFriend;
             }
+            persons.push(person);
+        }
+        // 人头的 friendship/is_hint 来自协议 persons（按 cardIndex 对齐）
+        for (index, person) in persons.iter_mut().enumerate() {
             if index < base.persons.len() {
                 person.friendship = base.persons[index].friendship;
                 person.is_hint = base.persons[index].is_hint;
             }
-            persons.push(person);
         }
         // 6: 理事長（始终在场）
         let mut yayoi = BasePerson::yayoi();
@@ -250,19 +223,9 @@ impl GameStatus for GameStatusRamen {
         }
         game.persons = persons;
 
-        // 5. 事件：协议 baseGame.story 非空 → push 到 unresolved_events
-        if let Some(story) = &base.story {
-            log::info!("{}", story.explain());
-            match umasim::gamedata::EventData::try_from(story) {
-                Ok(event) => game.base.unresolved_events.push(event),
-                Err(e) => log::warn!("事件效果解析失败, 无法计算: {e}")
-            }
-        }
-
-        // 6. 覆写 ramen 段（协议 `RamenStatus` → `RamenState` 全字段映射）
+        // 3. 覆写 ramen 段（协议 `RamenStatus` → `RamenState` 全字段映射）
         let ramen = self.ramen;
-        game.ramen.feeling_guage_gains = ramen.feeling_guage_gains;
-        game.ramen.feeling_slot = ramen.feeling_guage;
+        game.ramen.feeling_slot = ramen.feeling_gauge;
         game.ramen.feeling_stock = {
             // 协议 feeling_stock 是按"获得顺序"的队列，每项 1/2/3 表示 A/B/C
             // 累计整个 Vec 中 1/2/3 的出现次数 → [count_A, count_B, count_C]
@@ -293,15 +256,6 @@ impl GameStatus for GameStatusRamen {
                 Some(arr)
             }
         };
-        game.ramen.active_effect_array = ramen
-            .active_effect_array
-            .into_iter()
-            .map(|e| umasim::game::ramen::ActiveEffectEntry {
-                category: e.category,
-                id: e.id,
-                value: e.value
-            })
-            .collect();
         game.ramen.super_ramen = if ramen.super_ramen < 0 {
             None
         } else {
@@ -316,16 +270,14 @@ impl GameStatus for GameStatusRamen {
             }
             arr
         };
-        game.ramen.feeling_guage_gain_base = ramen.feeling_guage_gain_base;
-        game.ramen.current_ramen = if ramen.last_ramen < 0 {
+        game.ramen.current_ramen = if ramen.last_ramen < 0 || ramen.active_effect_array.is_empty() {
             None
         } else {
             Some(ramen.last_ramen as usize)
         };
         game.ramen.scenario_pt = ramen.scenario_pt;
-        game.ramen.next_scenario_pt = ramen.next_scenario_pt;
 
-        // 7. personDistribution 适配（adapter_spec §personDistribution 适配）：
+        // 4. personDistribution 适配（adapter_spec §personDistribution 适配）：
         //    spec 要求把全局按出现次序的 `8` 依次改写为 `8, 9, 10, 11, 12`。
         //    **当前实现不改写**——若启用会越界（详见 `issues.md` #12：spec 期望固定
         //    person_index 6/7/8-12，但当前 into_game 按 push 顺序动态分配 person_index，
@@ -336,10 +288,10 @@ impl GameStatus for GameStatusRamen {
         //    与 distribution 数字无绑定；distribute_all 按 persons 顺序遍历 chara_id 派发。
         //    留此注释作为占位，等 is_hidden PR 合并后启用改写函数。
 
-        // 8. Stage dispatch（adapter_spec §source / §playing_state 三方联合）。
+        // 5. Stage dispatch（adapter_spec §source / §playing_state 三方联合）。
         //    先做数据获取不全检查（turn 2..=71 且 selected_regions 全 0），命中则 warn + 不 dispatch。
         //    不 dispatch 时保留 `RamenStage::Begin`（newgame 默认值），由 main loop 识别并跳过。
-        let active_effect_count = game.ramen.active_effect_array.len();
+        let active_effect_count = ramen.active_effect_array.len();
         let data_incomplete = (2..=71).contains(&base.turn)
             && game.ramen.selected_regions.iter().all(|&r| r == 0);
         if data_incomplete {
@@ -418,11 +370,6 @@ impl GameStatus for GameStatusRamen {
                 }
             }
         }
-
-        // 9. 友人在 4 种及以上支援卡类型时才能分身（与 `RamenGame::newgame` 同口径
-        // `card_type_count.iter().filter(|x| **x > 0).count() >= 4`：卡组 6 张里含友人卡，
-        // 卡组类型 ≥ 4 即满足分身条件）
-        game.deck_can_split = game.base.card_type_count.iter().filter(|x| **x > 0).count() >= 4;
 
         Ok(game)
     }
@@ -584,6 +531,8 @@ mod tests {
             let ramen_json = value.get("ramen").cloned().unwrap_or_default();
             let scenario_pt_json = ramen_json.get("scenario_pt").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
             let last_ramen_json = ramen_json.get("last_ramen").and_then(|v| v.as_i64()).unwrap_or(-1);
+            let active_effect_json = ramen_json.get("active_effect_array").and_then(|v| v.as_array());
+            let active_effect_empty = active_effect_json.map_or(true, |a| a.is_empty());
             let super_ramen_json = ramen_json.get("super_ramen").and_then(|v| v.as_i64()).unwrap_or(-1);
             let selected_regions_json: [i32; 3] = {
                 let arr = ramen_json.get("selected_regions").and_then(|v| v.as_array());
@@ -611,8 +560,13 @@ mod tests {
             // 关键字段 round-trip 校验
             // 1) scenario_pt 透传
             assert_eq!(game.ramen.scenario_pt, scenario_pt_json, "{}: scenario_pt 不一致", path.display());
-            // 2) current_ramen 透传（last_ramen 协议字段）
-            let expected_current = if last_ramen_json < 0 { None } else { Some(last_ramen_json as usize) };
+            // 2) current_ramen 透传：仅在 last_ramen >= 0 且 active_effect_array 非空时生效
+            //    （L311 改动：active_effect_array 为空时 current_ramen 置 None，即使 last_ramen 有效）
+            let expected_current = if last_ramen_json < 0 || active_effect_empty {
+                None
+            } else {
+                Some(last_ramen_json as usize)
+            };
             assert_eq!(game.ramen.current_ramen, expected_current, "{}: current_ramen 不一致", path.display());
             // 3) selected_regions 透传
             let expected_regions: [usize; 3] = [

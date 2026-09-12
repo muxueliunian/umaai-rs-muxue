@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use anyhow::Result;
 use log::warn;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -225,7 +223,11 @@ impl GameStatusBase {
         let mut card_type_count = [0; 7];
         for (index, id) in self.card_id.iter().enumerate() {
             let mut card = SupportCard::new(*id)?;
-            card.friendship = self.persons[index].friendship;
+            // persons 可能不全（如 parse_game_by_scenario 的 ramen fixture 为 []），
+            // 越界时保留卡默认羁绊
+            if index < self.persons.len() {
+                card.friendship = self.persons[index].friendship;
+            }
             uma.race_bonus += card.effect.saihou;
             if card.card_type < 7 {
                 card_type_count[card.card_type as usize] += 1;
@@ -248,11 +250,11 @@ impl GameStatusBase {
             stage: TurnStage::Train, // 随便列一个
             uma,
             deck,
-            inherit: Arc::new(inherit),
+            inherit,
             friend,
             train_level_count: self.train_level_count.clone(),
             distribution: self.person_distribution.clone(),
-            card_type_count: Arc::new(card_type_count),
+            card_type_count,
             unresolved_events,
             ..Default::default()
         })
@@ -383,6 +385,10 @@ pub fn parse_game_by_scenario(contents: &str) -> Result<ParsedGame> {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::{bail, ensure};
+    use serde_json::from_str;
+    use umasim::{gamedata::init_global, utils::get_workspace_root};
+
     use super::*;
 
     /// 最小 thisTurn.json fixture（scenarioId=12 温泉）
@@ -464,7 +470,7 @@ mod tests {
             "isPositiveThinking": false,
             "isRefreshMind": false,
             "isLucky": false,
-            "zhongMaBlueCount": [0, 0, 0, 0, 0],
+            "zhongMaBlueCount": [15, 3, 0, 0, 0],
             "isRacing": false,
             "cardId": [302424, 302894, 303044, 302924, 303024, 303054],
             "persons": [],
@@ -531,19 +537,23 @@ mod tests {
         }
     }
 
-    /// parse_game_by_scenario：ramen fixture 路由到 ParsedGame::Ramen（占位 newgame）
+    /// 拉面协议导入保留继承和卡组计数，导出保留蓝因子。
     #[test]
-    fn test_parse_game_by_scenario_ramen() {
-        let workspace_root = umasim::utils::get_workspace_root().unwrap();
-        let _ = std::env::set_current_dir(workspace_root);
-        let _ = umasim::gamedata::init_global();
-        let r = parse_game_by_scenario(FIXTURE_RAMEN);
-        println!("ramen fixture: is_ok={}", r.is_ok());
-        match r {
-            Ok(ParsedGame::Ramen { .. }) => {}
-            Ok(ParsedGame::Onsen(_)) => panic!("不应路由到 Onsen"),
-            Err(e) => panic!("ramen fixture 不应报错: {e}")
-        }
+    fn test_parse_game_by_scenario_ramen() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let status: GameStatusRamen = from_str(FIXTURE_RAMEN)?;
+        let inherit = status.base_game.parse_inherit()?;
+        let ParsedGame::Ramen { game, .. } = parse_game_by_scenario(FIXTURE_RAMEN)? else {
+            bail!("拉面协议不应路由到 Onsen");
+        };
+        println!("导入继承: {:?}，卡组计数: {:?}", game.inherit, game.card_type_count);
+        ensure!(game.inherit == inherit, "协议蓝因子和配置剧本因子应完整保留");
+        ensure!(game.card_type_count == [3, 1, 0, 0, 1, 1, 0], "协议卡组应包含三速、一耐、一智、一友人");
+        let exported = GameStatusBase::from(&game.base);
+        println!("导出蓝因子: {:?}", exported.zhongma_blue_count);
+        ensure!(exported.zhongma_blue_count == status.base_game.zhongma_blue_count, "导出蓝因子应与协议输入一致");
+        Ok(())
     }
 
     /// parse_game_by_scenario：未知 scenarioId 报错

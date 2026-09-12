@@ -1,8 +1,12 @@
 //! umaai-rs - Rewrite UmaAI in Rust
 //!
 //! author: curran
+//!
+//! 职责：CLI 解析、初始化（config / logger / global / trainer）、watch 循环与分发。
+//! 具体场景逻辑（温泉 / 拉面）在 `scenario`，决策后处理（luck / 输出）在 `decision`。
+
 use std::{
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Instant
 };
 
@@ -14,28 +18,24 @@ use rand::{SeedableRng, rngs::StdRng};
 use serde::Serialize;
 use text_to_ascii_art::to_art;
 use umasim::{
-    game::{
-        Game,
-        Trainer,
-        onsen::{OnsenTurnStage, action::OnsenAction, game::OnsenGame},
-        ramen::{RamenGame, RamenStage}
-    },
+    game::Game,
     gamedata::init_global_with_config,
     neural::Evaluator,
-    output::{DecisionInfo, DecisionSink, HumanReadableSink, StdoutJsonSink},
+    output::{DecisionSink, HumanReadableSink, StdoutJsonSink},
     search::SearchConfig,
     trainer::{MctsTrainer, RamenMctsTrainer},
     utils::{check_working_dir, init_logger, load_game_config}
 };
 
 use crate::{
-    luck_score::LuckScoreTracker,
+    decision::{LastReasonSink, LuckScoreTracker},
     protocol::urafile::UraFileWatcher,
-    utils::{SAVED_GAME, hotkey_handler}
+    scenario::{onsen, ramen}
 };
 
-pub mod luck_score;
+pub mod decision;
 pub mod protocol;
+pub mod scenario;
 pub mod utils;
 
 /// CLI 参数
@@ -102,185 +102,6 @@ where
     Ok(())
 }
 
-/// 训练模式
-pub fn calc_onsen_training(trainer: &MctsTrainer, game: &mut OnsenGame, rng: &mut StdRng) -> Result<()> {
-    println!("{}", game.explain_distribution()?);
-    info!("{}", "正在计算...".bright_black());
-    if game.pending_selection {
-        // 是温泉选择状态
-        let actions = game.list_actions_onsen_select();
-        let onsen = trainer.select_action(game, &actions, rng)?;
-        // 前进一步选择升级
-        game.apply_action(&actions[onsen], rng)?;
-        let upgradeable = game.get_upgradeable_equipment();
-        if !upgradeable.is_empty() {
-            let actions = upgradeable
-                .iter()
-                .map(|x| OnsenAction::Upgrade(*x as i32))
-                .collect::<Vec<_>>();
-            trainer.select_action(game, &actions, rng)?;
-        }
-    } else {
-        // 如果被解析成 Bathing 但没有温泉券合buff，就直接跳过到 Train
-        if game.stage == OnsenTurnStage::Bathing && game.bathing.ticket_num == 0 && game.bathing.buff_remain_turn == 0 {
-            game.next();
-        }
-
-        let actions = game.list_actions()?;
-        if actions.is_empty() {
-            return Ok(());
-        }
-        let action_idx = trainer.select_action(game, &actions, rng)?;
-        let action = actions[action_idx].clone();
-
-        // 选择温泉券时需要继续给出训练推荐
-        if game.stage == OnsenTurnStage::Bathing {
-            // 日志控制说明：旧实现曾用 `disable_log()/enable_log()` 临时抑制温泉券期间
-            // 的训练搜索日志。Phase 3 后规则层日志已通过 `diag` feature 编译期裁剪
-            // （搜索 rollout 默认不产生 `info!` / `diag!`），无需运行期切换。这里直接
-            // 走完整搜索流程，日志静默由 diag 特性保证。
-            if action == OnsenAction::UseTicket(true) {
-                game.do_use_ticket(rng)?;
-            }
-            game.next();
-
-            info!("{}", "正在计算训练...".bright_black());
-            let actions = game.list_actions()?;
-            if !actions.is_empty() {
-                let _action_idx = trainer.select_action(game, &actions, rng)?;
-                //let action = actions[action_idx].clone();
-            }
-        }
-    }
-    println!("{}", "[按 F2 保存当前回合状态]".bright_black());
-    Ok(())
-}
-
-/// 事件模式
-pub fn calc_onsen_event(trainer: &MctsTrainer, game: &OnsenGame, rng: &mut StdRng) -> Result<()> {
-    if let Some(event) = game.unresolved_events.first() {
-        let _selection = trainer.select_event_choice(game, event, &event.choices, rng)?;
-        println!("{}", "[按 F2 保存当前回合状态]".bright_black());
-    }
-    Ok(())
-}
-
-/// 拉面训练：跑本回合所有 stage 直到推到 NextTurn / Settlement / SuperRamenSelect
-///
-/// **Step 7 接入**（参照 onsen `calc_onsen_training` 模式）：
-/// - 循环 `game.run_stage(&trainer, rng)` 让 trainer 在各 stage（RamenSelect /
-///   SpecialSelect / Train / RegionSelect / Begin 等）出决策
-/// - 退出条件：stage 推到 NextTurn（回合边界）/ Settlement（RMJ 结算，等下一条 JSON）
-///   / SuperRamenSelect（超级拉面选择，等下一条 JSON）
-/// - 特别处理「turn 2/23/47 的首次 RegionSelect」：`RamenGame::next()` 在 turn=2 的
-///   `Begin` 之后会自动推进到 `RegionSelect`（adapter_spec §UmaAI 需要复合决策 + 项目
-///   注释 §'Begin → RegionSelect → BeginAfterRegionSelect'），本函数不需要额外触发
-///   —— 只要不提前退出，`run_stage` 会把整个阶段链跑完。
-///
-/// 异常退出（事件回合、不 dispatch 的样本）由 `parse_game_by_scenario` 前的 caller 检查
-/// `game.stage`：若 stage 是 Begin（newgame 默认），说明 into_game 没 dispatch，
-/// 主循环不应调用本函数。
-pub fn calc_ramen_training(trainer: &RamenMctsTrainer, game: &mut RamenGame, rng: &mut StdRng) -> Result<()> {
-    // 防御性保护：最多循环 32 次避免 stage 流转卡死
-    const MAX_STAGE_LOOP: usize = 32;
-    for _ in 0..MAX_STAGE_LOOP {
-        match game.stage {
-            RamenStage::NextTurn | RamenStage::Settlement | RamenStage::SuperRamenSelect => {
-                // 回合边界 / RMJ 结算 / 超级拉面选择 —— 等下一条 JSON
-                break;
-            }
-            _ => {
-                // 其余 stage 全部交给 run_stage：内部已处理 select_action + apply_action + next()
-                game.run_stage(trainer, rng)?;
-            }
-        }
-    }
-    println!("{}", "[按 F2 保存当前回合状态]".bright_black());
-    Ok(())
-}
-
-/// 把 trainer 的 last_decision 喂给 sink：先挂 luck score 字段，再 emit
-///
-/// **Step 5 改造**：从原 `emit_decision` 升级——每回合不再"select_action → 立即 emit"，
-/// 而是把多次 select_action 的 last_decision 收集起来，由主循环在 calc_onsen_*
-/// 完成后**统一调一次本函数**：
-///
-/// 1. 取 `trainer.last_decision()`（最后一次 select_action 的数据）
-/// 2. 算 T(n) baseline（按局数加权：Σ score × n / Σ n，与 onsen `update_score` 同口径）
-/// 3. `tracker.on_new_turn(chara_id, t_n_baseline)` 更新 / 切局检测
-/// 4. 挂 `tracker.snapshot()` + 每候选 `action_luck` 到 `info.scenario_extra`
-/// 5. `sink.emit(&info, &game.view())`
-///
-/// `GameView::view()` 由 Game trait 默认实现填充；onsen scenario 字段留空待 Step 6/7。
-///
-/// **Step 7 改造**：拆出 `emit_with_luck_decision` 接收 `Option<DecisionInfo>`，
-/// 让拉面分支（`RamenMctsTrainer` 等其他 trainer）也能复用 luck score 挂载逻辑，
-/// 不必为每个 trainer 单独写一份。
-fn emit_with_luck<G: Game>(
-    trainer: &MctsTrainer, game: &G, sink: &Arc<dyn DecisionSink>, tracker: &mut LuckScoreTracker, chara_id: u64
-) {
-    emit_with_luck_decision(trainer.last_decision(), game, sink, tracker, chara_id);
-}
-
-/// 把已提取的 `DecisionInfo` 喂给 sink：挂 luck score 字段 + emit。
-///
-/// 与 [`emit_with_luck`] 区别在于**不依赖具体 trainer 类型**——只要 trainer 实现了
-/// `Trainer<G>` 并返回 `DecisionInfo` 即可。拉面分支（`RamenMctsTrainer` 等）走这里。
-fn emit_with_luck_decision<G: Game>(
-    last_decision: Option<DecisionInfo>, game: &G, sink: &Arc<dyn DecisionSink>, tracker: &mut LuckScoreTracker, chara_id: u64
-) {
-    let Some(mut info) = last_decision else {
-        return;
-    };
-    // T(n) baseline：按局数加权（手写 / 早期早退时 candidate_n 为空 → 退化为按候选数等权）
-    let t_n_baseline: f64 = if info.candidate_n.is_empty() {
-        if info.candidate_scores.is_empty() {
-            0.0
-        } else {
-            info.candidate_scores.iter().map(|&s| s as f64).sum::<f64>()
-                / info.candidate_scores.len() as f64
-        }
-    } else {
-        let total_n: u32 = info.candidate_n.iter().sum();
-        if total_n == 0 {
-            info.candidate_scores.iter().map(|&s| s as f64).sum::<f64>()
-                / info.candidate_scores.len().max(1) as f64
-        } else {
-            info.candidate_scores
-                .iter()
-                .zip(info.candidate_n.iter())
-                .map(|(&s, &n)| (s as f64) * (n as f64))
-                .sum::<f64>()
-                / total_n as f64
-        }
-    };
-
-    let _turn_delta = tracker.on_new_turn(chara_id, t_n_baseline);
-
-    // 每候选 action_luck：T(n, action_i) - T(n)（AIRedirector 关心，玩家模式跳过）
-    let action_luck = serde_json::json!(
-        info.candidate_scores
-            .iter()
-            .enumerate()
-            .map(|(i, &s)| (i, (s as f64) - t_n_baseline))
-            .collect::<std::collections::HashMap<usize, f64>>()
-    );
-
-    // 挂载 scenario_extra：snapshot + action_luck
-    let extra = match serde_json::to_value(tracker.snapshot()) {
-        Ok(mut v) => {
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("action_luck".into(), action_luck);
-            }
-            Some(v)
-        }
-        Err(_) => None
-    };
-    info.scenario_extra = extra;
-
-    sink.emit(&info, &game.view());
-}
-
 /// 实际的主函数
 async fn main_guard() -> Result<()> {
     let args = parse_args()?;
@@ -289,17 +110,41 @@ async fn main_guard() -> Result<()> {
     }
 
     // sink 选择必须在 colored::set_override 之前——后者是全局副作用
+    //
+    // `--json` 分支额外保留 `StdoutJsonSink` 的具体类型句柄（`json_sink`）：
+    // `DecisionSink` trait 只覆盖决策 emit（info/error 不在内）。`emit_info` /
+    // `emit_error` 是 `StdoutJsonSink` 的额外方法，main 在 watch loop 的各触发点
+    // 显式调——human 模式下 `json_sink` 为 `None`，闭包 no-op。
+    let json_sink: Option<Arc<StdoutJsonSink>>;
     let sink: Arc<dyn DecisionSink> = if args.json {
         // JSON 模式关闭 ANSI：colored 即使 --no-color 也可能输出 ANSI reset，
         // 影响 AIRedirector 解析。详见集成文档 §3.2.6 第 3 条。
         colored::control::set_override(false);
-        Arc::new(StdoutJsonSink)
+        let js = Arc::new(StdoutJsonSink);
+        json_sink = Some(js.clone());
+        js
     } else {
+        json_sink = None;
         Arc::new(HumanReadableSink)
+    };
+    let json_mode = args.json;
+
+    // info / error 发射器闭包：human 模式 no-op；json 模式转发到 StdoutJsonSink
+    // （stdout 严格只 JSON——不再走 eprintln/println 污染流）。闭包按 Fn 借用
+    // json_sink，可在 watch loop 内反复调用；同时作为 `&dyn Fn(&str)` 传给场景模块。
+    let emit_info = |event: &str| {
+        if let Some(ref js) = json_sink {
+            js.emit_info(event);
+        }
+    };
+    let emit_error = |message: &str| {
+        if let Some(ref js) = json_sink {
+            js.emit_error(message);
+        }
     };
 
     // 启动横幅走 stderr（避免污染 JSON 模式的 stdout 流）
-    eprintln!("{}", to_art("UMAAI 0.26".to_string(), "small", 0, 1, 0).expect("here"));
+    eprintln!("{}", to_art("Ramen-AI".to_string(), "small", 0, 1, 0).expect("here"));
     // 0. 运行前检查（Windows terminal 检测暂时注释掉——非 Windows 平台跳过，
     //    避免误报；Step 5 之后视需要再决定是否启用）
     // check_windows_terminal()?;
@@ -324,18 +169,9 @@ async fn main_guard() -> Result<()> {
     // 3. 再初始化全局数据
     init_global_with_config(&game_config)?;
 
-    // ctrl-s handler —— **延迟到 watcher 启动成功之后** spawn。`hotkey_handler`
-    // 是无限循环（loop），如果 watcher init 失败走 early return，runtime drop
-    // 时会等这个 task 结束 → hang，cargo run 卡住不退出。
-
     let mut rng = StdRng::from_os_rng();
 
-    // 神经网络训练员
-    //let model_path = "saved_models/onsen_v1/model.onnx";
-    //let evaluator =
-    //NeuralNetEvaluator::load(model_path).map_err(|e| anyhow!("错误: 无法加载神经网络模型 {model_path}: {e:?}"))?;
-
-    // MCTS训练员
+    // 温泉（onsen）MCTS 训练员
     let mut trainer = MctsTrainer::new(mcts_config).verbose(true);
     trainer.mcts_onsen = game_config.mcts_selected_onsen;
     // 这个设置在AI模式下不生效
@@ -344,11 +180,18 @@ async fn main_guard() -> Result<()> {
     // 拉面 MCTS 训练员（与 onsen 的 MctsTrainer 强耦合 OnsenGame 不同；拉面用
     // RamenMctsTrainer 绑 RamenGame，独立构造。stages 走 game_config.mcts.ramen_search_stages，
     // 与 umasim/src/main.rs 拉面路径口径一致。
+    //
+    // verbose=false：关闭 trainer 内部 `info!("[回合 X] 首选...")` 的 `log::info!` 上屏
+    // （避免与下方 human mode 下手动调 `render_reason_lines` 双打印，且
+    // umaai 默认关 log，trainer 走 info! 看不到）。DecisionReasonData 通过
+    // `with_reason_sink(LastReasonSink)` 缓存到 `reason_slot`。
     let ramen_mcts_config = SearchConfig::new_game_config(&game_config);
     let ramen_stages = umasim::trainer::RamenSearchStages::parse(&game_config.mcts.ramen_search_stages)?;
+    let reason_slot = LastReasonSink::new();
     let ramen_trainer = RamenMctsTrainer::new(ramen_mcts_config)
         .with_stages(ramen_stages)
-        .verbose(true);
+        .verbose(true)
+        .with_reason_sink(reason_slot.clone());
 
     // Phase 4 feature 拆分后，onnx 评估器路径已 cfg gate 到 `onnx` feature。
     // 当前通道层不依赖 onnx（不需要 tract-onnx 巨大依赖链），强制走 MctsTrainer
@@ -367,105 +210,51 @@ async fn main_guard() -> Result<()> {
 
     // 开始检测文件——init 失败时优雅退出（不 panic）：路径无效 / notify 失败都打 warn + return Ok(())
     let mut watcher = match UraFileWatcher::init() {
-        Ok(w) => w,
+        Ok(w) => {
+            // watcher 就绪、即将开始接受游戏数据：--json 模式下通知 AIRed 连接成功。
+            // human 模式无需此事件（emit_info 本就 no-op），显式 gate 到 json_mode。
+            if json_mode {
+                emit_info("connected");
+            }
+            w
+        }
         Err(e) => {
+            // watcher init 失败：json 模式发 error 行；human 模式保留原 warn 日志
+            emit_error(&format!("watcher 初始化失败: {e}"));
             log::warn!("UraFileWatcher init 失败: {e}，main 不进入 watch loop，程序正常退出（exit 0）");
             return Ok(());
         }
     };
 
-    // watcher 启动成功后才 spawn hotkey_handler（见上方注释——避免失败路径 hang）
-    tokio::spawn(async move {
-        hotkey_handler().await;
-    });
-
-    // Luck score 跟踪器（Step 5）：每回合 baseline 累加 + 切局检测，snapshot
-    // 挂在 DecisionInfo::scenario_extra 下发给 AIRedirector。
+    // Luck score 跟踪器（每回合 baseline 累加 + 切局检测，snapshot 挂到
+    // DecisionInfo::scenario_extra 下发给 AIRedirector）。
     let mut luck_tracker = LuckScoreTracker::new();
 
     loop {
         let contents = watcher.watch("thisTurn.json")?;
-        // Step 6：按 baseGame.scenarioId 分发（12=温泉 / 14=拉面）。拉面侧 AI 主流程
-        // 在 Step 7 接入——这里只解析 + 打 warn，AI 不出推荐。
+        // 收到一份新 JSON：通知 AIRed "开始计算本回合"
+        emit_info("compute_start");
+        // 按 baseGame.scenarioId 分发（12=温泉 / 14=拉面）到对应场景模块
         match crate::protocol::parse_game_by_scenario(&contents) {
-            Ok(crate::protocol::ParsedGame::Onsen(mut game)) => {
-                let mut is_newgame = false;
-                // 保存一份到全局
-                {
-                    if let Some(mutex) = SAVED_GAME.get() {
-                        let mut saved = mutex.lock().expect("saved game");
-                        // 如果当前游戏不是下一轮，则打印当前游戏配置
-                        if !game.is_next_of(&saved) {
-                            is_newgame = true;
-                        }
-                        *saved = game.clone();
-                    } else {
-                        SAVED_GAME
-                            .set(Mutex::new(game.clone()))
-                            .expect("SAVED_GAME already initialized");
-                        is_newgame = true;
-                    }
-                }
-                if is_newgame {
-                    trainer.print_newgame_config(&game);
-                    eprintln!("{}", format!("温泉顺序: {:?}", game_config.onsen_order).bright_yellow());
-                    eprintln!("{}", "------------------------------".bright_yellow())
-                }
-
-                // 切局检测：新对局起始时重置 tracker（让 total_luck 归零）
-                let chara_id = game.uma().uma_id as u64;
-                if is_newgame {
-                    luck_tracker = LuckScoreTracker::new();
-                }
-
-                if !game.unresolved_events.is_empty() {
-                    calc_onsen_event(&trainer, &game, &mut rng)?;
-                } else {
-                    calc_onsen_training(&trainer, &mut game, &mut rng)?;
-                }
-
-                // 回合决策完成后统一 emit（带 luck score 挂载）—— 见 emit_with_luck 注释
-                emit_with_luck(&trainer, &game, &sink, &mut luck_tracker, chara_id);
+            Ok(crate::protocol::ParsedGame::Onsen(game)) => {
+                onsen::process_onsen(
+                    game, &mut trainer, &sink, &mut luck_tracker, &mut rng, json_mode, &emit_info, &game_config,
+                )?;
             }
-            Ok(crate::protocol::ParsedGame::Ramen { mut game, single_mode_chara_id }) => {
-                // Step 7：拉面 AI 主流程接入（参照 onsen `Ok(ParsedGame::Onsen(..))` 路径）。
-                // `into_game` 已经按 (source, active_effect, playing_state, turn) 完成 stage dispatch：
-                //   - 不 dispatch 的样本（source=event / playing_state=5/46/48 / 数据获取不全）
-                //     stage 仍为 Begin（newgame 默认值），跳过本分支
-                //   - 已 dispatch 的样本按 RamenSelect / Train / RegionSelect 走主流程
-                //
-                // 注意：`SAVED_GAME` 是 OnsenGame（`ctrl-s` 玩家调试保存用），拉面侧
-                // 暂不写入——避免 onsen / ramen 类型冲突；切局检测改用 single_mode_chara_id。
-                if game.stage == RamenStage::Begin {
-                    // into_game 没 dispatch（事件 / 结算 / 数据不全），等下一条 JSON
-                    continue;
-                }
-
-                // 切局检测：`single_mode_chara_id` 变化 → 新一局开始。
-                // C# 端 single_mode_chara_id 单调递增，同 uma_id 重复训练也能识别新局。
-                // 协议字段缺失（None）时退化到 uma_id 兜底（旧 json / 测试 fixture）。
-                let chara_id = single_mode_chara_id
-                    .unwrap_or_else(|| game.uma().uma_id as u64);
-                if luck_tracker.last_single_mode_id() != Some(chara_id) {
-                    eprintln!("{}", "---- 拉面新一局 ----".bright_yellow());
-                    luck_tracker = LuckScoreTracker::new();
-                }
-
-                // 跑本回合所有 stage 直到推到 NextTurn / Settlement / SuperRamenSelect
-                calc_ramen_training(&ramen_trainer, &mut game, &mut rng)?;
-
-                // 回合决策完成后统一 emit（带 luck score 挂载）
-                emit_with_luck_decision(
-                    ramen_trainer.last_decision(),
-                    &game,
-                    &sink,
-                    &mut luck_tracker,
-                    chara_id,
-                );
+            Ok(crate::protocol::ParsedGame::Ramen { game, single_mode_chara_id }) => {
+                ramen::process_ramen(
+                    game, single_mode_chara_id, &ramen_trainer, &reason_slot, &sink, &mut luck_tracker, &mut rng,
+                    json_mode, &emit_info,
+                )?;
             }
             Err(e) => {
-                println!("{}", format!("解析回合信息出错: {e}").red());
-                println!("----------");
+                // json 模式：发 error JSON 行（不再用 println 污染 stdout 严格 JSON 流）
+                // human 模式：保留原 println 红色提示，玩家可见
+                emit_error(&format!("解析回合信息出错: {e}"));
+                if !json_mode {
+                    println!("{}", format!("解析回合信息出错: {e}").red());
+                    println!("----------");
+                }
             }
         }
     }

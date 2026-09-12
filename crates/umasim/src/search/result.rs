@@ -157,7 +157,8 @@ impl ActionResult {
         let mut weighted_sum = 0.0;
         let mut weight_total = 0.0;
 
-        for (score, &count) in self.distribution.iter().enumerate() {
+        let end = (self.max_score as usize).min(MAX_SCORE - 1);
+        for (score, &count) in self.distribution[..=end].iter().enumerate() {
             if count == 0 {
                 continue;
             }
@@ -430,4 +431,32 @@ pub struct ScoreEntry {
     pub mean: f64,
     pub weighted_mean: f64,
     pub stdev: f64
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env::set_current_dir;
+
+    use anyhow::Result;
+
+    use super::ActionResult;
+    use crate::utils::{Checks, get_workspace_root};
+
+    /// 等频双峰在激进度 1 时按 1:3 加权，分布边界沿用分数桶的钳位口径。
+    #[test]
+    fn test_weighted_mean_two_score_groups() -> Result<()> {
+        set_current_dir(get_workspace_root()?)?;
+        let mut checks = Checks::new();
+        let mut result = ActionResult::new();
+        result.add(20_000.0);
+        result.add(80_000.0);
+        checks.check(result.weighted_mean(0.0) == 50_000.0, "激进度 0 使用普通均值");
+        checks.check(result.weighted_mean(1.0) == 65_000.0, "等频双峰按排名加权");
+
+        let mut clipped = ActionResult::new();
+        clipped.add(0.0);
+        clipped.add(110_000.0);
+        checks.check(clipped.weighted_mean(1.0) == 74_999.25, "保留零分桶和最高分桶");
+        checks.finish()
+    }
 }

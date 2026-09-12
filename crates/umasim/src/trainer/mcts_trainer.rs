@@ -424,16 +424,22 @@ impl Trainer<OnsenGame> for MctsTrainer {
         };
 
         let action_index = ordered.iter().position(|(i, _, _)| *i == idx).unwrap_or(0);
+        // 候选可读描述：与 scores / n 严格同长同序同截断——下游（AIRedirector）按
+        // `action_index` 取名。拉面组合动作可能极长（如"吃面/中山-全/速训练"），
+        // 没有这个字段下游完全无法映射动作。
+        let candidate_descriptions: Vec<String> = ordered
+            .iter()
+            .map(|(i, _, _)| output.actions[*i].to_string())
+            .collect();
         Some(DecisionInfoProto {
             action_index,
             score: chosen_score,
+            // decision_kind 由 main.rs 外部填（onsen 路径固定 "train" / "event"）；
+            // trainer 不感知 stage，按用户拍板"由发起决策的 umaai 从外部保存状态"
+            decision_kind: String::new(),
             candidate_scores: ordered.iter().map(|(_, s, _)| *s as f32).collect(),
+            candidate_descriptions,
             candidate_n: ordered.iter().map(|(_, _, n)| *n).collect(),
-            reason: None,
-            elapsed_ms: None,
-            search_depth: None,
-            visit_count: None,
-            score_breakdown: None,
             scenario_extra: None
         })
     }

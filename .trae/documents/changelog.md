@@ -2,7 +2,24 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-12
+- **同步 xulai 上游至最新**：真实合并上游 rollout 手写基策与状态复制性能优化、候选内部并行、umaai 决策字段与输出调整、数据更新（新马娘与支援卡）及默认搜索量提升
+- **合并取舍**：本地保留 fat LTO 与多代码生成单元的 Release 配置，暂不启用本机 CPU 指令集；隐藏风味替换上限继续使用统一常量；手写策略协议输出随上游删除评分明细字段
+- **strict_rollout 与并行搜索**：候选内部并行后仍报出序号最小的失败；UCB 追加组改走同一执行路径，失败同样受该开关约束；补充多线程一致性、失败槽与追加组报错测试
+
+## 2026-09-11
+- **模拟状态与规则计算**：内联继承因子和卡组计数，支援卡面板借用全局只读卡表，共享事件采样分布，简化做面可行性计算，系统事件和概率查询仅在失败时构造错误，减少复制与分配。
+- **选面与训练评分**：预演借用原局面并显式指定候选面，复用训练候选、评分空间、训练基础值、Hint 与羁绊估值、友人动态估值、体力结果和地区窗口分量，各面的实际加成与最终评分分别计算；rollout 省略评分明细，普通决策日志和协议输出保持完整。
+- **性能验证**：补充状态隔离、逐碗计算、候选顺序、事件随机流、Hint 切换、必赛分支和普通策略日志的一致性检查，记录生产参数正反序配对测量及源码、配置和产物校验信息。
+- **Windows 构建脚本**：停用构建脚本中的图标资源编译和栈链接参数输出。
+
 ## 2026-09-10
+- **本机 Release 性能优化**：启用速度优先优化、ThinLTO 和本机 CPU 指令集，减少模拟、评分与搜索中的重复分配、复制和计算，复用事件队列与地区评分，候选内部模拟并行执行并按原序归并；rollout 跳过原因文本生成，保留数值评分分解、正常决策日志与协议输出。
+- **性能基准与验证**：基准继承游戏线程和搜索配置，补充分配复用、评分、随机流、动作与事件轨迹、协议输出及跨线程失败槽一致性检查，记录生产参数整局与高预算搜索根的配对测量口径和复测步骤。
+- **main.rs 按职责拆分重构**：主程序收敛为薄调度（CLI / 初始化 / watch 循环分发）；新增 `decision/` 目录（决策后处理：luck 计算与决策输出，`luck_score` 一并移入）与 `scenario/` 目录（温泉 / 拉面各一幕块：含 newgame 检测、切局、决策计算与 emit）；行为等价
+- **连续决策中间状态输出时机修正**：中间决策的「计算后续动作」提示与 `compute_next_step` 通知从主循环移到决策循环内部、在真正执行下一步决策（可能耗时）之前发出
+- **比赛回合策略输出修复**：拉面比赛回合仅一个固定动作、MCTS 不搜索导致无输出——为固定动作合成决策信息使其在屏幕 / JSON 上可见，不挂 luck
+- **`--json` 开始接受数据时发 `connected`**：仅 json 模式、watcher 就绪进入监听时 `emit_info("connected")` 通知 AIRed 连接成功
 - **`search_n` 预算记录订正**：1024 的选定来自教师闭环 sweep（被测量是整局闭环均分），此前误挂到一项计划中的 top-1 一致率实验；同时补记该 sweep 未实测 2048/4096、也未验证更大预算对学生的收益，以及实际采集批次全部为 512 而无改动决策记录
 - **单候选决策点免推理**：`RamenNnTrainer::prepare_decision` 在候选只有一个时直接定案，省掉整次网络往返；只收敛「需要推理」这一种结果，不影响守门与手写转发分支，候选落格检查保留
 - **改动前后对拍**：固定根上逐 rollout 终局评分与剩余网络决策均逐字段一致，请求数与墙钟均下降，批利用率同时下降；运行身份、数值与证据边界记于 `nn_pipeline_plan.md` 第 14 节
@@ -11,8 +28,29 @@
 - **`ramen_root_bench` 种子口径注释**：补记它与 `ramen_space_bench` 的基种子口径不同，只有 `--plan-index 0` 两边对齐，跨工具比较前须先对齐有效基种子
 
 ## 2026-09-09
+- **决策间 `decision_kind` 顶层字段 + `scenario_extra.ramen_action`**：partial decision 类型分发——main.rs 在 select_action 前按 `RamenStage` 填 `decision_kind`，onsen 填 `train`/`event`；`ramen_action` 由 `RamenAction.to_string()` 给出含吃面 + 隐藏诀窍 + 操作三阶段动作串（AIRed 端只显示不解析），合并路径一条 JSON 表达、三阶段路径按 chain 顺序分条
+- **新增 `candidate_descriptions` 字段**：与 `candidate_scores` / `candidate_n` 严格同长同序同截断，供 AIRed 映射拉面组合动作名（onsen 取自 `SearchOutput.actions[i]`、拉面 MCTS / 手写策略分别缓存到 `LastSearchSummary` / `LastDecisionSummary`）
+- **`DecisionInfo` 简化 + `scenario_extra.reason` 挂载**：删 5 个 stub 字段（reason / search_depth / visit_count / score_breakdown / elapsed_ms），保留 candidate_scores / candidate_n；拉面从 `LastReasonSink` 取 `DecisionReasonData` 挂到 `scenario_extra.reason` 完整透传 human reason 信息
+- **`--json` 输出类型扩展**：stdout 顶层 `type` 区分三类消息（`decision` / `info` / `error`），去掉 `schema_version`；`info` 仅 event 取值、`error` 仅 message——在 watcher init、watch loop 入口、拉面链式决策中间、切局、失败五处按需发射
+- **AI 不再推进游戏状态**：拉面 calc_ramen_training 与温泉 calc_onsen_training / calc_onsen_event 改为只调一次 select_action 出推荐、不再 apply / next；主循环每次 watch 收到新 JSON 后从零重建 game 重新计算，两次 JSON 间不互相依赖
+- **温泉 / 拉面回合头部打印**：human mode 在每次计算后打印马娘状态 / 剧本信息 / 训练分布；json mode 跳过这些屏幕输出
+- **JSON 模式 stdout 净化**：计算完成提示「计算完成，等待新数据...」、启动横幅走 stderr；`[按 F2 保存当前回合状态]` 等人类调试提示在 json mode 跳过
+- **ctrl-s 热键功能临时停用**：tokio::spawn(hotkey_handler) 注释掉（crossterm 无限 poll 占用 worker 配额、AI 通道下无意义），后续重构时按 feature gate 恢复
+- **版本号 / 横幅升级**：`umasim` / `umaai` Cargo.toml version 升 0.2.x → 0.14.0；启动横幅 "UMAAI 0.26" 改为 "UMAAI-Ramen"
+- **拉面 / 温泉连续决策**：特定场景在前一决策基础上继续生成下一决策——应用上一决策并推进到下一阶段后再出推荐（第 1 回合训练后接地区选择、选"不吃面"后接训练选择），一回合内可连续下发多段决策
+- **连续决策触发条件修正**：仅在第 1 回合训练时继续，避免其余回合误触发
+- **拉面内部状态字段清理**：移除仅用于状态导入内部判断、无需持久化的字段及对应类型，协议不再写出
+- **拉面当前生效面修正在下**：仅在效果列表非空时才透传，同步更新样本导入测试断言
+- **启动日志精简**：去掉"载入用户配置 / 载入默认配置"的日志输出
+- **human 输出改为运气行**：删去 AI 选择 / 理由两行，输出期望评分与运气分（本局 / 本回合），四舍五入为整数，本局运气按区间着色
+- **期望评分叠加每回合加成**：期望评分与运气分统一计入"每回合比手写逻辑多的分数"，按剩余回合数加权，初始基线按第 0 回合计算
+- **拉面决策理由输出解耦**：理由的原始数据始终下发供宿主使用，可读文字仅在诊断模式上屏，避免双打印
+- **feeling_guage → feeling_gauge 改名**：上游已修复误拼，协议与 umaai 端 `RamenStatus` 字段随迁 `feeling_gauge` / `feeling_gauge_gains` / `feeling_gauge_gain_base`，文档同步更新
+- **拉面 into_game 严格按协议重建 base**：弃 `RamenGame::newgame` 打补丁，改由 `parse_basegame` 重建（Uma / Friend 走 `parse_uma` / `parse_friend`、`five_status_limit` 取协议值、丢弃 `friend_event_ids`，友人事件 / 五维上限视为外部输入）；新增 `RamenGame::from_base_game`；`parse_basegame` 卡组循环补 persons 越界守卫
+- **地区选择（手写 fallback）决策可输出**：`region` 门控关闭时 `last_decision()` 为 None 导致无结果——`decide` **仅对 `RegionSelect`** 合成决策信息入链 emit（其余 None 阶段保持旧行为不合成）、不挂 luck；human 紫色显示「选择地区[...]（手写逻辑）」
 - **合入上游 AIRedirector 线与吃面 PT 规则变更**：上游 13 个提交并入本地 master；除 changelog 外无冲突，`game.rs` / `state.rs` / `bench.rs` / `flat_search.rs` / `ramen_mcts_trainer.rs` 五个双方都改的文件全部自动合并
 - **rollout 推理录制钩子改名避开撞名**：`RamenRolloutTrainer` 的 `DecisionSink` / `DecisionSnapshot` / `with_decision_sink` 改为 `RolloutInferSink` / `RolloutInferSnapshot` / `with_infer_sink`，与上游 `output::DecisionSink`（决策主干输出）区分——两者语义无关，同名会读错
+
 
 ## 2026-09-08
 - **新增 adapter_spec 文档**：整理 SendGameStatusPlugin 与 umaai 协议对接的易混淆点（feeling_guage 拼错 / persons/personDistribution 适配 / playing_state 含义 / 数据获取不全判定 / 超级拉面回合处理 / 阶段来源三态等）

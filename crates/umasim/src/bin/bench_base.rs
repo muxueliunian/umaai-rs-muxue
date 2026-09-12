@@ -28,6 +28,7 @@
 
 use anyhow::{Context, Result};
 use lexopt::Arg;
+use rayon::ThreadPoolBuilder;
 use serde::Deserialize;
 use umasim::{
     bench::{self, CardPickOpts, RESULTS_HEADER, load_player_builds, outcome_to_row},
@@ -235,6 +236,9 @@ fn main() -> Result<()> {
     game_config.ramen_region_strategy = RamenRegionStrategy::All;
     game_config.ramen_region_fixed = None;
     init_global_with_config(&game_config)?;
+    ThreadPoolBuilder::new()
+        .num_threads(game_config.collector.threads)
+        .build_global()?;
 
     // 卡组来源：玩家 build 预置（每个 build 用代表卡自动生成卡组）
     let builds = load_player_builds()?;
@@ -266,15 +270,16 @@ fn main() -> Result<()> {
         "pt" => RamenSelection::Pt,
         other => anyhow::bail!("未知 search_selection: {other}（可选 score / pt）")
     };
-    let search_config = SearchConfig::default()
+    let search_config = SearchConfig::new_game_config(&game_config)
         .with_search_n(cfg.search_n)
         .with_max_depth(0) // 拉面无 leaf 估值器，只能跑到终局
         .with_ucb(cfg.search_ucb)
         .with_radical_factor_max(cfg.radical_factor_max);
     if cfg.trainer == "mcts" {
         println!(
-            "  mcts 参数: search_n={}/候选 stages={} ucb={} selection={} radical_factor_max={}",
-            cfg.search_n, cfg.search_stages, cfg.search_ucb, cfg.search_selection, cfg.radical_factor_max
+            "  mcts 参数: search_n={}/候选 stages={} ucb={} selection={} radical_factor_max={} threads={} group_size={} expected_stdev={}",
+            cfg.search_n, cfg.search_stages, cfg.search_ucb, cfg.search_selection, cfg.radical_factor_max,
+            game_config.collector.threads, search_config.search_group_size, search_config.expected_search_stdev
         );
     }
 

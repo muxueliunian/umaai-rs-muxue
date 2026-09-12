@@ -521,9 +521,9 @@ match scenario_id {
    `turn` / `vital` / `five_status` / `deck` / `persons` / `distribution` 等。
    5 人卡组构造包含友人 / 理事长 / 记者；事件走 `unresolved_events` 路线。
 2. **拉面段 12 字段全覆写**：`RamenStatus` 12 个字段逐一映射到 `RamenState` 对应位置
-   （feeling_guage_gains / feeling_slot / feeling_stock 累计 / special_feeling /
+   （feeling_gauge_gains / feeling_slot / feeling_stock 累计 / special_feeling /
    train_feeling_type / active_effect_array / super_ramen / selected_regions /
-   feeling_guage_gain_base / current_ramen / scenario_pt / next_scenario_pt）。
+   feeling_gauge_gain_base / current_ramen / scenario_pt / next_scenario_pt）。
 3. **stage dispatch**：按协议 `playing_state` 1/5/45/46/48 → `RamenStage::Train` /
    `Settlement` / `SuperRamenSelect`，其它 playing_state 走 warn + fallback Train。
 4. **`deck_can_split`**：在 `into_game` 末尾按 `card_type_count` 实际数 ≥ 5 重算。

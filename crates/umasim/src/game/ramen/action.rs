@@ -758,7 +758,8 @@ impl RamenAction {
         let mut hint_persons = vec![];
         let mut friend_clicked = false;
 
-        for person_index in game.distribution[train].clone() {
+        for i in 0..game.distribution[train].len() {
+            let person_index = game.distribution[train][i];
             if person_index < 0 {
                 continue;
             }
@@ -1071,14 +1072,14 @@ fn apply_region_selection(game: &mut super::RamenGame, regions: [usize; 3]) -> R
 ///
 /// 所有候选动作的 `operation = Operation::StageOnly`，`special_targets = None`。
 pub fn list_ramen_select_actions(state: &super::RamenState, selected_regions: &[usize; 3]) -> Vec<RamenAction> {
-    use super::rules::list_special_targets_for;
+    use super::rules::{get_recipe, min_special_targets};
 
     let mut actions = vec![RamenAction::ramen_select(None)]; // 不吃面
     for &region_id in selected_regions {
         // 用隐藏风味可达（候选非空）即可选
-        let ok = !list_special_targets_for(state, region_id)
-            .map(|t| t.is_empty())
-            .unwrap_or(true);
+        let ok = get_recipe(region_id)
+            .map(|recipe| min_special_targets(state, recipe).is_some())
+            .unwrap_or(false);
         if ok {
             actions.push(RamenAction::ramen_select(Some(region_id)));
         }
@@ -1199,21 +1200,15 @@ pub fn list_combined_ramen_select_actions(
     actions
 }
 
-/// 获取当年可用的面（存在合法 `special_targets` 即可选）。
-///
-/// 与之前用 `can_make_ramen(recipe, &[0,0,0])` 过滤不同：本函数委托给
-/// [`super::rules::list_special_targets_for`]，允许"普通诀窍不够、用隐藏风味补缺口"的面
-/// 也算作可选。例如库存 A=5 B=0 C=0、recipe=[2,2,1] 时，用 1 个隐藏风味替代 B 仍可做面。
-///
-/// 返回可以吃的面的 ID 列表。
+/// 获取当年可用的面：存在最小合法隐藏风味替换方案即为可选，返回面的 ID 列表。
 pub fn get_available_ramens(state: &super::RamenState, selected_regions: &[usize; 3]) -> Vec<usize> {
-    use super::rules::list_special_targets_for;
+    use super::rules::{get_recipe, min_special_targets};
 
     let mut available = Vec::new();
     for &region_id in selected_regions {
-        if !list_special_targets_for(state, region_id)
-            .map(|t| t.is_empty())
-            .unwrap_or(true)
+        if get_recipe(region_id)
+            .map(|recipe| min_special_targets(state, recipe).is_some())
+            .unwrap_or(false)
         {
             available.push(region_id);
         }
@@ -1356,6 +1351,8 @@ mod tests {
 
     #[test]
     fn test_get_available_ramens() -> anyhow::Result<()> {
+        use crate::game::ramen::rules::list_special_targets_for;
+
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
         let _ = init_test_logger("info");
@@ -1388,7 +1385,30 @@ mod tests {
         // 札幌 [2,2,1] 缺 B=1，用 1 个 hidden 补 → 可选
         assert!(available.contains(&0));
 
-        Ok(())
+        let mut c = Checks::new();
+        for regions in [[0, 1, 2], [5, 7, 9], [10, 14, 19]] {
+            for stock in [[0, 0, 0], [3, 1, 2], [5, 5, 5]] {
+                for special in 0..=4 {
+                    state.feeling_stock = stock;
+                    state.special_feeling = special;
+                    let mut expected = Vec::new();
+                    let mut expected_actions = vec![RamenAction::ramen_select(None)];
+                    for &region_id in &regions {
+                        if !list_special_targets_for(&state, region_id)?.is_empty() {
+                            expected.push(region_id);
+                            expected_actions.push(RamenAction::ramen_select(Some(region_id)));
+                        }
+                    }
+                    c.check(get_available_ramens(&state, &regions) == expected, "可用面及其顺序与完整 targets 枚举一致");
+                    c.check(
+                        list_ramen_select_actions(&state, &regions) == expected_actions,
+                        "选面动作与完整 targets 枚举一致，且不吃面在首位"
+                    );
+                }
+            }
+        }
+        println!("三组地区、三种库存和 0..=4 隐藏风味的 45 个局面已对照完整枚举");
+        c.finish()
     }
 
     // ========== 三阶段决策候选生成测试 ==========
@@ -1598,6 +1618,8 @@ mod tests {
         let mut game = RamenGame::newgame(102601, &deck, inherit)?;
         // 第 2 回合后（已有友人卡 + 5 个 NPC：persons[0..5]=支援卡, [6]=友人, [7..12]=NPC）
         game.add_friend_and_npcs()?;
+        game.base.turn = 30;
+        game.ramen.scenario_pt = 1000;
         game.ramen.selected_regions = [0, 6, 7];
         game.ramen.train_feeling_type = Some([
             FeelingType::A,
@@ -1607,7 +1629,8 @@ mod tests {
             FeelingType::B
         ]);
         game.stage = RamenStage::Train;
-        let _rng = StdRng::seed_from_u64(42);
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut checks = Checks::new();
         let action = RamenAction::new(Operation::Train(TrainingType::Speed));
         let base_dist = calc_gauge_base_distribution(&game.ramen.selected_regions);
         let gauge_limit = crate::game::ramen::rules::GAUGE_LIMIT;
@@ -1627,7 +1650,10 @@ mod tests {
             failure_rate: 0.0
         };
         game.ramen.feeling_slot = [0, 0, 0];
-        action.fill_feeling_gauge(&mut game, 0, &params, false)?;
+        let mut expected_uma = game.uma.clone();
+        expected_uma.add_value(&game.calc_training_value(&params.buffs, 0)?);
+        action.handle_train_success(&mut game, 0, &params, &mut rng)?;
+        checks.check(game.uma == expected_uma, "训练成功的马娘状态与完整公式结果一致");
         let gain = game.ramen.feeling_slot[0];
         let expect_bonus = 1 + 0 + 2 / 2; // 1 + 支援卡0 + floor(2/2)=1
         let expected_gain = base_dist[0] + expect_bonus;
@@ -1666,7 +1692,7 @@ mod tests {
             "4 个 NPC 时应按 floor(4/2)=2 计算（而非硬编码 5 个 NPC 的 floor(5/2)=2 恰好巧合相同）"
         );
 
-        Ok(())
+        checks.finish()
     }
 
     /// 回归：超级拉面分身必须包含友人卡，且分身同样受「每训练一个友人」约束

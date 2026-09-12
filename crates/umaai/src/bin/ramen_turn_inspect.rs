@@ -105,7 +105,6 @@ fn ensure_workspace_cwd() -> Result<()> {
 /// scenario_pt=4200  current_ramen=Some(3)  selected_regions=[3, 7, 12]
 /// super_ramen=None  feeling_slot=[2, 1, 0]  feeling_stock=[4, 3, 2]  special_feeling=1
 /// train_feeling_type=Some([A, B, A, C, B])
-/// active_effect_array=3 条
 /// stage=Settlement   (协议 playing_state 已 dispatch)
 /// deck=[302424, 302894, 303044, 302924, 303024, 303054]
 /// uma_id=100603  five_status=[320, 248, 268, 214, 182]
@@ -130,7 +129,6 @@ fn print_turn_state(game: &RamenGame) {
     println!("super_ramen={:?}  feeling_slot={:?}  feeling_stock={:?}  special_feeling={}",
         ramen.super_ramen, ramen.feeling_slot, ramen.feeling_stock, ramen.special_feeling);
     println!("train_feeling_type={:?}", ramen.train_feeling_type);
-    println!("active_effect_array={} 条", ramen.active_effect_array.len());
     println!("stage={:?}   (协议 playing_state 已 dispatch)", game.stage);
     println!("deck={:?}", game.base.deck.iter().map(|c| c.card_id * 10 + c.rank).collect::<Vec<_>>());
     println!("uma_id={}  five_status={:?}", game.uma().uma_id, game.uma().five_status);
@@ -166,11 +164,10 @@ fn print_candidates(actions_len: usize, info: Option<&DecisionInfo>) {
             if !info.candidate_n.is_empty() {
                 println!("候选局数（与 scores 同序同截断） = {:?}", info.candidate_n);
             }
-            if let Some(reason) = &info.reason {
-                println!("reason = {reason}");
-            }
-            if let Some(ms) = info.elapsed_ms {
-                println!("elapsed_ms = {ms}");
+            // 2026-09 简化：`reason` / `elapsed_ms` 已从 DecisionInfo 删除——
+            // reason 改由 scenario_extra.reason.rivals[] 承载（main.rs 接线）
+            if let Some(extra) = &info.scenario_extra {
+                println!("scenario_extra 键 = {:?}", extra.as_object().map(|o| o.keys().collect::<Vec<_>>()));
             }
         }
         None => {
