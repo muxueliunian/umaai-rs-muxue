@@ -39,7 +39,8 @@ use std::{
         Arc,
         Mutex,
         atomic::{AtomicUsize, Ordering}
-    }
+    },
+    time::{Duration, Instant}
 };
 
 use anyhow::{Result, anyhow, bail};
@@ -57,7 +58,7 @@ use crate::{
         DecisionInfo as DecisionInfoProto,
         reason::{DecisionReasonData, DecisionReasonNoopSink, ReasonMetric, analyze_narrow_win, render_reason_lines}
     },
-    search::{ActionResult, FlatSearch, RamenSearchOutput, SearchConfig, TerminalStats}
+    search::{ActionResult, FlatSearch, RamenSearchOutput, SearchConfig, SearchProbe, TerminalStats}
 };
 
 /// 搜索哪些阶段的门控开关
@@ -195,6 +196,49 @@ pub enum RamenSelection {
     Pt
 }
 
+/// 一次 `select_action` 走过的路径（决策探针用）
+///
+/// 用枚举而非布尔组合：`searched` / `cache_hit` / `single_candidate` 三个布尔
+/// 里只有四种组合合法，枚举让非法组合根本表达不出来。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DecisionPath {
+    /// 真正跑了一次 [`FlatSearch::search`](crate::search::FlatSearch::search)
+    Searched,
+    /// `SpecialSelect` 直接复用了合并搜索缓存的 targets
+    CombinedCacheHit,
+    /// 单候选短路，转发手写策略
+    FallbackSingleCandidate,
+    /// 阶段门控关闭，转发手写策略
+    FallbackGated
+}
+
+/// 一次 `select_action` 调用的成本记录（仅测量用）
+///
+/// 与 [`SearchProbe`](crate::search::SearchProbe) 的区别：后者只量搜索内核，
+/// 本结构量的是**整个决策**——含 `list_actions` 之后的合并候选枚举、搜索、
+/// 以及搜索之后的 `stash_*` / `emit_decision_reason` 收尾。未搜索的决策
+/// （门控关 / 单候选 / 缓存命中）同样会留下记录，故「执行决策次数」= 本记录条数。
+#[derive(Debug, Clone)]
+pub struct DecisionProbe {
+    /// 决策发生时的回合
+    pub turn: i32,
+    /// 决策发生时的阶段
+    pub stage: RamenStage,
+    /// `select_action` 收到的候选数（三阶段口径，**不是**合并候选数）
+    pub actions_len: usize,
+    /// 本次决策走了哪条路径
+    pub path: DecisionPath,
+    /// 本次决策结束后 `last_decision()` 是否有内容可供上层 emit
+    ///
+    /// 合并 `RamenSelect` 路径搜索了但清空摘要，此处为 `false`——用来区分
+    /// 「没搜索」与「搜了但不对外暴露」。
+    pub exposes_decision_info: bool,
+    /// 决策开始时刻（与外层链路对齐用）
+    pub started: Instant,
+    /// 决策墙钟耗时（含搜索前后的全部处理）
+    pub elapsed: Duration
+}
+
 /// 上一次真正走过 MCTS 搜索的最小摘要（供 `last_decision` 读取）
 ///
 /// **只缓存决策协议需要的字段**，不复制整个 [`RamenSearchOutput`]（含每个候选
@@ -303,7 +347,12 @@ pub struct RamenMctsTrainer {
     /// 决策理由原始数据出口（每回合都发出 JSON；umasim 默认接日志）
     ///
     /// 可读文字不走此出口，由 [`Self::emit_decision_reason`] 渲染后上屏。
-    pub reason_sink: Arc<dyn crate::output::DecisionReasonSink>
+    pub reason_sink: Arc<dyn crate::output::DecisionReasonSink>,
+    /// 决策成本探针出口（**仅测量用**，默认 `None`）
+    ///
+    /// 关闭时 `select_action` 只多一次 `Option` 判断后直接转
+    /// [`Self::select_action_inner`]，不取时钟、不读原子量。
+    decision_probe: Option<Arc<Mutex<Vec<DecisionProbe>>>>
 }
 
 impl RamenMctsTrainer {
@@ -321,8 +370,15 @@ impl RamenMctsTrainer {
             combined_cache_hits: AtomicUsize::new(0),
             pending_combined_targets: Mutex::new(None),
             last_search_summary: Mutex::new(None),
-            reason_sink: Arc::new(DecisionReasonNoopSink)
+            reason_sink: Arc::new(DecisionReasonNoopSink),
+            decision_probe: None
         }
+    }
+
+    /// 挂上决策成本探针出口（**仅测量用**，见 [`DecisionProbe`]）
+    pub fn with_decision_probe(mut self, sink: Arc<Mutex<Vec<DecisionProbe>>>) -> Self {
+        self.decision_probe = Some(sink);
+        self
     }
 
     /// 本训练员真正走过搜索的决策次数
@@ -349,6 +405,17 @@ impl RamenMctsTrainer {
             .search
             .with_rollout_trainer(super::RamenRolloutTrainer::handwritten().with_neural_net(nn, max_turn))
             .with_strict_rollout(true);
+        self
+    }
+
+    /// 给内部搜索器挂上成本探针（**仅测量用**）
+    ///
+    /// 探针只观测、不参与分配与排序，搜索结果与 RNG 消耗逐位不变，
+    /// 契约见 [`FlatSearch::with_probe`](crate::search::FlatSearch::with_probe)。
+    /// 单独给一个转发方法，是因为 `search` 字段虽然是 `pub`，但 `with_probe`
+    /// 取 `self` 按值返回，外部想挂探针得先把字段搬出来再放回去。
+    pub fn with_search_probe(mut self, sink: Arc<Mutex<Vec<SearchProbe>>>) -> Self {
+        self.search = self.search.with_probe(sink);
         self
     }
 
@@ -630,8 +697,12 @@ impl Default for RamenMctsTrainer {
     }
 }
 
-impl Trainer<RamenGame> for RamenMctsTrainer {
-    fn select_action(
+impl RamenMctsTrainer {
+    /// [`Trainer::select_action`] 的原始实现
+    ///
+    /// 决策探针只在外层计时壳里读写，不进本函数——保证「挂不挂探针」不改变
+    /// 这里的任何一步。
+    fn select_action_inner(
         &self, game: &RamenGame, actions: &[<RamenGame as Game>::Action], rng: &mut StdRng
     ) -> Result<usize> {
         // (A) SpecialSelect 命中缓存 —— 必须放在早退判断之前。
@@ -758,6 +829,54 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
         self.stash_last_summary(&output, idx);
         Ok(idx)
     }
+}
+
+impl Trainer<RamenGame> for RamenMctsTrainer {
+    /// 挂了决策探针时多一层计时壳，否则直接转 [`Self::select_action_inner`]
+    ///
+    /// 壳只读 `searched` / `combined_cache_hits` 的前后差值判断走了哪条路径，
+    /// 不改变决策语义与 RNG 消耗。
+    fn select_action(
+        &self, game: &RamenGame, actions: &[<RamenGame as Game>::Action], rng: &mut StdRng
+    ) -> Result<usize> {
+        let Some(sink) = self.decision_probe.as_ref() else {
+            return self.select_action_inner(game, actions, rng);
+        };
+        let searched_before = self.searched.load(Ordering::Relaxed);
+        let cache_before = self.combined_cache_hits.load(Ordering::Relaxed);
+        let turn = game.turn();
+        let stage = game.stage.clone();
+        let started = Instant::now();
+        let out = self.select_action_inner(game, actions, rng);
+        let elapsed = started.elapsed();
+        let path = if self.combined_cache_hits.load(Ordering::Relaxed) > cache_before {
+            DecisionPath::CombinedCacheHit
+        } else if self.searched.load(Ordering::Relaxed) > searched_before {
+            DecisionPath::Searched
+        } else if actions.len() <= 1 {
+            DecisionPath::FallbackSingleCandidate
+        } else {
+            DecisionPath::FallbackGated
+        };
+        let probe = DecisionProbe {
+            turn,
+            stage,
+            actions_len: actions.len(),
+            path,
+            exposes_decision_info: self
+                .last_search_summary
+                .lock()
+                .map(|slot| slot.is_some())
+                .unwrap_or(false),
+            started,
+            elapsed
+        };
+        match sink.lock() {
+            Ok(mut v) => v.push(probe),
+            Err(e) => debug!("[决策][探针] 记录失败（锁中毒）: {e}")
+        }
+        out
+    }
 
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
         self.clear_breakdown();
@@ -850,6 +969,8 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
 
 #[cfg(test)]
 mod tests {
+    use rand::RngCore;
+
     use super::*;
     use crate::{
         gamedata::{GAMECONSTANTS, init_global},
@@ -1683,6 +1804,115 @@ mod tests {
         let mut c = Checks::new();
         println!("单候选决策数 {singlet_seen}, 走过搜索 {summary_seen}");
         c.check(singlet_seen > 0, "整局至少有一个单候选决策");
+        c.finish()
+    }
+
+    // ========== 决策成本探针（仅测量用）验收 ==========
+
+    /// 挂 / 不挂决策探针必须给出**逐位相同**的整局结果与 RNG 位置
+    ///
+    /// 探针壳只读原子计数判断路径；一旦它改变决策或随机流，量出来的就不是
+    /// 生产成本。用整局（而非单点）比较：决策链上任何一处偏移都会放大到终局分。
+    #[test]
+    fn test_decision_probe_neutral_full_game() -> Result<()> {
+        let seed = 7;
+        let cfg = SearchConfig::default().with_search_n(4).with_ucb(false);
+        let stages = RamenSearchStages::train_only();
+
+        let (mut game_a, mut rng_a) = setup(seed)?;
+        let plain = RamenMctsTrainer::new(cfg.clone()).with_stages(stages);
+        game_a.run_full_game(&plain, &mut rng_a)?;
+        let after_a = rng_a.next_u64();
+
+        let sink: Arc<Mutex<Vec<DecisionProbe>>> = Arc::new(Mutex::new(Vec::new()));
+        let (mut game_b, mut rng_b) = setup(seed)?;
+        let probed = RamenMctsTrainer::new(cfg)
+            .with_stages(stages)
+            .with_decision_probe(sink.clone());
+        game_b.run_full_game(&probed, &mut rng_b)?;
+        let after_b = rng_b.next_u64();
+
+        let probes = sink.lock().map_err(|e| anyhow!("探针锁中毒: {e}"))?;
+        let searched = probes.iter().filter(|p| p.path == DecisionPath::Searched).count();
+        let gated = probes.iter().filter(|p| p.path == DecisionPath::FallbackGated).count();
+        let single = probes
+            .iter()
+            .filter(|p| p.path == DecisionPath::FallbackSingleCandidate)
+            .count();
+        let cache = probes
+            .iter()
+            .filter(|p| p.path == DecisionPath::CombinedCacheHit)
+            .count();
+        println!(
+            "关探针: 分数={} searched_count={} | 开探针: 分数={} searched_count={}",
+            game_a.uma().calc_score(),
+            plain.searched_count(),
+            game_b.uma().calc_score(),
+            probed.searched_count()
+        );
+        println!(
+            "决策记录 {} 条: 搜索={searched} 门控转发={gated} 单候选转发={single} 合并缓存={cache}",
+            probes.len()
+        );
+        println!("rng 后继: 关={after_a:#018x} 开={after_b:#018x}");
+
+        let mut c = Checks::new();
+        c.check(game_a.uma().calc_score() == game_b.uma().calc_score(), "整局终局分数一致");
+        c.check(plain.searched_count() == probed.searched_count(), "搜索次数一致");
+        c.check(after_a == after_b, "整局结束后 rng 位置一致");
+        c.check(searched == probed.searched_count(), "标为 Searched 的记录数等于 searched_count");
+        c.check(probes.len() > searched, "未搜索的决策同样留下记录（否则量不到执行决策次数）");
+        c.check(
+            probes.iter().all(|p| p.elapsed.as_nanos() > 0),
+            "每条记录都有非零耗时"
+        );
+        c.finish()
+    }
+
+    /// 合并 `RamenSelect` 路径：搜索发生了，但不对外暴露 `DecisionInfo`
+    ///
+    /// 钉住「搜了 ≠ 有输出」这一区分——报告里「执行决策次数」与「输出决策记录数」
+    /// 的差额全部来自这里，若 `exposes_decision_info` 恒为 true 就看不出来了。
+    #[test]
+    fn test_decision_probe_marks_combined_without_decision_info() -> Result<()> {
+        let sink: Arc<Mutex<Vec<DecisionProbe>>> = Arc::new(Mutex::new(Vec::new()));
+        let (mut game, mut rng) = setup(11)?;
+        let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(4).with_ucb(false))
+            .with_stages(ramen_and_special_stages())
+            .with_combined_ramen_select(true)
+            .with_decision_probe(sink.clone());
+        // 只跑前若干阶段：拿到至少一次 RamenSelect 搜索即可
+        for _ in 0..400 {
+            if !game.next() {
+                break;
+            }
+            game.run_stage(&trainer, &mut rng)?;
+            let hit = sink
+                .lock()
+                .map_err(|e| anyhow!("探针锁中毒: {e}"))?
+                .iter()
+                .any(|p| p.stage == RamenStage::RamenSelect && p.path == DecisionPath::Searched);
+            if hit {
+                break;
+            }
+        }
+        let probes = sink.lock().map_err(|e| anyhow!("探针锁中毒: {e}"))?;
+        let combined: Vec<&DecisionProbe> = probes
+            .iter()
+            .filter(|p| p.stage == RamenStage::RamenSelect && p.path == DecisionPath::Searched)
+            .collect();
+        for p in &combined {
+            println!(
+                "RamenSelect 回合 {} 候选 {} 耗时 {:?} 暴露 DecisionInfo={}",
+                p.turn, p.actions_len, p.elapsed, p.exposes_decision_info
+            );
+        }
+        let mut c = Checks::new();
+        c.check(!combined.is_empty(), "至少捕获一次 RamenSelect 搜索");
+        c.check(
+            combined.iter().all(|p| !p.exposes_decision_info),
+            "合并路径搜索后 last_decision 为空（既有行为，本次未改）"
+        );
         c.finish()
     }
 }

@@ -9,8 +9,10 @@ use std::{
     collections::HashMap,
     sync::{
         Arc,
+        Mutex,
         atomic::{AtomicUsize, Ordering}
-    }
+    },
+    time::{Duration, Instant}
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -55,6 +57,11 @@ struct CandidateAccum<D> {
     terminal: D,
     /// rollout 失败次数
     failed: usize,
+    /// 已**计划**的 rollout 次数（成功 + 失败；仅供成本探针读取）
+    ///
+    /// 与 `failed` 同为观测量，不参与任何排序或终止判据——UCB 的终止判据仍用
+    /// `search_ucb` 内部的 `planned` 向量，这里只是把同一个数带出内核。
+    planned: usize,
     /// 按 rollout 序号对齐的原始分（`score` 轴）
     ///
     /// `None`：开关关闭，不分配。`Some`：`ordered[k]` 为第 k 次的分数，
@@ -73,6 +80,7 @@ impl<D: Default> CandidateAccum<D> {
             score_pt: ActionResult::new(),
             terminal: D::default(),
             failed: 0,
+            planned: 0,
             ordered: if record_ordered {
                 Some(Vec::new())
             } else {
@@ -189,7 +197,75 @@ where
     ///
     /// 泛型结构体上挂一个非泛型 trait 对象是有意为之：温泉没有批量后端，
     /// 为它引入一层泛型参数只会污染所有调用点。
-    batch_rollout: Option<Arc<dyn RamenBatchRollout>>
+    batch_rollout: Option<Arc<dyn RamenBatchRollout>>,
+
+    /// 成本探针出口（**仅测量用**，默认 `None`）
+    ///
+    /// 置上之后每次 [`Self::search_with_terminal`] 结束会追加一条 [`SearchProbe`]。
+    ///
+    /// 关闭时的开销**不是零**，而是：每次搜索一次 `Option::map`（不取时钟）、
+    /// 每个 rollout 组一次 `Option::is_some` 分支（不累加计数）。候选分配、
+    /// 种子派生、统计与排序不读本字段，故搜索结果与 RNG 消耗逐位不变。
+    probe: Option<Arc<Mutex<Vec<SearchProbe>>>>
+}
+
+/// 探针的三份候选计数（`planned` / `succeeded` / `failed` 同序同长）
+///
+/// 建新类型而非三元组：三个 `Vec<usize>` 位置写反不会编译报错，也不会在数值上
+/// 立刻露馅（都是同一量级的计数）。
+#[derive(Debug, Clone)]
+struct ProbeCounts {
+    /// 每候选**计划**的 rollout 次数
+    planned: Vec<usize>,
+    /// 每候选**成功**的 rollout 次数
+    succeeded: Vec<usize>,
+    /// 每候选**失败**的 rollout 次数
+    failed: Vec<usize>
+}
+
+/// 一次搜索内核调用的成本记录（仅测量用）
+///
+/// 内核不对外暴露 `CandidateAccum`，而「每候选计划 / 成功 / 失败次数」正是
+/// 预算核实要看的量。本结构把这些观测量原样带出，**不参与**任何判据。
+#[derive(Debug, Clone)]
+pub struct SearchProbe {
+    /// 根局面回合
+    pub turn: usize,
+    /// 剧本阶段键（[`FlatSearchGame::crn_stage_key`]）
+    pub stage_key: u64,
+    /// 真正进入搜索的候选数
+    pub candidates: usize,
+    /// 每候选**计划**的 rollout 次数（成功 + 失败）
+    pub planned: Vec<usize>,
+    /// 每候选**成功**的 rollout 次数
+    pub succeeded: Vec<usize>,
+    /// 每候选**失败**的 rollout 次数
+    pub failed: Vec<usize>,
+    /// 本次搜索的激进度因子
+    pub radical_factor: f64,
+    /// `weighted_mean(radical_factor)` 口径的中选下标
+    pub best_action_idx: usize,
+    /// 搜索内核开始时刻（与外层链路对齐用）
+    pub started: Instant,
+    /// 搜索内核墙钟耗时
+    pub elapsed: Duration
+}
+
+impl SearchProbe {
+    /// 计划 rollout 总数（= 总续跑数，含失败）
+    pub fn total_planned(&self) -> usize {
+        self.planned.iter().sum()
+    }
+
+    /// 成功 rollout 总数
+    pub fn total_succeeded(&self) -> usize {
+        self.succeeded.iter().sum()
+    }
+
+    /// 失败 rollout 总数
+    pub fn total_failed(&self) -> usize {
+        self.failed.iter().sum()
+    }
 }
 
 /// 一次批量 rollout 的结果表
@@ -229,8 +305,21 @@ where
             config,
             rollout_batch_size: 1,
             strict_rollout: false,
-            batch_rollout: None
+            batch_rollout: None,
+            probe: None
         }
+    }
+
+    /// 挂上成本探针出口（**仅测量用**，见 [`SearchProbe`]）
+    ///
+    /// 默认不挂。**不挂 ≠ 零开销**：结构体多一个 `Option` 字段，每次搜索多一次
+    /// `Option::map`（不取时钟）、每个 rollout 组多一次 `Option::is_some` 分支
+    /// （不累加计数）。它保证的是**不改变决策语义**——候选分配、CRN 种子派生、
+    /// 统计与排序都不读本字段，故搜索结果与 RNG 消耗逐位不变。
+    /// 挂上后每次搜索内核结束追加一条记录。
+    pub fn with_probe(mut self, sink: Arc<Mutex<Vec<SearchProbe>>>) -> Self {
+        self.probe = Some(sink);
+        self
     }
 
     /// 挂上批量 rollout 后端（仅拉面路径生效）
@@ -389,6 +478,8 @@ where
         // （simulation_count > 1）时任一局的搜索会顺带抑制其他局真实回合的
         // diag——已知局限，见 diagnostic.rs 模块文档。
         let _diag_guard = crate::output::diagnostic::DiagGuard::suppress();
+        // 成本探针的计时起点：探针关闭时**不取**时钟，避免为不用的数字付钟表开销
+        let probe_started = self.probe.as_ref().map(|_| Instant::now());
         let collected = if self.config.use_ucb {
             self.search_ucb(game, actions, radical_factor, &seeds, &rollout)?
         } else {
@@ -403,6 +494,12 @@ where
         }
 
         let record = self.config.record_ordered_rollouts;
+        // 成本探针快照：必须在 `collected` 被消费前取
+        let probe_counts: Option<ProbeCounts> = self.probe.as_ref().map(|_| ProbeCounts {
+            planned: collected.iter().map(|acc| acc.planned).collect(),
+            succeeded: collected.iter().map(|acc| acc.score.count() as usize).collect(),
+            failed: collected.iter().map(|acc| acc.failed).collect()
+        });
         let mut action_results = Vec::with_capacity(collected.len());
         let mut terminal_results = Vec::with_capacity(collected.len());
         let mut per_candidate = if record {
@@ -429,6 +526,24 @@ where
                 root_seed: seeds.root(),
                 per_candidate
             });
+        }
+        if let (Some(sink), Some(counts), Some(started)) = (self.probe.as_ref(), probe_counts, probe_started) {
+            let probe = SearchProbe {
+                turn: game.turn() as usize,
+                stage_key: game.crn_stage_key(),
+                candidates: actions.len(),
+                planned: counts.planned,
+                succeeded: counts.succeeded,
+                failed: counts.failed,
+                radical_factor,
+                best_action_idx: out.best_action_idx,
+                started,
+                elapsed: started.elapsed()
+            };
+            match sink.lock() {
+                Ok(mut v) => v.push(probe),
+                Err(e) => warn!("[搜索][探针] 记录失败（锁中毒）: {e}")
+            }
         }
         Ok(out)
     }
@@ -581,6 +696,11 @@ where
         T: TerminalRecord,
         F: Fn(&G, &G::Action, u64) -> Result<RolloutOutcome<T>> + Sync
     {
+        // 只在挂了探针时才记账：关闭时这里是一次 `Option::is_some` 分支，
+        // 每组（而非每条 rollout）判一次。
+        if self.probe.is_some() {
+            acc.planned += n;
+        }
         let run_one = |k: usize| rollout(game, action, seeds.seed_at(offset + k));
         let outcomes: Vec<Result<RolloutOutcome<T>>> = if self.use_parallel_simulation() {
             (0..n).into_par_iter().map(run_one).collect()
@@ -2537,5 +2657,154 @@ mod tests {
             println!();
         }
         Ok(())
+    }
+
+    // ========== 成本探针（仅测量用）验收 ==========
+
+    /// 探针开 / 关必须给出**逐位相同**的搜索结果与 RNG 位置
+    ///
+    /// 探针一旦影响候选分配、CRN 种子或排序，用它量出来的成本就不是生产成本。
+    /// 这里逐字段比较（不算哈希）：中选下标、激进度、每候选的 n / sum / sum_sq /
+    /// min-max 派生量，以及搜索后外层 rng 的下一个输出。
+    #[test]
+    fn test_probe_neutral_to_search_result() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let mut c = Checks::new();
+        for use_ucb in [false, true] {
+            let cfg = SearchConfig::default()
+                .with_search_n(8)
+                .with_ucb(use_ucb)
+                .with_search_group_size(4);
+            let plain: FlatSearch<RamenGame> = FlatSearch::new(cfg.clone());
+            let sink: Arc<Mutex<Vec<SearchProbe>>> = Arc::new(Mutex::new(Vec::new()));
+            let probed: FlatSearch<RamenGame> = FlatSearch::new(cfg).with_probe(sink.clone());
+
+            let mut rng_a = StdRng::seed_from_u64(20260913);
+            let out_a = plain.search(&game, &actions, &mut rng_a)?;
+            let after_a = rng_a.next_u64();
+
+            let mut rng_b = StdRng::seed_from_u64(20260913);
+            let out_b = probed.search(&game, &actions, &mut rng_b)?;
+            let after_b = rng_b.next_u64();
+
+            println!(
+                "ucb={use_ucb} 中选: 关={} 开={} | radical: 关={:.9} 开={:.9} | rng 后继: 关={after_a:#018x} 开={after_b:#018x}",
+                out_a.best_action_idx, out_b.best_action_idx, out_a.radical_factor, out_b.radical_factor
+            );
+            c.check(out_a.best_action_idx == out_b.best_action_idx, "中选下标一致");
+            c.check(out_a.radical_factor == out_b.radical_factor, "激进度一致");
+            c.check(after_a == after_b, "搜索后外层 rng 位置一致");
+            c.check(
+                out_a.action_results.len() == out_b.action_results.len(),
+                "候选数一致"
+            );
+            for (i, ((a, a_pt), (b, b_pt))) in out_a
+                .action_results
+                .iter()
+                .zip(out_b.action_results.iter())
+                .enumerate()
+            {
+                println!(
+                    "  候选{i}: score 关 n={} sum={:.6} sum_sq={:.6} | 开 n={} sum={:.6} sum_sq={:.6}",
+                    a.count(), a.sum, a.sum_sq, b.count(), b.sum, b.sum_sq
+                );
+                println!(
+                    "          score_pt 关 n={} sum={:.6} sum_sq={:.6} | 开 n={} sum={:.6} sum_sq={:.6}",
+                    a_pt.count(), a_pt.sum, a_pt.sum_sq, b_pt.count(), b_pt.sum, b_pt.sum_sq
+                );
+                c.check(a.count() == b.count(), "score 样本数一致");
+                c.check(a.sum == b.sum, "score 分数和一致");
+                c.check(a.sum_sq == b.sum_sq, "score 平方和一致");
+                c.check(a_pt.count() == b_pt.count(), "score_pt 样本数一致");
+                c.check(a_pt.sum == b_pt.sum, "score_pt 分数和一致");
+                c.check(a_pt.sum_sq == b_pt.sum_sq, "score_pt 平方和一致");
+            }
+
+            let probes = sink.lock().map_err(|e| anyhow!("探针锁中毒: {e}"))?;
+            c.check(probes.len() == 1, "一次搜索恰好留下一条探针记录");
+        }
+        c.finish()
+    }
+
+    /// 探针计数必须与注入的失败逐条对齐，且 `planned = 成功 + 失败`
+    ///
+    /// 失败 rollout 只增加计划次数、不增加成功次数；探针若把两者混同，
+    /// 「预算花在哪」就会被系统性高估或低估。
+    #[test]
+    fn test_probe_counts_match_injected_failures() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let actions = &actions[..2];
+        let terminal = RamenTerminal::from_game(&game);
+        let search_n = 8;
+        let group_size = 4;
+        let mut root_rng = StdRng::seed_from_u64(4242);
+        let seeds = RolloutSeeds::from_root(root_rng.next_u64());
+        let fail_indices = [1usize, 5];
+        let fail_seeds = fail_indices.map(|idx| seeds.seed_at(idx));
+        let dummy = |_: &RamenGame, _: &RamenAction, seed: u64| -> Result<RolloutOutcome<RamenTerminal>> {
+            if fail_seeds.contains(&seed) {
+                bail!("injected failure for seed {seed:#018x}");
+            }
+            Ok(RolloutOutcome {
+                score: SearchScore {
+                    score: (seed % 1_000_000) as f64,
+                    score_pt: (seed % 1_000_000) as f64 * 0.37
+                },
+                terminal
+            })
+        };
+
+        let mut c = Checks::new();
+        for use_ucb in [false, true] {
+            let cfg = SearchConfig::default()
+                .with_search_n(search_n)
+                .with_ucb(use_ucb)
+                .with_search_group_size(group_size);
+            let sink: Arc<Mutex<Vec<SearchProbe>>> = Arc::new(Mutex::new(Vec::new()));
+            let search: FlatSearch<RamenGame> = FlatSearch::new(cfg).with_probe(sink.clone());
+            let mut rng = StdRng::seed_from_u64(4242);
+            let out = search.search_with_terminal(&game, actions, &mut rng, dummy)?;
+
+            let probes = sink.lock().map_err(|e| anyhow!("探针锁中毒: {e}"))?;
+            let p = probes.first().ok_or_else(|| anyhow!("探针没有留下记录"))?;
+            println!(
+                "ucb={use_ucb} 候选={} 计划={:?} 成功={:?} 失败={:?} 总续跑={}",
+                p.candidates, p.planned, p.succeeded, p.failed, p.total_planned()
+            );
+            c.check(p.candidates == actions.len(), "探针候选数与入参一致");
+            c.check(p.planned.len() == actions.len(), "planned 与候选同长");
+            for i in 0..actions.len() {
+                c.check(
+                    p.planned[i] == p.succeeded[i] + p.failed[i],
+                    "planned = 成功 + 失败"
+                );
+                c.check(
+                    p.succeeded[i] as u32 == out.action_results[i].0.count(),
+                    "探针成功数等于 ActionResult 样本数"
+                );
+            }
+            // 预算语义：均匀分配下每候选都恰好 `search_n`；UCB 下只有**某一个**
+            // 候选计划次数达到 `search_n` 即停，其余停在更低处——`search_n` 是
+            // 停止阈值，不是「每候选都会跑满」。
+            let max_planned = p.planned.iter().copied().max().unwrap_or(0);
+            if use_ucb {
+                c.check(max_planned >= search_n, "UCB: 最大计划次数达到停止阈值 search_n");
+                c.check(
+                    p.planned.iter().any(|n| *n < search_n),
+                    "UCB: 存在未跑满 search_n 的候选（预算是动态分配的）"
+                );
+            } else {
+                c.check(
+                    p.planned.iter().all(|n| *n == search_n),
+                    "均匀分配: 每候选恰好 search_n"
+                );
+            }
+            c.check(
+                p.total_failed() > 0,
+                "注入的失败被记到 failed 而不是被静默丢弃"
+            );
+            c.check(p.total_planned() == p.total_succeeded() + p.total_failed(), "总数自洽");
+        }
+        c.finish()
     }
 }

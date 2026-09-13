@@ -30,11 +30,20 @@ pub struct LastReasonSink {
 }
 
 impl LastReasonSink {
-    pub(crate) fn new() -> Arc<Self> {
+    /// 新建一个空 sink
+    ///
+    /// 直接返回 `Arc`：它要同时交给训练员（`reason_sink`）与取用方，
+    /// 两边共享同一个槽位。
+    pub fn new() -> Arc<Self> {
         Arc::new(Self { inner: Mutex::new(None) })
     }
 
-    pub(crate) fn take(&self) -> Option<DecisionReasonData> {
+    /// 取走上一次缓存的决策理由，并把槽位清空
+    ///
+    /// 返回 `None` 表示自上次取用以来没有新的理由被 emit（例如合并
+    /// `RamenSelect` 路径搜了但不暴露摘要）。清空是有意的：不清会让下一次
+    /// 没有理由时读到上一回合的旧数据。
+    pub fn take(&self) -> Option<DecisionReasonData> {
         // 取走副本，留 None 给下一次覆写
         self.inner.lock().expect("reason sink").take()
     }
