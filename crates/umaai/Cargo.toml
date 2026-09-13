@@ -20,6 +20,10 @@ libc = "0.2.189"
 # 发布给用户的二进制必须启用此 feature，否则出错时不会暂停（CI / 自动化场景
 # 会因 stdin 等待而卡住）。发布构建：`cargo build --release --features release-pause`
 release-pause = []
+# 实验用：给 `ramen_client_game_bench` 打开拉面 ONNX 网络策略。
+# ❗**不进 default**，正式客户端（`umaai` 主程序）默认构建与以前逐字节同源，
+# 不引入 tract-onnx 依赖链。只有显式 `--features onnx` 的实验构建才会拉进来。
+onnx = ["umasim/onnx"]
 
 [dependencies]
 # AI 助手 binary：PC 通道层需要终端交互与彩色输出，启用 cli。
