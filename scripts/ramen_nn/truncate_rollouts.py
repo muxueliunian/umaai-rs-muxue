@@ -21,7 +21,7 @@ from pathlib import Path
 import numpy as np
 
 # 与列数无关、直接复制的数组
-PASSTHROUGH = ("x", "stage", "turn", "index", "legal_mask", "cand_ptr", "cand_slots", "combo_key")
+PASSTHROUGH = ("x", "stage", "turn", "index", "legal_mask", "cand_ptr", "cand_slots", "combo_key", "combo_fields")
 # 每次处理的候选行数，避免一次性把 f64 中间量摊平到内存
 CHUNK = 4096
 

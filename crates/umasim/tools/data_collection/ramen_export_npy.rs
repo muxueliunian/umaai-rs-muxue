@@ -45,6 +45,8 @@
 //!     --output-dir training_data/npy_v1 --raw
 //! ```
 
+mod explicit_assets;
+
 use std::{
     collections::{BTreeMap, HashSet},
     fs::File,
@@ -56,6 +58,7 @@ use std::{
 use anyhow::{Context, Result, bail, ensure};
 use clap::Parser;
 use serde::{Deserialize, Serialize};
+use serde_json::{Value, json};
 use umasim::{
     collector::scan_part_files,
     game::ramen::{
@@ -64,7 +67,7 @@ use umasim::{
         training_sample::{RamenSampleBatch, RamenTrainingSample, SAMPLE_FORMAT_VERSION, stage_of_code}
     },
     gamedata::init_global_with_config,
-    sampler::{GEN1_SPACE_HASH_V1, space_from_cli},
+    sampler::{GEN1_SPACE_HASH_V1, SamplingSpace, space_from_cli, space_version_by_name},
     utils::{get_workspace_root, load_game_config}
 };
 
@@ -106,7 +109,14 @@ struct ExportArgs {
 
     /// 采集时追加进卡池的支援卡 idrank；与 `--shape` 同用
     #[arg(long)]
-    extra_card: Vec<u32>
+    extra_card: Vec<u32>,
+
+    /// 采集时用的具名采样空间版本（如 `gen2_v1`），与 `--shape` / `--extra-card` 互斥
+    ///
+    /// 给出即按**显式身份口径**导出：源目录必须都记有同一份逐字段空间清单，
+    /// 且必须没有枚举指纹。全程不计算任何指纹，一致性靠字段直接比较。
+    #[arg(long)]
+    space_version: Option<String>
 }
 
 // ============================================================================
@@ -127,26 +137,58 @@ struct SourceManifest {
     policy_dim: usize,
     /// 每候选 rollout 次数
     search_n: usize,
-    /// 采集配方哈希，跨机合并的唯一有效判据
-    recipe_hash_fnv1a64: String,
+    /// 采集配方哈希；显式身份口径的目录没有这一项
+    #[serde(default)]
+    recipe_hash_fnv1a64: Option<String>,
     /// 采集时的 git commit
     git_commit: String,
     /// 采样空间枚举指纹；本字段加入之前采的目录为 `None`，按 v1 空间处理
     #[serde(default)]
-    sampling_space_hash: Option<String>
+    sampling_space_hash: Option<String>,
+    /// 采样空间的显式身份；只有 `--space-version` 口径的目录才有
+    ///
+    /// 用 `Value` 原样收下：结构由采集端定义，这里只需**逐字段相等**比较，
+    /// 不需要在本 bin 里复制一份类型定义。
+    #[serde(default)]
+    space: Option<Value>,
+    /// 四条运行时前提的实际取值；显式口径下参与逐字段比较
+    #[serde(default)]
+    premises: Option<Value>,
+    /// 采样器配置快照；显式口径下参与逐字段比较
+    #[serde(default)]
+    sampler: Option<Value>,
+    /// Roll-in 名称；显式口径还需比较原始资产副本。
+    #[serde(default)]
+    rollin: Option<String>,
+    /// 数据目录内的原始资产相对路径。
+    #[serde(default)]
+    asset_files: Option<Vec<String>>
 }
 
 /// 所有输入目录必须一致的那部分配方
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 两种身份口径共用本类型：既有口径比 `recipe_hash`，显式口径 `recipe_hash` 为空、
+/// 改比 `space` / `premises` / `sampler` 三份**实际字段**。
+#[derive(Debug, Clone, PartialEq)]
 struct SharedRecipe {
-    /// 采集配方哈希
-    recipe_hash: String,
+    /// 采集配方哈希；显式口径下为 `None`
+    recipe_hash: Option<String>,
     /// git commit
     git_commit: String,
     /// 每候选 rollout 次数
     search_n: usize,
-    /// 采样空间指纹；manifest 未记录时回落到 [`GEN1_SPACE_HASH_V1`]
-    sampling_space_hash: String
+    /// 采样空间指纹；显式口径下为 `None`，既有目录未记录时回落到 [`GEN1_SPACE_HASH_V1`]
+    sampling_space_hash: Option<String>,
+    /// 采样空间的显式身份；既有口径下为 `None`
+    space: Option<Value>,
+    /// 四条运行时前提
+    premises: Option<Value>,
+    /// 采样器配置快照
+    sampler: Option<Value>,
+    /// 同一模型名称不能代替内容核对，run 还会逐字节比较原文资产。
+    rollin: Option<String>,
+    /// 两侧必须携带同一组资产。
+    asset_files: Option<Vec<String>>
 }
 
 impl SharedRecipe {
@@ -165,16 +207,56 @@ impl SharedRecipe {
         );
         ensure!(m.input_dim == INPUT_DIM, "{} 的 input_dim={} 与本次编译的 {INPUT_DIM} 不符", dir.display(), m.input_dim);
         ensure!(m.policy_dim == POLICY_DIM, "{} 的 policy_dim={} 与本次编译的 {POLICY_DIM} 不符", dir.display(), m.policy_dim);
-        Ok(Self {
-            recipe_hash: m.recipe_hash_fnv1a64.clone(),
-            git_commit: m.git_commit.clone(),
-            search_n: m.search_n,
-            // 本字段加入前采的目录一律产自 v1 空间——现存的教师数据全部如此
-            sampling_space_hash: m
-                .sampling_space_hash
-                .clone()
-                .unwrap_or_else(|| GEN1_SPACE_HASH_V1.to_string())
-        })
+        // 两种口径互斥，且各自必须自洽：显式目录不得带指纹，指纹目录必须有配方哈希。
+        match (&m.space, &m.recipe_hash_fnv1a64) {
+            (Some(_), Some(_)) => bail!(
+                "{} 同时带显式空间清单与配方指纹，身份口径自相矛盾",
+                dir.display()
+            ),
+            (Some(_), None) => {
+                ensure!(
+                    m.sampling_space_hash.is_none(),
+                    "{} 是显式身份口径的目录，却记有空间指纹",
+                    dir.display()
+                );
+                ensure!(
+                    m.premises.is_some() && m.sampler.is_some(),
+                    "{} 缺 premises / sampler，显式口径无法做逐字段配方比较",
+                    dir.display()
+                );
+                Ok(Self {
+                    recipe_hash: None,
+                    git_commit: m.git_commit.clone(),
+                    search_n: m.search_n,
+                    sampling_space_hash: None,
+                    space: m.space.clone(),
+                    premises: m.premises.clone(),
+                    sampler: m.sampler.clone(),
+                    rollin: m.rollin.clone(),
+                    asset_files: m.asset_files.clone()
+                })
+            }
+            (None, Some(hash)) => Ok(Self {
+                recipe_hash: Some(hash.clone()),
+                git_commit: m.git_commit.clone(),
+                search_n: m.search_n,
+                // 本字段加入前采的目录一律产自 v1 空间——现存的教师数据全部如此
+                sampling_space_hash: Some(
+                    m.sampling_space_hash
+                        .clone()
+                        .unwrap_or_else(|| GEN1_SPACE_HASH_V1.to_string())
+                ),
+                space: None,
+                premises: None,
+                sampler: None,
+                rollin: None,
+                asset_files: None
+            }),
+            (None, None) => bail!(
+                "{} 既无配方指纹也无显式空间清单，无法判定采集身份",
+                dir.display()
+            )
+        }
     }
 }
 
@@ -344,7 +426,9 @@ struct ArraySet {
     /// 样本 id
     index: NpyWriter<u64>,
     /// (马娘, 卡组) 组合键，见 `DeckPlan::combo_key`
-    combo_key: NpyWriter<u64>,
+    combo_key: Option<NpyWriter<u64>>,
+    /// 显式口径保存完整元组：[马娘, 六张卡按 ID 排序]，不生成哈希键。
+    combo_fields: Option<NpyWriter<u64>>,
     /// 合法格位掩码
     legal_mask: NpyWriter<u8>,
     /// CSR 偏移
@@ -371,13 +455,14 @@ impl ArraySet {
     /// # 错误
     ///
     /// 任一文件创建失败时报错。
-    fn create(dir: &Path, raw: bool, rollout_width: usize) -> Result<Self> {
+    fn create(dir: &Path, raw: bool, rollout_width: usize, explicit: bool) -> Result<Self> {
         Ok(Self {
             x: NpyWriter::create(dir, "x", Some(INPUT_DIM))?,
             stage: NpyWriter::create(dir, "stage", None)?,
             turn: NpyWriter::create(dir, "turn", None)?,
             index: NpyWriter::create(dir, "index", None)?,
-            combo_key: NpyWriter::create(dir, "combo_key", None)?,
+            combo_key: if explicit { None } else { Some(NpyWriter::create(dir, "combo_key", None)?) },
+            combo_fields: if explicit { Some(NpyWriter::create(dir, "combo_fields", Some(7))?) } else { None },
             legal_mask: NpyWriter::create(dir, "legal_mask", Some(POLICY_DIM))?,
             cand_ptr: NpyWriter::create(dir, "cand_ptr", None)?,
             cand_slots: NpyWriter::create(dir, "cand_slots", Some(SLOTS_PER_CAND))?,
@@ -407,7 +492,8 @@ impl ArraySet {
         self.stage.finish()?;
         self.turn.finish()?;
         self.index.finish()?;
-        self.combo_key.finish()?;
+        if let Some(writer) = self.combo_key { writer.finish()?; }
+        if let Some(writer) = self.combo_fields { writer.finish()?; }
         self.legal_mask.finish()?;
         self.cand_ptr.finish()?;
         self.cand_slots.finish()?;
@@ -452,12 +538,21 @@ struct ExportMeta {
     policy_dim: usize,
     /// 每候选 rollout 次数
     search_n: usize,
-    /// 采集配方哈希
-    recipe_hash_fnv1a64: String,
+    /// 采集配方哈希；显式身份口径下为 `None`
+    recipe_hash_fnv1a64: Option<String>,
     /// 采集时的 git commit
     git_commit: String,
-    /// 采样空间的枚举指纹，与 `plan_count` 取自同一个 space
-    sampling_space_hash: String,
+    /// 采样空间的枚举指纹，与 `plan_count` 取自同一个 space；显式口径下为 `None`
+    sampling_space_hash: Option<String>,
+    /// 采样空间的显式身份（原样转录源 manifest）；既有口径下为 `None`
+    space: Option<Value>,
+    /// 显式配方与模型来源，供后续标签/训练核对，不以名称替代原文资产。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    sampler: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    premises: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rollin: Option<String>,
     /// 采样空间的计划数（(马娘, 卡组) 组合数）
     ///
     /// 采样器按 `index % plan_count` 轮转分配，所以 `index % plan_count` 就是
@@ -506,6 +601,23 @@ fn scan_input(dir: &Path) -> Result<(SourceManifest, Vec<PathBuf>)> {
     Ok((manifest, parts))
 }
 
+/// 本次导出要求的采样空间身份口径
+///
+/// 与采集端的两种口径一一对应；两者不可混用，混了就没有任何字段能事后区分
+/// 同一批 `.npy` 里的 index 属于哪个空间。
+enum ExpectedSpace {
+    /// 既有口径：身份是枚举指纹
+    Fingerprint {
+        /// 本次编译出的空间指纹
+        hash: String
+    },
+    /// 显式口径：身份是版本名与逐字段清单
+    Explicit {
+        /// 版本名
+        version: String
+    }
+}
+
 /// 主流程
 ///
 /// # 错误
@@ -519,9 +631,25 @@ fn run(args: &ExportArgs) -> Result<()> {
     init_global_with_config(&load_game_config()?)?;
     // plan_count 与空间指纹必须成对取自同一个 space：训练侧按 `sample_id % plan_count`
     // 切留出组合，取错了会让切分静默错位。
-    let space = space_from_cli(args.shape.as_deref(), &args.extra_card)?;
+    let (space, expected_space) = match args.space_version.as_deref() {
+        None => {
+            let space = space_from_cli(args.shape.as_deref(), &args.extra_card)?;
+            let hash = space.content_hash();
+            (space, ExpectedSpace::Fingerprint { hash })
+        }
+        Some(name) => {
+            ensure!(
+                args.shape.is_none() && args.extra_card.is_empty(),
+                "--space-version 与 --shape / --extra-card 互斥"
+            );
+            let version = space_version_by_name(name)?;
+            let space = SamplingSpace::from_version(version)?;
+            (space, ExpectedSpace::Explicit {
+                version: version.name.to_string()
+            })
+        }
+    };
     let plan_count = space.len();
-    let space_hash = space.content_hash();
 
     let mut inputs = args.inputs.clone();
     inputs.sort();
@@ -537,11 +665,24 @@ fn run(args: &ExportArgs) -> Result<()> {
             None => shared = Some(recipe),
             Some(first) => ensure!(
                 first == &recipe,
-                "{} 的采集配方与前面的目录不一致：{:?} vs {:?}。跨机合并只认 recipe_hash + git_commit，不要合并不同配方的数据",
+                "{} 的采集配方与前面的目录不一致：{:?} vs {:?}。既有口径认 recipe_hash + git_commit，\
+                 显式口径逐字段认 space / premises / sampler，都不要合并不同配方的数据",
                 dir.display(),
                 recipe,
                 first
             )
+        }
+        if manifest.space.is_some() {
+            let names = manifest.asset_files.as_ref().ok_or_else(|| anyhow::anyhow!(
+                "{} 缺原文资产，不接受 size/mtime 代替内容", dir.display()
+            ))?;
+            ensure!(!names.is_empty(), "资产清单为空");
+            let reference = scanned.first().map_or(dir, |(path, _): &(PathBuf, Vec<PathBuf>)| path);
+            explicit_assets::compare_sets(reference, dir, names)?;
+            // 枚举依赖当前 gamedata，不能只比较两个源目录却忽略当前导出环境。
+            for name in names.iter().filter(|n| n.starts_with("assets/gamedata/")) {
+                explicit_assets::ensure_same_bytes(&dir.join(name), Path::new(&name[7..]))?;
+            }
         }
         println!("源 {:<40} {:3} 个分片", dir.display(), parts.len());
         scanned.push((dir.clone(), parts));
@@ -552,17 +693,44 @@ fn run(args: &ExportArgs) -> Result<()> {
     // 改动它既不会动 gamedata_sig 也不会动 recipe_hash——不做这个校验的话，扩空间之后
     // 重导旧目录会把 plan_count 静默改写成新值，训练侧的组合切分随之整体错位，
     // 而且没有任何一处会报错。
-    ensure!(
-        shared.sampling_space_hash == space_hash,
-        "数据采自采样空间 {}，本次编译的空间是 {}（{} 个组合）。\
-         index 的含义由空间决定，用当前空间导出旧数据会让 plan_count 与组合切分静默错位。\
-         请用采集时的代码版本导出，或为新空间新建独立的导出目录。",
-        shared.sampling_space_hash,
-        space_hash,
-        plan_count
-    );
-    println!("采样空间 {space_hash}，{plan_count} 个 (马娘, 卡组) 组合");
+    let space_note = match (&expected_space, &shared.sampling_space_hash, &shared.space) {
+        (ExpectedSpace::Fingerprint { hash }, Some(recorded), _) => {
+            ensure!(
+                recorded == hash,
+                "数据采自采样空间 {}，本次编译的空间是 {}（{} 个组合）。\
+                 index 的含义由空间决定，用当前空间导出旧数据会让 plan_count 与组合切分静默错位。\
+                 请用采集时的代码版本导出，或为新空间新建独立的导出目录。",
+                recorded,
+                hash,
+                plan_count
+            );
+            format!("枚举指纹 {hash}")
+        }
+        (ExpectedSpace::Fingerprint { .. }, None, _) => bail!(
+            "源目录是显式身份口径采的，导出必须同样给 --space-version"
+        ),
+        (ExpectedSpace::Explicit { version }, _, Some(recorded)) => {
+            let definition = space_version_by_name(version)?;
+            let expected = json!({
+                "version": definition.name,
+                "umas": definition.umas.iter().map(|u| u.game_id).collect::<Vec<_>>(),
+                "cards": definition.cards.iter().map(|c| c.idrank).collect::<Vec<_>>(),
+                "shapes": definition.shapes.iter().map(|s| json!({
+                    "counts": s.counts, "name": s.name
+                })).collect::<Vec<_>>(),
+                "plan_count": plan_count
+            });
+            ensure!(recorded == &expected, "源空间完整字段与当前枚举定义不同");
+            format!("显式版本 {version}")
+        }
+        (ExpectedSpace::Explicit { version }, _, None) => bail!(
+            "本次给了 --space-version {version}，但源目录没有显式空间清单（是既有指纹口径采的）"
+        )
+    };
+    println!("采样空间 {space_note}，{plan_count} 个 (马娘, 卡组) 组合");
 
+    ensure!(!args.output_dir.exists() || args.output_dir.read_dir()?.next().is_none(),
+        "导出目录非空，拒绝覆盖：{}", args.output_dir.display());
     std::fs::create_dir_all(&args.output_dir)
         .with_context(|| format!("创建导出目录失败: {}", args.output_dir.display()))?;
 
@@ -570,7 +738,8 @@ fn run(args: &ExportArgs) -> Result<()> {
     // 矩形数组的前提，不齐就必须报错而不是补零——补零会被训练侧当成真实分数。
     let rollout_width = first_rollout_width(&scanned)?;
 
-    let mut arrays = ArraySet::create(&args.output_dir, args.raw, rollout_width)?;
+    let explicit = shared.space.is_some();
+    let mut arrays = ArraySet::create(&args.output_dir, args.raw, rollout_width, explicit)?;
     let mut stats = ExportStats {
         rollout_width,
         ..Default::default()
@@ -578,7 +747,16 @@ fn run(args: &ExportArgs) -> Result<()> {
     // 组合键表：每个采样计划一个，供样本按 `index % plan_count` 查表。
     // 它替代「训练侧自己算 index % plan_count」这一步——那个口径绑死在单一空间上，
     // 换空间后同一 index 指向别的组合，新旧数据因此无法合并按组合切分。
-    let combo_keys: Vec<u64> = space.plans().iter().map(|plan| plan.combo_key()).collect();
+    let combo_keys: Vec<u64> = if explicit { Vec::new() }
+        else { space.plans().iter().map(|plan| plan.combo_key()).collect() };
+    let combo_fields: Vec<[u64; 7]> = space.plans().iter().map(|plan| {
+        let mut row = [0u64; 7];
+        row[0] = u64::from(plan.uma);
+        let mut cards = plan.deck;
+        cards.sort_unstable();
+        for (slot, card) in row[1..].iter_mut().zip(cards) { *slot = u64::from(card); }
+        row
+    }).collect();
     let mut seen: HashSet<u64> = HashSet::new();
     let mut cursor: i64 = 0;
     arrays.cand_ptr.push(cursor)?;
@@ -593,6 +771,7 @@ fn run(args: &ExportArgs) -> Result<()> {
                     &mut arrays,
                     sample,
                     &combo_keys,
+                    &combo_fields,
                     rollout_width,
                     args.raw,
                     &mut cursor,
@@ -613,14 +792,18 @@ fn run(args: &ExportArgs) -> Result<()> {
     }
 
     let meta = ExportMeta {
-        export_version: 1,
+        export_version: if explicit { 2 } else { 1 },
         format_version: SAMPLE_FORMAT_VERSION,
         input_dim: INPUT_DIM,
         policy_dim: POLICY_DIM,
         search_n: shared.search_n,
         recipe_hash_fnv1a64: shared.recipe_hash.clone(),
         git_commit: shared.git_commit.clone(),
-        sampling_space_hash: space_hash.clone(),
+        sampling_space_hash: shared.sampling_space_hash.clone(),
+        space: shared.space.clone(),
+        sampler: shared.sampler.clone(),
+        premises: shared.premises.clone(),
+        rollin: shared.rollin.clone(),
         plan_count,
         raw: args.raw,
         sources: scanned.iter().map(|(d, _)| d.display().to_string()).collect(),
@@ -667,6 +850,7 @@ fn write_sample(
     arrays: &mut ArraySet,
     sample: &RamenTrainingSample,
     combo_keys: &[u64],
+    combo_fields: &[[u64; 7]],
     rollout_width: usize,
     raw: bool,
     cursor: &mut i64,
@@ -694,10 +878,9 @@ fn write_sample(
     arrays.index.push(sample.meta.index)?;
     // 组合键取自空间的计划表，与 `SamplingSpace::spec_at` 的 `index % len` 分层同口径。
     // 空 `combo_keys` 在本函数被调用前已排除（空间非空是 SamplingSpace 的不变量）。
-    let plan = combo_keys
-        .get((sample.meta.index % combo_keys.len() as u64) as usize)
-        .ok_or_else(|| anyhow::anyhow!("组合键表为空，无法定位样本 index={}", sample.meta.index))?;
-    arrays.combo_key.push(*plan)?;
+    let plan_index = (sample.meta.index % combo_fields.len() as u64) as usize;
+    if let Some(writer) = &mut arrays.combo_key { writer.push(combo_keys[plan_index])?; }
+    if let Some(writer) = &mut arrays.combo_fields { writer.push_row(&combo_fields[plan_index])?; }
 
     let mut mask = vec![0u8; POLICY_DIM];
     let mut scores = vec![0f32; rollout_width];
@@ -709,6 +892,7 @@ fn write_sample(
             sample.meta.index,
             cand.rollouts()
         );
+        ensure!(cand.scores.iter().all(|v| v.is_finite()), "样本包含非有限 rollout 分数");
         let row = slots_row(sample, ci)?;
         for &s in &row {
             if s >= 0 {
@@ -798,21 +982,90 @@ mod tests {
             input_dim: INPUT_DIM,
             policy_dim: POLICY_DIM,
             search_n: 512,
-            recipe_hash_fnv1a64: "d80184067dad807f".into(),
+            recipe_hash_fnv1a64: Some("d80184067dad807f".into()),
             git_commit: "2f20806".into(),
-            sampling_space_hash: None
+            sampling_space_hash: None,
+            space: None,
+            premises: None,
+            sampler: None,
+            rollin: None,
+            asset_files: None
         };
 
         let old = SharedRecipe::from_manifest(&base, dir)?;
-        println!("旧 manifest（无字段）→ {}", old.sampling_space_hash);
-        c.check(old.sampling_space_hash == GEN1_SPACE_HASH_V1, "缺字段时回落到 GEN1_SPACE_HASH_V1");
+        println!("旧 manifest（无字段）→ {:?}", old.sampling_space_hash);
+        c.check(
+            old.sampling_space_hash.as_deref() == Some(GEN1_SPACE_HASH_V1),
+            "缺字段时回落到 GEN1_SPACE_HASH_V1"
+        );
 
         let mut newer = base.clone();
         newer.sampling_space_hash = Some("0123456789abcdef".into());
         let recorded = SharedRecipe::from_manifest(&newer, dir)?;
-        println!("新 manifest（有字段）→ {}", recorded.sampling_space_hash);
-        c.check(recorded.sampling_space_hash == "0123456789abcdef", "有字段时原样取用");
+        println!("新 manifest（有字段）→ {:?}", recorded.sampling_space_hash);
+        c.check(
+            recorded.sampling_space_hash.as_deref() == Some("0123456789abcdef"),
+            "有字段时原样取用"
+        );
         c.check(recorded != old, "两者不相等，跨目录一致性校验能分辨出来");
+
+        c.finish()
+    }
+
+    /// 显式身份口径：源 manifest 带逐字段清单、不带任何指纹时能被正确识别
+    ///
+    /// 同时覆盖两种矛盾形态——既带清单又带配方指纹、以及两者都没有——都必须报错，
+    /// 因为那说明该目录的身份口径无法判定，不能让它静默参与合并。
+    #[test]
+    fn test_explicit_space_identity_source() -> Result<()> {
+        let mut c = Checks::new();
+        let dir = Path::new("training_data/示例");
+        let space = json!({
+            "version": "gen2_v1",
+            "umas": [100603],
+            "cards": [302754],
+            "shapes": [{"counts": [3, 1, 0, 0, 1], "name": "3速1耐1智1友"}],
+            "plan_count": 4288
+        });
+        let explicit = SourceManifest {
+            format_version: SAMPLE_FORMAT_VERSION,
+            input_dim: INPUT_DIM,
+            policy_dim: POLICY_DIM,
+            search_n: 512,
+            recipe_hash_fnv1a64: None,
+            git_commit: "99d975f".into(),
+            sampling_space_hash: None,
+            space: Some(space.clone()),
+            premises: Some(json!({"use_ucb": false})),
+            sampler: Some(json!({"epsilon": 0.15})),
+            rollin: Some("handwritten".into()),
+            asset_files: Some(vec![])
+        };
+        let shared = SharedRecipe::from_manifest(&explicit, dir)?;
+        println!("显式口径 → recipe_hash={:?} space={:?}", shared.recipe_hash, shared.space);
+        c.check(shared.recipe_hash.is_none(), "显式口径不带配方指纹");
+        c.check(shared.sampling_space_hash.is_none(), "显式口径不带空间指纹");
+        c.check(shared.space.as_ref() == Some(&space), "空间清单原样转录");
+
+        let mut both = explicit.clone();
+        both.recipe_hash_fnv1a64 = Some("d80184067dad807f".into());
+        match SharedRecipe::from_manifest(&both, dir) {
+            Ok(_) => c.check(false, "同时带清单与指纹应当报错"),
+            Err(e) => {
+                println!("  [OK] 两种身份并存被拒: {e}");
+                c.check(true, "同时带清单与指纹被拒");
+            }
+        }
+
+        let mut neither = explicit.clone();
+        neither.space = None;
+        match SharedRecipe::from_manifest(&neither, dir) {
+            Ok(_) => c.check(false, "两者都没有应当报错"),
+            Err(e) => {
+                println!("  [OK] 无身份被拒: {e}");
+                c.check(true, "无身份被拒");
+            }
+        }
 
         c.finish()
     }

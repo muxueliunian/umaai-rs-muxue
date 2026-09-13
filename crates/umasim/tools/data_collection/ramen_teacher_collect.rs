@@ -18,9 +18,13 @@
 //!     --count 5 --search-n 8 --output-dir target/ramen_teacher_smoke
 //! ```
 
+mod explicit_assets;
+
 use std::{
+    collections::BTreeSet,
     io::{BufWriter, Write},
-    path::{Path, PathBuf}
+    path::{Path, PathBuf},
+    time::Instant
 };
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
@@ -42,7 +46,14 @@ use umasim::{
         }
     },
     gamedata::{GAMECONFIG, RamenRegionStrategy, init_global_with_config},
-    sampler::{SampledPosition, SamplerConfig, sample_position_with_rollin, space_from_cli},
+    sampler::{
+        SampledPosition,
+        SamplerConfig,
+        SamplingSpace,
+        sample_position_with_rollin,
+        space_from_cli,
+        space_version_by_name
+    },
     search::{FlatSearch, SearchConfig},
     trainer::RamenHandwrittenTrainer,
     utils::{get_workspace_root, init_logger, load_game_config}
@@ -100,6 +111,14 @@ struct CollectArgs {
     #[arg(long)]
     extra_card: Vec<u32>,
 
+    /// 具名采样空间版本（如 `gen2_v1`），与 `--shape` / `--extra-card` 互斥
+    ///
+    /// 给出即进入**显式身份口径**：马娘、卡池、构成、组合数原样写进 manifest，
+    /// 续跑闸门逐字段比对，全程不计算空间指纹、配方指纹与文件内容哈希。
+    /// 不给时完全走既有口径（空间指纹 + 配方指纹 + 文件内容哈希），字段语义不变。
+    #[arg(long)]
+    space_version: Option<String>,
+
     /// 每个候选的搜索次数
     #[arg(long)]
     search_n: usize,
@@ -120,6 +139,13 @@ struct CollectArgs {
     #[arg(long, value_delimiter = ',', num_args = 1, default_value = "20,30")]
     region_quota_permille: Vec<u32>,
 
+    /// 第 1 年地区选择采样配额（千分之几）
+    ///
+    /// 独立参数而非把上面那个扩成三元组：那会改掉既有 manifest 里数组的下标含义。
+    /// 默认 0，此时采样分配与本参数加入之前逐位相同。
+    #[arg(long, default_value_t = 0)]
+    region_quota_permille_y1: u32,
+
     /// roll-in 基策：`handwritten`（默认，与既有全部数据一致）/ `nn`（需 `--model`）
     ///
     /// roll-in 决定轨迹走到哪些状态，因而决定**样本的状态分布**。换成 `nn` 即得到
@@ -132,7 +158,23 @@ struct CollectArgs {
 
     /// roll-in 用的 ONNX 模型路径；`--rollin nn` 时必填
     #[arg(long)]
-    model: Option<PathBuf>
+    model: Option<PathBuf>,
+
+    /// 显式模型版本名称；原始模型及 sidecar 会另存并逐字节核对。
+    #[arg(long)]
+    model_id: Option<String>,
+
+    /// 显式工作序号数组；此时 start/count/next_index 表示数组游标，样本仍记录真实 index。
+    #[arg(long)]
+    indices_file: Option<PathBuf>,
+
+    /// 该目录的有效根目标；未捕获使用清单中的后续备用序号，达到即停止。
+    #[arg(long)]
+    accepted_target: Option<u64>,
+
+    /// 软截止秒数：根与根之间检查，收尾写完整分片后退出；外部驱动提供硬截止。
+    #[arg(long)]
+    max_seconds: Option<u64>
 }
 
 // ============================================================================
@@ -253,8 +295,14 @@ struct ManifestSamplerConfig {
     /// 种子基底
     pub seed_base: u64,
     /// 第 2/3 年地区选择配额（千分之几）
-    pub region_quota_permille: [u32; 2]
+    pub region_quota_permille: [u32; 2],
+    /// 第 1 年地区选择配额（千分之几）；本字段加入之前采的目录按 0 读
+    #[serde(default, skip_serializing_if = "quota_is_zero")]
+    pub region_quota_permille_y1: u32
 }
+
+/// 默认关闭的新配额不写入旧配方，保持旧配方序列化字节不变。
+fn quota_is_zero(value: &u32) -> bool { *value == 0 }
 
 impl ManifestSamplerConfig {
     /// 从运行中的采样器配置拍快照
@@ -265,9 +313,62 @@ impl ManifestSamplerConfig {
             inherit: cfg.inherit.clone(),
             max_turn: cfg.max_turn,
             seed_base: cfg.seed_base,
-            region_quota_permille: cfg.region_quota_permille
+            region_quota_permille: cfg.region_quota_permille,
+            region_quota_permille_y1: cfg.region_quota_permille_y1
         }
     }
+}
+
+/// manifest 里记录的一种卡组构成
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ManifestShape {
+    /// 各类型张数 `[速, 耐, 力, 根, 智]`
+    pub counts: [usize; 5],
+    /// 构成名
+    pub name: String
+}
+
+/// 采样空间的**显式身份**：逐字段记全，不算指纹
+///
+/// 存在的理由是可以直接比较：续跑与跨机合并只需把两份清单逐字段对上，
+/// 不需要任何哈希。`plan_count` 一并记下，因为 `index % plan_count` 决定组合归属，
+/// 它对不上就说明两边编译的空间不是同一个。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct ManifestSpaceIdentity {
+    /// 空间版本名
+    pub version: String,
+    /// 该版本的马娘 gameId 清单，按枚举顺序
+    pub umas: Vec<u32>,
+    /// 该版本的支援卡 idrank 清单，按枚举顺序
+    pub cards: Vec<u32>,
+    /// 该版本的构成清单，按枚举顺序
+    pub shapes: Vec<ManifestShape>,
+    /// 枚举出的 (马娘, 卡组) 组合总数
+    pub plan_count: usize
+}
+
+/// 一次采集的分项墙钟，单位毫秒
+///
+/// 只做测量，不参与任何判定。分项之和**小于**进程总墙钟：命令行解析、
+/// 日志初始化与进程退出前的收尾不在任何一项里，差额由 `total` 与各项之差体现。
+#[derive(Debug, Clone, Default)]
+struct StageTiming {
+    /// gamedata / GAMECONFIG 全局初始化
+    pub init_ms: u128,
+    /// 采样空间枚举
+    pub space_ms: u128,
+    /// roll-in 基策构造（`--rollin nn` 时即 ONNX 模型加载）
+    pub rollin_load_ms: u128,
+    /// 采样（含 roll-in 走到截断回合）累计
+    pub sample_ms: u128,
+    /// 搜索 + 导出样本累计
+    pub search_ms: u128,
+    /// 分片写盘 + 签名累计
+    pub flush_ms: u128,
+    /// manifest 写盘累计
+    pub manifest_ms: u128,
+    /// 收尾读回校验
+    pub verify_ms: u128
 }
 
 /// 一个已落盘分片的记录
@@ -337,7 +438,24 @@ struct TeacherManifest {
     #[serde(default)]
     pub rollin: Option<String>,
     /// 生效配方（前提 + 采样器 + search_n + 维度）的 FNV-1a
-    pub recipe_hash_fnv1a64: String
+    ///
+    /// **显式身份口径（`--space-version`）下为 `None`**：该口径不算任何指纹，
+    /// 配方一致性由 [`ensure_resume_compatible`] 逐字段比较得出。
+    /// 既有目录里这是一个字符串，读进来即 `Some`，语义不变。
+    #[serde(default)]
+    pub recipe_hash_fnv1a64: Option<String>,
+    /// 采样空间的显式身份；只有 `--space-version` 口径才有
+    #[serde(default)]
+    pub space: Option<ManifestSpaceIdentity>,
+    /// 无哈希口径的资产副本相对路径；旧数据不含此字段。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_files: Option<Vec<String>>,
+    /// 显式工作清单；存在时进度字段为清单游标。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub work_indices: Option<Vec<u64>>,
+    /// 固定有效根目标。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub accepted_target: Option<u64>
 }
 
 impl TeacherManifest {
@@ -351,7 +469,7 @@ impl TeacherManifest {
         serde_json::from_str(&text).with_context(|| format!("解析 manifest 失败: {}", path.display()))
     }
 
-    /// 原子替换写入（Windows 下先删再 rename，与 collector 同一套）
+    /// 原子替换写入（临时文件写完后直接 rename 替换，与 collector 同一套）
     ///
     /// # 错误
     ///
@@ -380,10 +498,101 @@ struct CollectRecipe {
 
 impl CollectRecipe {
     /// 配方哈希，便于一眼看出两批数据是否能拼
+    ///
+    /// 只在**既有口径**下调用。显式身份口径不算它，见
+    /// [`TeacherManifest::recipe_hash_fnv1a64`]。
     fn hash(&self) -> Result<String> {
         let text = serde_json::to_string(self).context("序列化采集配方失败")?;
         Ok(compute_text_hash_fnv1a64(&text))
     }
+}
+
+/// 本次采集的空间来源与身份口径
+///
+/// 两个变体互斥：既有口径继续走枚举指纹，显式口径改为逐字段清单，
+/// 且不触发任何内容哈希。
+enum SpaceIdentity {
+    /// 既有口径：`--shape` / `--extra-card` / 默认 gen1，身份是枚举指纹
+    Fingerprint {
+        /// 空间枚举指纹
+        hash: String
+    },
+    /// 显式口径：`--space-version`，身份是逐字段清单
+    Explicit {
+        /// 写进 manifest 的完整清单
+        identity: ManifestSpaceIdentity
+    }
+}
+
+impl SpaceIdentity {
+    /// 是否为显式（无哈希）口径
+    fn is_explicit(&self) -> bool {
+        matches!(self, Self::Explicit { .. })
+    }
+
+    /// 进 manifest 的枚举指纹（显式口径下为 `None`）
+    fn fingerprint(&self) -> Option<String> {
+        match self {
+            Self::Fingerprint { hash } => Some(hash.clone()),
+            Self::Explicit { .. } => None
+        }
+    }
+
+    /// 进 manifest 的显式清单（既有口径下为 `None`）
+    fn explicit(&self) -> Option<ManifestSpaceIdentity> {
+        match self {
+            Self::Fingerprint { .. } => None,
+            Self::Explicit { identity } => Some(identity.clone())
+        }
+    }
+
+    /// 一行可读摘要
+    fn describe(&self) -> String {
+        match self {
+            Self::Fingerprint { hash } => format!("枚举指纹 {hash}"),
+            Self::Explicit { identity } => format!(
+                "显式版本 {}（马娘 {} / 卡 {} / 构成 {}）",
+                identity.version,
+                identity.umas.len(),
+                identity.cards.len(),
+                identity.shapes.len()
+            )
+        }
+    }
+}
+
+/// 按命令行构造采样空间及其身份口径
+///
+/// # 错误
+///
+/// `--space-version` 与 `--shape` / `--extra-card` 同用，或空间构造失败时报错。
+fn build_space(args: &CollectArgs) -> Result<(SamplingSpace, SpaceIdentity)> {
+    let Some(name) = args.space_version.as_deref() else {
+        let space = space_from_cli(args.shape.as_deref(), &args.extra_card)?;
+        let hash = space.content_hash();
+        return Ok((space, SpaceIdentity::Fingerprint { hash }));
+    };
+    ensure!(
+        args.shape.is_none() && args.extra_card.is_empty(),
+        "--space-version 与 --shape / --extra-card 互斥：具名版本已经把马娘、卡池、构成一并冻结"
+    );
+    let version = space_version_by_name(name)?;
+    let space = SamplingSpace::from_version(version)?;
+    let identity = ManifestSpaceIdentity {
+        version: version.name.to_string(),
+        umas: version.umas.iter().map(|u| u.game_id).collect(),
+        cards: version.cards.iter().map(|c| c.idrank).collect(),
+        shapes: version
+            .shapes
+            .iter()
+            .map(|sh| ManifestShape {
+                counts: sh.counts,
+                name: sh.name.to_string()
+            })
+            .collect(),
+        plan_count: space.len()
+    };
+    Ok((space, SpaceIdentity::Explicit { identity }))
 }
 
 // ============================================================================
@@ -427,10 +636,10 @@ impl RollIn {
 /// # 错误
 ///
 /// 未知策略名、`nn` 缺 `--model`、未启用 `onnx` feature，或模型加载失败时报错。
-fn select_rollin(args: &CollectArgs) -> Result<(RollIn, String)> {
+fn select_rollin(args: &CollectArgs, explicit_identity: bool) -> Result<(RollIn, String)> {
     match args.rollin.as_str() {
         "handwritten" => {
-            ensure!(args.model.is_none(), "--model 只对 --rollin nn 有意义");
+            ensure!(args.model.is_none() && args.model_id.is_none(), "--model / --model-id 只对 --rollin nn 有意义");
             let r = RollIn::Handwritten(RamenHandwrittenTrainer::new());
             let id = r.identity(None);
             Ok((r, id))
@@ -442,9 +651,17 @@ fn select_rollin(args: &CollectArgs) -> Result<(RollIn, String)> {
                     .model
                     .as_ref()
                     .ok_or_else(|| anyhow::anyhow!("--rollin nn 需要同时给出 --model <onnx 路径>"))?;
-                // 模型文件哈希进身份串：换 checkpoint 等于换状态分布，必须被绊线拦住
-                let sig = compute_file_signature(path, true)?;
-                let hash = sig.hash_fnv1a64.clone().unwrap_or_else(|| "unknown".to_string());
+                let hash = if explicit_identity {
+                    let name = args.model_id.as_deref().ok_or_else(|| anyhow!(
+                        "显式 NN 采集必须给 --model-id；模型原文另存核对，不以名称证明内容一致"
+                    ))?;
+                    ensure!(!name.trim().is_empty(), "model-id 不能为空");
+                    format!("asset:{name}")
+                } else {
+                    ensure!(args.model_id.is_none(), "旧口径不接受 --model-id");
+                    compute_file_signature(path, true)?.hash_fnv1a64
+                        .ok_or_else(|| anyhow!("旧口径缺模型身份"))?
+                };
                 let trainer = RamenNnTrainer::load(path)?.with_race_shield(true);
                 let r = RollIn::Nn(Box::new(trainer));
                 let id = r.identity(Some(&hash));
@@ -453,6 +670,7 @@ fn select_rollin(args: &CollectArgs) -> Result<(RollIn, String)> {
             #[cfg(not(feature = "onnx"))]
             {
                 let _ = &args.model;
+                let _ = explicit_identity;
                 bail!(
                     "--rollin nn 需要编译 feature onnx\
                      （cargo build --release --features onnx,cli --bin ramen_teacher_collect）"
@@ -573,7 +791,7 @@ fn ensure_resume_compatible(old: &TeacherManifest, recipe: &CollectRecipe) -> Re
 // 落盘
 // ============================================================================
 
-/// 原子替换写入 JSON（Windows 下先删再 rename）
+/// 原子替换写入 JSON（临时文件写完后直接 rename 替换）
 ///
 /// # 错误
 ///
@@ -585,10 +803,8 @@ fn save_json_replace(path: &Path, value: &impl Serialize) -> Result<()> {
     let mut writer = BufWriter::new(file);
     serde_json::to_writer_pretty(&mut writer, value).context("写入 manifest JSON 失败")?;
     writer.flush().context("flush manifest 失败")?;
-    writer.get_ref().sync_all().ok();
-    if path.exists() {
-        fs_err::remove_file(path).with_context(|| format!("删除旧 manifest 失败: {}", path.display()))?;
-    }
+    writer.get_ref().sync_all().context("sync manifest 失败")?;
+    drop(writer);
     fs_err::rename(&tmp_path, path)
         .with_context(|| format!("重命名 manifest 失败: {} -> {}", tmp_path.display(), path.display()))?;
     Ok(())
@@ -599,17 +815,18 @@ fn save_json_replace(path: &Path, value: &impl Serialize) -> Result<()> {
 /// # 错误
 ///
 /// 文件存在但读元信息 / 内容失败时报错。缺失的文件跳过。
-fn collect_gamedata_signatures() -> Result<Vec<FileSignature>> {
+fn collect_gamedata_signatures(with_hash: bool) -> Result<Vec<FileSignature>> {
     let mut out = Vec::new();
     for rel in GAMEDATA_SIG_PATHS {
         let path = Path::new(rel);
         if !path.exists() {
             continue;
         }
-        let hash = match fs_err::metadata(path) {
-            Ok(m) => m.len() <= 32 * 1024 * 1024,
-            Err(_) => false
-        };
+        let hash = with_hash
+            && match fs_err::metadata(path) {
+                Ok(m) => m.len() <= 32 * 1024 * 1024,
+                Err(_) => false
+            };
         out.push(compute_file_signature(path, hash)?);
     }
     Ok(out)
@@ -621,7 +838,7 @@ fn collect_gamedata_signatures() -> Result<Vec<FileSignature>> {
 ///
 /// 批次为空、目标文件已存在、写盘或签名失败时报错。
 fn flush_shard(
-    batch: &mut RamenSampleBatch, output_dir: &Path, part_index: usize
+    batch: &mut RamenSampleBatch, output_dir: &Path, part_index: usize, with_hash: bool
 ) -> Result<TeacherPart> {
     ensure!(!batch.is_empty(), "不能写空分片");
     let name = part_file_name(part_index);
@@ -639,7 +856,8 @@ fn flush_shard(
         .with_context(|| format!("重命名分片失败: {} -> {}", tmp_path.display(), final_path.display()))?;
     let samples = batch.len();
     *batch = RamenSampleBatch::new();
-    let signature = compute_file_signature(&final_path, true)?;
+    // 显式口径不算内容哈希：分片的一致性由「读回条数 + 字节数」直接核对
+    let signature = compute_file_signature(&final_path, with_hash)?;
     Ok(TeacherPart {
         name,
         samples,
@@ -719,7 +937,17 @@ fn collect_one(
         .with_context(|| format!("index={index} 导出教师样本失败"))
 }
 
+/// 工作清单的序号、游标和有效根目标必须自洽；不生成内容指纹。
+fn check_work_indices(values: &[u64], start: u64, count: u64, target: Option<u64>) -> Result<()> {
+    ensure!(start == 0 && count == values.len() as u64, "显式清单必须 start=0、count=清单长度");
+    ensure!(values.iter().copied().collect::<BTreeSet<_>>().len() == values.len(), "清单 index 重复");
+    if let Some(n) = target { ensure!(n > 0 && n <= count, "有效根目标超出工作清单"); }
+    Ok(())
+}
+
 fn main() -> Result<()> {
+    let t_process = Instant::now();
+    let mut timing = StageTiming::default();
     let args = CollectArgs::parse();
     ensure!(args.count > 0, "--count 必须 > 0");
     ensure!(args.search_n > 0, "--search-n 必须 > 0");
@@ -739,7 +967,9 @@ fn main() -> Result<()> {
         );
         game_config.ramen_region_strategy = RamenRegionStrategy::All;
     }
+    let t = Instant::now();
     init_global_with_config(&game_config)?;
+    timing.init_ms = t.elapsed().as_millis();
 
     let strategy = GAMECONFIG
         .get()
@@ -761,6 +991,7 @@ fn main() -> Result<()> {
 
     let mut sampler_cfg = SamplerConfig::default();
     sampler_cfg.region_quota_permille = quota.as_array();
+    sampler_cfg.region_quota_permille_y1 = args.region_quota_permille_y1;
     let sampler_snap = ManifestSamplerConfig::from_sampler(&sampler_cfg);
     let recipe = CollectRecipe {
         format_version: SAMPLE_FORMAT_VERSION,
@@ -770,7 +1001,6 @@ fn main() -> Result<()> {
         search_n: args.search_n,
         sampler: sampler_snap.clone()
     };
-    let recipe_hash = recipe.hash()?;
 
     let output_dir = args.output_dir.clone();
     if output_dir.exists() {
@@ -785,29 +1015,104 @@ fn main() -> Result<()> {
     }
     let manifest_path = output_dir.join(MANIFEST_NAME);
 
-    // 采样空间指纹：卡池与构成写在代码里，改动不会反映到 gamedata_sig，只能这样记。
-    let space = space_from_cli(args.shape.as_deref(), &args.extra_card)?;
-    let space_hash = space.content_hash();
-    println!("采样空间 {space_hash}，{} 个 (马娘, 卡组) 组合", space.len());
+    // 采样空间身份：卡池与构成写在代码里，改动不会反映到 gamedata_sig，只能显式记。
+    // 既有口径记枚举指纹；`--space-version` 口径改记逐字段清单，全程不算哈希。
+    let t = Instant::now();
+    let (space, space_identity) = build_space(&args)?;
+    timing.space_ms = t.elapsed().as_millis();
+    let explicit_identity = space_identity.is_explicit();
+    ensure!(explicit_identity || (args.indices_file.is_none() && args.accepted_target.is_none()),
+        "工作清单与有效根目标只支持显式空间");
+    let work_indices = args.indices_file.as_ref().map(|path| -> Result<Vec<u64>> {
+        let values: Vec<u64> = serde_json::from_slice(&fs_err::read(path)?)?;
+        check_work_indices(&values, args.start, args.count, args.accepted_target)?;
+        Ok(values)
+    }).transpose()?;
+    if let Some(target) = args.accepted_target {
+        ensure!(work_indices.is_some() && target > 0 && target <= args.count,
+            "accepted-target 需要工作清单且位于 1..=count");
+    }
+    let asset_files = if explicit_identity {
+        let mut names = Vec::new();
+        for rel in GAMEDATA_SIG_PATHS {
+            if Path::new(rel).exists() {
+                let name = format!("assets/{rel}");
+                explicit_assets::snapshot(Path::new(rel), &output_dir.join(&name), manifest_path.exists())?;
+                names.push(name);
+            }
+        }
+        if let Some(model) = &args.model {
+            explicit_assets::snapshot(model, &output_dir.join("assets/rollin.onnx"), manifest_path.exists())?;
+            names.push("assets/rollin.onnx".to_string());
+            let sidecar = PathBuf::from(format!("{}.json", model.display()));
+            explicit_assets::snapshot(&sidecar, &output_dir.join("assets/rollin.onnx.json"), manifest_path.exists())?;
+            names.push("assets/rollin.onnx.json".to_string());
+        }
+        Some(names)
+    } else { None };
+    println!(
+        "采样空间 {}，{} 个 (马娘, 卡组) 组合",
+        space_identity.describe(),
+        space.len()
+    );
 
     // roll-in 决定样本落在哪些状态上；身份串进 manifest 供续跑绊线比对
-    let (rollin, rollin_id) = select_rollin(&args)?;
+    let t = Instant::now();
+    let (rollin, rollin_id) = select_rollin(&args, explicit_identity)?;
+    timing.rollin_load_ms = t.elapsed().as_millis();
     println!("roll-in 基策 {rollin_id}");
 
     let now = Utc::now().to_rfc3339();
     let (mut manifest, span) = if manifest_path.exists() {
         let old = TeacherManifest::load(&manifest_path)?;
         ensure_resume_compatible(&old, &recipe)?;
-        // 本字段加入前的目录留空——来路不明就保持不明，不给它盖一个当前空间的章
-        if let Some(recorded) = &old.sampling_space_hash {
-            ensure!(
-                recorded == &space_hash,
-                "{} 是在采样空间 {} 下采的，当前编译的空间是 {}。续跑会让同一目录里\
-                 混进两个空间的样本，而 index 的含义正是由空间决定的。",
-                manifest_path.display(),
-                recorded,
-                space_hash
-            );
+        ensure!(old.work_indices == work_indices && old.accepted_target == args.accepted_target,
+            "续跑工作清单或有效根目标发生变化");
+        ensure!(old.asset_files == asset_files, "续跑资产清单变化或旧显式目录没有原文资产，拒绝续跑");
+        if explicit_identity {
+            ensure!(old.git_commit == try_get_git_commit(&workspace_root), "显式采集续跑代码版本变化");
+        }
+        // 空间闸门。两种身份口径互不通用：一个目录只能是其中一种，
+        // 混用会让同一目录里出现两套 index 语义而没有任何字段能事后区分。
+        match (&old.space, &space_identity) {
+            (Some(recorded), SpaceIdentity::Explicit { identity }) => {
+                ensure!(
+                    recorded == identity,
+                    "{} 的采样空间与本次不一致（逐字段比较，未使用任何指纹）:\n  manifest {:?}\n  当前 {:?}",
+                    manifest_path.display(),
+                    recorded,
+                    identity
+                );
+            }
+            (Some(recorded), SpaceIdentity::Fingerprint { .. }) => {
+                bail!(
+                    "{} 是显式空间版本 `{}` 的采集目录，本次没有给 --space-version。\
+                     两种身份口径不可混用。",
+                    manifest_path.display(),
+                    recorded.version
+                );
+            }
+            (None, SpaceIdentity::Explicit { identity }) => {
+                bail!(
+                    "{} 是既有指纹口径的采集目录，本次给了 --space-version {}。\
+                     换目录，或去掉 --space-version。",
+                    manifest_path.display(),
+                    identity.version
+                );
+            }
+            (None, SpaceIdentity::Fingerprint { hash }) => {
+                // 本字段加入前的目录留空——来路不明就保持不明，不给它盖一个当前空间的章
+                if let Some(recorded) = &old.sampling_space_hash {
+                    ensure!(
+                        recorded == hash,
+                        "{} 是在采样空间 {} 下采的，当前编译的空间是 {}。续跑会让同一目录里\
+                         混进两个空间的样本，而 index 的含义正是由空间决定的。",
+                        manifest_path.display(),
+                        recorded,
+                        hash
+                    );
+                }
+            }
         }
         // roll-in 身份：本字段加入前的目录一律是手写 roll-in，故 None 等价于 "handwritten"。
         // 与空间指纹不同，这里**不留白**——旧目录的 roll-in 是确知的，不是来路不明。
@@ -821,6 +1126,11 @@ fn main() -> Result<()> {
             rollin_id
         );
         ensure_parts_match_disk(&output_dir, &old.parts)?;
+        if args.accepted_target.is_some_and(|n| old.accepted >= n) {
+            ensure!(verify_written_parts(&output_dir, &old.parts)? as u64 == old.accepted, "已完成分片计数不符");
+            println!("有效根目标已完成，manifest 原样保留");
+            return Ok(());
+        }
         let progress = IndexProgress {
             index_start: old.index_start,
             next_index: old.next_index
@@ -878,14 +1188,21 @@ fn main() -> Result<()> {
             skipped_uncaptured: 0,
             accepted: 0,
             git_commit: try_get_git_commit(&workspace_root),
-            gamedata_sig: collect_gamedata_signatures()?,
-            sampling_space_hash: Some(space_hash.clone()),
+            gamedata_sig: collect_gamedata_signatures(!explicit_identity)?,
+            sampling_space_hash: space_identity.fingerprint(),
             rollin: Some(rollin_id.clone()),
-            recipe_hash_fnv1a64: recipe_hash
+            // 显式口径不算配方指纹；一致性由 ensure_resume_compatible 逐字段比较
+            recipe_hash_fnv1a64: if explicit_identity { None } else { Some(recipe.hash()?) },
+            space: space_identity.explicit(),
+            asset_files,
+            work_indices,
+            accepted_target: args.accepted_target
         };
         (manifest, span)
     };
+    let t = Instant::now();
     manifest.save_replace(&manifest_path)?;
+    timing.manifest_ms += t.elapsed().as_millis();
 
     println!("=== 拉面杯教师采集 ===");
     println!("  输出目录              : {}", output_dir.display());
@@ -897,10 +1214,15 @@ fn main() -> Result<()> {
     println!("  radical_factor_max      = {}", premises.radical_factor_max);
     println!("  ramen_region_strategy   = {:?}", premises.ramen_region_strategy);
     println!(
-        "  region_quota_permille    = {:?}",
+        "  region_quota_permille    = {:?}（Y2,Y3）",
         sampler_cfg.region_quota_permille
     );
-    println!("  采样空间指纹            : {space_hash}");
+    println!(
+        "  region_quota_permille_y1 = {}",
+        sampler_cfg.region_quota_permille_y1
+    );
+    println!("  采样空间身份            : {}", space_identity.describe());
+    println!("  组合总数                : {}", space.len());
     println!("  INPUT_DIM / POLICY_DIM  = {INPUT_DIM} / {POLICY_DIM}");
     println!("  format_version          = {SAMPLE_FORMAT_VERSION}");
 
@@ -915,14 +1237,28 @@ fn main() -> Result<()> {
     let mut batch = RamenSampleBatch::new();
     let mut next_part_index = manifest.parts.len();
 
-    for index in span.start..span.end {
-        match sample_position_with_rollin(&space, &sampler_cfg, index, rollin.as_trainer())?.into_captured() {
+    for position in span.start..span.end {
+        if args.max_seconds.is_some_and(|n| t_process.elapsed().as_secs() >= n) {
+            println!("达到根间软截止，保存已有完整样本");
+            break;
+        }
+        let index = manifest.work_indices.as_ref().map_or(position, |v| v[position as usize]);
+        let t = Instant::now();
+        let sampled = sample_position_with_rollin(&space, &sampler_cfg, index, rollin.as_trainer())?;
+        timing.sample_ms += t.elapsed().as_millis();
+        match sampled.into_captured() {
             None => {
                 manifest.skipped_uncaptured += 1;
                 println!("  index={index} 跳过（未捕获）");
             }
             Some(pos) => {
+                let t = Instant::now();
                 let sample = collect_one(&search, &pos, index)?;
+                if explicit_identity {
+                    ensure!(sample.candidates.iter().all(|c| c.n as usize == args.search_n),
+                        "index={index} 有失败 rollout，停止显式采集，已有完整分片保留");
+                }
+                timing.search_ms += t.elapsed().as_millis();
                 println!(
                     "  index={index} turn={} stage={:?} 候选 {}",
                     pos.turn,
@@ -931,38 +1267,53 @@ fn main() -> Result<()> {
                 );
                 batch.push(sample);
                 if batch.len() >= args.shard_size {
-                    let part = flush_shard(&mut batch, &output_dir, next_part_index)?;
+                    let t = Instant::now();
+                    let part = flush_shard(&mut batch, &output_dir, next_part_index, !explicit_identity)?;
+                    timing.flush_ms += t.elapsed().as_millis();
                     println!("  写入 {} ({} 条)", part.name, part.samples);
                     manifest.parts.push(part);
                     manifest.accepted = manifest.parts.iter().map(|p| p.samples as u64).sum();
                     next_part_index += 1;
-                    manifest.next_index = index + 1;
+                    manifest.next_index = position + 1;
                     manifest.updated_at = Utc::now().to_rfc3339();
+                    let t = Instant::now();
                     manifest.save_replace(&manifest_path)?;
+                    timing.manifest_ms += t.elapsed().as_millis();
                 }
             }
         }
-        manifest.next_index = index + 1;
+        manifest.next_index = position + 1;
+        if args.accepted_target.is_some_and(|n| manifest.accepted + batch.len() as u64 >= n) {
+            break;
+        }
     }
 
     if !batch.is_empty() {
-        let part = flush_shard(&mut batch, &output_dir, next_part_index)?;
+        let t = Instant::now();
+        let part = flush_shard(&mut batch, &output_dir, next_part_index, !explicit_identity)?;
+        timing.flush_ms += t.elapsed().as_millis();
         println!("  写入 {} ({} 条)", part.name, part.samples);
         manifest.parts.push(part);
         manifest.accepted = manifest.parts.iter().map(|p| p.samples as u64).sum();
         manifest.updated_at = Utc::now().to_rfc3339();
+        let t = Instant::now();
         manifest.save_replace(&manifest_path)?;
+        timing.manifest_ms += t.elapsed().as_millis();
     }
 
     let finished = Utc::now().to_rfc3339();
     manifest.updated_at = finished.clone();
-    if manifest.next_index >= manifest.index_end {
+    if args.accepted_target.map_or(manifest.next_index >= manifest.index_end, |n| manifest.accepted >= n) {
         manifest.finished_at = Some(finished);
     }
+    let t = Instant::now();
     manifest.save_replace(&manifest_path)?;
+    timing.manifest_ms += t.elapsed().as_millis();
 
     println!("=== 读回校验 ===");
+    let t = Instant::now();
     let total = verify_written_parts(&output_dir, &manifest.parts)?;
+    timing.verify_ms = t.elapsed().as_millis();
     ensure!(
         total as u64 == manifest.accepted,
         "accepted ({}) 与读回条数 ({total}) 不一致",
@@ -976,12 +1327,64 @@ fn main() -> Result<()> {
         manifest.next_index
     );
     println!("manifest: {}", manifest_path.display());
+    if let Some(target) = args.accepted_target {
+        ensure!(manifest.accepted == target, "有效根未完成：{} / {target}，完整分片已保留", manifest.accepted);
+    }
+
+    let total_ms = t_process.elapsed().as_millis();
+    let accounted = timing.init_ms
+        + timing.space_ms
+        + timing.rollin_load_ms
+        + timing.sample_ms
+        + timing.search_ms
+        + timing.flush_ms
+        + timing.manifest_ms
+        + timing.verify_ms;
+    println!("=== 分项墙钟（毫秒） ===");
+    println!("  TIMING total          = {total_ms}");
+    println!("  TIMING init_global    = {}", timing.init_ms);
+    println!("  TIMING space_enum     = {}", timing.space_ms);
+    println!("  TIMING rollin_load    = {}", timing.rollin_load_ms);
+    println!("  TIMING sample         = {}", timing.sample_ms);
+    println!("  TIMING search_export  = {}", timing.search_ms);
+    println!("  TIMING shard_flush    = {}", timing.flush_ms);
+    println!("  TIMING manifest_write = {}", timing.manifest_ms);
+    println!("  TIMING verify_readback= {}", timing.verify_ms);
+    println!("  TIMING unaccounted    = {}", total_ms.saturating_sub(accounted));
+    println!("  TIMING accepted_roots = {}", manifest.accepted);
+    println!("  TIMING skipped        = {}", manifest.skipped_uncaptured);
     Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 检查稀疏 index 不被当作连续区间、重复清单及越界目标被拒绝。
+    #[test]
+    fn test_explicit_work_indices() -> Result<()> {
+        check_work_indices(&[20_000_001, 20_004_301], 0, 2, Some(1))?;
+        ensure!(check_work_indices(&[1, 1], 0, 2, Some(1)).is_err(), "重复未拒绝");
+        ensure!(check_work_indices(&[1, 2], 1, 2, Some(1)).is_err(), "错误游标未拒绝");
+        ensure!(check_work_indices(&[1, 2], 0, 2, Some(3)).is_err(), "超额目标未拒绝");
+        println!("清单重复、错误游标、越界目标均拒绝");
+        Ok(())
+    }
+
+    /// Y1 默认关闭时序列化不增加字段，旧配置读回仍为零。
+    #[test]
+    fn test_zero_y1_preserves_old_recipe_fields() -> Result<()> {
+        let mut snapshot = ManifestSamplerConfig::from_sampler(&SamplerConfig::default());
+        let value = serde_json::to_value(&snapshot)?;
+        ensure!(value.get("region_quota_permille_y1").is_none(), "零配额污染旧配方");
+        let old: ManifestSamplerConfig = serde_json::from_value(value)?;
+        ensure!(old == snapshot, "旧字段读取语义改变");
+        snapshot.region_quota_permille_y1 = 1000;
+        ensure!(serde_json::to_value(&snapshot)?["region_quota_permille_y1"] == 1000,
+            "启用的Y1配额未记录");
+        println!("零Y1省略、旧字段读回、启用Y1记录均通过");
+        Ok(())
+    }
 
     /// 新类型原则：配额必须恰好两个数
     #[test]

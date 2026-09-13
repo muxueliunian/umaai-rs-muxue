@@ -1,0 +1,294 @@
+{
+  "recipe": "scripts/collect/gen2_v1_recipe.json",
+  "recipe_id": "gen2_v1_price0914",
+  "machine": "cloud",
+  "threads": 16,
+  "space_version": "gen2_v1",
+  "search_n": 512,
+  "shard_size": 32,
+  "rollin": "nn",
+  "model": "saved_models/arms/ens_R4_g123.onnx",
+  "index_band": [
+    9730000,
+    9750966
+  ],
+  "target_roots": {
+    "general": 96,
+    "region_y1": 14,
+    "region_y2": 42,
+    "region_y3": 42
+  },
+  "note": "定价专用；这些根不得进入正式训练集或正式评估集",
+  "runs": [
+    {
+      "name": "price0914c_gen_s1_u100603",
+      "layer": "general",
+      "shape": "3速1耐1智1友",
+      "uma": 100603,
+      "plan_range": [
+        0,
+        5
+      ],
+      "index_start": 9733760,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s1_u100603"
+    },
+    {
+      "name": "price0914c_gen_s1_u112901",
+      "layer": "general",
+      "shape": "3速1耐1智1友",
+      "uma": 112901,
+      "plan_range": [
+        1176,
+        1181
+      ],
+      "index_start": 9734936,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s1_u112901"
+    },
+    {
+      "name": "price0914c_gen_s1_u100301",
+      "layer": "general",
+      "shape": "3速1耐1智1友",
+      "uma": 100301,
+      "plan_range": [
+        3290,
+        3295
+      ],
+      "index_start": 9737050,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s1_u100301"
+    },
+    {
+      "name": "price0914c_gen_s1_u114101",
+      "layer": "general",
+      "shape": "3速1耐1智1友",
+      "uma": 114101,
+      "plan_range": [
+        3700,
+        3705
+      ],
+      "index_start": 9737460,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s1_u114101"
+    },
+    {
+      "name": "price0914c_gen_s2_u100603",
+      "layer": "general",
+      "shape": "2速2耐1智1友",
+      "uma": 100603,
+      "plan_range": [
+        224,
+        229
+      ],
+      "index_start": 9738272,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s2_u100603"
+    },
+    {
+      "name": "price0914c_gen_s2_u112901",
+      "layer": "general",
+      "shape": "2速2耐1智1友",
+      "uma": 112901,
+      "plan_range": [
+        1316,
+        1321
+      ],
+      "index_start": 9739364,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s2_u112901"
+    },
+    {
+      "name": "price0914c_gen_s2_u100301",
+      "layer": "general",
+      "shape": "2速2耐1智1友",
+      "uma": 100301,
+      "plan_range": [
+        3430,
+        3435
+      ],
+      "index_start": 9741478,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s2_u100301"
+    },
+    {
+      "name": "price0914c_gen_s2_u114101",
+      "layer": "general",
+      "shape": "2速2耐1智1友",
+      "uma": 114101,
+      "plan_range": [
+        3924,
+        3929
+      ],
+      "index_start": 9741972,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s2_u114101"
+    },
+    {
+      "name": "price0914c_gen_s3_u100603",
+      "layer": "general",
+      "shape": "2速1耐1力1智1友",
+      "uma": 100603,
+      "plan_range": [
+        280,
+        285
+      ],
+      "index_start": 9742616,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s3_u100603"
+    },
+    {
+      "name": "price0914c_gen_s3_u112901",
+      "layer": "general",
+      "shape": "2速1耐1力1智1友",
+      "uma": 112901,
+      "plan_range": [
+        1358,
+        1363
+      ],
+      "index_start": 9743694,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s3_u112901"
+    },
+    {
+      "name": "price0914c_gen_s3_u100301",
+      "layer": "general",
+      "shape": "2速1耐1力1智1友",
+      "uma": 100301,
+      "plan_range": [
+        3472,
+        3477
+      ],
+      "index_start": 9745808,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s3_u100301"
+    },
+    {
+      "name": "price0914c_gen_s3_u114101",
+      "layer": "general",
+      "shape": "2速1耐1力1智1友",
+      "uma": 114101,
+      "plan_range": [
+        3980,
+        3985
+      ],
+      "index_start": 9746316,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s3_u114101"
+    },
+    {
+      "name": "price0914c_gen_s4_u100603",
+      "layer": "general",
+      "shape": "2速1力1根1智1友",
+      "uma": 100603,
+      "plan_range": [
+        504,
+        509
+      ],
+      "index_start": 9747128,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s4_u100603"
+    },
+    {
+      "name": "price0914c_gen_s4_u110602",
+      "layer": "general",
+      "shape": "2速1力1根1智1友",
+      "uma": 110602,
+      "plan_range": [
+        2030,
+        2035
+      ],
+      "index_start": 9748654,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s4_u110602"
+    },
+    {
+      "name": "price0914c_gen_s4_u100301",
+      "layer": "general",
+      "shape": "2速1力1根1智1友",
+      "uma": 100301,
+      "plan_range": [
+        3640,
+        3645
+      ],
+      "index_start": 9750264,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s4_u100301"
+    },
+    {
+      "name": "price0914c_gen_s4_u114101",
+      "layer": "general",
+      "shape": "2速1力1根1智1友",
+      "uma": 114101,
+      "plan_range": [
+        4204,
+        4209
+      ],
+      "index_start": 9750828,
+      "count": 6,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_gen_s4_u114101"
+    },
+    {
+      "name": "price0914c_region_y1",
+      "layer": "region_y1",
+      "target_roots": 14,
+      "index_start": 9750834,
+      "count": 19,
+      "quota_y1": 1000,
+      "quota_y2_y3": "0,0",
+      "dir": "training_data/price0914c_region_y1"
+    },
+    {
+      "name": "price0914c_region_y2",
+      "layer": "region_y2",
+      "target_roots": 42,
+      "index_start": 9750853,
+      "count": 57,
+      "quota_y1": 0,
+      "quota_y2_y3": "1000,0",
+      "dir": "training_data/price0914c_region_y2"
+    },
+    {
+      "name": "price0914c_region_y3",
+      "layer": "region_y3",
+      "target_roots": 42,
+      "index_start": 9750910,
+      "count": 57,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,1000",
+      "dir": "training_data/price0914c_region_y3"
+    }
+  ]
+}

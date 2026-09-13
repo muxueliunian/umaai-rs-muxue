@@ -149,6 +149,8 @@ class NpyShard:
         # 之前导出的目录，此时按组合切分回落到 `index % plan_count` 的旧口径。
         combo_path = self.data_dir / "combo_key.npy"
         self.combo_key = np.load(combo_path, mmap_mode="r") if combo_path.exists() else None
+        fields_path = self.data_dir / "combo_fields.npy"
+        self.combo_fields = np.load(fields_path, mmap_mode="r", allow_pickle=False) if fields_path.exists() else None
         # 原始 rollout 列只在 `--raw` 导出的目录里存在，且体积远大于其余数组，
         # 故不在构造时打开：只有按列窗口评估时才 mmap。
         self._cand_scores: np.ndarray | None = None
@@ -221,6 +223,10 @@ class NpyShard:
             raise ValueError(f"{self.data_dir}: x 形状错误 {self.x.shape}")
         if self.stage.shape != (n,) or self.turn.shape != (n,):
             raise ValueError(f"{self.data_dir}: stage/turn 形状错误")
+        if self.combo_fields is not None and self.combo_fields.shape != (n, 7):
+            raise ValueError(f"{self.data_dir}: combo_fields 形状错误 {self.combo_fields.shape}")
+        if self.combo_fields is not None and self.combo_key is not None:
+            raise ValueError(f"{self.data_dir}: 完整字段与旧组合键不可混用")
         if self.combo_key is not None and self.combo_key.shape != (n,):
             raise ValueError(f"{self.data_dir}: combo_key 形状错误 {self.combo_key.shape}")
         if self.legal_mask.shape != (n, POLICY_DIM):
@@ -277,6 +283,22 @@ def resolve_plan_count(shards: Sequence[NpyShard]) -> int:
     return int(values.pop())
 
 
+def split_refs_by_combos(shards: Sequence[NpyShard], validation_combos: Sequence[Sequence[int]]) -> tuple[np.ndarray, np.ndarray]:
+    """按预登记的完整马娘/卡组字段切分；不计算内容哈希，拒绝混入缺字段的旧导出。"""
+    held = sorted(tuple(int(v) for v in row) for row in validation_combos)
+    if any(len(row) != 7 for row in held):
+        raise ValueError("留出组合必须是马娘加六张卡")
+    train, validation = [], []
+    for shard_idx, shard in enumerate(shards):
+        fields = getattr(shard, "combo_fields", None)
+        if fields is None:
+            raise ValueError("缺 combo_fields.npy；旧数据必须先从实际计划字段建立映射，不能猜测组合键")
+        for local_idx, row in enumerate(fields):
+            key = tuple(int(v) for v in row)
+            (validation if key in held else train).append((shard_idx, local_idx))
+    return np.asarray(train, dtype=np.int64).reshape(-1, 2), np.asarray(validation, dtype=np.int64).reshape(-1, 2)
+
+
 def stable_split_refs(
     shards: Sequence[NpyShard],
     validation_fraction: float,
@@ -304,6 +326,8 @@ def stable_split_refs(
         raise ValueError("validation_fraction 必须位于 [0.01, 0.5]")
     if split_by not in ("combo", "sample"):
         raise ValueError("split_by 必须是 combo 或 sample")
+    if any(getattr(shard, "combo_fields", None) is not None for shard in shards):
+        raise ValueError("完整组合字段数据必须使用预登记留出清单和 split_refs_by_combos；禁止回落到 index 或旧哈希划分")
     use_combo_key = split_by == "combo" and all(shard.combo_key is not None for shard in shards)
     if split_by == "combo" and not use_combo_key:
         missing = [_display_path(s.data_dir) for s in shards if s.combo_key is None]
