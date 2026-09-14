@@ -34,7 +34,7 @@ pub use local_ramen_trainer::{LocalRamenTrainer, RecommendedRamenTrainer};
 pub use logging_trainer::LoggingTrainer;
 pub use mcts_trainer::MctsTrainer;
 pub use ramen_handwritten_trainer::RamenHandwrittenTrainer;
-pub use ramen_mcts_trainer::{DecisionPath, DecisionProbe, RamenMctsTrainer, RamenSearchStages, RamenSelection};
+pub use ramen_mcts_trainer::{DecisionPath, DecisionProbe, RamenMctsTrainer, RamenSearchStages};
 #[cfg(feature = "onnx")]
 pub use ramen_nn_trainer::{DecisionPrep, RamenNnTrainer, SpecialSelectMode, infer_request_count};
 pub use ramen_rollout_trainer::RamenRolloutTrainer;

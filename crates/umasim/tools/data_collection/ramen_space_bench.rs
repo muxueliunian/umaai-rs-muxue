@@ -57,7 +57,7 @@ use umasim::{
     sampler::{DeckPlan, SamplingSpace, gen1_inherit, space_from_cli},
     search::SearchConfig,
     trainer::{
-        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection, RandomTrainer, RecommendedRamenTrainer
+        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RandomTrainer, RecommendedRamenTrainer
     },
     utils::{get_workspace_root, load_game_config}
 };
@@ -861,8 +861,7 @@ fn run_plan(
             }
             SelectedTrainer::Search(setup) => {
                 let mcts = RamenMctsTrainer::new(setup.config.clone())
-                    .with_stages(RamenSearchStages::all())
-                    .with_selection(RamenSelection::Score);
+                    .with_stages(RamenSearchStages::all());
                 #[cfg(feature = "onnx")]
                 let mcts = match setup.rollout_nn.as_ref() {
                     Some(nn) => mcts.with_nn_rollout(Arc::clone(nn), setup.rollout_nn_max_turn),

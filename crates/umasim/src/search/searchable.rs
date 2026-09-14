@@ -13,6 +13,7 @@
 use anyhow::{Result, anyhow};
 use rand::rngs::StdRng;
 
+use crate::gamedata::GAMECONSTANTS;
 use crate::game::{
     Game,
     Trainer,
@@ -141,6 +142,22 @@ impl FlatSearchGame for RamenGame {
     /// rollout 专用实例：三份年的 breakdown 全部关闭
     fn default_rollout_trainer() -> Self::RolloutTrainer {
         crate::trainer::RamenRolloutTrainer::handwritten()
+    }
+
+    /// 拉面 MCTS 终局估值：`score` = `calc_score()`（正常评分），
+    /// `score_pt` = `calc_score()` 但 skill_pt 按 `pt_favor_rate` 缩放。
+    ///
+    /// `pt_favor_rate = 1.0` 时两者等价；`> 1.0` 时 `score_pt` 倾向 PT 更高的路径。
+    /// 不乘 ×0.37 缩放——MCTS 只比相对大小，线性变换不改变排序。
+    fn search_score(&self) -> SearchScore {
+        let cons = GAMECONSTANTS.get().expect("GAMECONSTANTS not initialized");
+        let parts = self.uma().score_parts();
+        let pt_raw = (self.uma().skill_pt as f32 * cons.pt_score_rate) as i32;
+        let pt_scaled = (pt_raw as f32 * cons.pt_favor_rate) as i32;
+        SearchScore {
+            score: parts.total() as f64,
+            score_pt: (parts.skill + pt_scaled + parts.five_status.iter().sum::<i32>()) as f64
+        }
     }
 
     /// 拉面 stage key（保留实现仅为满足 trait；规则层接管后不再被调用）

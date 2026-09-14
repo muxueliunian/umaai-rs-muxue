@@ -53,7 +53,7 @@ use umasim::{
     },
     trainer::{
         DecisionPrep, RolloutInferSink, RolloutInferSnapshot, RamenMctsTrainer, RamenNnTrainer, RamenRolloutTrainer,
-        RamenSearchStages, RamenSelection, RecommendedRamenTrainer, SpecialSelectMode
+        RamenSearchStages, RecommendedRamenTrainer, SpecialSelectMode
     },
     utils::{get_workspace_root, load_game_config}
 };
@@ -1745,14 +1745,13 @@ impl Trainer<RamenGame> for RecordingTeacher {
 /// 按生产口径搭一台教师
 ///
 /// 与 `ramen_space_bench` 同一条构造链：`RamenSearchStages::all()` +
-/// `RamenSelection::Score` + `with_nn_rollout`。**合并动作、阶段门控、平局处理
+/// 上游统一 score_pt（pt_favor_rate=1 时等价普通评分）+ `with_nn_rollout`。**合并动作、阶段门控、平局处理
 /// 与 RNG 消耗一律沿用生产实现**，本工具不再自写简化版。
 fn build_teacher(
     config: SearchConfig, nn: Option<Arc<RamenNnTrainer>>, backend: Option<Arc<dyn RamenBatchRollout>>
 ) -> RamenMctsTrainer {
     let mcts = RamenMctsTrainer::new(config.clone())
-        .with_stages(RamenSearchStages::all())
-        .with_selection(RamenSelection::Score);
+        .with_stages(RamenSearchStages::all());
     // 不给 nn 就是手写 rollout 基策：配对实验的另一臂
     let mut mcts = match nn {
         Some(nn) => mcts.with_nn_rollout(nn, None),

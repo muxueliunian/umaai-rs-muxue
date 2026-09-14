@@ -68,6 +68,7 @@ use umasim::{
 };
 
 use umaai::{decision::LastReasonSink, scenario::ramen::calc_ramen_training};
+use umasim::output::sink::{DecisionSink, EmptySink};
 
 /// 一个待测根的规格
 ///
@@ -241,7 +242,8 @@ fn measure_once(
     let mut rng = StdRng::seed_from_u64(rng_seed);
     let noop = |_: &str| {};
     let t0 = Instant::now();
-    let chain_out = calc_ramen_training(trainer, &mut game, &mut rng, true, reason_slot, &noop)?;
+    let sink: Arc<dyn DecisionSink> = Arc::new(EmptySink);
+    let chain_out = calc_ramen_training(trainer, &mut game, &mut rng, true, reason_slot, &noop, &sink)?;
     let chain = t0.elapsed();
 
     let decisions = probes
@@ -356,8 +358,8 @@ fn main() -> Result<()> {
         game_config.mcts.ramen_search_stages
     );
     println!(
-        "selection={:?} use_combined_ramen_select={} stages={:?}",
-        trainer.selection, trainer.use_combined_ramen_select, trainer.stages
+        "selection=score_pt use_combined_ramen_select={} stages={:?}",
+        trainer.use_combined_ramen_select, trainer.stages
     );
     println!(
         "ramen_region_strategy={:?} threads(rayon)={} uma={} cards={:?}",

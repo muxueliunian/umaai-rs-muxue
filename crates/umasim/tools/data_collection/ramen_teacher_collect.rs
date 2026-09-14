@@ -123,6 +123,10 @@ struct CollectArgs {
     #[arg(long)]
     search_n: usize,
 
+    /// 拒绝偏离新教师评分优先口径的用户配置，不静默覆盖。
+    #[arg(long)]
+    require_newteacher_defaults: bool,
+
     /// 输出目录（相对工作空间根，或绝对路径）
     #[arg(long, default_value = "training_data/ramen_teacher")]
     output_dir: PathBuf,
@@ -967,6 +971,17 @@ fn main() -> Result<()> {
         );
         game_config.ramen_region_strategy = RamenRegionStrategy::All;
     }
+    if args.require_newteacher_defaults {
+        ensure!(
+            game_config.ramen_pt_sacrifice_score == 0.0 && game_config.pt_favor_rate == 1.0,
+            "新教师要求 ramen_pt_sacrifice_score=0 / pt_favor_rate=1，实际为 {} / {}",
+            game_config.ramen_pt_sacrifice_score, game_config.pt_favor_rate
+        );
+    }
+    println!(
+        "教师生效配置: ramen_pt_sacrifice_score={} pt_favor_rate={} raw_score=normal",
+        game_config.ramen_pt_sacrifice_score, game_config.pt_favor_rate
+    );
     let t = Instant::now();
     init_global_with_config(&game_config)?;
     timing.init_ms = t.elapsed().as_millis();

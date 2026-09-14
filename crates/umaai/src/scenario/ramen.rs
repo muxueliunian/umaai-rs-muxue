@@ -40,7 +40,10 @@ pub fn process_ramen(
     emit_info: &dyn Fn(&str)
 ) -> Result<()> {
     if game.stage == RamenStage::Begin {
-        // into_game 没 dispatch（事件 / 结算 / 数据不全），等下一条 JSON
+        // into_game 没 dispatch（事件 / 结算 / 数据不全），等下一条 JSON。
+        // 本轮无决策，但仍要收尾 compute_done——保证每轮 JSON 流
+        // `compute_start → compute_done` 成对，C# 端"计算中"状态不会悬挂。
+        emit_info("compute_done");
         return Ok(());
     }
 
@@ -71,17 +74,12 @@ pub fn process_ramen(
         }
     }
     eprintln!("AI计算中...");
-    // 连续决策：返回链式决策（一个快照对应多个决策时逐个 emit）
-    // 中间决策（除最后一个）用各自捕获的 view 直接 emit（不触 luck），
-    // 最后一个决策走完整 luck 挂载（baseline 每回合只更新一次）。
-    //
-    // 注意：链式决策的"计算后续动作"通知（eprintln + compute_next_step）
-    // 已在 calc_ramen_training 内部、决策#2 真正执行前发出——这里不再重复。
-    let chain = calc_ramen_training(trainer, &mut game, rng, json_mode, reason_slot, emit_info)?;
-    let last_index = chain.len().saturating_sub(1);
-    for (_, (info, view)) in chain.iter().take(last_index).enumerate() {
-        sink.emit(info, view);
-    }
+    // 连续决策：链式决策（一个快照对应多个决策）。
+    // 中间决策（除最后一个）已在 calc_ramen_training 内部、决策#2 计算前
+    // 立即 emit（不触 luck）——保证 JSON 流顺序为 decision#1 →
+    // compute_next_step → decision#2；此处 `chain` 只剩末项，由下方走
+    // 完整 luck 挂载（baseline 每回合只更新一次）。
+    let chain = calc_ramen_training(trainer, &mut game, rng, json_mode, reason_slot, emit_info, sink)?;
     if !chain.is_empty() {
         // 拉面 MCTS 路径：从 LastReasonSink 缓存取 DecisionReasonData 挂到
         // scenario_extra.reason，让 AIRedirector 拿到 human mode reason
@@ -122,6 +120,7 @@ pub fn process_ramen(
     }
 
     // 计算完成：通知下游 watcher 进入阻塞状态
+    emit_info("compute_done");
     eprintln!("计算完成，等待新数据...");
     Ok(())
 }
@@ -140,11 +139,17 @@ pub fn process_ramen(
 ///     再给地区决策；到达 RegionSelect 后**立即停**，不继续向下级联。
 ///- 其它所有阶段维持单决策：AI 不推进游戏状态，玩家执行后由 C# 发新 JSON。
 ///
-/// 返回链式决策 `Vec<(DecisionInfo, GameView)>`（每个决策附带其**作出时**的
-/// `GameView`，保证中间决策行的 `turn`/`scenario` 正确）；由 call 方逐个 emit。
+/// 返回链式决策 `Vec<(DecisionInfo, GameView)>`。
+///
+/// **emit 时机**：链式决策的**中间项**（决策#1）在函数内部、决策#2 真正执行前
+/// （`compute_next_step` 通知前）经 `sink` 立即 emit（不触 luck）——保证 JSON 流
+/// 顺序为 `decision#1 → compute_next_step → decision#2`，下游不会先收到
+/// "还在计算"通知而以为本回合没有结果。**末项**（决策#2，或非链式场景的决策#1）
+/// 留在返回值中，由 call 方走完整 luck 挂载；每个决策附带其**作出时**的
+/// `GameView`，保证决策行的 `turn`/`scenario` 正确。
 pub fn calc_ramen_training(
     trainer: &RamenMctsTrainer, game: &mut RamenGame, rng: &mut StdRng, json_mode: bool, reason_slot: &LastReasonSink,
-    emit_info: &dyn Fn(&str)
+    emit_info: &dyn Fn(&str), sink: &Arc<dyn DecisionSink>
 ) -> Result<Vec<(DecisionInfo, GameView)>> {
     // 链式决策收集：每次 select_action 捕获 DecisionInfo + 该阶段 view
     let mut out: Vec<(DecisionInfo, GameView)> = Vec::new();
@@ -180,11 +185,16 @@ pub fn calc_ramen_training(
                 // 2) **比赛回合**：`is_race_turn()` 下落 `Train`，list_actions 只有"比赛"
                 //    一个固定动作，trainer 因单候选直接落 fallback、不搜索，`last_decision()`
                 //    为 `None`，不合成的话 calc_ramen_training 返回空、屏幕上无策略输出。
-                // 其余 None 阶段保持旧行为（决策仍返回但**不**合成、不 emit）。
+                // 3) **RamenSelect 决策**：合并搜索路径清掉 last_summary（`last_decision()`
+                //    为 `None`），吃面 / 不吃面都没有可 emit 的结果——不吃面还会触发链式
+                //    决策（→ 计算下一步 → Train），决策#1 必须作为单独决策输出（JSON 流为
+                //    不吃面 → compute_next_step → 训练）；吃面虽不链式，但同样需要决策行。
+                //    其余 None 阶段保持旧行为（决策仍返回但**不**合成、不 emit）。
                 let mut info = match trainer.last_decision() {
                     Some(info) => Some(info),
                     None if before_stage == RamenStage::RegionSelect
-                        || (before_stage == RamenStage::Train && g.is_race_turn()) =>
+                        || (before_stage == RamenStage::Train && g.is_race_turn())
+                        || before_stage == RamenStage::RamenSelect =>
                     {
                         Some(fallback_decision(&actions, idx, &before_stage))
                     }
@@ -206,6 +216,17 @@ pub fn calc_ramen_training(
                 || (before_stage == RamenStage::Train && before_turn == 1);
 
             if need_continue {
+                // 决策#1 是链式决策的**中间项**：先把它的结果 emit 出去（下游拿到
+                // 即时反馈），再从 `out` 移除——否则它要等本函数返回后才由 call 方
+                // emit，而 `compute_next_step` 已在下面决策#2 前发出，JSON 顺序变成
+                // `compute_next_step` 先于任何决策结果到达，下游会误以为本回合没算。
+                // 末项（决策#2）仍留在 `out` 返回，由 call 方走完整 luck 挂载。
+                // 注：RamenSelect 决策已在上方 decide 合成（见合成条件 3），
+                // `out` 通常有内容；其它 None 阶段不合成时这里无输出，与旧行为一致。
+                if let Some((info, view)) = out.first() {
+                    sink.emit(info, view);
+                }
+                out.clear();
                 // 应用决策#1 并推进一个阶段（RamenSelect 不吃 → Train；Train(turn==1) → AfterTrain）
                 game.apply_action(&chosen, rng)?;
                 if game.next() {
@@ -277,13 +298,15 @@ fn ramen_stage_kind(stage: RamenStage) -> &'static str {
     }
 }
 
-/// 为 MCTS 手写 fallback 阶段的决策合成一条最小 `DecisionInfo`
+/// 为 `last_decision()` 为 `None` 的阶段合成一条最小 `DecisionInfo`
 ///
 /// [`Trainer::last_decision`] 只在**真正走过 MCTS 搜索**时返回 `Some`；门控关闭的阶段
 /// （如默认配置 `ramen_search_stages="train,ramen"` 下未开启的 `region`）落入手写
-/// fallback，`last_decision()` 为 `None`，但手写策略确实作出了选择——导致该阶段
-/// 没有任何决策结果输出。这里按本次候选列表与选中下标合成一条无搜索评分的决策信息，
-/// 保证 region_select 等阶段也有结果可 emit（candidate_scores 为空，luck baseline 退化按等权）。
+/// fallback，合并搜索的 `RamenSelect` 路径（吃面 / 不吃面）也会清掉 last_summary——
+/// 这些情况 `last_decision()` 均为 `None`，但策略确实作出了选择，导致该阶段没有任何
+/// 决策结果输出。这里按本次候选列表与选中下标合成一条无搜索评分的决策信息，保证
+/// region_select / ramen_select 等阶段也有结果可 emit（candidate_scores 为空，
+/// luck baseline 退化按等权）。
 fn fallback_decision(actions: &[RamenAction], chosen_idx: usize, before_stage: &RamenStage) -> DecisionInfo {
     DecisionInfo {
         action_index: chosen_idx,

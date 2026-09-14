@@ -30,7 +30,7 @@
 //! `--json` 模式 stdout 严格只 JSON，三种消息类型用顶层 `type` 字段区分：
 //!
 //! - `decision`：AI 决策（与 `DecisionSink::emit` 对应）
-//! - `info`：提示信息（`connected` / `compute_start` / `compute_next_step` / `new_game`）
+//! - `info`：提示信息（`connected` / `compute_start` / `compute_next_step` / `compute_done` / `new_game`）
 //! - `error`：错误信息（只带 `message` 字段，不细分类型）
 //!
 //! `emit_info` / `emit_error` 是 `StdoutJsonSink` 的额外方法，不在 `DecisionSink`
@@ -197,7 +197,7 @@ impl StdoutJsonSink {
     /// 发出一条 `info` JSON 行（stdout 严格 JSON 流的一部分）
     ///
     /// `event` 取值由调用方负责保证合法（已知取值：`connected` / `compute_start` /
-    /// `compute_next_step` / `new_game`）；sink 不做取值校验，按字符串透传。
+    /// `compute_next_step` / `compute_done` / `new_game`）；sink 不做取值校验，按字符串透传。
     ///
     /// **不在 `DecisionSink` trait 内**——`main.rs` 在 `--json` 分支显式持有
     /// `Arc<StdoutJsonSink>`（具体类型），绕过 trait 直接调本方法。
@@ -377,11 +377,11 @@ mod tests {
 
     /// emit_info 输出正确格式：`{"type":"info","event":"<event>"}`
     ///
-    /// 覆盖 4 种已知 event 取值（`connected` / `compute_start` / `compute_next_step` /
-    /// `new_game`）。println 让人眼核对每行的 JSON 结构与 event 值。
+    /// 覆盖 5 种已知 event 取值（`connected` / `compute_start` / `compute_next_step` /
+    /// `compute_done` / `new_game`）。println 让人眼核对每行的 JSON 结构与 event 值。
     #[test]
     fn test_stdout_json_sink_info() {
-        for event in ["connected", "compute_start", "compute_next_step", "new_game"] {
+        for event in ["connected", "compute_start", "compute_next_step", "compute_done", "new_game"] {
             StdoutJsonSink.emit_info(event);
             println!("emit_info({event}) 完成（应输出 {{\"type\":\"info\",\"event\":\"{event}\"}}）");
         }

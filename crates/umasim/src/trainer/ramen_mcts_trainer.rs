@@ -58,7 +58,7 @@ use crate::{
         DecisionInfo as DecisionInfoProto,
         reason::{DecisionReasonData, DecisionReasonNoopSink, ReasonMetric, analyze_narrow_win, render_reason_lines}
     },
-    search::{ActionResult, FlatSearch, RamenSearchOutput, SearchConfig, SearchProbe, TerminalStats}
+    search::{FlatSearch, RamenSearchOutput, SearchConfig, SearchProbe, TerminalStats}
 };
 
 /// 搜索哪些阶段的门控开关
@@ -187,15 +187,6 @@ impl Default for RamenSearchStages {
     }
 }
 
-/// 最优动作的取分口径
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RamenSelection {
-    /// 结算评分（`calc_score`）
-    Score,
-    /// 计入 PT 偏好的评分（`calc_score_with_pt_favor`）
-    Pt
-}
-
 /// 一次 `select_action` 走过的路径（决策探针用）
 ///
 /// 用枚举而非布尔组合：`searched` / `cache_hit` / `single_candidate` 三个布尔
@@ -256,7 +247,7 @@ pub struct DecisionProbe {
 struct LastSearchSummary {
     /// 中选者在 `action_results` 中的下标
     chosen_idx: usize,
-    /// 全候选按 [`RamenSelection`] 口径的分数（按 action_results 顺序）
+    /// 全候选分数（按 action_results 顺序）
     scores: Vec<f64>,
     /// 全候选的 rollout 样本数（按 action_results 顺序）
     counts: Vec<u32>,
@@ -305,8 +296,6 @@ pub struct RamenMctsTrainer {
     pub fallback: RecommendedRamenTrainer,
     /// 搜索哪些阶段
     pub stages: RamenSearchStages,
-    /// 取分口径
-    pub selection: RamenSelection,
     /// 是否输出每步决策日志
     pub verbose: bool,
     /// `RamenSelect` 是否用合并动作（ramen + targets 一次决策）搜索
@@ -362,7 +351,6 @@ impl RamenMctsTrainer {
             search: FlatSearch::<RamenGame>::new(config),
             fallback: RecommendedRamenTrainer::new(),
             stages: RamenSearchStages::all(),
-            selection: RamenSelection::Score,
             verbose: false,
             use_combined_ramen_select: true,
             last_breakdown: Mutex::new(None),
@@ -425,12 +413,6 @@ impl RamenMctsTrainer {
         self
     }
 
-    /// 设置取分口径
-    pub fn with_selection(mut self, selection: RamenSelection) -> Self {
-        self.selection = selection;
-        self
-    }
-
     /// 设置是否输出每步决策日志
     pub fn verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
@@ -458,17 +440,14 @@ impl RamenMctsTrainer {
     /// 输出决策理由：原始 JSON 经 [`Self::reason_sink`] 发出，可读文字上屏
 ///
 /// 每回合都调用 [`analyze_narrow_win`]；当前不再用分差门限决定是否输出，
-/// 分差仅用于着色档位。比较口径跟随 [`Self::selection`]——理由解释的是
+/// 分差仅用于着色档位。比较口径采用上游统一的 score_pt——理由解释的是
 /// 实际选择。终局差异日志之后调用，两段日志可互相印证。
 ///
 /// **2026-09 修改**：`reason_sink.emit` 与 `info!` 上屏解耦——sink 始终发出
 /// 原始数据（供宿主程序缓存、自行决定何时打印），`info!` 仅在 `verbose=true`
 /// 时上屏。这样 JSON 通道下宿主可以自己渲染 / 上报，文字日志也不会双打印。
 fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
-        let metric = match self.selection {
-            RamenSelection::Pt => ReasonMetric::Pt,
-            RamenSelection::Score => ReasonMetric::Score
-        };
+        let metric = ReasonMetric::Score;
         let Some(data) = analyze_narrow_win(
             turn,
             metric,
@@ -523,9 +502,7 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     /// 只打差值而非绝对值：各候选的绝对面板高度相似，人眼分辨不出；
     /// 「选这个动作，最终智力会多 300」才是可读的因果陈述。
     ///
-    /// 锚点取 `chosen`（即 `select_action` 真正返回的下标）而非
-    /// `best_action_idx`：`RamenSelection::Pt` 下两者可能不同，拿后者当锚点会
-    /// 对着一个没被选中的动作报差值。
+    /// 锚点取 `chosen`（即 `select_action` 真正返回的下标）。
     ///
     /// 差值只在**均值**层面成立。阈值类维度（`rmj_ok_*`）本身已是每次 rollout
     /// 内部归约出的 0/1，其均值是达成率，差值即达成率之差——不要再拿它与 PT
@@ -598,12 +575,9 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     ///
     /// 非 `SuperRamenSelect` 阶段原样返回。
     ///
-    /// 平局判定**必须与 `selection` 用同一口径**：`Score` 比 `.0.mean()`，
-    /// `Pt` 比 `.1.weighted_mean(radical_factor)`。两边错位会把「Pt 口径下并非
-    /// 平局」误判成平局，反而覆盖掉正确选择。
+    /// 平局判定用 `.0.mean()`（score 口径）。
     fn break_super_ramen_tie(
-        game: &RamenGame, actions: &[<RamenGame as Game>::Action], output: &RamenSearchOutput,
-        selection: RamenSelection, idx: usize
+        game: &RamenGame, actions: &[<RamenGame as Game>::Action], output: &RamenSearchOutput, idx: usize
     ) -> usize {
         if game.stage != RamenStage::SuperRamenSelect {
             return idx;
@@ -622,11 +596,7 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
         else {
             return idx;
         };
-        let metric = |r: &(ActionResult, ActionResult)| match selection {
-            RamenSelection::Score => r.0.mean(),
-            RamenSelection::Pt => r.1.weighted_mean(output.radical_factor)
-        };
-        if metric(chosen) == metric(fallback) { fallback_idx } else { idx }
+        if chosen.1.mean() == fallback.1.mean() { fallback_idx } else { idx }
     }
 
     /// 取出并清空合并搜索缓存的 targets
@@ -655,20 +625,8 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     /// 该文本不再挂到决策协议。完整 `DecisionReasonData` 改由 `emit_decision_reason`
     /// 通过 `LastReasonSink` 缓存，挂到 `scenario_extra.reason`（main.rs 接线）。
     fn stash_last_summary(&self, output: &RamenSearchOutput, chosen_idx: usize) {
-        let (scores, counts): (Vec<f64>, Vec<u32>) = match self.selection {
-            RamenSelection::Score => (
-                output.action_results.iter().map(|(s, _)| s.mean()).collect(),
-                output.action_results.iter().map(|(s, _)| s.count()).collect()
-            ),
-            RamenSelection::Pt => (
-                output
-                    .action_results
-                    .iter()
-                    .map(|(_, pt)| pt.weighted_mean(output.radical_factor))
-                    .collect(),
-                output.action_results.iter().map(|(s, _)| s.count()).collect()
-            )
-        };
+        let scores: Vec<f64> = output.action_results.iter().map(|(_, pt)| pt.mean()).collect();
+        let counts: Vec<u32> = output.action_results.iter().map(|(s, _)| s.count()).collect();
         // 候选可读描述：与 scores / counts 严格同长同序（按 action_results 顺序）
         let descriptions: Vec<String> = output
             .actions
@@ -751,10 +709,7 @@ impl RamenMctsTrainer {
             if combined.len() > 1 {
                 self.searched.fetch_add(1, Ordering::Relaxed);
                 let output = self.search.search(game, &combined, rng)?;
-                let idx = match self.selection {
-                    RamenSelection::Score => output.best_action_idx,
-                    RamenSelection::Pt => output.best_action_pt_idx()
-                };
+                let idx = output.best_action_pt_idx();
                 let best = combined
                     .get(idx)
                     .ok_or_else(|| anyhow!("合并搜索最优下标 {idx} 超出候选数 {}", combined.len()))?;
@@ -806,11 +761,8 @@ impl RamenMctsTrainer {
 
         self.searched.fetch_add(1, Ordering::Relaxed);
         let output = self.search.search(game, actions, rng)?;
-        let idx = match self.selection {
-            RamenSelection::Score => output.best_action_idx,
-            RamenSelection::Pt => output.best_action_pt_idx()
-        };
-        let idx = Self::break_super_ramen_tie(game, actions, &output, self.selection, idx);
+        let idx = output.best_action_pt_idx();
+        let idx = Self::break_super_ramen_tie(game, actions, &output, idx);
         self.stash_search_breakdown(&output);
         self.log_terminal_breakdown(game.turn() as i32, idx, &output);
         self.emit_decision_reason(game.turn() as i32, idx, &output);
@@ -912,7 +864,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
     /// 时，candidates 是 `(ramen, targets)` 组合，与 `select_action` 收到的三阶段
     /// `actions` 列表下标不对应（同 ramen 跨多个 action）；保留准确映射留待后续步骤。
     ///
-    /// 取分口径跟随 [`Self::selection`]（`Score` → `.0.mean()` / `Pt` → `.1.weighted_mean`）；
+    /// 取分口径统一为 score_pt 的 weighted_mean；
     /// 候选评分按口径排序、截断到 `SearchConfig::reason_max_display`（分数与 `candidate_n` 同步）。
     /// 选中者若被截断在 top-N 之外则插入首位，`action_index` 重定位到截断后下标。
     ///
@@ -1580,8 +1532,8 @@ mod tests {
         let output = search.search(&game, &actions, &mut rng)?;
         println!(
             "search 最优 #{} {} 各候选 n={:?}",
-            output.best_action_idx,
-            actions[output.best_action_idx],
+            output.best_action_pt_idx(),
+            actions[output.best_action_pt_idx()],
             output.action_results.iter().map(|(r, _)| r.count()).collect::<Vec<_>>()
         );
         c.check(output.action_results.len() == 3, "搜索覆盖 3 个候选");
@@ -1590,7 +1542,7 @@ mod tests {
             "每个候选都有样本"
         );
 
-        let best = &actions[output.best_action_idx];
+        let best = &actions[output.best_action_pt_idx()];
         game.apply_root_action(best, &mut rng)?;
         c.check(game.stage == RamenStage::SuperRamenSelect, "apply_root_action 不切阶段");
         c.check(game.turn() == 71, "apply_root_action 不推进回合");
@@ -1673,7 +1625,7 @@ mod tests {
         let output = search.search(&game, &actions, &mut rng)?;
         println!(
             "search 最优 #{} 各候选 n={:?}",
-            output.best_action_idx,
+            output.best_action_pt_idx(),
             output.action_results.iter().map(|(r, _)| r.count()).collect::<Vec<_>>()
         );
         c.check(output.action_results.len() == actions.len(), "搜索覆盖全部候选");
@@ -1693,12 +1645,12 @@ mod tests {
         });
         println!(
             "同根同种子两次: best {} vs {} same={same}",
-            a.best_action_idx, b.best_action_idx
+            a.best_action_pt_idx(), b.best_action_pt_idx()
         );
         c.check(same, "同根同种子两次逐位一致");
-        c.check(a.best_action_idx == b.best_action_idx, "最优下标一致");
+        c.check(a.best_action_pt_idx() == b.best_action_pt_idx(), "最优下标一致");
 
-        let best = &actions[output.best_action_idx];
+        let best = &actions[output.best_action_pt_idx()];
         game.apply_root_action(best, &mut rng)?;
         c.check(game.stage == RamenStage::RegionSelect, "apply_root_action 不切阶段");
         c.check(game.turn() == 2, "apply_root_action 不推进回合");

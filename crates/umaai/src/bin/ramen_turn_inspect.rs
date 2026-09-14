@@ -239,7 +239,7 @@ fn run() -> Result<()> {
     println!("list_actions 长度 = {}", actions.len());
     println!("search config: search_n={}  selection={:?}",
         trainer.search.config().search_n,
-        trainer.selection);
+        "score_pt");
 
     let mut rng = StdRng::from_os_rng();
     let t0 = Instant::now();

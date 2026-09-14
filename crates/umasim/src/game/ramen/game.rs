@@ -2404,11 +2404,11 @@ struct AlwaysTrueRng;
         c.finish()
     }
 
-    /// 拉面杯要求卡组必须包含新友人卡（card_id=30305）
+    /// 拉面杯要求卡组必须包含新友人卡（card_id=30305，rank 0-4，idrank 303050-303054）
     ///
     /// 校验逻辑：
-    /// - 合法：含 `idrank / 10 == 30305` 且突破等级 0-4（上游 de9d611 起 rank=0 也接受）
-    /// - 非法：完全无 30305；rank=5-9 由 `SupportCard::new` 以「Rank超出范围」拒绝
+    /// - 合法：idrank 满足 `idrank / 10 == 30305 && 0 <= rank <= 4`（rank=0 为未突破）
+    /// - 非法：rank=5-9（303055-303059）、或完全无 30305
     #[test]
     fn test_ramen_newgame_requires_new_friend() -> Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -2425,13 +2425,19 @@ struct AlwaysTrueRng;
         let msg = err.to_string();
         assert!(msg.contains("新友人"), "错误消息应提示新友人: {msg}");
 
-        // 2. rank=5（idrank=303055）：通过友人判定，但由 SupportCard::new 以越界拒绝
+        // 2. rank=0（idrank=303050，未突破）：应合法（旧注释曾误判为非法）
+        let deck_rank0 = [302424, 302894, 303044, 302924, 303024, 303050];
+        let result = RamenGame::newgame(TEST_UMA_ID, &deck_rank0, TEST_INHERIT);
+        println!("rank=0 应合法: {}", result.is_ok());
+        assert!(result.is_ok(), "rank=0（未突破）应合法");
+
+        // 3. rank=5（idrank=303055）：应报错（rank 超出 [0,4]）
         let deck_rank5 = [302424, 302894, 303044, 302924, 303024, 303055];
         let result = RamenGame::newgame(TEST_UMA_ID, &deck_rank5, TEST_INHERIT);
         let msg = result.as_ref().err().map(|e| format!("{e:#}")).unwrap_or_default();
         println!("rank=5 被拒绝: {}，错误: {msg}", result.is_err());
         assert!(result.is_err(), "rank=5 应被拒绝（突破等级超出范围）");
-        assert!(msg.contains("Rank超出范围"), "rank=5 应由越界检查拒绝: {msg}");
+        assert!(msg.contains("合法的新友人"), "rank=5 应由友人合法性检查拒绝: {msg}");
 
         // 3. 合法 rank=0-4：应成功（上游 de9d611 起不再拒绝 rank=0）
         for rank in 0..=4u32 {
