@@ -623,7 +623,30 @@ pub struct GameConfig {
     ///
     /// 例如 `[[10, 12, 14]]`：第3年固定选 [10,12,14]
     #[serde(default)]
-    pub ramen_region_fixed: Option<Vec<[usize; 3]>>
+    pub ramen_region_fixed: Option<Vec<[usize; 3]>>,
+    /// 拉面手写策略：为多拿总 PT 最多愿意牺牲的总评分（评分换PT，顶层可调）
+    ///
+    /// 语义：策略终盘训练主属性已满的位时只剩 PT 收益；本值表示玩家愿意
+    /// 为该训练位多产的 PT **总共**放弃多少最终评分（不是每 PT 的单价）。
+    /// 内部映射到「已满位 + 有彩圈」训练的 PT 定价（实测标定曲线，7 build×100局）：
+    ///
+    /// | 本值（最多牺牲总评分） | 内部定价 | 实测得分 | 实际牺牲 | skill_pt |
+    /// |---|---:|---:|---:|---:|
+    /// | 0（默认，评分优先） | 36 | 65266 | 0（基准） | 8600 |
+    /// | ≤60 | 44 | 65214 | 52 | 8625 |
+    /// | ≤160 | 52 | 65210 | 56 | 8650 |
+    /// | ≤550 | 64 | 64733 | 533 | 8690（PT 峰值） |
+    ///
+    /// 只影响已满位训练（未满位训练/比赛/事件的 PT 估值不变），超过 64 的
+    /// 定价会误选已满位导致评分与 PT 双降，故内部封顶在 64。
+    #[serde(default = "default_ramen_pt_sacrifice_score")]
+    pub ramen_pt_sacrifice_score: f32,
+}
+
+fn default_ramen_pt_sacrifice_score() -> f32 {
+    // 默认 0 = 评分优先（已满位+有彩圈定价 36，实测评分峰值）。
+    // >0 = 为多拿总 PT 愿意牺牲的评分（见 GameConfig::ramen_pt_sacrifice_score 标定表）。
+    0.0
 }
 
 fn default_mcts_turn_bonus() -> i32 {
@@ -631,7 +654,7 @@ fn default_mcts_turn_bonus() -> i32 {
 }
 
 fn default_pt_favor_rate() -> f32 {
-    8.0
+    1.0
 }
 
 fn default_race_grades() -> Vec<i32> {
@@ -674,6 +697,7 @@ impl GameConfig {
             pt_favor_rate: default_pt_favor_rate(),
             race_grades: default_race_grades(),
             ramen_region_strategy: RamenRegionStrategy::default(),
+            ramen_pt_sacrifice_score: default_ramen_pt_sacrifice_score(),
             ramen_region_fixed: None
         }
     }
@@ -707,6 +731,7 @@ impl GameConfig {
     pub fn policy(&self) -> PolicyConfig {
         PolicyConfig {
             ramen_region_strategy: self.ramen_region_strategy,
+            ramen_pt_sacrifice_score: self.ramen_pt_sacrifice_score,
             ramen_region_fixed: self.ramen_region_fixed.clone()
         }
     }
@@ -791,6 +816,8 @@ pub enum RamenRegionStrategy {
 pub struct PolicyConfig {
     /// 拉面杯第3年地区选择策略
     pub ramen_region_strategy: RamenRegionStrategy,
+    /// 为多拿总 PT 最多愿意牺牲的总评分（映射见 [`GameConfig::ramen_pt_sacrifice_score`]）
+    pub ramen_pt_sacrifice_score: f32,
     /// 第3年固定地区组合（`Fixed` 策略时生效；长度必须 = 1，每项为 3 个地区 id）
     ///
     /// 例如 `[[10, 12, 14]]`：第3年固定选 [10,12,14]
@@ -859,7 +886,13 @@ pub struct OverrideGameConfig {
     /// `None` = 不覆盖 default；写 `ramen_region_fixed = [[.., .., ..]]` 即覆盖；
     /// 要显式清空 default 的 fixed 组合可写空数组 `[]`。
     #[serde(default)]
-    pub ramen_region_fixed: Option<Vec<[usize; 3]>>
+    pub ramen_region_fixed: Option<Vec<[usize; 3]>>,
+    /// 为多拿总 PT 最多愿意牺牲的总评分（顶层覆盖；对应
+    /// `GameConfig::ramen_pt_sacrifice_score`）。`None` = 不覆盖 default。
+    ///
+    /// 须写在 game_config.toml 所有 `[xxx]` 段之前（同 `ramen_region_strategy`）。
+    #[serde(default)]
+    pub ramen_pt_sacrifice_score: Option<f32>
 }
 
 /// MCTS 覆盖配置：每个字段都是可选覆盖（`None` = 不覆盖 `default_config.toml`）。
@@ -1049,6 +1082,9 @@ impl OverrideGameConfig {
         if let Some(v) = self.ramen_region_fixed {
             ret.ramen_region_fixed = Some(v);
         }
+        if let Some(v) = self.ramen_pt_sacrifice_score {
+            ret.ramen_pt_sacrifice_score = v;
+        }
         ret
     }
 }
@@ -1089,7 +1125,8 @@ mod tests {
             config_override: cfg,
             mcts: OverrideMctsConfig::default(),
             ramen_region_strategy: None,
-            ramen_region_fixed: None
+            ramen_region_fixed: None,
+            ramen_pt_sacrifice_score: None
         }
     }
 

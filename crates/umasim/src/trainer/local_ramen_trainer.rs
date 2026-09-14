@@ -23,7 +23,7 @@ use crate::{
             }
         }
     },
-    gamedata::{EventChoice, EventData, GAMECONSTANTS, ramen::RAMENDATA},
+    gamedata::{EventChoice, EventData, GAMECONFIG, GAMECONSTANTS, ramen::RAMENDATA},
     global
 };
 use crate::trainer::ramen_handwritten_trainer::ramen_effective_stage;
@@ -79,6 +79,18 @@ pub struct LocalRamenConfig {
     /// 预留量会随剩余回合线性缩小；训练把属性推近上限时会产生软惩罚。
     /// `0.0` 表示关闭属性溢出预留模型。
     pub status_reserve_max: f32,
+
+    /// 预留惩罚的增益口径（`reserve_penalty` 用哪个增量计算"训练后透支"）。
+    ///
+    /// - `0`：原始未截断增量（旧行为）。已满位属性收益实为 0，但此处仍按原始
+    ///   gain（如 +355 速）计入透支，惩罚被虚增——终盘（r→0）时雪崩放大。
+    /// - `1`（A 修复）：按实际生效增量 `min(gain, h)` 截断，已满位增量 0、不产生
+    ///   透支，接近满位按真实可增量温和处罚。
+    /// - `2`（B 修复）：已满位（`h <= 0`）直接跳过惩罚，其余位保持旧逻辑。
+    ///
+    /// 调参按 `matrix_variant` / `with_tokens` 的 `reserve`（调 max）与 `rgn`（调口径）
+    /// 两个 token 实验；`0` 为基准默认，改动经基准判别后决定是否入 preset。
+    pub reserve_gain_mode: u8,
 
     /// 是否启用按五维完成度动态调整属性边际价值。
     ///
@@ -341,6 +353,7 @@ impl Default for LocalRamenConfig {
             overflow_value: 8.,
             max_base_score_sacrifice: 140.,
             status_reserve_max: 0.,
+            reserve_gain_mode: 0,
             dynamic_status_balance: false,
             status_gap_strength: 0.0,
             status_overflow_strength: 0.0,
@@ -509,6 +522,13 @@ impl LocalRamenTrainer {
                 s = true
             } else if let Some(v) = token.strip_prefix("reserve") {
                 local.status_reserve_max = v.parse()?
+            } else if let Some(v) = token.strip_prefix("rgn") {
+                // reserve 增益口径：0=原始（基准） / 1=A截断 / 2=B满位豁免
+                let mode: u8 = v.parse()?;
+                if mode > 2 {
+                    anyhow::bail!("rgn 仅支持 0/1/2: {v}");
+                }
+                local.reserve_gain_mode = mode
             } else if let Some(v) = token.strip_prefix("fail") {
                 local.high_fail_penalty = v.parse()?;
                 f = true
@@ -528,6 +548,15 @@ impl LocalRamenTrainer {
                 local.ramen_train_coupling_weight = v.parse::<f32>()? / 100.0
             } else if let Some(v) = token.strip_prefix("capd") {
                 policy.cap_discount_weight = v.parse::<f32>()? / 100.0
+            } else if let Some(v) = token.strip_prefix("trdsh") {
+                // 已满位 + 有彩圈 的 PT 折算价（彩圈分级）：trdsh6400=64.0
+                policy.pt_tradeoff_shining = v.parse::<f32>()? / 100.0
+            } else if let Some(v) = token.strip_prefix("trds") {
+                // 超级拉面已满位 PT 折算价：trds200=2.0
+                policy.pt_tradeoff_super = v.parse::<f32>()? / 100.0
+            } else if let Some(v) = token.strip_prefix("trd") {
+                // 已满位 PT 折算价：trd200=2.0
+                policy.pt_tradeoff = v.parse::<f32>()? / 100.0
             } else if let Some(v) = token.strip_prefix("starve") {
                 local.friend_hidden_starve_weight = v.parse::<f32>()? / 100.0
             } else if let Some(v) = token.strip_prefix("fh") {
@@ -596,8 +625,19 @@ impl LocalRamenTrainer {
         let mut p = 0.;
         for i in 0..5 {
             let h = (g.uma.five_status_limit[i] - g.uma.five_status[i]).max(0) as f32;
+            // 已满位豁免（B 修复）：该维已无空间，训练不可能透支未来预留，跳过。
+            if self.config.reserve_gain_mode == 2 && h <= 0. {
+                continue;
+            }
             let b = (r - h).max(0.);
-            let a = (r - (h - gain[i] as f32)).max(0.);
+            // 参与透支计算的增量（A 修复）：按实际生效增量截断——已满位增量 0，
+            // 接近满位只按真实可增部分计，避免把被 cap 截断掉的溢出当透支再罚一次。
+            let eff_gain = if self.config.reserve_gain_mode == 1 {
+                (gain[i] as f32).min(h)
+            } else {
+                gain[i] as f32
+            };
+            let a = (r - (h - eff_gain)).max(0.);
             p += (a * a - b * b) / (2. * r.max(1.));
         }
         p * 6.
@@ -1732,6 +1772,32 @@ impl RecommendedRamenTrainer {
                 for year in trainer.years.iter_mut() {
                     year.policy.config.cap_discount_weight = weight;
                 }
+            } else if let Some(v) = token.strip_prefix("trdsh") {
+                // 已满位 + 有彩圈 的 PT 折算价（彩圈分级）：trdsh6400=64.0
+                // 注：必须排在 trds/trd 之前判断，否则前缀冲突。
+                let w: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.pt_tradeoff_shining = w;
+                }
+            } else if let Some(v) = token.strip_prefix("trds") {
+                // 超级拉面已满位 PT 折算价（评分换PT系数超拉面档）：trds200=2.0
+                let w: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.pt_tradeoff_super = w;
+                }
+            } else if let Some(v) = token.strip_prefix("ptrate") {
+                // 全局 PT 折算价（训练未满位 + 比赛 + 事件三处）：ptrate3200=32.0。
+                // 与 trd（只改已满位训练）对照用。
+                let w: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.pt_rate = w;
+                }
+            } else if let Some(v) = token.strip_prefix("trd") {
+                // 已满位 PT 折算价（评分换PT系数普通档）：trd200=2.0
+                let w: f32 = v.parse::<f32>()? / 100.0;
+                for year in trainer.years.iter_mut() {
+                    year.policy.config.pt_tradeoff = w;
+                }
             } else if let Some(v) = token.strip_prefix("ck") {
                 let scale: f32 = v.parse::<f32>()? / 100.0;
                 for year in trainer.years.iter_mut() {
@@ -1782,6 +1848,21 @@ impl RecommendedRamenTrainer {
                 let s: f32 = sign * digits.parse::<f32>()? / 100.0;
                 for year in trainer.years.iter_mut() {
                     year.config.power_gap_strength = s;
+                }
+            } else if let Some(v) = token.strip_prefix("reserve") {
+                // 预留上限空间（调低=减轻终盘已满位惩罚；C 修复入口）
+                let max: f32 = v.parse()?;
+                for year in trainer.years.iter_mut() {
+                    year.config.status_reserve_max = max;
+                }
+            } else if let Some(v) = token.strip_prefix("rgn") {
+                // reserve 增益口径：0=原始（基准） / 1=A截断 / 2=B满位豁免
+                let mode: u8 = v.parse()?;
+                if mode > 2 {
+                    anyhow::bail!("rgn 仅支持 0/1/2: {v}");
+                }
+                for year in trainer.years.iter_mut() {
+                    year.config.reserve_gain_mode = mode;
                 }
             } else {
                 anyhow::bail!("未知 token: {token}（完整: {tokens}）");
@@ -1852,6 +1933,24 @@ impl RecommendedRamenTrainer {
             local.friend_rest_max_special = 4;
             local.deadline_urgency_scale = 0.0;
             local.dynamic_special_targets = true;
+            // 评分换 PT（玩家可调，见 GameConfig::ramen_pt_sacrifice_score 标定表）：
+            // 只影响"已满位 + 有彩圈"训练的 PT 定价（未满位/比赛/事件不变）——
+            // 实测 PT 产出由彩圈主导（0 圈≈40 / ≥1 圈 267-340），有彩圈已满位是
+            // 终盘唯一值得权衡的"纯 PT"来源；无彩圈已满位（PT≈40 且属性 0）恒为
+            // 最差选择，固定压到 16。映射分段来自 7 build×100 局实测：
+            //   0 → 定价 36（评分峰值 65266）；≤60 → 44；≤160 → 52；其余 → 64（PT 峰值）。
+            let sacrifice = global!(GAMECONFIG).ramen_pt_sacrifice_score;
+            let shining_pt_rate = if sacrifice <= 0.0 {
+                36.0
+            } else if sacrifice <= 60.0 {
+                44.0
+            } else if sacrifice <= 160.0 {
+                52.0
+            } else {
+                64.0
+            };
+            policy.pt_tradeoff_shining = shining_pt_rate;
+            policy.pt_tradeoff = 16.0;
             LocalRamenTrainer::with_configs(policy, local)
         }
 

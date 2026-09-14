@@ -56,6 +56,37 @@ pub struct RamenPolicyConfig {
     pub status_rate: f32,
     /// PT→评分折算（默认与 `pt_score_rate` 同量级）
     pub pt_rate: f32,
+    /// 已满位训练候选的 PT 折算价（评分换PT系数，主位无剩余空间时生效）。
+    ///
+    /// 普通回合训练主属性已满时 `status_gain` 截断为 0，只剩 PT 收益（超级拉面
+    /// 峰值可到 250-350 PT）。策略默认仍用 `pt_rate` 折算，会把 PT 高估约 32 倍
+    /// （策略 pt_rate=64 vs 终局 `pt_score_rate`=2.0），诱使策略在终盘反复练已满位
+    /// 拿「看起来值钱、实际亏分」的 PT（A/B/C 修复全降分的根因）。
+    ///
+    /// 本系数把已满位训练候选的 PT 按独立价折算：`0.0` = 关闭（用 `pt_rate`），
+    /// 正数 = 按此值折算（建议量级 2~8，对齐终局真实收益）。配合
+    /// [`Self::pt_tradeoff_super`] 对超级拉面（72-77）分级。配置 token `trdN` =
+    /// N/100（`trd200` 对应 2.0）。
+    pub pt_tradeoff: f32,
+    /// 已满位训练在**有彩圈**（友情训练，`shining > 0`）时的 PT 折算价。
+    ///
+    /// 依据（超级拉面实测 90 个候选）：PT 产出由彩圈数主导——0 彩圈均值 40、
+    /// 1 彩圈 267、2 彩圈 284、3 彩圈 340；而 PT 产出与属性是否已满几乎无关
+    /// （已满 232 vs 未满 225）。因此"已满位"不是一个同质群体：
+    /// - 高彩圈已满位：PT 真实产出高，定价过低会白丢可得的 PT；
+    /// - 无彩圈已满位：PT 仅 40 上下且属性为 0，是最差选择，应重压。
+    ///
+    /// `0.0` = 关闭分级（一律用 [`Self::pt_tradeoff`]）。配置 token `trdshN`。
+    pub pt_tradeoff_shining: f32,
+    /// 超级拉面回合（72-77）的已满位 PT 折算价。
+    ///
+    /// 超级拉面训练强度全局峰值（finals youqing=150 / pt_bonus=100 → PT 上限
+    /// 350），已满位也能稳定拿高额 PT（实测均值 241）。若玩家认可"超拉面拿
+    /// 满位纯 PT"是合理策略，这里可给更高价；若认为应把超拉面留给未满位
+    /// 双丰收（属性+PT），则与普通回合同价甚至更低。
+    ///
+    /// `0.0` = 关闭（与普通回合一样回落 `pt_rate` 口径）。配置 token `trdsN`。
+    pub pt_tradeoff_super: f32,
     /// 主属性快满时"残余收益"折扣强度（方案 E，0~1）。
     ///
     /// 配卡决定训练效率（3 速 build 速位每次 +90 天然更快接近上限），凸评分曲线
@@ -175,6 +206,9 @@ impl Default for RamenPolicyConfig {
             motivation_outing: 3,
             status_rate: 1.0,
             pt_rate: 8.0,
+            pt_tradeoff: 0.0,
+            pt_tradeoff_shining: 0.0,
+            pt_tradeoff_super: 0.0,
             cap_discount_weight: 0.0,
             failure_penalty: 60.0,
             effective_ramen_failure: true,
@@ -807,10 +841,30 @@ impl RamenPolicy {
         let pt_gain = value.status_pt[5] as f32;
         // 注：`status_gain` 内部已乘 status_rate，此处不可再乘（否则成平方）
         let attr = attr_gain;
-        // PT 不打折：PT 是独立追求目标（终局 skill_pt 直接计分），
-        // 为拿 PT 继续训练已满位是正当行为；打折只会扭曲"PT vs 属性"的取舍
-        // （训练等级成长等跨回合前瞻留给 MCTS 搜索，单点启发式承认上限）。
-        let pt = pt_gain * self.config.pt_rate;
+        // 已满位训练的 PT 按独立折算价（评分换PT系数）：主位剩余空间为 0 时
+        // 该训练的主属性收益被截断（status_gain=0），只剩副属性+PT；此时 PT 的
+        // 策略价值不再用 pt_rate（会高估约 32 倍），而用可调的 pt_tradeoff /
+        // pt_tradeoff_super（超级拉面分级）。未满位训练仍用 pt_rate 全额折算。
+        // 0.0 = 关闭（保留旧口径，行为逐位不变）。
+        let cap_left_main = (game.uma().five_status_limit[train] - game.uma().five_status[train]).max(0);
+        let main_full = inc_main > 0 && cap_left_main == 0;
+        let eff_pt_rate = if main_full && self.config.pt_tradeoff > 0.0 {
+            // 彩圈分级：有彩圈（友情训练）的已满位 PT 真实产出高（实测 267-340），
+            // 用 pt_tradeoff_shining 定价；无彩圈（PT≈40）用 pt_tradeoff 重压。
+            let base = if eval.shining > 0 && self.config.pt_tradeoff_shining > 0.0 {
+                self.config.pt_tradeoff_shining
+            } else {
+                self.config.pt_tradeoff
+            };
+            if self.config.pt_tradeoff_super > 0.0 && game.is_super_ramen_turn() {
+                self.config.pt_tradeoff_super
+            } else {
+                base
+            }
+        } else {
+            self.config.pt_rate
+        };
+        let pt = pt_gain * eff_pt_rate;
         // 体力成本（消耗按 train_vital_value 折算）
         let vital_cost = (-value.vital).max(0) as f32 * self.config.train_vital_value;
         let shining = eval.shining as f32 * self.config.shining_bonus;

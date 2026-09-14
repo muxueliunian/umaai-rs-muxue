@@ -38,7 +38,7 @@ use umasim::{
     output::decision_log::DecisionLogRow,
     search::SearchConfig,
     trainer::{
-        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection, RandomTrainer, RecommendedRamenTrainer
+        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RandomTrainer, RecommendedRamenTrainer
     },
     utils::{get_workspace_root, load_game_config}
 };
@@ -84,9 +84,11 @@ struct BenchConfig {
     /// mcts 专用：是否用 UCB 分配预算（false 为均匀分配）
     #[serde(default = "default_search_ucb")]
     search_ucb: bool,
-    /// mcts 专用：取分口径 "score" | "pt"
-    #[serde(default = "default_search_selection")]
-    search_selection: String,
+    /// handwritten 专用：策略变体 token 串（`RecommendedRamenTrainer::with_tokens`），
+    /// 如 `rgn1`（reserve 截断增量）/ `rgn2`（满位豁免）/ `reserve20`（调低预留）。
+    /// 空 = 正式 preset。实验用，防止把手写参数混入 preset。
+    #[serde(default)]
+    tokens: String,
     /// mcts 专用：激进度上限
     ///
     /// 缺省 **0.0**（取普通均值）而非 `SearchConfig::default()` 的 50.0：
@@ -118,11 +120,6 @@ fn default_search_ucb() -> bool {
     false
 }
 
-/// `search_selection` 缺省值
-fn default_search_selection() -> String {
-    "score".to_string()
-}
-
 /// 内置默认值（与 bench_config.toml 保持一致；文件缺失时使用）
 impl Default for BenchConfig {
     fn default() -> Self {
@@ -139,7 +136,7 @@ impl Default for BenchConfig {
             search_n: default_search_n(),
             search_stages: default_search_stages(),
             search_ucb: default_search_ucb(),
-            search_selection: default_search_selection(),
+            tokens: String::new(),
             radical_factor_max: 0.0
         }
     }
@@ -158,18 +155,17 @@ fn apply_cli(mut cfg: BenchConfig) -> Result<BenchConfig> {
             Arg::Long("search-n") => cfg.search_n = bench::parse_value(&mut parser, "search-n")?,
             Arg::Long("search-stages") => cfg.search_stages = bench::parse_value(&mut parser, "search-stages")?,
             Arg::Long("search-ucb") => cfg.search_ucb = bench::parse_value(&mut parser, "search-ucb")?,
-            Arg::Long("search-selection") => {
-                cfg.search_selection = bench::parse_value(&mut parser, "search-selection")?
-            }
             Arg::Long("radical-factor") => {
                 cfg.radical_factor_max = bench::parse_value(&mut parser, "radical-factor")?
             }
+            Arg::Long("tokens") => cfg.tokens = bench::parse_value(&mut parser, "tokens")?,
             Arg::Long("help") | Arg::Short('h') => {
                 println!(
                     "用法: bench_base [--runs N] [--seed S] [--log] [--out DIR]
 \n                     	[--trainer random|handwritten|mcts]
+\n                     	handwritten 专用: [--tokens TOKEN串]（如 --tokens rgn1 / rgn2 / reserve20）
 \n                     	mcts 专用: [--search-n N] [--search-stages train,ramen,...] [--search-ucb]
-\n                     	           [--search-selection score|pt] [--radical-factor F] [--search-ucb true|false]\n\
+\n                     	           [--radical-factor F] [--search-ucb true|false]\n\
                      缺省参数读取 workspace 根 bench_config.toml"
                 );
                 std::process::exit(0);
@@ -254,22 +250,18 @@ fn main() -> Result<()> {
     };
 
     println!(
-        "===== bench_base: uma={} {} runs={} base_seed={} trainer={} builds={} =====",
+        "===== bench_base: uma={} {} runs={} base_seed={} trainer={} tokens={:?} builds={} =====",
         cfg.uma,
         uma_name,
         cfg.runs,
         cfg.seed,
         cfg.trainer,
+        cfg.tokens,
         builds.len()
     );
 
     // mcts 参数提前解析：跑批循环里再报错等于跑了一半才发现参数拼错
     let search_stages = RamenSearchStages::parse(&cfg.search_stages)?;
-    let search_selection = match cfg.search_selection.as_str() {
-        "score" => RamenSelection::Score,
-        "pt" => RamenSelection::Pt,
-        other => anyhow::bail!("未知 search_selection: {other}（可选 score / pt）")
-    };
     let search_config = SearchConfig::new_game_config(&game_config)
         .with_search_n(cfg.search_n)
         .with_max_depth(0) // 拉面无 leaf 估值器，只能跑到终局
@@ -277,8 +269,8 @@ fn main() -> Result<()> {
         .with_radical_factor_max(cfg.radical_factor_max);
     if cfg.trainer == "mcts" {
         println!(
-            "  mcts 参数: search_n={}/候选 stages={} ucb={} selection={} radical_factor_max={} threads={} group_size={} expected_stdev={}",
-            cfg.search_n, cfg.search_stages, cfg.search_ucb, cfg.search_selection, cfg.radical_factor_max,
+            "  mcts 参数: search_n={}/候选 stages={} ucb={} radical_factor_max={} threads={} group_size={} expected_stdev={}",
+            cfg.search_n, cfg.search_stages, cfg.search_ucb, cfg.radical_factor_max,
             game_config.collector.threads, search_config.search_group_size, search_config.expected_search_stdev
         );
     }
@@ -311,14 +303,17 @@ fn main() -> Result<()> {
                     (outcome, trainer.take_records())
                 }
                 "handwritten" => {
-                    let trainer = LoggingTrainer::new(RecommendedRamenTrainer::new(), log_seed);
+                    let trainer = if cfg.tokens.is_empty() {
+                        LoggingTrainer::new(RecommendedRamenTrainer::new(), log_seed)
+                    } else {
+                        LoggingTrainer::new(RecommendedRamenTrainer::with_tokens(&cfg.tokens)?, log_seed)
+                    };
                     let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())
                 }
                 "mcts" => {
                     let mcts = RamenMctsTrainer::new(search_config.clone())
-                        .with_stages(search_stages)
-                        .with_selection(search_selection);
+                        .with_stages(search_stages);
                     let trainer = LoggingTrainer::new(mcts, log_seed);
                     let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())

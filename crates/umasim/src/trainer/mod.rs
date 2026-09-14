@@ -31,7 +31,7 @@ pub use local_ramen_trainer::{LocalRamenTrainer, RecommendedRamenTrainer};
 pub use logging_trainer::LoggingTrainer;
 pub use mcts_trainer::MctsTrainer;
 pub use ramen_handwritten_trainer::RamenHandwrittenTrainer;
-pub use ramen_mcts_trainer::{RamenMctsTrainer, RamenSearchStages, RamenSelection};
+pub use ramen_mcts_trainer::{RamenMctsTrainer, RamenSearchStages};
 #[cfg(feature = "onnx")]
 pub use ramen_nn_trainer::{RamenNnTrainer, SpecialSelectMode};
 // 只有网络策略用得上它，故 re-export 跟着 onnx 走

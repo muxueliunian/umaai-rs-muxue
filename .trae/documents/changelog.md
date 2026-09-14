@@ -2,6 +2,15 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-14
+- **拉面手写策略评分换PT参数**：新增可调已满位训练 PT 折算价（`pt_tradeoff` 普通档 / `pt_tradeoff_shining` 有彩圈分级 / `pt_tradeoff_super` 超拉面档）——训练位主属性已满时属性收益为 0、只剩 PT，策略按独立价重估该训练候选，避免按 `pt_rate` 高估后终盘贪练已满位
+- **评分换PT玩家配置**：新增顶层可调字段 `ramen_pt_sacrifice_score`（为多拿总 PT 最多愿意牺牲的总评分，默认 0 = 评分优先），按实测标定分段映射到已满位有彩圈定价（0→36/≤60→44/≤160→52/其余→64），`default_config.toml` 注明范围与对照表、`game_config.toml` 顶层可覆盖
+- **实测调优结论**：彩圈分级实验确认 PT 产出由彩圈数主导（0圈≈40 / ≥1圈267-340）且与属性是否满无关（已满232 vs 未满225）；最优档=有彩圈定价36，100局 7 build 平均 +533 分、skill_pt -90；定价>64 会导致评分与 PT 双降
+- **策略变体跑批入口**：`bench_base --tokens` 支持 `RecommendedRamenTrainer::with_tokens` 变体（trd/trds/trdsh/ptrate 等），实验不混入 preset
+- **MCTS 评分换PT公式重设计**：`RamenGame::search_score()` 覆盖 trait 默认，`score_pt` 基于 `score_parts()` 使用干净公式 `skill_score + skill_pt × 2.0 × pt_favor_rate + five_status`（无 ×0.37 缩放），`pt_favor_rate=1.0` 等价 `calc_score()`；`pt_favor_rate` 代码默认 8.0→1.0
+- **移除 RamenSelection 枚举**：ramen MCTS 统一走 `best_action_pt_idx()`（score_pt 口径），删除 `bench_base --search-selection` CLI、`RamenMctsTrainer::with_selection()`、`RamenSelection` re-export
+- **友人卡 rank=0（未突破）合法化**：`newgame` 校验补 rank≤4 范围检查，修正测试断言（rank=0 应合法、rank=5-9 非法）
+
 ## 2026-09-13
 - **拉面链式决策 JSON 输出顺序修正**：链式决策#1（不吃面 / 训练 turn1）在 `compute_next_step` 之前先 emit，下游先收决策结果再收"计算中"通知
 - **拉面 RamenSelect 决策输出补齐**：吃面 / 不吃面在合并搜索路径下均合成 `ramen_select` 决策信息下发（不吃面同时作为链式决策#1 单独输出）
