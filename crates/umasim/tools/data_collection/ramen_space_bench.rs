@@ -54,7 +54,7 @@ use umasim::{
     bench,
     collector::{compute_file_signature, fnv1a64, try_get_git_commit},
     gamedata::{GameConfig, RamenRegionStrategy, init_global_with_config},
-    sampler::{DeckPlan, SamplingSpace, gen1_inherit, space_from_cli},
+    sampler::{DeckPlan, SamplingSpace, gen1_inherit, space_from_cli, space_version_by_name},
     search::SearchConfig,
     trainer::{
         LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection, RandomTrainer, RecommendedRamenTrainer
@@ -155,6 +155,28 @@ struct BenchArgs {
     #[arg(long)]
     extra_card: Vec<u32>,
 
+    /// 具名采样空间版本（如 `gen2_v1`）；与 `--shape` / `--extra-card` 互斥
+    ///
+    /// 第二代教师数据就是在具名版本上采的，验收面板必须能点名同一个空间，
+    /// 否则只能靠「构成 + 追加卡」去凑，凑出来的计划表顺序不保证一致。
+    #[arg(long)]
+    space_version: Option<String>,
+
+    /// 只跑清单里的计划：JSON 的 `plans` 数组，每项带 7 个完整字段 `fields`
+    ///
+    /// 字段即 `[马娘, 六张卡升序]`，与 `combo_fields.npy` 同一口径。匹配**逐字段**
+    /// 进行，不算任何指纹；清单里有一项在空间里找不到就报错。命中后保留计划在
+    /// 空间中的**原始下标**，因此逐计划的随机世界与全量跑完全一致。
+    #[arg(long)]
+    plans_file: Option<PathBuf>,
+
+    /// 不计算任何内容指纹：实验身份改为原样记录生效配置与计划清单
+    ///
+    /// 用于「禁止哈希、身份一律逐字段/逐字节核对」的口径。关掉之后 sidecar 里
+    /// 存的是完整字段本身，比指纹更可核，代价是文件变大。
+    #[arg(long)]
+    no_fingerprint: bool,
+
     /// `--trainer search` 的每候选搜索次数；教师数据用的是 512
     #[arg(long, default_value_t = 512)]
     search_n: usize,
@@ -205,8 +227,9 @@ fn parse_special_mode(s: &str) -> Result<SpecialSelectMode> {
 struct ModelIdentity {
     /// 模型路径（原样保留命令行给的写法）
     path: String,
-    /// 文件内容的 FNV-1a 64 指纹（全仓库统一口径，见 `collector::fnv1a64`）
-    hash_fnv1a64: String
+    /// 文件内容的 FNV-1a 64 指纹（全仓库统一口径，见 `collector::fnv1a64`）；
+    /// `--no-fingerprint` 下为 `None`
+    hash_fnv1a64: Option<String>
 }
 
 impl ModelIdentity {
@@ -215,24 +238,36 @@ impl ModelIdentity {
     /// # 错误
     ///
     /// 文件不存在或读取失败时报错——静默跳过哈希会让实验身份看着完整、实则不可核。
-    fn of(path: &Path) -> Result<Self> {
+    fn of(path: &Path, fingerprint: bool) -> Result<Self> {
+        if !fingerprint {
+            // `--no-fingerprint`：只记路径。文件是不是想要的那一个，由调用方在
+            // 外部逐字节比对，而不是在这里算一个替代指纹。
+            ensure!(path.is_file(), "模型文件不存在: {}", path.display());
+            return Ok(Self {
+                path: path.to_string_lossy().to_string(),
+                hash_fnv1a64: None
+            });
+        }
         let sig = compute_file_signature(path, true)?;
         let hash = sig
             .hash_fnv1a64
             .ok_or_else(|| anyhow::anyhow!("未算出模型哈希: {}", path.display()))?;
         Ok(Self {
             path: path.to_string_lossy().to_string(),
-            hash_fnv1a64: hash
+            hash_fnv1a64: Some(hash)
         })
     }
 
-    /// 上屏用的短写法：文件名 + 哈希前 8 位
+    /// 上屏用的短写法：文件名，带指纹时再缀哈希前 8 位
     fn short(&self) -> String {
         let name = Path::new(&self.path)
             .file_name()
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_else(|| self.path.clone());
-        format!("{name}@{}", &self.hash_fnv1a64[..8])
+        match &self.hash_fnv1a64 {
+            Some(h) => format!("{name}@{}", &h[..8]),
+            None => name
+        }
     }
 }
 
@@ -258,12 +293,13 @@ fn run_identity(args: &BenchArgs, game_config: &GameConfig, plan_indices: &[usiz
     // 网络策略（--trainer nn / --rollout-model）共用同一套推理开关，
     // 故两处都要记：只记其中一处会让另一处的对照组变成静默的实验组
     let race_shield = !args.no_race_shield;
+    let fingerprint = !args.no_fingerprint;
     let policy_model = match args.model.as_ref() {
-        Some(p) => Some(ModelIdentity::of(p)?),
+        Some(p) => Some(ModelIdentity::of(p, fingerprint)?),
         None => None
     };
     let rollout_model = match args.rollout_model.as_ref() {
-        Some(p) => Some(ModelIdentity::of(p)?),
+        Some(p) => Some(ModelIdentity::of(p, fingerprint)?),
         None => None
     };
 
@@ -317,8 +353,10 @@ fn run_identity(args: &BenchArgs, game_config: &GameConfig, plan_indices: &[usiz
             "strict_rollout": rollout_model.is_some()
         },
         "space": {
+            "version": args.space_version,
             "shape": args.shape,
             "extra_card": args.extra_card,
+            "plans_file": args.plans_file.as_ref().map(|p| p.to_string_lossy().to_string()),
             "ramen_region_strategy": "all"
         },
         "worlds": {
@@ -330,16 +368,20 @@ fn run_identity(args: &BenchArgs, game_config: &GameConfig, plan_indices: &[usiz
         },
         "git_commit": try_get_git_commit(Path::new(".")),
         // 同一个 commit **不代表**同一个程序：工作树里未提交的改动同样改变结果。
-        "source_inputs_fnv1a64": source_inputs_fingerprint()?,
+        "source_inputs_fnv1a64": if fingerprint { serde_json::json!(source_inputs_fingerprint()?) } else { serde_json::Value::Null },
         // 生效配置而非 toml 文件：main 里会把 `ramen_region_strategy` 强制改成 All，
         // 光记文件哈希会把「改过的配置」记成「文件里写的配置」。
-        "game_config_fnv1a64": fingerprint_json(&serde_json::to_value(game_config)?),
+        // `--no-fingerprint` 下原样落生效配置本身，比指纹更可核。
+        "game_config": if fingerprint { serde_json::Value::Null } else { serde_json::to_value(game_config)? },
+        "game_config_fnv1a64": if fingerprint { serde_json::json!(fingerprint_json(&serde_json::to_value(game_config)?)) } else { serde_json::Value::Null },
         // 生效配置之外的游戏数据（卡库 / 事件库 / 剧本表）同样决定结果
-        "game_data_fnv1a64": game_data_fingerprint()?,
-        // 实际参与本次跑的计划：只记条数不够，抽样步长相同而空间不同就会撞车
+        "game_data_fnv1a64": if fingerprint { serde_json::json!(game_data_fingerprint()?) } else { serde_json::Value::Null },
+        // 实际参与本次跑的计划：只记条数不够，抽样步长相同而空间不同就会撞车。
+        // 不算指纹时原样落下标全表——它本来就是可直接逐值比较的字段。
         "plan_selection": {
             "count": plan_indices.len(),
-            "original_indices_fnv1a64": fingerprint_json(&serde_json::json!(plan_indices))
+            "original_indices_fnv1a64": if fingerprint { serde_json::json!(fingerprint_json(&serde_json::json!(plan_indices))) } else { serde_json::Value::Null },
+            "original_indices": if fingerprint { serde_json::Value::Null } else { serde_json::json!(plan_indices) }
         }
     });
     Ok(RunIdentity { label, json })
@@ -534,7 +576,77 @@ impl IdentityGate {
 ///
 /// 见 [`space_from_cli`]。
 fn build_space(args: &BenchArgs) -> Result<SamplingSpace> {
-    space_from_cli(args.shape.as_deref(), &args.extra_card)
+    let Some(name) = args.space_version.as_deref() else {
+        return space_from_cli(args.shape.as_deref(), &args.extra_card);
+    };
+    ensure!(
+        args.shape.is_none() && args.extra_card.is_empty(),
+        "--space-version 与 --shape / --extra-card 互斥：具名版本已经冻结了马娘、卡池与构成"
+    );
+    SamplingSpace::from_version(space_version_by_name(name)?)
+}
+
+/// 一个计划的完整字段：马娘 + 升序六张卡，与 `combo_fields.npy` 同一口径
+fn plan_fields(plan: &DeckPlan) -> [u32; 7] {
+    let mut row = [0u32; 7];
+    row[0] = plan.uma;
+    let mut cards = plan.deck;
+    cards.sort_unstable();
+    row[1..].copy_from_slice(&cards);
+    row
+}
+
+/// 按清单里的完整字段挑出计划下标
+///
+/// 返回的下标按空间原顺序升序排列，**保留原始下标**——逐计划的基种子是
+/// `seed + plan_index * 1000003`，重新编号会换掉整批随机世界。
+///
+/// # 错误
+///
+/// 清单读不出、某项字段不是 7 个、清单里的组合在空间里找不到，或清单自身有重复。
+fn select_plans_from_file(space: &SamplingSpace, path: &Path) -> Result<Vec<usize>> {
+    let text = std::fs::read_to_string(path).with_context(|| format!("读不出计划清单 {}", path.display()))?;
+    let doc: serde_json::Value = serde_json::from_str(&text).with_context(|| format!("{} 不是合法 JSON", path.display()))?;
+    let rows = doc
+        .get("plans")
+        .unwrap_or(&doc)
+        .as_array()
+        .ok_or_else(|| anyhow!("{} 里没有 plans 数组", path.display()))?;
+    let mut by_fields: BTreeMap<[u32; 7], usize> = BTreeMap::new();
+    for (i, plan) in space.plans().iter().enumerate() {
+        if by_fields.insert(plan_fields(plan), i).is_some() {
+            bail!("采样空间里有两个计划的完整字段相同，无法按字段点名");
+        }
+    }
+    let mut picked: Vec<usize> = Vec::with_capacity(rows.len());
+    for (n, row) in rows.iter().enumerate() {
+        let values = row
+            .get("fields")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| anyhow!("{} 第 {n} 项缺 fields", path.display()))?;
+        ensure!(values.len() == 7, "{} 第 {n} 项的 fields 不是 7 个", path.display());
+        let mut key = [0u32; 7];
+        for (slot, value) in key.iter_mut().zip(values) {
+            *slot = u32::try_from(value.as_u64().ok_or_else(|| anyhow!("{} 第 {n} 项的 fields 含非整数", path.display()))?)?;
+        }
+        let index = *by_fields
+            .get(&key)
+            .ok_or_else(|| anyhow!("{} 第 {n} 项的组合 {key:?} 不在本采样空间里", path.display()))?;
+        // 清单若自带 `plan` 下标，一并逐值核对：对不上说明清单产自另一个空间
+        if let Some(recorded) = row.get("plan").and_then(serde_json::Value::as_u64) {
+            ensure!(
+                recorded as usize == index,
+                "{} 第 {n} 项记的下标 {recorded} 与本空间的 {index} 不同",
+                path.display()
+            );
+        }
+        picked.push(index);
+    }
+    let before = picked.len();
+    picked.sort_unstable();
+    picked.dedup();
+    ensure!(picked.len() == before, "{} 里有重复组合", path.display());
+    Ok(picked)
 }
 
 /// 一组分数的汇总统计
@@ -930,11 +1042,18 @@ fn main() -> Result<()> {
     ensure!(args.plan_stride >= 1, "--plan-stride 必须 >= 1（当前 {}）", args.plan_stride);
     // 保留**原始下标**：逐计划的基种子是 `seed + plan_index * 1000003`，
     // 抽样后重新编号会换掉整批随机世界，抽样跑与全量跑就不再可配对。
-    let mut plans: Vec<(usize, &DeckPlan)> = all_plans
-        .iter()
-        .enumerate()
-        .step_by(args.plan_stride)
-        .collect();
+    let mut plans: Vec<(usize, &DeckPlan)> = match args.plans_file.as_ref() {
+        // 点名清单与抽样步长互斥：两者都在挑计划，同时给会让「实际跑了哪些」
+        // 变成两个规则的交集，出了问题很难回溯。
+        Some(path) => {
+            ensure!(args.plan_stride == 1, "--plans-file 与 --plan-stride 互斥");
+            select_plans_from_file(&space, path)?
+                .into_iter()
+                .map(|i| (i, &all_plans[i]))
+                .collect()
+        }
+        None => all_plans.iter().enumerate().step_by(args.plan_stride).collect()
+    };
     if let Some(n) = args.plans {
         plans.truncate(n);
     }
@@ -952,12 +1071,19 @@ fn main() -> Result<()> {
     );
 
     println!("  基种子 {}", args.seed);
-    match &args.shape {
-        None => println!("  空间   第一代（与教师数据同分布）"),
-        Some(text) => println!(
+    match (&args.space_version, &args.shape) {
+        (Some(name), _) => println!("  空间   具名版本 {name}，共 {} 个计划", all_plans.len()),
+        (None, None) => println!("  空间   第一代（与教师数据同分布）"),
+        (None, Some(text)) => println!(
             "  空间   ❗分布外：构成 {}，追加卡 {:?}——分数不可与默认口径直接比较",
             text, args.extra_card
         )
+    }
+    if let Some(path) = &args.plans_file {
+        println!("  计划清单 {}（逐字段点名 {} 个，保留原始下标）", path.display(), plans.len());
+    }
+    if args.no_fingerprint {
+        println!("  ❗已关闭全部内容指纹：实验身份改记生效配置与计划下标原文");
     }
 
     // 逐局落盘：只在给了 --csv 时启用（没有落盘目标就没有续跑的意义）。
