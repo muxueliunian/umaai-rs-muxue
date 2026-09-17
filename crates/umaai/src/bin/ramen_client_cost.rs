@@ -62,6 +62,7 @@ use umasim::{
         ramen::{RamenGame, RamenStage}
     },
     gamedata::init_global_with_config,
+    output::{DecisionSink, EmptySink},
     search::{SearchConfig, SearchProbe},
     trainer::{DecisionPath, DecisionProbe, RamenMctsTrainer, RamenSearchStages, RecommendedRamenTrainer},
     utils::{get_workspace_root, init_logger_stdout, load_game_config}
@@ -240,8 +241,11 @@ fn measure_once(
     let mut game = root.clone();
     let mut rng = StdRng::seed_from_u64(rng_seed);
     let noop = |_: &str| {};
+    // 本工具只测成本，不对外发决策：链式中间项 emit 到空 sink（上游 e5cdd64 起
+    // `calc_ramen_training` 在函数内部 emit 中间决策，必须给它一个 sink）。
+    let sink: Arc<dyn DecisionSink> = Arc::new(EmptySink);
     let t0 = Instant::now();
-    let chain_out = calc_ramen_training(trainer, &mut game, &mut rng, true, reason_slot, &noop)?;
+    let chain_out = calc_ramen_training(trainer, &mut game, &mut rng, true, reason_slot, &noop, &sink)?;
     let chain = t0.elapsed();
 
     let decisions = probes

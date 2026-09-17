@@ -32,6 +32,13 @@
 //! 地区阶段候选数恒 >1（第 1/2 年 10，第 3 年 `all` 下 120），因此
 //! **每局推理数恰好 = 3**——这就是「搜索内部没有推理」的直接证据。
 //!
+//! ❗**决策逻辑与主程序同源**：`mcts+region_nn` 用的就是主程序
+//! （`game_config.toml` 里 `ramen_region_policy = "nn"`）那一份共享实现
+//! [`umaai::region::RegionNnTrainer`]，本工具只额外挂一个观测钩子
+//! （[`RegionObsRecorder`]）记录 `regions.csv`。两边**不存在**两份会逐渐分叉的接管逻辑。
+//! 区别只在模型来源：本工具走 `--model` 命令行参数（保留一次跑多个模型的能力），
+//! 主程序走配置项 `ramen_region_model_path`。
+//!
 //! `regions.csv` 逐次记录实际地区选择；`mcts+region_nn` 还用一个**独立的**
 //! `RecommendedRamenTrainer` 在同一局面上算出「手写本来会选什么」作为观测，
 //! 该调用用 `rng` 的克隆，既不推进外层随机流，也不触碰参与决策的训练员状态。
@@ -99,32 +106,28 @@ use std::{
 
 use anyhow::{Context, Result, anyhow, bail};
 use rayon::{ThreadPoolBuilder, current_num_threads};
+use serde::Deserialize;
 use umasim::{
     bench,
     game::InheritInfo,
     gamedata::{GameConfig, init_global_with_config, ramen::RAMENDATA},
     search::{SearchConfig, SearchProbe},
-    trainer::{LoggingTrainer, RamenMctsTrainer, RamenSearchStages},
+    trainer::{LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RecommendedRamenTrainer},
     utils::{Array6, get_workspace_root, init_logger_stdout, load_game_config}
 };
 #[cfg(feature = "onnx")]
-use std::sync::atomic::{AtomicBool, Ordering};
-
-#[cfg(feature = "onnx")]
 use rand::prelude::StdRng;
+use umaai::region::check_region_nn_applicable;
+#[cfg(feature = "onnx")]
+use umaai::region::{RegionDecisionObserver, RegionNnTrainer};
 #[cfg(feature = "onnx")]
 use umasim::{
     game::{
         Game,
         Trainer,
-        ramen::{Operation, RamenAction, RamenGame, RamenStage, RamenState}
+        ramen::{RamenAction, RamenGame, RamenState}
     },
-    gamedata::{EventChoice, EventData},
-    output::DecisionInfo,
-    trainer::{
-        RamenNnTrainer, RecommendedRamenTrainer, SpecialSelectMode,
-        ramen_handwritten_trainer::ramen_effective_stage, infer_request_count
-    }
+    trainer::{RamenNnTrainer, SpecialSelectMode, infer_request_count}
 };
 
 /// 本进程实际执行的决策策略
@@ -140,7 +143,14 @@ enum Policy {
     ///
     /// 其余一切（Train / RamenSelect 搜索、SpecialSelect 缓存、事件选项、
     /// **搜索内部模拟的地区选择**）与 [`Policy::Mcts`] 完全相同。
-    MctsRegionNn
+    MctsRegionNn,
+    /// `RecommendedRamenTrainer`：纯手写推荐策略，不跑搜索也不加载网络
+    ///
+    /// 它就是 [`Policy::Mcts`] 的 rollout 基策与地区 fallback 本体。存在的理由是
+    /// **可行性筛查**：整局只有手写决策，一局几十毫秒，可以在正式实验前把
+    /// 「这个马娘能不能完整育成」跑出来，而不必花 20 s/局的搜索预算。
+    /// 它**不是**任何一臂的实验策略。
+    Handwritten
 }
 
 impl Policy {
@@ -149,7 +159,8 @@ impl Policy {
         match self {
             Self::Mcts => "mcts",
             Self::Nn => "nn",
-            Self::MctsRegionNn => "mcts+region_nn"
+            Self::MctsRegionNn => "mcts+region_nn",
+            Self::Handwritten => "handwritten"
         }
     }
 
@@ -161,6 +172,7 @@ impl Policy {
             Self::MctsRegionNn => {
                 "RamenMctsTrainer + 仅外层 RegionSelect 由 RamenNnTrainer 决策（搜索内部地区仍手写）"
             }
+            Self::Handwritten => "RecommendedRamenTrainer（纯手写推荐策略，不跑搜索、不加载 NN）"
         }
     }
 
@@ -175,17 +187,44 @@ impl Policy {
     }
 }
 
+/// 按臂检查**生效配置**是否适用（地区 NN 臂与客户端共用同一套判断）
+///
+/// review#3：`mcts+region_nn` 此前直接构造 `RegionNnTrainer`，绕开了客户端的
+/// `fixed` / 地区搜索开关冲突检查。结果是同一份 `game_config.toml`，客户端启动即
+/// 拒绝、benchmark 却照跑，还会按「每局恒 3 次推理」的前提去读结果——而
+/// `ramen_region_strategy = "fixed"` 下第 3 年只有 1 个候选，实际只会推理 2 次。
+///
+/// 只有 `mcts+region_nn` 受地区专用限制：`mcts` / `nn` / `handwritten` 三臂
+/// 与地区接管无关，一律放行。
+///
+/// 模型路径**不在**这里检查：benchmark 的模型来自 `--model`（保留一次跑多个模型的
+/// 能力），不要求用户去配 `ramen_region_model_path`；这正是本函数调
+/// [`check_region_nn_applicable`] 而不是 `validate_region_policy` 的原因。
+///
+/// ❗`cfg` / `stages` 必须是**命令行覆盖之后**的生效值。
+///
+/// # 错误
+///
+/// 地区 NN 臂下配置不适用时返回带修复建议的错误。
+fn check_arm_config(policy: Policy, cfg: &GameConfig, stages: RamenSearchStages) -> Result<()> {
+    match policy {
+        Policy::MctsRegionNn => check_region_nn_applicable(cfg, stages),
+        Policy::Mcts | Policy::Nn | Policy::Handwritten => Ok(())
+    }
+}
+
 /// 解析 `--trainer`
 ///
 /// # 错误
 ///
-/// 取值不是 `mcts` / `nn` / `mcts+region_nn` 时报错——**不做任何默认回退**。
+/// 取值不是 `mcts` / `nn` / `mcts+region_nn` / `handwritten` 时报错——**不做任何默认回退**。
 fn parse_policy(s: &str) -> Result<Policy> {
     match s {
         "mcts" => Ok(Policy::Mcts),
         "nn" => Ok(Policy::Nn),
         "mcts+region_nn" => Ok(Policy::MctsRegionNn),
-        other => bail!("未知 --trainer {other:?}（可选 mcts / nn / mcts+region_nn）")
+        "handwritten" => Ok(Policy::Handwritten),
+        other => bail!("未知 --trainer {other:?}（可选 mcts / nn / mcts+region_nn / handwritten）")
     }
 }
 
@@ -203,6 +242,12 @@ struct Args {
     extra_count: Option<Array6>,
     /// 覆盖合并配置的 `cards`（6 张支援卡 idrank，末位友人卡）
     cards: Option<[u32; 6]>,
+    /// 覆盖合并配置的 `uma`（马娘 gameId）
+    uma: Option<u32>,
+    /// 计划表文件：一行一个「马娘 + 六卡组 + 世界局号」，逐条各跑一局
+    plans_file: Option<PathBuf>,
+    /// 只跑计划表的 `[start, end)` 段（分块交替两臂顺序用）
+    plan_range: Option<(usize, usize)>,
     /// 覆盖合并配置的线程数
     threads: Option<usize>,
     /// 覆盖合并配置的 `mcts.search_n`（UCB 停止阈值，**不是**整次搜索总预算）
@@ -226,6 +271,9 @@ impl Default for Args {
             out: PathBuf::from("logs/client_game_bench"),
             extra_count: None,
             cards: None,
+            uma: None,
+            plans_file: None,
+            plan_range: None,
             threads: None,
             search_n: None,
             policy: Policy::Mcts,
@@ -302,6 +350,26 @@ fn parse_args() -> Result<Args> {
                 args.cards = Some(parse_cards(&need()?)?);
                 i += 2;
             }
+            "--uma" => {
+                args.uma = Some(need()?.parse()?);
+                i += 2;
+            }
+            "--plans-file" => {
+                args.plans_file = Some(PathBuf::from(need()?));
+                i += 2;
+            }
+            "--plan-range" => {
+                let start: usize = need()?.parse()?;
+                let end: usize = raw
+                    .get(i + 2)
+                    .ok_or_else(|| anyhow!("--plan-range 需要两个取值 <start> <end>"))?
+                    .parse()?;
+                if start >= end {
+                    bail!("--plan-range 需要 start < end，实得 {start} {end}");
+                }
+                args.plan_range = Some((start, end));
+                i += 3;
+            }
             "--threads" => {
                 args.threads = Some(need()?.parse()?);
                 i += 2;
@@ -345,11 +413,33 @@ fn parse_args() -> Result<Args> {
     if args.search_n == Some(0) {
         bail!("--search-n 必须 > 0");
     }
+    // 计划表模式与「单一固定组合 + 连续局号」模式互斥：两者都给会出现
+    // 「打印一套、跑另一套」的隐性错配，直接拒绝。
+    if args.plans_file.is_some() {
+        for (flag, given) in [
+            ("--cards", args.cards.is_some()),
+            ("--uma", args.uma.is_some()),
+            ("--runs", raw.iter().any(|a| a == "--runs")),
+            ("--run-offset", raw.iter().any(|a| a == "--run-offset"))
+        ] {
+            if given {
+                bail!("--plans-file 已给出每条计划的马娘/卡组/局号，不应再给 {flag}");
+            }
+        }
+    } else if args.plan_range.is_some() {
+        bail!("--plan-range 只在 --plans-file 模式下有意义");
+    }
     Ok(args)
 }
 
 /// 逐局成本与结果记录
 struct GameRecord {
+    /// 计划编号（单一组合模式下即第几局，从 0 起）
+    plan_id: usize,
+    /// 本局马娘 gameId
+    uma: u32,
+    /// 本局六张卡（`a|b|c|d|e|f`）
+    deck: String,
     /// 局号（世界标识的一半）
     run_idx: u64,
     /// 规则主种子（`bench::seeded_rngs` 派生，世界标识的另一半）
@@ -400,16 +490,17 @@ type NnSlot = Option<()>;
 ///
 /// 模型未加载、整局模拟报错（含网络推理失败）时报错。
 #[cfg(feature = "onnx")]
+#[allow(clippy::too_many_arguments)]
 fn nn_run(
-    nn: &NnSlot, cfg: &GameConfig, inherit: &InheritInfo, seed: u64, run_idx: u64, rule_master: u64,
-    cost: &mut CostStat
+    nn: &NnSlot, uma: u32, cards: &[u32; 6], inherit: &InheritInfo, seed: u64, run_idx: u64,
+    rule_master: u64, cost: &mut CostStat
 ) -> Result<bench::GameOutcome> {
     let t = nn.as_ref().ok_or_else(|| anyhow!("NN 模式但模型未加载"))?;
     // 进程内累计推理数取逐局增量
     let before = infer_request_count();
     let mut trainer = LoggingTrainer::new(t.clone(), rule_master);
     trainer.set_logging(false);
-    let out = bench::run_seeded(cfg.uma, &cfg.cards, inherit, seed, run_idx, &trainer)?;
+    let out = bench::run_seeded(uma, cards, inherit, seed, run_idx, &trainer)?;
     cost.infers = infer_request_count() - before;
     Ok(out)
 }
@@ -420,8 +511,9 @@ fn nn_run(
 ///
 /// 恒报错——该构建里没有任何网络策略可用。
 #[cfg(not(feature = "onnx"))]
+#[allow(clippy::too_many_arguments)]
 fn nn_run(
-    _nn: &NnSlot, _cfg: &GameConfig, _inherit: &InheritInfo, _seed: u64, _run_idx: u64,
+    _nn: &NnSlot, _uma: u32, _cards: &[u32; 6], _inherit: &InheritInfo, _seed: u64, _run_idx: u64,
     _rule_master: u64, _cost: &mut CostStat
 ) -> Result<bench::GameOutcome> {
     bail!("--trainer nn 需要编译 feature onnx")
@@ -438,25 +530,20 @@ fn nn_run(
 #[cfg(feature = "onnx")]
 #[allow(clippy::too_many_arguments)]
 fn region_nn_run(
-    nn: &NnSlot, mcts: RamenMctsTrainer, cfg: &GameConfig, inherit: &InheritInfo, seed: u64, run_idx: u64,
-    rule_master: u64, cost: &mut CostStat
+    nn: &NnSlot, mcts: RamenMctsTrainer, uma: u32, cards: &[u32; 6], inherit: &InheritInfo, seed: u64,
+    run_idx: u64, rule_master: u64, cost: &mut CostStat
 ) -> Result<RegionNnRun> {
     let t = nn.as_ref().ok_or_else(|| anyhow!("地区 NN 模式但模型未加载"))?;
-    let obs: Arc<Mutex<Vec<RegionObs>>> = Arc::new(Mutex::new(Vec::new()));
-    let hybrid = RegionNnTrainer {
-        mcts,
-        nn: t.clone(),
-        hand_ref: RecommendedRamenTrainer::new(),
-        obs: Arc::clone(&obs),
-        region_last: AtomicBool::new(false)
-    };
+    let recorder = Arc::new(RegionObsRecorder::new());
+    // 决策逻辑走共享实现（主程序用的是同一份），benchmark 只额外挂观测钩子
+    let hybrid = RegionNnTrainer::new(mcts, t.clone()).with_observer(Arc::clone(&recorder) as Arc<_>);
     let before = infer_request_count();
     let mut trainer = LoggingTrainer::new(hybrid, rule_master);
     trainer.set_logging(false);
-    let out = bench::run_seeded(cfg.uma, &cfg.cards, inherit, seed, run_idx, &trainer)?;
+    let out = bench::run_seeded(uma, cards, inherit, seed, run_idx, &trainer)?;
     cost.infers = infer_request_count() - before;
     // `trainer` 仍持有另一份 Arc，这里按值复制取出（`RegionObs` 是 `Copy`）
-    let recs = obs.lock().map_err(|_| anyhow!("地区观测锁被毒化"))?.clone();
+    let recs = recorder.snapshot()?;
     Ok(RegionNnRun {
         outcome: out,
         obs: recs
@@ -471,8 +558,8 @@ fn region_nn_run(
 #[cfg(not(feature = "onnx"))]
 #[allow(clippy::too_many_arguments)]
 fn region_nn_run(
-    _nn: &NnSlot, _mcts: RamenMctsTrainer, _cfg: &GameConfig, _inherit: &InheritInfo, _seed: u64,
-    _run_idx: u64, _rule_master: u64, _cost: &mut CostStat
+    _nn: &NnSlot, _mcts: RamenMctsTrainer, _uma: u32, _cards: &[u32; 6], _inherit: &InheritInfo,
+    _seed: u64, _run_idx: u64, _rule_master: u64, _cost: &mut CostStat
 ) -> Result<RegionNnRun> {
     bail!("--trainer mcts+region_nn 需要编译 feature onnx")
 }
@@ -505,25 +592,110 @@ struct CostStat {
     infers: u64
 }
 
-/// 一局的世界标识（预登记用）
+/// 计划表文件里的一条计划（**外部输入**，字段名即 JSON 键名）
 ///
-/// 建新类型而非 `(u64, u64)`：两个字段同类型，位置写反不会编译报错。
-#[derive(Clone, Copy)]
-struct WorldSpec {
+/// 一条计划 = 一个「马娘 + 六卡组 + 世界局号」，两臂逐字段共用同一份文件。
+#[derive(Debug, Clone, Deserialize)]
+struct PlanEntry {
+    /// 计划编号，必须与数组下标逐值相同（防止删行后编号与位置错位）
+    plan_id: usize,
+    /// 马娘 gameId
+    uma: u32,
+    /// 六张支援卡 idrank（末位必须是友人卡，由建局自己校验）
+    cards: [u32; 6],
+    /// 世界局号，与 `--seed` 一起经 `bench::seeded_rngs` 派生世界
+    run_idx: u64
+}
+
+/// 计划表文件的整体结构
+#[derive(Debug, Clone, Deserialize)]
+struct PlanFile {
+    /// 基种子；必须与 `--seed` 逐值相同，否则两臂可能读同一份计划却跑不同世界
+    base_seed: u64,
+    /// 全部计划
+    plans: Vec<PlanEntry>
+}
+
+/// 一局的完整身份（预登记用）：计划 + 世界
+///
+/// 建新类型而非元组：字段同类型，位置写反不会编译报错。
+#[derive(Clone)]
+struct PlanSpec {
+    /// 计划编号
+    plan_id: usize,
+    /// 马娘 gameId
+    uma: u32,
+    /// 六张支援卡 idrank
+    cards: [u32; 6],
     /// 局号
     run_idx: u64,
     /// `bench::seeded_rngs` 派生的规则主种子
     rule_master: u64
 }
 
+impl PlanSpec {
+    /// 卡组渲染成 `a|b|c|d|e|f`（CSV 单元格内不含逗号）
+    fn deck_cell(&self) -> String {
+        self.cards
+            .iter()
+            .map(u32::to_string)
+            .collect::<Vec<_>>()
+            .join("|")
+    }
+}
+
+/// 读取计划表文件并校验
+///
+/// 校验项：`base_seed` 与 `--seed` 逐值相同、`plan_id` 与下标逐值相同、
+/// `run_idx` 互不重复（同一个世界被两条计划占用会让配对分析对不上）。
+/// **不算任何指纹**，全部是字段的直接比较。
+///
+/// # 错误
+///
+/// 文件读不了、JSON 结构不符、上述任一校验不过，或 `--plan-range` 越界时报错。
+fn load_plans(path: &PathBuf, seed: u64, range: Option<(usize, usize)>) -> Result<Vec<PlanEntry>> {
+    let text = fs::read_to_string(path).with_context(|| format!("读不了计划表: {}", path.display()))?;
+    let file: PlanFile =
+        serde_json::from_str(&text).with_context(|| format!("计划表 JSON 解析失败: {}", path.display()))?;
+    if file.base_seed != seed {
+        bail!("计划表 base_seed={} 与 --seed {seed} 不一致", file.base_seed);
+    }
+    if file.plans.is_empty() {
+        bail!("计划表为空: {}", path.display());
+    }
+    let mut seen: Vec<u64> = Vec::with_capacity(file.plans.len());
+    for (idx, plan) in file.plans.iter().enumerate() {
+        if plan.plan_id != idx {
+            bail!("计划表第 {idx} 条的 plan_id={} 与下标不符", plan.plan_id);
+        }
+        if seen.contains(&plan.run_idx) {
+            bail!("计划表 run_idx={} 出现多次，世界会被两条计划占用", plan.run_idx);
+        }
+        seen.push(plan.run_idx);
+    }
+    let picked = match range {
+        None => file.plans,
+        Some((start, end)) => {
+            if end > file.plans.len() {
+                bail!("--plan-range {start} {end} 越界：计划表只有 {} 条", file.plans.len());
+            }
+            file.plans[start..end].to_vec()
+        }
+    };
+    Ok(picked)
+}
+
 /// 逐局 CSV 表头
-const CSV_HEADER: &str = "run_idx,rule_master,score,rank,speed,stamina,power,guts,wisdom,skill_pt,wall_s,searches,search_s,planned,succeeded,failed,infers,free_race_ok,rmj_ok,friend_all";
+const CSV_HEADER: &str = "plan_id,uma,deck,run_idx,rule_master,score,rank,speed,stamina,power,guts,wisdom,skill_pt,wall_s,searches,search_s,planned,succeeded,failed,infers,free_race_ok,rmj_ok,friend_all";
 
 impl GameRecord {
     /// 转一行 CSV（各字段均无逗号，直接拼接）
     fn to_csv(&self) -> String {
         format!(
-            "{},{},{},{},{},{},{},{},{},{},{:.3},{},{:.3},{},{},{},{},{},{},{}",
+            "{},{},{},{},{},{},{},{},{},{},{},{},{},{:.3},{},{:.3},{},{},{},{},{},{},{}",
+            self.plan_id,
+            self.uma,
+            self.deck,
             self.run_idx,
             self.rule_master,
             self.score,
@@ -568,134 +740,74 @@ struct RegionObs {
     hand: Option<[usize; 3]>
 }
 
-/// `RamenMctsTrainer` + 仅外层 `RegionSelect` 交给网络的实验决策器
+/// 记录一次实际地区决策的旁观器（只观测，不参与决策）
 ///
-/// 除 `RegionSelect` 外的一切调用**原样转发**给同一个 [`RamenMctsTrainer`] 实例，
-/// 因此 `SpecialSelect` 合并缓存、`last_decision` / `last_breakdown` 状态与纯
-/// `mcts` 臂逐字一致。搜索内部的模拟决策器由 `RamenMctsTrainer` 自己持有
-/// （手写 rollout 基策），本壳**不接触**，故搜索内部的地区选择仍是手写。
+/// 决策逻辑本身在共享实现 [`umaai::region::RegionNnTrainer`] 里，本结构只挂钩子，
+/// 因此 benchmark 与主程序**不会**各自跑一份会逐渐分叉的地区接管逻辑。
 ///
 /// `hand_ref` 是一个**独立的** [`RecommendedRamenTrainer`]，只用来观测「同一局面下
-/// 手写会选什么」：它用 `rng` 的克隆调用，既不推进外层随机流，也不触碰参与决策的
-/// `mcts` 的任何内部状态。
+/// 手写会选什么」：它用共享实现传入的**推理前**随机流快照调用，既不推进外层随机流，
+/// 也不触碰参与决策的搜索训练员的任何内部状态。
 #[cfg(feature = "onnx")]
-struct RegionNnTrainer {
-    /// 真正做除地区外全部决策的搜索训练员
-    mcts: RamenMctsTrainer,
-    /// 只在外层 `RegionSelect` 使用的网络训练员
-    nn: RamenNnTrainer,
+struct RegionObsRecorder {
     /// 观测用手写参照，与 [`RamenMctsTrainer`] 的 fallback 同为 `RecommendedRamenTrainer::new()`
     hand_ref: RecommendedRamenTrainer,
     /// 本局的地区决策记录
-    obs: Arc<Mutex<Vec<RegionObs>>>,
-    /// 最近一次决策是否为**网络做出的地区决策**
-    ///
-    /// 地区决策不经内部 [`RamenMctsTrainer`]，它的 `last_search_summary`
-    /// 因此停在上一次搜索上。置位后 `last_decision` / `last_breakdown`
-    /// 返回 `None`，避免把上一次 MCTS 的旧摘要当成本次地区决策的理由。
-    ///
-    /// 屏蔽**只覆盖地区决策本身这一步**：此后任何一次转发（动作、事件选项、
-    /// 新接口事件选项）都会清位，之后的行为与纯 `mcts` 臂逐字一致。
-    /// 尤其是地区之后紧跟事件时，事件自己的说明不会被连带屏蔽。
-    /// 用 `AtomicBool` 是因为 `Trainer` 的方法都取 `&self`。
-    region_last: AtomicBool
+    obs: Mutex<Vec<RegionObs>>
 }
 
 #[cfg(feature = "onnx")]
-impl Trainer<RamenGame> for RegionNnTrainer {
-    /// 地区阶段走网络，其余阶段原样转发搜索训练员
+impl RegionObsRecorder {
+    /// 新建一个空记录器
+    fn new() -> Self {
+        Self {
+            hand_ref: RecommendedRamenTrainer::new(),
+            obs: Mutex::new(Vec::new())
+        }
+    }
+
+    /// 按值取出已记录的观测（`RegionObs` 是 `Copy`）
     ///
     /// # 错误
     ///
-    /// 网络推理失败、候选落格失败、非地区回合进入地区阶段，或转发的搜索训练员
-    /// 报错时原样返回——**任何一种都不会静默退回手写**。
-    fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
-        if ramen_effective_stage(game, actions) != RamenStage::RegionSelect {
-            // 转发给 MCTS 的决策会自己刷新摘要，屏蔽位随之解除
-            self.region_last.store(false, Ordering::Relaxed);
-            return self.mcts.select_action(game, actions, rng);
-        }
+    /// 记录锁被毒化时报错。
+    fn snapshot(&self) -> Result<Vec<RegionObs>> {
+        Ok(self.obs.lock().map_err(|_| anyhow!("地区观测锁被毒化"))?.clone())
+    }
+}
+
+#[cfg(feature = "onnx")]
+impl RegionDecisionObserver for RegionObsRecorder {
+    /// 记录本次实际选择，并算出同局面下手写本来会选什么
+    ///
+    /// # 错误
+    ///
+    /// 回合不是地区回合、候选落格失败、手写参照报错或记录锁被毒化时报错。
+    fn on_region_decided(
+        &self, game: &RamenGame, actions: &[RamenAction], picked: usize, mut rng_before: StdRng
+    ) -> Result<()> {
         let turn = game.turn() as i32;
         let year_idx = RamenState::region_archive_year_idx(turn)?;
-        // 观测：克隆随机流喂给独立的手写参照，外层 rng 与 mcts 状态都不受影响
-        let hand_idx = {
-            let mut probe_rng = rng.clone();
-            self.hand_ref.select_action(game, actions, &mut probe_rng)?
-        };
-        let idx = self.nn.select_action(game, actions, rng)?;
-        let pick = |i: usize| -> Result<[usize; 3]> {
-            match actions.get(i).map(|a| a.operation) {
-                Some(Operation::RegionSelect(r)) => Ok(r),
-                other => bail!("地区阶段候选 {i} 不是 RegionSelect：{other:?}")
-            }
-        };
+        // 手写参照跑在**推理前**的随机流快照上：与「不接管时手写会看到的状态」一致
+        let hand_idx = self.hand_ref.select_action(game, actions, &mut rng_before)?;
         let rec = RegionObs {
             turn,
             year: year_idx + 1,
             candidates: Some(actions.len()),
-            picked: pick(idx)?,
-            hand: Some(pick(hand_idx)?)
+            picked: RegionNnTrainer::region_of(actions, picked)?,
+            hand: Some(RegionNnTrainer::region_of(actions, hand_idx)?)
         };
         self.obs
             .lock()
             .map_err(|_| anyhow!("地区观测锁被毒化"))?
             .push(rec);
-        // 只在**决策成功落定后**置位：中途报错时整局已经终止，不需要也不应改状态
-        self.region_last.store(true, Ordering::Relaxed);
-        Ok(idx)
-    }
-
-    /// 事件选项转发搜索训练员（与纯 `mcts` 臂逐字相同）
-    ///
-    /// 转发前清掉地区屏蔽位：事件由内部 MCTS 处理，它自己的说明不该被上一次
-    /// 地区决策连带屏蔽。
-    ///
-    /// # 错误
-    ///
-    /// 转发的训练员报错时原样返回。
-    fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
-        self.region_last.store(false, Ordering::Relaxed);
-        self.mcts.select_choice(game, choices, rng)
-    }
-
-    /// 事件选项（新接口）转发搜索训练员
-    ///
-    /// 同 `select_choice`：转发前清掉地区屏蔽位。
-    ///
-    /// # 错误
-    ///
-    /// 转发的训练员报错时原样返回。
-    fn select_event_choice(
-        &self, game: &RamenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
-    ) -> Result<usize> {
-        self.region_last.store(false, Ordering::Relaxed);
-        self.mcts.select_event_choice(game, event, choices, rng)
-    }
-
-    /// 非地区决策返回内部 MCTS 的摘要；**地区决策后返回 `None`**
-    ///
-    /// 地区决策由网络做出，没有 MCTS 摘要可给；若原样透传，上层会读到上一次
-    /// 搜索的旧 `DecisionInfo`。本实验只需要「不暴露旧摘要」这一最小行为，
-    /// 不在此生成地区自己的 `DecisionInfo`——那属于正式接入的工作。
-    fn last_decision(&self) -> Option<DecisionInfo> {
-        match self.region_last.load(Ordering::Relaxed) {
-            true => None,
-            false => self.mcts.last_decision()
-        }
-    }
-
-    /// 同 `last_decision`：地区决策后不返回内部 MCTS 的旧 breakdown
-    fn last_breakdown(&self) -> Option<String> {
-        match self.region_last.load(Ordering::Relaxed) {
-            true => None,
-            false => self.mcts.last_breakdown()
-        }
+        Ok(())
     }
 }
 
 /// 地区决策记录 CSV 表头
 const REGION_CSV_HEADER: &str =
-    "run_idx,turn,year,source,candidates,picked,picked_names,hand,hand_names,disagree";
+    "plan_id,run_idx,turn,year,source,candidates,picked,picked_names,hand,hand_names,disagree";
 
 /// 把三个地区下标渲染成名称串（取自 `RAMENDATA.ramen_region_effect`）
 ///
@@ -720,7 +832,7 @@ fn region_names(regions: [usize; 3]) -> Result<String> {
 /// # 错误
 ///
 /// 地区名称查表失败时报错。
-fn region_csv_line(run_idx: u64, source: &str, obs: &RegionObs) -> Result<String> {
+fn region_csv_line(plan_id: usize, run_idx: u64, source: &str, obs: &RegionObs) -> Result<String> {
     let picked = format!("{}|{}|{}", obs.picked[0], obs.picked[1], obs.picked[2]);
     let (hand, hand_names, disagree) = match obs.hand {
         Some(h) => (
@@ -732,7 +844,7 @@ fn region_csv_line(run_idx: u64, source: &str, obs: &RegionObs) -> Result<String
     };
     let cand = obs.candidates.map(|n| n.to_string()).unwrap_or_default();
     Ok(format!(
-        "{run_idx},{},{},{source},{cand},{picked},{},{hand},{hand_names},{disagree}",
+        "{plan_id},{run_idx},{},{},{source},{cand},{picked},{},{hand},{hand_names},{disagree}",
         obs.turn,
         obs.year,
         region_names(obs.picked)?
@@ -772,6 +884,10 @@ fn main() -> Result<()> {
     if let Some(v) = args.cards {
         game_config.cards = v;
     }
+    let uma_before = game_config.uma;
+    if let Some(v) = args.uma {
+        game_config.uma = v;
+    }
     if let Some(v) = args.threads {
         game_config.collector.threads = v;
     }
@@ -799,13 +915,21 @@ fn main() -> Result<()> {
         .build_global()?;
 
     let ramen_stages = RamenSearchStages::parse(&game_config.mcts.ramen_search_stages)?;
+    // ❗地区 NN 臂与客户端共用同一套适用配置检查；此处 game_config / ramen_stages
+    // 已吃过全部命令行覆盖，校验的是**实际生效值**而不是文件里的原值。
+    check_arm_config(args.policy, &game_config, ramen_stages)?;
 
     // ---- 打印生效配置，供人工核对 ----
     println!("=== 生效配置（合并后 + 本次覆盖）===");
     println!(
-        "uma={} cards={:?}（文件值 {cards_before:?}） blue_count={:?} extra_count={:?}（文件值 {extra_before:?}）",
+        "uma={}（文件值 {uma_before}） cards={:?}（文件值 {cards_before:?}） blue_count={:?} extra_count={:?}（文件值 {extra_before:?}）",
         game_config.uma, game_config.cards, game_config.blue_count, game_config.extra_count
     );
+    if args.plans_file.is_some() {
+        println!(
+            "❗上一行的 uma / cards 是**合并配置**里的值，本次不参与建局：             计划表逐条给出马娘与卡组，实际用的是下面「预登记计划与世界」里逐条打印的那一份"
+        );
+    }
     println!(
         "trainer={:?}（文件值 {trainer_before:?}；实际执行 {}）",
         game_config.trainer,
@@ -849,6 +973,10 @@ fn main() -> Result<()> {
                  均 >1，故每局恰好 3 次地区推理，整局推理数 = 3 即为「无搜索内部推理」的直接证据"
             );
         }
+    } else if args.policy == Policy::Handwritten {
+        println!(
+            "❗本次不跑搜索、不加载网络：整局全部决策由 RecommendedRamenTrainer（手写推荐策略）做出。             本模式只用于可行性筛查，不是任何一臂的实验策略"
+        );
     } else {
         // 搜索一次都不跑，上面那些搜索字段本次全部不参与决策，避免误读
         println!(
@@ -867,19 +995,31 @@ fn main() -> Result<()> {
         "ramen_region_strategy={:?} mcts_selected_onsen={} mcts_selection={:?}",
         game_config.ramen_region_strategy, game_config.mcts_selected_onsen, game_config.mcts_selection
     );
-    println!(
-        "基种子={} run_idx ∈ [{}, {}) 共 {} 局；硬超时={}s",
-        args.seed,
-        args.run_offset,
-        args.run_offset + args.runs,
-        args.runs,
-        args.hard_timeout_secs
-    );
+    match &args.plans_file {
+        Some(path) => println!(
+            "计划表={}{} 基种子={}；硬超时={}s",
+            path.display(),
+            match args.plan_range {
+                Some((a, b)) => format!(" 段 [{a}, {b})"),
+                None => String::new()
+            },
+            args.seed,
+            args.hard_timeout_secs
+        ),
+        None => println!(
+            "基种子={} run_idx ∈ [{}, {}) 共 {} 局；硬超时={}s",
+            args.seed,
+            args.run_offset,
+            args.run_offset + args.runs,
+            args.runs,
+            args.hard_timeout_secs
+        )
+    }
 
     // ---- NN 模式：整进程只加载一次模型 ----
     #[cfg(feature = "onnx")]
     let nn: NnSlot = match args.policy {
-        Policy::Mcts => None,
+        Policy::Mcts | Policy::Handwritten => None,
         Policy::Nn | Policy::MctsRegionNn => {
             let path = args
                 .model
@@ -926,14 +1066,35 @@ fn main() -> Result<()> {
         blue_count: game_config.blue_count,
         extra_count: game_config.extra_count
     };
-    println!("=== 预登记世界 ===");
-    let mut worlds: Vec<WorldSpec> = Vec::with_capacity(args.runs as usize);
-    for k in 0..args.runs {
-        let run_idx = args.run_offset + k;
-        let (_, rule_master) = bench::seeded_rngs(args.seed, run_idx);
-        println!("  run_idx={run_idx} rule_master={rule_master}");
-        worlds.push(WorldSpec { run_idx, rule_master });
+    println!("=== 预登记计划与世界 ===");
+    // 两种来源：计划表逐条给出「马娘 + 卡组 + 局号」；否则用合并配置的固定组合 + 连续局号。
+    let entries: Vec<PlanEntry> = match &args.plans_file {
+        Some(path) => load_plans(path, args.seed, args.plan_range)?,
+        None => (0..args.runs)
+            .map(|k| PlanEntry {
+                plan_id: k as usize,
+                uma: game_config.uma,
+                cards: game_config.cards,
+                run_idx: args.run_offset + k
+            })
+            .collect()
+    };
+    let mut worlds: Vec<PlanSpec> = Vec::with_capacity(entries.len());
+    for e in entries {
+        let (_, rule_master) = bench::seeded_rngs(args.seed, e.run_idx);
+        println!(
+            "  plan_id={} uma={} cards={:?} run_idx={} rule_master={rule_master}",
+            e.plan_id, e.uma, e.cards, e.run_idx
+        );
+        worlds.push(PlanSpec {
+            plan_id: e.plan_id,
+            uma: e.uma,
+            cards: e.cards,
+            run_idx: e.run_idx,
+            rule_master
+        });
     }
+    println!("共 {} 局", worlds.len());
     println!();
 
     // ---- 证据目录与逐局 CSV ----
@@ -957,10 +1118,12 @@ fn main() -> Result<()> {
     println!("地区决策 CSV: {}", region_path.display());
 
     let wall0 = Instant::now();
-    let mut records: Vec<GameRecord> = Vec::with_capacity(args.runs as usize);
-    for WorldSpec { run_idx, rule_master } in worlds {
+    let total_plans = worlds.len();
+    let mut records: Vec<GameRecord> = Vec::with_capacity(total_plans);
+    for plan in worlds {
+        let PlanSpec { plan_id, uma, cards, run_idx, rule_master } = plan.clone();
         println!(
-            "=== 第 {} 局 run_idx={run_idx} rule_master={rule_master} ===",
+            "=== 第 {}/{total_plans} 局 plan_id={plan_id} uma={uma} cards={cards:?} run_idx={run_idx} rule_master={rule_master} ===",
             records.len() + 1
         );
         // 成本统计：两条分支各自填自己那一半，另一半留 0
@@ -978,10 +1141,10 @@ fn main() -> Result<()> {
                 let out = if args.policy == Policy::Mcts {
                     let mut trainer = LoggingTrainer::new(mcts, rule_master);
                     trainer.set_logging(false);
-                    bench::run_seeded(game_config.uma, &game_config.cards, &inherit, args.seed, run_idx, &trainer)?
+                    bench::run_seeded(uma, &cards, &inherit, args.seed, run_idx, &trainer)?
                 } else {
                     let run = region_nn_run(
-                        &nn, mcts, &game_config, &inherit, args.seed, run_idx, rule_master, &mut cost
+                        &nn, mcts, uma, &cards, &inherit, args.seed, run_idx, rule_master, &mut cost
                     )?;
                     region_obs = run.obs;
                     run.outcome
@@ -994,7 +1157,13 @@ fn main() -> Result<()> {
                 cost.failed = recs.iter().map(SearchProbe::total_failed).sum();
                 out
             }
-            Policy::Nn => nn_run(&nn, &game_config, &inherit, args.seed, run_idx, rule_master, &mut cost)?
+            Policy::Nn => nn_run(&nn, uma, &cards, &inherit, args.seed, run_idx, rule_master, &mut cost)?,
+            Policy::Handwritten => {
+                // 纯手写：没有搜索探针也没有推理计数，两半成本统计都留 0
+                let mut trainer = LoggingTrainer::new(RecommendedRamenTrainer::new(), rule_master);
+                trainer.set_logging(false);
+                bench::run_seeded(uma, &cards, &inherit, args.seed, run_idx, &trainer)?
+            }
         };
         let wall_s = started.elapsed().as_secs_f64();
 
@@ -1043,7 +1212,7 @@ fn main() -> Result<()> {
             }
         }
         let region_src = match args.policy {
-            Policy::Mcts => "handwritten",
+            Policy::Mcts | Policy::Handwritten => "handwritten",
             Policy::Nn => "nn_all",
             Policy::MctsRegionNn => "nn_region"
         };
@@ -1052,7 +1221,7 @@ fn main() -> Result<()> {
             if o.hand.is_some_and(|h| h != o.picked) {
                 disagree += 1;
             }
-            writeln!(region_csv, "{}", region_csv_line(run_idx, region_src, o)?)?;
+            writeln!(region_csv, "{}", region_csv_line(plan_id, run_idx, region_src, o)?)?;
         }
         region_csv.flush()?;
         println!(
@@ -1065,6 +1234,9 @@ fn main() -> Result<()> {
             region_obs.len()
         );
         let rec = GameRecord {
+            plan_id,
+            uma,
+            deck: plan.deck_cell(),
             run_idx,
             rule_master,
             score: out.score,
@@ -1124,7 +1296,7 @@ fn main() -> Result<()> {
     let race_fail = records.iter().filter(|r| !r.free_race_ok).count();
 
     println!("\n=== 汇总 ===");
-    println!("完成 {n} 局 / 计划 {} 局；总墙钟={total:.1}s", args.runs);
+    println!("完成 {n} 局 / 计划 {total_plans} 局；总墙钟={total:.1}s");
     println!(
         "均分={mean:.1} 标准差={stdev:.1} 标准误={:.1} 最低={lo} 最高={hi}",
         stdev / (n as f64).sqrt()
@@ -1136,8 +1308,8 @@ fn main() -> Result<()> {
         "推理请求合计={infers}（每局平均 {:.1}）",
         infers as f64 / n as f64
     );
-    if n as u64 != args.runs {
-        println!("❗未完成 {} 局", args.runs - n as u64);
+    if n != total_plans {
+        println!("❗未完成 {} 局", total_plans - n);
     }
     Ok(())
 }
@@ -1158,10 +1330,14 @@ mod tests {
     use std::{
         path::Path,
         slice,
-        sync::{Arc, Mutex, atomic::AtomicBool}
+        sync::{Arc, Mutex}
     };
     #[cfg(feature = "onnx")]
     use rand::{SeedableRng, prelude::StdRng};
+    #[cfg(feature = "onnx")]
+    use umaai::region::RegionNnTrainer;
+    #[cfg(feature = "onnx")]
+    use umasim::output::decision::SOURCE_REGION_NN;
     #[cfg(feature = "onnx")]
     use umasim::{
         game::{
@@ -1171,16 +1347,78 @@ mod tests {
             ramen::{Operation, RamenAction, RamenGame, RamenStage}
         },
         trainer::{
-            RamenMctsTrainer, RamenNnTrainer, RamenSearchStages, RecommendedRamenTrainer, SpecialSelectMode,
-            ramen_handwritten_trainer::ramen_effective_stage
+            RamenMctsTrainer, RamenNnTrainer, RamenSearchStages, SpecialSelectMode,
+            infer_request_count, ramen_handwritten_trainer::ramen_effective_stage
         }
     };
+    #[cfg(feature = "onnx")]
+    use umasim::{bench, trainer::LoggingTrainer};
 
     #[cfg(feature = "onnx")]
-    use super::RegionNnTrainer;
+    use super::RegionObsRecorder;
     use super::{
-        Policy, REGION_CSV_HEADER, RegionObs, parse_array6, parse_cards, parse_policy, region_csv_line
+        Policy, REGION_CSV_HEADER, RegionObs, check_arm_config, load_plans, parse_array6, parse_cards,
+        parse_policy, region_csv_line
     };
+    use umasim::{
+        gamedata::{GameConfig, RamenRegionStrategy},
+        trainer::RamenSearchStages as Stages
+    };
+
+    /// 地区 NN 臂必须复用客户端那套适用配置检查；其余三臂不受地区限制
+    ///
+    /// review#3：拆分前 benchmark 直接构造接管器，`fixed` / 地区搜索未关这两种
+    /// 客户端会拒绝的配置，在这里会被放行，并被当成「每局恒 3 次推理」去解读。
+    ///
+    /// 用 fixture 配置，不读用户的 `game_config.toml`。
+    #[test]
+    fn test_region_nn_arm_shares_client_config_checks() -> Result<()> {
+        let mut fails: Vec<String> = Vec::new();
+        let mut note = |ok: bool, what: &str| {
+            println!("  [{}] {what}", if ok { "OK" } else { "NG" });
+            if !ok {
+                fails.push(what.to_string());
+            }
+        };
+
+        let base = GameConfig::default_for_init();
+        let legal = Stages::parse("train,ramen")?;
+        let with_region = Stages::parse("train,ramen,region")?;
+        let mut fixed_cfg = base.clone();
+        fixed_cfg.ramen_region_strategy = RamenRegionStrategy::Fixed;
+        fixed_cfg.ramen_region_fixed = Some(vec![[11, 14, 15]]);
+
+        // 1) 地区搜索开关未关 → 拒绝
+        let e1 = check_arm_config(Policy::MctsRegionNn, &base, with_region);
+        println!("region 搜索未关 → {:?}", e1.as_ref().err().map(ToString::to_string));
+        note(e1.is_err(), "mcts+region_nn：ramen_search_stages 仍含 region 时拒绝");
+
+        // 2) fixed 候选 → 拒绝（第 3 年只剩 1 个候选，实际只会推理 2 次）
+        let e2 = check_arm_config(Policy::MctsRegionNn, &fixed_cfg, legal);
+        println!("fixed 候选 → {:?}", e2.as_ref().err().map(ToString::to_string));
+        note(e2.is_err(), "mcts+region_nn：ramen_region_strategy=fixed 时拒绝");
+
+        // 3) 合法配置 → 通过（且**不要求** ramen_region_model_path，模型走 --model）
+        note(
+            base.ramen_region_model_path.is_none(),
+            "fixture 未设 ramen_region_model_path（benchmark 的模型来自 --model）"
+        );
+        let ok = check_arm_config(Policy::MctsRegionNn, &base, legal);
+        println!("合法配置 → {:?}", ok.as_ref().err().map(ToString::to_string));
+        note(ok.is_ok(), "mcts+region_nn：合法地区面板配置照常通过");
+
+        // 4) 其余三臂不受地区专用限制（连 fixed + region 全开都不该被拦）
+        for arm in [Policy::Mcts, Policy::Nn, Policy::Handwritten] {
+            let r = check_arm_config(arm, &fixed_cfg, with_region);
+            println!("{arm:?} + fixed + region 全开 → {:?}", r.as_ref().err().map(ToString::to_string));
+            note(r.is_ok(), &format!("{arm:?} 不被误加地区专用限制"));
+        }
+
+        if fails.is_empty() {
+            return Ok(());
+        }
+        bail!("{} 项观测未通过: {}", fails.len(), fails.join(" / "))
+    }
 
     /// `--trainer` 的标签必须与执行分支一一对应，未知取值报错
     #[test]
@@ -1188,7 +1426,8 @@ mod tests {
         for (text, want) in [
             ("mcts", Policy::Mcts),
             ("nn", Policy::Nn),
-            ("mcts+region_nn", Policy::MctsRegionNn)
+            ("mcts+region_nn", Policy::MctsRegionNn),
+            ("handwritten", Policy::Handwritten)
         ] {
             let got = parse_policy(text)?;
             println!("--trainer {text:?} → {got:?}（label={}）", got.label());
@@ -1196,7 +1435,9 @@ mod tests {
                 bail!("策略分派错位：{text:?} → {got:?}");
             }
         }
-        for bad in ["handwritten", "MCTS", "", "search", "region_nn", "mcts+nn"] {
+        // ❗`handwritten` 现在是**合法**取值（纯手写臂，面板筛查用），
+        // 因此不在非法清单里；下面这些才是未知取值。
+        for bad in ["MCTS", "", "search", "region_nn", "mcts+nn"] {
             match parse_policy(bad) {
                 Ok(p) => bail!("未知 --trainer {bad:?} 未报错，反而得到 {p:?}"),
                 Err(e) => println!("--trainer {bad:?} 正确报错：{e}")
@@ -1298,7 +1539,7 @@ mod tests {
             picked: [5, 8, 9],
             hand: Some([7, 8, 9])
         };
-        let line = region_csv_line(150000, "nn_region", &obs)?;
+        let line = region_csv_line(0, 150000, "nn_region", &obs)?;
         println!("{REGION_CSV_HEADER}");
         println!("{line}");
         if !line.ends_with(",1") {
@@ -1308,7 +1549,7 @@ mod tests {
             hand: Some([5, 8, 9]),
             ..obs
         };
-        let line2 = region_csv_line(150000, "nn_region", &same)?;
+        let line2 = region_csv_line(0, 150000, "nn_region", &same)?;
         println!("{line2}");
         if !line2.ends_with(",0") {
             bail!("同选时分歧位应为 0：{line2}");
@@ -1319,7 +1560,7 @@ mod tests {
             hand: None,
             ..obs
         };
-        let line3 = region_csv_line(150000, "handwritten", &plain)?;
+        let line3 = region_csv_line(0, 150000, "handwritten", &plain)?;
         println!("{line3}");
         if !line3.ends_with(",,,") {
             bail!("无反事实时 hand 三列应为空：{line3}");
@@ -1328,6 +1569,12 @@ mod tests {
     }
 
     /// 地区包装器：地区决策后不暴露内部 MCTS 的旧摘要，其余决策照常转发
+    ///
+    /// 「不暴露旧摘要」的判据是**摘要内容**，不是 `last_decision()` 是否为 `None`：
+    /// 网络地区决策会给出**它自己**的一条摘要（无搜索评分、来源标 `region_nn`、
+    /// `action_index` 就是这次选中的候选），渲染端据此既不挂旧理由也不误标手写
+    /// （review#1）。真正要抓的是：摘要里带上了搜索评分 / 旧的 `decision_kind` /
+    /// 对不上的 `action_index`——那才说明上一次 MCTS 的旧摘要漏了出来。
     ///
     /// 用极小搜索预算（`search_n=2`、均匀分配）跑到第一次地区决策（turn 2）为止，
     /// 不做任何性能测量，也不跑整局。
@@ -1339,6 +1586,8 @@ mod tests {
     #[cfg(feature = "onnx")]
     #[test]
     fn test_region_wrapper_masks_stale_summary() -> Result<()> {
+        // 本测试也会产生推理，与整局计数测试互斥（见 INFER_GUARD 文档）
+        let _guard = INFER_GUARD.lock().map_err(|_| anyhow::anyhow!("推理计数锁被毒化"))?;
         env::set_current_dir(get_workspace_root()?)?;
         init_global()?;
         let model = Path::new("saved_models/arms/ens_R4_g123.onnx");
@@ -1352,17 +1601,16 @@ mod tests {
             return Ok(());
         }
         let cfg = load_game_config()?;
-        let hybrid = RegionNnTrainer {
-            mcts: RamenMctsTrainer::new(SearchConfig::default().with_search_n(2).with_ucb(false))
+        let recorder = Arc::new(RegionObsRecorder::new());
+        let hybrid = RegionNnTrainer::new(
+            RamenMctsTrainer::new(SearchConfig::default().with_search_n(2).with_ucb(false))
                 .with_stages(RamenSearchStages::parse("train,ramen")?)
                 .verbose(false),
-            nn: RamenNnTrainer::load(model)?
+            RamenNnTrainer::load(model)?
                 .with_race_shield(true)
-                .with_special_mode(SpecialSelectMode::Canonical),
-            hand_ref: RecommendedRamenTrainer::new(),
-            obs: Arc::new(Mutex::new(Vec::new())),
-            region_last: AtomicBool::new(false)
-        };
+                .with_special_mode(SpecialSelectMode::Canonical)
+        )
+        .with_observer(Arc::clone(&recorder) as Arc<_>);
         let inherit = InheritInfo {
             blue_count: cfg.blue_count,
             extra_count: cfg.extra_count
@@ -1376,19 +1624,58 @@ mod tests {
         let mut released = false;
         while game.next() {
             let turn = game.turn();
-            let before = hybrid.obs.lock().expect("地区观测锁").len();
+            let before = recorder.snapshot()?.len();
             game.run_stage(&hybrid, &mut rng)?;
-            let after = hybrid.obs.lock().expect("地区观测锁").len();
-            let decision = hybrid.last_decision().is_some();
+            let after = recorder.snapshot()?.len();
+            let info = hybrid.last_decision();
+            let decision = info.is_some();
             let breakdown = hybrid.last_breakdown().is_some();
             if after > before {
                 region_seen += 1;
-                println!("turn {turn}: 地区决策（网络）→ last_decision={decision} last_breakdown={breakdown}");
-                if decision || breakdown {
+                // 本次地区决策的选中下标，用来核对摘要说的就是这一次
+                let picked = recorder
+                    .snapshot()?
+                    .last()
+                    .map(|o| o.picked)
+                    .ok_or_else(|| anyhow::anyhow!("观测钩子未记录本次地区决策"))?;
+                let stale = match &info {
+                    // 摘要缺失也算没挂旧理由，但要记下来（上层会退回中性文案）
+                    None => false,
+                    Some(d) => {
+                        let named = d.source_label() == Some(SOURCE_REGION_NN);
+                        let scored = !d.candidate_scores.is_empty() || !d.candidate_n.is_empty();
+                        let kind_ok = d.decision_kind == "region_select";
+                        // 第 1 年地区候选恒 10 个；摘要必须是**这一次**的候选表，
+                        // 且选中下标落在表内（旧搜索摘要的候选表长度与此不同）
+                        let idx_ok =
+                            d.candidate_descriptions.len() == 10 && d.action_index < d.candidate_descriptions.len();
+                        println!(
+                            "turn {turn}: 地区决策（网络）→ 来源={:?} 评分项={} kind={:?} idx={} 候选={}",
+                            d.source_label(),
+                            d.candidate_scores.len(),
+                            d.decision_kind,
+                            d.action_index,
+                            d.candidate_descriptions.len()
+                        );
+                        println!("  观测钩子记录的选中地区 = {picked:?}");
+                        !named || scored || !kind_ok || !idx_ok
+                    }
+                };
+                println!("turn {turn}: last_decision={decision} last_breakdown={breakdown} 旧摘要泄漏={stale}");
+                if stale || breakdown {
                     leaked += 1;
                 }
             } else if region_seen > 0 && decision {
-                println!("turn {turn}: 地区之后的转发决策 → last_decision 恢复为 Some，屏蔽位已解除");
+                let d = info.as_ref().expect("已判定为 Some");
+                println!(
+                    "turn {turn}: 地区之后的转发决策 → 恢复为搜索侧摘要（kind={:?} 评分项={} 来源={:?}）",
+                    d.decision_kind,
+                    d.candidate_scores.len(),
+                    d.source_label()
+                );
+                if d.source_label() == Some(SOURCE_REGION_NN) {
+                    bail!("地区屏蔽位没有解除：后续决策仍被标成 region_nn");
+                }
                 released = true;
                 break;
             }
@@ -1401,10 +1688,83 @@ mod tests {
             bail!("跑到 turn 14 仍未捕获地区决策，测试未覆盖到目标路径");
         }
         if leaked > 0 {
-            bail!("地区决策后仍暴露了内部 MCTS 的旧摘要 {leaked} 次");
+            bail!("地区决策的摘要不是本次网络决策自己的（疑似泄漏旧搜索摘要）{leaked} 次");
         }
         if !released {
             bail!("地区之后的转发决策未恢复摘要，屏蔽位没有解除");
+        }
+        Ok(())
+    }
+
+    /// 会做推理的测试之间的互斥锁
+    ///
+    /// `infer_request_count()` 是**进程级**全局计数，两个 onnx 测试并行跑会互相
+    /// 污染增量。凡是要读增量、或会产生推理的测试，都先拿这把锁。
+    #[cfg(feature = "onnx")]
+    static INFER_GUARD: Mutex<()> = Mutex::new(());
+
+    /// 整局隔离性：NN 地区模式下**恰好 3 次**推理、**恰好 3 次**地区决策
+    ///
+    /// 地区阶段候选数第 1/2 年 10、第 3 年 `all` 下 120，均 > 1，不会被单候选短路。
+    /// 因此「整局推理数 == 地区决策数 == 3」就是**搜索内部没有任何网络推理**的直接证据：
+    /// 只要 rollout 里跑过一次网络，这个数就会远大于 3。
+    ///
+    /// 搜索压到 `search_n=2`（本测试只看隔离性，不看棋力）。模型不存在时跳过并显式
+    /// 声明零覆盖。
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn test_region_nn_full_game_infers_exactly_three() -> Result<()> {
+        let _guard = INFER_GUARD.lock().map_err(|_| anyhow::anyhow!("推理计数锁被毒化"))?;
+        env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let model = Path::new("saved_models/arms/ens_G2mix_g123.onnx");
+        if !model.exists() {
+            println!("❗❗ 本测试被跳过：模型不存在 {}", model.display());
+            println!("❗❗ 这意味着「整局恰好 3 次推理」本次**零覆盖**，绿色不代表它还正确。");
+            println!("❗❗ 需要强制覆盖时置环境变量 UMAAI_REQUIRE_REGION_MODEL=1。");
+            if env::var("UMAAI_REQUIRE_REGION_MODEL").is_ok_and(|v| v == "1") {
+                bail!("UMAAI_REQUIRE_REGION_MODEL=1，但模型不存在：{}", model.display());
+            }
+            return Ok(());
+        }
+        let cfg = load_game_config()?;
+        let recorder = Arc::new(RegionObsRecorder::new());
+        let hybrid = RegionNnTrainer::new(
+            RamenMctsTrainer::new(SearchConfig::default().with_search_n(2).with_ucb(false))
+                .with_stages(RamenSearchStages::parse("train,ramen")?)
+                .verbose(false),
+            RamenNnTrainer::load(model)?
+                .with_race_shield(true)
+                .with_special_mode(SpecialSelectMode::Canonical)
+        )
+        .with_observer(Arc::clone(&recorder) as Arc<_>);
+        let inherit = InheritInfo {
+            blue_count: cfg.blue_count,
+            extra_count: cfg.extra_count
+        };
+
+        // 与生产 / 实验路径同一个入口：外面包一层 LoggingTrainer（关日志）
+        let mut trainer = LoggingTrainer::new(hybrid, 20260914);
+        trainer.set_logging(false);
+        let before = infer_request_count();
+        let out = bench::run_seeded(cfg.uma, &cfg.cards, &inherit, 61444, 250000, &trainer)?;
+        let infers = infer_request_count() - before;
+        let obs = recorder.snapshot()?;
+        let turns: Vec<i32> = obs.iter().map(|o| o.turn).collect();
+        let cands: Vec<Option<usize>> = obs.iter().map(|o| o.candidates).collect();
+        println!(
+            "整局完成：分数={} 推理={infers} 地区决策={} 回合={turns:?} 候选数={cands:?}",
+            out.score,
+            obs.len()
+        );
+        if obs.len() != 3 {
+            bail!("地区决策应恰好 3 次，实际 {}", obs.len());
+        }
+        if turns != vec![2, 23, 47] {
+            bail!("地区决策回合应为 [2, 23, 47]，实际 {turns:?}");
+        }
+        if infers != 3 {
+            bail!("整局推理应恰好 3 次（>3 说明搜索内部也在推理），实际 {infers}");
         }
         Ok(())
     }
@@ -1439,6 +1799,68 @@ mod tests {
                 Ok(x) => bail!("非法 extra_count {bad:?} 未报错，反而得到 {x:?}"),
                 Err(e) => println!("extra_count {bad:?} 正确报错：{e}")
             }
+        }
+        Ok(())
+    }
+
+    /// 计划表：正常读入、`--plan-range` 截段，以及三种非法输入必须报错
+    ///
+    /// 用临时文件写 JSON，只比较字段取值，不做任何指纹。
+    #[test]
+    fn test_plans_file_parse_and_guards() -> Result<()> {
+        let dir = env::temp_dir().join("ramen_client_game_bench_plans_test");
+        std::fs::create_dir_all(&dir)?;
+        let good = dir.join("good.json");
+        std::fs::write(
+            &good,
+            r#"{"base_seed":61444,"plans":[
+                {"plan_id":0,"uma":100603,"cards":[1,2,3,4,5,6],"run_idx":250000},
+                {"plan_id":1,"uma":113101,"cards":[7,8,9,10,11,12],"run_idx":250001},
+                {"plan_id":2,"uma":114101,"cards":[13,14,15,16,17,18],"run_idx":250002}]}"#
+        )?;
+        let all = load_plans(&good, 61444, None)?;
+        println!("整表读入 {} 条，首条 uma={} run_idx={}", all.len(), all[0].uma, all[0].run_idx);
+        let seg = load_plans(&good, 61444, Some((1, 3)))?;
+        println!(
+            "段 [1,3) 读入 {} 条，plan_id={:?}",
+            seg.len(),
+            seg.iter().map(|p| p.plan_id).collect::<Vec<_>>()
+        );
+        if seg.len() != 2 || seg[0].plan_id != 1 || seg[1].run_idx != 250002 {
+            bail!("--plan-range 截段结果不对：{seg:?}");
+        }
+
+        // 1) base_seed 与 --seed 不一致
+        match load_plans(&good, 99999, None) {
+            Ok(_) => bail!("base_seed 不一致未报错"),
+            Err(e) => println!("base_seed 不一致正确报错：{e}")
+        }
+        // 2) plan_id 与下标错位
+        let bad_id = dir.join("bad_id.json");
+        std::fs::write(
+            &bad_id,
+            r#"{"base_seed":61444,"plans":[{"plan_id":5,"uma":1,"cards":[1,2,3,4,5,6],"run_idx":1}]}"#
+        )?;
+        match load_plans(&bad_id, 61444, None) {
+            Ok(_) => bail!("plan_id 错位未报错"),
+            Err(e) => println!("plan_id 错位正确报错：{e}")
+        }
+        // 3) run_idx 重复（两条计划抢同一个世界）
+        let dup = dir.join("dup.json");
+        std::fs::write(
+            &dup,
+            r#"{"base_seed":61444,"plans":[
+                {"plan_id":0,"uma":1,"cards":[1,2,3,4,5,6],"run_idx":7},
+                {"plan_id":1,"uma":2,"cards":[1,2,3,4,5,6],"run_idx":7}]}"#
+        )?;
+        match load_plans(&dup, 61444, None) {
+            Ok(_) => bail!("run_idx 重复未报错"),
+            Err(e) => println!("run_idx 重复正确报错：{e}")
+        }
+        // 4) --plan-range 越界
+        match load_plans(&good, 61444, Some((0, 9))) {
+            Ok(_) => bail!("--plan-range 越界未报错"),
+            Err(e) => println!("--plan-range 越界正确报错：{e}")
         }
         Ok(())
     }
