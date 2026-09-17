@@ -111,26 +111,16 @@ pub struct HumanReadableSink;
 
 impl DecisionSink for HumanReadableSink {
     fn emit(&self, info: &DecisionInfo, _view: &GameView) {
-        // 无搜索评分的地区决策（`candidate_scores` 为空）。两种来源都会落到这里：
-        // 默认配置 `ramen_search_stages="train,ramen"` 下 region 未开启走手写 fallback，
-        // 以及 `ramen_region_policy="nn"` 下网络接管外层地区。两者都没有搜索评分，
-        // luck 行的「期望评分」只是回合加成换算、运气恒 0，混入会误导，故只显示所选
-        // 地区并标注**来源**、跳过 luck 行。
+        // 无搜索评分的决策（`candidate_scores` 为空）。来源不止一种：
+        // - 默认配置 `ramen_search_stages="train,ramen"` 下 region 未开启 → 地区走手写 fallback；
+        // - **比赛回合单候选**（`Train` 且 `is_race_turn`）与 RamenSelect 合并候选 ≤ 1 的短路；
+        // - `ramen_region_policy="nn"` 下网络接管外层地区，`ramen_trainer_policy="nn"` 下整局每一步。
+        // 它们都没有搜索评分，luck 行的「期望评分」只是回合加成换算、运气恒 0，混入会误导，
+        // 故只显示所选动作并标注**来源**、跳过 luck 行（JSON 模式下全量字段照常输出）。
         //
         // ❗来源取自 `scenario_extra.decision_source`（见 [`DecisionInfo::with_source`]），
-        // **不再**把「没有搜索评分」等同于手写：未标注时走中性文案。
-        //
-        // 触发条件是「没有搜索评分」**且**满足下列之一：
-        //
-        // 1. `decision_kind == "region_select"`——默认 MCTS 装配下地区未开搜索时走手写
-        //    fallback，这条线在本分支引入时就有，保持原样；
-        // 2. **带来源标签**——整局网络模式（`ramen_trainer_policy = "nn"`）下训练 / 吃面 /
-        //    隐藏风味 / 地区每一步都没有搜索评分，但都标了真实来源，必须照样上屏。
-        //
-        // 反过来，默认 MCTS 装配里**没有**来源标签的那些无评分决策（比赛回合的 `train`、
-        // 合并搜索路径的 `ramen_select`）仍然静默——它们在本改动前就不上屏，不借机改默认行为。
-        let no_score = info.candidate_scores.is_empty();
-        if no_score && (info.source_label().is_some() || info.decision_kind == "region_select") {
+        // **不再**把「没有搜索评分」等同于手写：未标注时走中性文案，不替它编来源。
+        if info.candidate_scores.is_empty() {
             if let Some(desc) = info.candidate_descriptions.get(info.action_index) {
                 let src = decision_source_text(info.source_label());
                 println!("{}", format!("选择{desc}（{src}）").magenta());
@@ -457,6 +447,23 @@ mod tests {
         }));
         HumanReadableSink.emit(&info, &GameView::default());
         println!("带 luck extra 时 emit 完成");
+    }
+
+    /// 手写 fallback（`candidate_scores` 为空）：region_select / 比赛回合 / RamenSelect
+    /// 单候选都应按「选择…（手写逻辑）」上屏，而不是静默跳过（JSON 模式全量字段照常）。
+    #[test]
+    fn test_human_readable_sink_handwritten_fallback() {
+        for (kind, desc) in [("region_select", "地区/[中山-全]"), ("train", "比赛/杏目 G2")] {
+            let mut info = sample_info();
+            info.action_index = 0;
+            info.decision_kind = kind.to_string();
+            info.candidate_scores = Vec::new();
+            info.candidate_n = Vec::new();
+            info.candidate_descriptions = vec![desc.to_string()];
+            info.scenario_extra = None;
+            HumanReadableSink.emit(&info, &GameView::default());
+            println!("{kind} fallback 应打印: 选择{desc}（手写逻辑）");
+        }
     }
 
     /// 本局运气各颜色档位均不 panic（四舍五入 + 着色路径全覆盖）

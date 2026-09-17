@@ -2,6 +2,18 @@
 
 本文件用于记载较复杂问题（需要用户协助解决的）的解决过程。
 
+## ga_lab 最优策略合并（2026-09-17）：组合交互 / weakboost 反模式 / 年度前瞻参数被支配
+
+- **日期**：2026-09-17
+- **状态**：已解决（已合入 preset 与默认卡组，待提交）
+- **问题描述**：把 ga_lab fork（479fb38）收敛的 GA 参数方向合并进本地 umaai-rs（70550cd）时，逐项"方向性拧参数"几乎全部无效——单项旋钮单独改动要么 0/60 局完全惰性（不翻转任何决策），要么轻微负收益。
+- **排查过程**：以通解卡组（速2耐1智2）为基座，逐项 + 组合档同种子配对（base_seed=61444 主样本 + seed=77777 独立复制，4 马 × 2 种子块）：
+  1. 单项臂全灭：trd3700/ck15/reserve55/rwc35 逐局逐位相同（Δ=0），cook34 −111，weakboost 0.5 单测 −1017（t=−4.83）；
+  2. 完整 10 旋钮组合档：+631（t=5.76）；去掉 weakboost 的 9 旋钮组合档：**+1394（t=12.55）**，8/8 个（马×种子块）单元全部显著——收益不来自任何单项，而是组合交互；
+  3. 年度前瞻三参数（rest_target_vital=70 / rmj_cross_bonus=150 / great_cross_bonus=100）扩成 12 旋钮再测：480 局配对 Δ=0；极端值 5000 探针仅 102601 2/60 局翻转——消费路径在（rest 打分被训练打分数量级支配；rmj/great 只在吃面选择加分、跨年成功线的面本就通常是最优），结论为"被支配的惰性旋钮"。
+- **解决方案**：采纳 9 旋钮组合档进 `RecommendedRamenTrainer::new()`（pt_tradeoff 16→37、pt_tradeoff_super 0→35、region_weak_cover_weight 查表→35 直值、region_youqing_weight 1.5→0.4、hint_bonus 6→8、max_base_score_sacrifice 140→200、ramen_window_weight 0.10→0.15、checkpoint_scale 0→0.15、Y1 pt_rate 16→56）；明确不采纳 weakboost 与年度前瞻三参数；默认卡组切 GA 通解骨架；`test_yearly_observability` 锚点重抓 68118→70138（五维同步），`test_ramen_three_stage_action_unchanged` 7 组 rollout 均值重抓。
+- **备注**：GA 方向合并正确姿势 = "组合档整体验证"而非逐项搬运——逐项 CRN 会系统性低估交互收益；bench_base 新增 `--deck` 入口用于配卡对照。
+
 ## 问题记录模板
 
 ```
@@ -34,6 +46,20 @@
 | 12 | spec 期望固定 person_index 6/7/8-12 vs 当前 push-顺序动态 layout | ⚠️ 待解决（规划） | adapter_spec 期望固定 layout（理事长 6 / 记者 7 / NPC 8-12），但当前 into_game 按 push 顺序动态分配 person_index，无空洞；启用 spec 的 personDistribution 8→12 改写会越界。已商定方案：给 `BasePerson` 加 `is_hidden: bool` 字段把缺位者以 placeholder 形式屏蔽（影响 ramen/action.rs / features.rs / game.rs 约 50+ 处）。Step 7 不做，保持 push-顺序 layout 现状交付；后续单独 PR 做 is_hidden 重构。 |
 
 > 结论：拉面剧本的「人头」问题已全部清零；剩余未解决项集中在已搁置的温泉剧本与 base 潜伏项，以及拉面侧的死代码 / 测试语义 / 跨剧本防御缺口。详见下文各条目。
+
+
+## 第3年地区选择「多训练地区 vs 单点训练地区」配对扫描（维持现状）
+
+- **日期**：2026-09-16
+- **状态**：已解决（结论 = 维持现有第 3 年策略，不采纳单点偏好）
+- **问题描述**：现有 `score_region`（`bias_sum × youqing × 1.5 + 弱位覆盖 − waste×10`）在第 3 年自然偏向"覆盖 build 多卡位的 3 点地区"（id 15-19，youqing 40×3 槽）；用户要求与"倾向单点训练地区"（id 10-14，youqing 50/60 集中单槽）做整局配对比较——沿用 9/15 轴线：打分公式不动、扫参（`region_y3_single_focus`：0=现状 / 1..=3=组合内至少含 N 个单点地区，仅第 3 年生效，组合级候选过滤）。
+- **排查过程**（全 101 构成配对，两种子复现）：
+  1. seed=42×100 局/构成四档扫描：focus=0 选区单点占比 26%（42 构成全 3 点 / 38 含 1 单点 / 21 含 2 单点——现有公式本身已按 build 自适应选单/多点）；focus=1/2/3 单点占比 40%/67%/100%，Y2 选区 0/101 变化（隔离成立）
+  2. focus=1 显著负（Δ−128，t=−3.36）、focus=2 显著负（Δ−368，t=−4.62）；focus=3 整体中性（Δ+66，t=+0.64）但结构性分化：**玩家真实 build（≥4 种卡，21/101）大亏 −1145（t=−5.22）**，智向（智≥2）+370、残缺（<4 种）+384
+  3. seed=61444×50 复测 f0 vs f3：整体 +52（t=+0.51）、真实 build −1099（t=−5.04）、智向 +345、残缺 +354——模式逐点位复现
+  4. 机制：真实 build 训练分布跨多槽，3 点覆盖（40×训练到的槽）胜于单点集中（60 仅落在单槽）；智向 build 训练高度集中，东京智单点（60）反超；混合档（focus=1/2）强制"单点多点混搭"是最差集合
+- **解决方案**：不采纳单点偏好，维持现有第 3 年策略。`region_y3_single_focus` 保留为可配实验字段（默认 0 = 现状），bench_compositions 新增 `--region-y3-single-focus` 与 region_y2/y3 选区 CSV 列（此前 comp 档不记录每年实际选区），配套 3 个单测（focus 语义 / 仅第 3 年生效 / 回退）
+- **备注**：与 8/25 教训同构——"残缺 build 拉高结论、真实 build 受损"的指标不可采纳；现有公式的自适应（智向选单点、真实选多点）已隐含最优混合，强制单点属过度旋转。数据留档 logs/comp-y3sf0..3.csv（seed42×100）、logs/comp-y3sf-{0,3}-seed61444.csv（×50）。
 
 
 ## 自动 vs 玩家手动：吃面-训练覆盖差距（玩家 87% vs 自动 52%）
@@ -547,3 +573,100 @@
   - `test_region_build_sensitivity` 已由临时验证转为断言测试（`assert_ne!` 两 build 选中组合不同）
   - 与既有 issue「第三年地区选择组合过多」（已解决：Fixed）相关联：Fixed 是性能临时方案，本 issue 是在 build 维度上的功能补齐。恢复 `all` 后实测整局耗时 2.9ms 不变，120 组合枚举无可测代价
   - **影响采样器复现基座**：`sampler.rs` 的 `run_region_select` 读 `GAMECONFIG.ramen_region_strategy`，本次由 `fixed` 改 `all` 后同一条 `SampleSpec` 的轨迹已不同（结构性指标不变：74/78 回合覆盖、卡组分层 min==max）。Phase 3 落盘的配置签名须用改后这套
+
+## 运气分 SVG 趋势图 + 在线决策记录整合（规划）
+
+- **日期**：2026-09-16（同日二次修订：落盘改为"每局一目录"；在线记录器与局末自动 SVG 已实施）
+- **状态**：**部分实施**——在线记录器（步骤 1~2）与局末自动 SVG 出图（步骤 3 接线）已落地；`umaai --plot` / `luck_replay --svg` CLI 接线（步骤 4）与三方交叉验证（步骤 5）待排期
+- **问题描述**：
+  1. 运气分可视化目前依赖 Python + matplotlib（`scripts/plot_luck_trend.py` 出每局 JPG），Windows（用户主力运行环境）不便：打包 exe 体积 50-100MB、启动慢，且 matplotlib 打包需额外处理字体；
+  2. **在线运行（AIRedirector / 玩家模式）没有决策记录落盘**——运气分只存在于内存 `LuckScoreTracker`，仅经 sink 上屏 / 走 stdout JSON，事后无法复盘；想要曲线只能靠"快照样本 + `luck_replay` 重放"，而重放既需要完整快照序列、又要重跑一遍 MCTS（seed 不同结果还会微变）。
+- **目标**：
+  1. umaai 侧用 Rust 直接生成 **SVG** 趋势图（零 Python 依赖；中文交给渲染器字体回退，规避字体打包/加载问题）；
+  2. **在线记录**：umaai 运行时按局把「接收到的游戏数据」（`thisTurn.json` 原文）与「策略计算结果」（逐决策点）一并落盘 → 图可直接由在线记录生成，无需重放；
+  3. 离线（重放）与在线（记录）**共用同一份数据 schema 与同一套绘图模块**。
+- **方案设计**：
+  1. **落盘形态：每局一个目录** `logs/game{id}/`（`id` = `single_mode_chara_id`，现有切局键，与插件归档 `game{id}_turn{turn}.json` 同源），该局**全部产物平铺在同一目录内**（csv / json / svg，后续新增产物同样落此目录）：
+
+     | 文件 | 内容 | 写入时机 |
+     |---|---|---|
+     | `game{id}_turn{turn}[_{seq}].json` | 接收到的游戏数据**原文**（`thisTurn.json`） | watch 每收到一份即写（写完即关） |
+     | `decisions.csv` | 策略计算结果：逐决策点一行（候选 / 评分 / 局数 / 选中 / 运气分） | 每条决策 emit 即时写（无缓冲） |
+     | `meta.json` | 局元信息：起止时间 / 起始回合 / `mid_entry` / 结束原因 / `snapshots` / `csv_rows` / `decision_rows` / `total_luck_end` | 切局或进程退出时收尾 |
+
+  2. **统一数据 schema**：沿用 `luck_replay` 现有明细列（`game/file/turn/seq/source/playing_state/stage/outcome/reason/step/chain_len/decision_kind/n_actions/cand{1..5}_desc|cand{1..5}_score|cand{1..5}_n/chosen_idx/chosen_desc/chosen_action_luck/t_n_raw/t_n_display/total_luck/turn_delta`，共 35 列），与 `classify_begin_reason` 一并从 bin 私有逻辑抽到 lib（`umaai::decision::record`），供在线记录与离线重放共用。**在线 `step` / `chain_len` 两列留空**（用户拍板：不为它们保留"每快照行缓冲"——在线边算边 emit，末行落盘时才知道本快照总行数；两列只有离线重放有，图上不用）。
+  3. **在线记录器**（`crates/umaai/src/decision/record.rs`）：状态只有两项——「当前局（`chara_id` + 目录 + `decisions.csv` 句柄）」与「回合内序号（生成 `_{seq}` 后缀）」；
+     - 全局形态 `OnceLock<Mutex<Option<OnlineRecorder>>>`（对齐 `GAMECONFIG` / `SAVED_GAME` 的项目惯例）：`record::init` **之前所有入口 no-op**，`luck_replay` / `luck_probe` / bench 与在线共用同一份 `process_ramen` 代码也不会误写日志
+     - 接收侧：watch 收到 `contents` → parse 得 `chara_id` / `turn` → 写 `game{id}_turn{turn}[_{seq}].json` 原文（Begin / 事件 / RMJ / 解析失败等"不派发"快照同样留档；解析失败归入当前局，落在 `_unparsed_{n}.json`）
+     - 决策侧：`DecisionSink` **外包一层 `RecordingSink`**——转发内层（stdout JSON / 屏幕），同时把 `DecisionInfo` 记为一行 CSV；链式决策的**中间项**（直发 `sink.emit`、不挂 luck）同样捕获、不漏行
+     - 切局：`chara_id` 变化 → 收尾上一局（`meta.json` + 关文件）→ 建新目录；`main.rs` 在 watch 循环结束（含 `Err` 路径）调 `finalize_shutdown()`
+     - 无决策快照的 `no_emit` 行：在**下一条快照到达 / 收尾时**补出（此时才能确定"本快照没有决策"），保证与离线口径一致
+     - 开关：**默认开**，`game_config.toml` 的 `[config_override]` 段 `luck_record` 可关（放该段避开"顶层字段必须写在所有 `[xxx]` 段之前"的 TOML 陷阱）；`--json` 等既有模式不受影响（写文件、不污染 stdout）
+  4. **快照文件名保留 `game{id}_` 前缀**（用户拍板）：与插件归档同名同构 → `luck_replay --dir logs/game{id}` **零改动**即可重放该局（`turn{NN}.json` 形式过不了 `luck_replay::parse_file_name` 的 `game` 前缀 + `_turn` 分隔要求）；同回合序号与插件同口径（首份无后缀、第 2 份 `_2`、第 3 份 `_3`…），`seq` 列随之可比对；目录内 `meta.json` / `thisTurn.json` 非该格式，扫描时自然跳过
+  5. **SVG 绘图模块**（`crates/umaai/src/plot/`，已实现 `svg.rs` 构建器 + `luck_trend.rs` 渲染）：
+     - `svg.rs`：极简 SVG 构建器（线/折线/矩形/多边形/文本/坐标变换，字符串拼接，无第三方依赖）
+     - `luck_trend.rs`：单局一张图，3 子图（期望评分 / 运气分 / 运气波动），与现有 python 版对齐——折线带圆点标记、运气波动为正绿负红柱状、每子图 x 轴标回合刻度、skip 快照剔除、竖直底色带按 AI 决策类别（训练/出行/休息/比赛/吃面/地区选择）
+     - 中文：`font-family="Microsoft YaHei, PingFang SC, Noto Sans CJK SC, sans-serif"` 走渲染器回退，**不内嵌字形**
+     - 输出：`logs/game{id}/luck_trend.svg`（自包含单文件）——**直接出 SVG，不做 PNG/JPG 栅格化**（不引入 `resvg` 等依赖）
+     - **样式（2026-09-16 用户逐条调整后定稿）**：3 子图各带边框与横坐标轴（四边框 `fill=none`；轴标题「回合数」、刻度标签为回合数，**x 轴右端多留 1 格覆盖到末回合 +1（拉面即 78 回合）**）；**每个子图带纵坐标刻度数字（1/2/5×10^n 步长自动取整，约 5 档）与竖排纵轴标题（估分 / 运气分 / 回合波动）**；图例为「蒙特卡洛估分（raw 实线）/ 显示估分（显示口径虚线）/ 显示运气分」+ 类别色块 + 波动正负，**原始运气分（raw 累计）曲线与图例项均隐藏**（代码注释保留，可一键恢复，颜色 `#e8a3a6`）；图例下侧（快照数下一行）署名 `由 UmaAI-Ramen 生成`
+     - **路径展示**：出图后在线记录器在终端打印绿色绝对路径（Windows 经 `dunce::canonicalize` 去掉 `\\?\` 前缀）方便点击跳转；走 **stderr**，`--json` 模式 stdout 仍严格 JSON
+  6. **入口接线**（CLI 待排期）：
+     - `umaai --plot [--game <id>]`：扫 `logs/game*/decisions.csv` 出图，**不重放**（待排期）
+     - `luck_replay --svg`：重放后直接出 SVG（离线复盘，待排期）
+     - **局末自动出图已内置**（2026-09-16 用户再拍板，见「已定决策」4）：末回合第 2 份快照处理完即生成该局 SVG（切局/退出仅兜底）
+- **触发点说明（2026-09-16 用户两次指正后固化）**：实际游戏在**收到末回合 77 数据**（`baseGame.turn == 77 == RamenGame::max_turn()`，实测 game6222 佐证）时结束。末回合实测有 **2 份快照**：`turn77` 是 Begin skip（超级拉面丢包）、`turn77_2` 才含带决策的 calc 行——**不能在第一份 77 快照时出图**；
+  2026-09-16 再修订：**改为在收到末回合第 2 份快照（`turn77_2`）、其决策行落盘后立即出图 + 写 meta（`end_reason=game_end`）**，不再等切局/退出。实现：`SnapMeta.max_turn`（main 传 `game.max_turn()`）+ 记录器对「同一末回合出现第 2 份快照」置 `end_pending`，`main.rs` 在 `process_ramen` 返回后调 `record::on_turn_done()` 触发（`handle_turn_done` → `write_meta_and_plot("game_end")`、标记 `end_done`）；切局 / 退出降级为**兜底**（`end_done` 局不再重写 meta/SVG；未触发末回合的中途停止局由 `finalize(switch/process_exit)` 补写）。产物 `logs/game{id}/luck_trend.svg`。
+  7. **与 python 脚本的关系**：`scripts/plot_luck_trend.py` 保留作对照 / 备用（schema 相同 → 同一 CSV 可交叉验证两者结构与数值标注一致）；其 `--csv` 可直接吃 `logs/game{id}/decisions.csv`
+- **范围**：**本期只做拉面**（`scenarioId=14`）——运气分图表与 `single_mode_chara_id` 切局键均为拉面专属；温泉无该字段（现有代码退化用 `uma_id`），纳入需另定切局键，留待后续
+- **实现步骤**：
+  1. ✅ 抽共享行 schema + `classify_begin_reason` 到 lib（`umaai::decision::record`）+ `OnlineRecorder` + `RecordingSink` + `luck_record` 开关
+  2. ✅ `main.rs` 接线（`init` / `on_snapshot` / sink 包装 / 退出收尾）+ 单测（行构造、端到端切局与 `meta.json`、解析失败留档）
+  3. ✅ SVG 构建器 + `luck_trend` 绘图（逐项对齐 python 样式；已接局末自动触发，实测 game6222 出图 79KB / 合法 XML）+ 单测（分类口径、真实 schema 渲染冒烟）
+  4. ⏳ CLI 接线（`umaai --plot` / `luck_replay --svg`）
+  5. ⏳ 交叉验证：同一局「在线 `decisions.csv`」对「插件快照离线重放 CSV」（忽略 `step`/`chain_len`）对「python JPG 出图」三方比对
+- **已定决策（2026-09-16 用户拍板）**：
+  1. **在线记录默认开**（`luck_record` 可显式关闭），产物落 `logs/game{id}/` 每局一目录
+  2. 记录格式 **CSV**（与重放明细同 schema，复用现有解析）；**接收到的游戏数据保留 thisTurn.json 原文**，与其它产物平铺在同一局目录内（不另设子目录）
+  3. 出图**直接生成 SVG**，不引入栅格化依赖、不产出 PNG/JPG
+  4. **"打完一局自动出图"改为做，触发点=末回合第 2 份快照（2026-09-16 用户两次拍板）**：收到 `turn77_2`（含决策行那份）、其决策行落盘后立即写 `meta.json`（`end_reason=game_end`）+ 生成 `logs/game{id}/luck_trend.svg`；不在第一份末回合快照触发（它是 Begin skip、无决策行）；切局 / 退出降级为兜底，详见「触发点说明」
+  5. 快照文件名保留 `game{id}_` 前缀；**在线 `step`/`chain_len` 留空**（不引入每快照行缓冲）
+  6. 本期范围只覆盖拉面
+- **备注**：
+  - 已知冗余：`SendGameStatusPlugin` 本就把每份快照归档成 `game{id}_turn{turn}[_{seq}].json`（工作区 `logs/SendGameStatusPlugin/` 的 560 份即来自它，4 局 ≈ 3MB）。umaai 侧再存一份的增量价值 = 与策略结果同目录自包含、可跨机分析、解析失败样本也留档、出图/重放不必再手工拷插件目录；体积 ≈ 0.8~1MB/局（含 SVG）可忽略
+  - **离线输出不变**：`luck_replay` 的行构造改为调用 lib 后，同种子同参数下明细 CSV 与 summary CSV 与改动前**逐字节一致**（已验证）
+  - 选 SVG 而非 plotters 的理由：无字体加载/打包问题、体积小（数百 KB）、可在浏览器交互（悬停/缩放）、实现量小
+  - 样式基准：`scripts/plot_luck_trend.py`（经用户多轮微调）；数据来源：`crates/umaai/src/bin/luck_replay.rs`
+  - `logs/` 与 `*.svg` 已在 `.gitignore`，新目录不污染仓库
+  - 相关：本文件「年度 RMJ 派生状态恢复」修复后，运气分曲线才具备分析价值（修复前第 2/3 年存在 ~2300 系统性虚降）
+
+## 合宿训练诀窍填充缺失（"高体力一选休息"根因）
+
+- **日期**：2026-09-17
+- **状态**：已解决
+- **问题描述**：game6222 回合 60（第三年夏合宿开局，体力 85/108）MCTS 把「休息」排第一（"高体力一选休息"）。初判指向手写策略体力硬门限（`vital_rest=40`）——被分叉实验否决：512 种子 CRN 配对「休息 vs 智训练」rollout，490/512 次分叉发生在双方体力 ≥50，仅 1 次 ≤40。
+- **排查过程**：
+  1. `luck_replay` 重放回合 60 与在线逐位同向（休息第一 63549 vs 智 63320），排除配置/数据漂移
+  2. CRN 配对 rollout 探针（512 种子 × 7 候选）：休息分支终局 score_pt 领先，优势集中在 PT 分量（+126）与五维净值（+22）；逐回合追踪发现两条分支在 t61 吃面时已分叉（休息分支吃面库存 [2,4,2]，智训分支 [1,3,1]）
+  3. 库存差异回溯到 t60 动作本身：合宿**休息**后库存 +1×3（[1,3,1]→[2,4,2]），合宿**智训练**后 +0×3（[1,3,1]→[1,3,1]）——违反合宿「任何动作三种诀窍都 +1」规则
+  4. 代码定位：协议合宿回合（36-39 / 60-63）`train_feeling_type` 全 [0,0,0,0,0] → `into_game` 映射 None（`protocol/ramen.rs` 显式注释「协议 0=本回合无角标」）；`action.rs::fill_feeling_gauge` 被 `if let Some(train_feelings)` 门控整段跳过——但合宿全 MAX 分支（`fill_gauge_xiahesu_max`）本就不需要角标；非训练动作走 `fill_gauge_non_train` 无条件填充 → **只有训练在合宿漏掉 3 诀窍/回合**
+  5. 影响面：全部存档（7075-7078 / 6222）两次合宿角标全 0 → 在线对局合宿训练系统性少 3 诀窍/回合 → MCTS 视野里合宿训练亏诀窍 → 休息胜出。附带发现：72-77 角标也全 0，且 NN 特征注释本就把角标限定「回合 2-71」→ URA 训练不填属预期语义
+- **解决方案**：
+  1. `fill_feeling_gauge` 门控放宽为 `is_xiahesu || train_feeling_type.is_some()`（合宿无条件走 `fill_gauge_after_train` 的 xiahesu 全 MAX；None 用默认角标占位，合宿分支不消费它）
+  2. `run_distribute` URA 回合（72-77）角标**照常抽签但不落库**（置 None）——保留抽签消耗使后续 distribute_all/hint 的固定流偏移逐位不变，sim 与在线行为一致
+  3. 新增守门单测 ×2：合宿 None 角标训练仍 +1×3（含休息对照 / URA None 不填对照）；72-77 角标不落库但分布照常分配
+- **验证**：落地后 `luck_replay` 回合 60 决策翻转——智训练 63887 > 休息 63525（+362），"高体力一选休息"消失（修复前休息 +229 领先）。模拟数值变化 → 基线作废（老规矩）；Y3 观测列 `gauge_gain_y3` 56→50、`gauge_overflow_y3` 4→0、`friend_turns_y3` 19→16（观测随填充执行走，与旧在线行为一致），score / 五维逐位不变
+- **备注**：存量红测试 4 个与本修复逐位无关——`test_combined_gate_off` / `test_combined_on_skips`（pt_favor_rate 2.0 快照基线过期，用户明示不管）、`test_ramen_three_stage_action_unchanged` / `test_yearly_observability_full_game_and_csv`（最近策略调优未重抓基线，干净 master 亦红；后者 score/五维断言对本次改动逐位不变，仅 Y3 观测列随语义变化）。重抓基线留待单独排期
+
+
+## 手写策略"低体力练智"与智向 build 优化探索（三条方向全部关闭）
+
+- **日期**：2026-09-17
+- **状态**：已解决（结论=维持现状）
+- **问题描述**：用户提议"智力训练体力门限可单独调低（30 体力时考虑智训练或休息而非纯休息）"；并关注 2-3 智卡配卡（智溢出拿 PT / 体力管理）。检查数据：智卡3 终局智 100% 贴顶（上限 2445）、智卡2 91% 贴顶，"智溢出"实锤；智向 build 终局速/耐/力/根明显低于智卡1 build（配卡天花板）。友人出行检查：手写逻辑非智向 100% 用满 5 次、智向 83-93%（中位 5），偶发未满来自解锁事件 RNG，无需修复。
+- **排查过程与结论**（全部配对扫描，CSV 留档 logs/）：
+  1. **wisf（智力豁免下限）**：原实现=豁免带内整个 40 门放开（所有动作可选），seed42×50 实测 wisf15 −1616、w30 −355；收敛为**白名单语义**（只放行智训练/休息/普通外出/治病）后损伤减半（w30 −177），两种子复现 ≈ −178（t≈−1.8）；智卡 1/2/3 分组（12-build 定制组）不跨种子稳定（智2 seed42 +31 / seed61444 −280）→ 无一档收益，维持 40/MAX
+  2. **已满位 PT 定价（trd/trdsh/trds）**：trd 无彩圈 16→8/12 零影响（无彩圈已满位几乎不触发）；trdsh 彩圈 36→28/32 智2/3 显著变差（−62~−94）；超拉面档→8 灾难性（−362 总体）→ 36/16/36 为最优，与 9/14 定档共振
+  3. **弱位覆盖智≥2 加分**（region 弱位覆盖固定 12 vs 查表）：101 构成 × 20 局逐位不变（+12 信用从不翻转地区 argmax）→ 无效
+  4. **capd（残余收益折扣）**：`cap_discount_weight` 实际只是 0/非 0 开关（数值无意义），capd150/200 与 base 逐位一致
+- **解决方案**：三方向全部关闭，手写 preset 维持现状。保留两处无害性改动：①豁免 scoped 语义修正（默认 MAX 不豁免，行为逐位不变，修复原实现"整个门放开"的与文档意图不符）；②补齐 trd/trdsh/trds 实验 token（文档声明过但从未实现）与解析单测。
+- **备注**：智卡3 的 3.4k 分差主要为配卡天花板（速/耐/力/根弱位），非策略失误；若要继续增量，剩余方向在 MCTS 侧（智向 build 的 pt_favor_rate 交互）或新系数（hint/羁绊对智向 build 差异化定价）。

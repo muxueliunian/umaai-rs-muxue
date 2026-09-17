@@ -7,6 +7,11 @@
 pub mod luck_score;
 pub use luck_score::LuckScoreTracker;
 
+pub mod record;
+pub use record::RecordingSink;
+
+pub mod zip_export;
+
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicBool, Ordering}

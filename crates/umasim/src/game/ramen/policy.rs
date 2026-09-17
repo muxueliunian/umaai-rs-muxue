@@ -56,6 +56,40 @@ pub struct RamenPolicyConfig {
     pub status_rate: f32,
     /// PT→评分折算（默认与 `pt_score_rate` 同量级）
     pub pt_rate: f32,
+    /// 已满位训练候选的 PT 折算价（评分换PT系数，主位无剩余空间时生效）。
+    ///
+    /// 普通回合训练主属性已满时 `status_gain` 截断为 0，只剩 PT 收益（超级拉面
+    /// 峰值可到 250-350 PT）。策略默认仍用 `pt_rate` 折算，会把 PT 高估约 32 倍
+    /// （策略 pt_rate=64 vs 终局 `pt_score_rate`=2.0），诱使策略在终盘反复练已满位
+    /// 拿「看起来值钱、实际亏分」的 PT（A/B/C 修复全降分的根因）。
+    ///
+    /// 本系数把已满位训练候选的 PT 按独立价折算：`0.0` = 关闭（用 `pt_rate`），
+    /// 正数 = 按此值折算（建议量级 2~8，对齐终局真实收益）。配合
+    /// [`Self::pt_tradeoff_super`] 对超级拉面（72-77）分级。配置 token `trdN` =
+    /// N/100（`trd200` 对应 2.0）。
+    pub pt_tradeoff: f32,
+    /// 已满位训练在**有彩圈**（友情训练，`shining > 0`）时的 PT 折算价。
+    ///
+    /// 依据（超级拉面实测 90 个候选）：PT 产出由彩圈数主导——0 彩圈均值 40、
+    /// 1 彩圈 267、2 彩圈 284、3 彩圈 340；而 PT 产出与属性是否已满几乎无关
+    /// （已满 232 vs 未满 225）。因此"已满位"不是一个同质群体：
+    /// - 高彩圈已满位：PT 真实产出高，定价过低会白丢可得的 PT；
+    /// - 无彩圈已满位：PT 仅 40 上下且属性为 0，是最差选择，应重压。
+    ///
+    /// `0.0` = 关闭分级（一律用 [`Self::pt_tradeoff`]）。配置 token `trdshN`。
+    pub pt_tradeoff_shining: f32,
+    /// 超级拉面回合（72-77）的已满位 PT 折算价。
+    ///
+    /// 超级拉面训练强度全局峰值（finals youqing=150 / pt_bonus=100 → PT 上限
+    /// 350），已满位也能稳定拿高额 PT（实测均值 241）。若玩家认可"超拉面拿
+    /// 满位纯 PT"是合理策略，这里可给更高价；若认为应把超拉面留给未满位
+    /// 双丰收（属性+PT），则与普通回合同价甚至更低。
+    ///
+    /// `0.0` = 关闭（与普通回合一样回落 `pt_rate` 口径）。配置 token `trdsN`。
+    pub pt_tradeoff_super: f32,
+    /// 实验：在剩余主属性不足 N 次本次训练收益时，连续过渡到满位 PT 价格。
+    /// 0 关闭，保留正式策略；正数仅影响未满位的 PT 估值。
+    pub pt_cap_blend_turns: f32,
     /// 主属性快满时"残余收益"折扣强度（方案 E，0~1）。
     ///
     /// 配卡决定训练效率（3 速 build 速位每次 +90 天然更快接近上限），凸评分曲线
@@ -130,11 +164,13 @@ pub struct RamenPolicyConfig {
     /// 普通诀窍机会成本权重（吃面消耗 5 诀窍的折算）
     pub ramen_stock_cost: f32,
     // ===== RegionSelect（年度选面）=====
-    /// 地区 xunlian 加成→分数折算
+    /// 地区 xunlian 加成→分数折算（仅第 1 年地区有 xunlian；按 bias_sum 缩放）
     pub region_xunlian_weight: f32,
-    /// 地区 pt_bonus→分数折算
-    pub region_pt_weight: f32,
-    /// 地区 hint_count→分数折算
+    /// 地区 hint_count 加成→分数折算
+    ///
+    /// **地区选择路径已不使用**（同年各地区 hint_count 恒定，常量项不改变 argmax，
+    /// 已从 `score_region` 移除）。保留仅因吃面选择 `score_ramen_action` 仍按
+    /// `hint_count` 折算地区效果（该路径 hint 项有区分度）。
     pub region_hint_weight: f32,
     /// 地区 youqing 加成→分数折算（与 `region_xunlian_weight` 同族，作用于不同年份）
     ///
@@ -154,11 +190,47 @@ pub struct RamenPolicyConfig {
     /// （`card_type_count[t] == 1`，即"带卡少但不是没有"）的地区加分，让年度
     /// 选区同步偏向副属性，使弱位偏好有兑现空间。
     ///
-    /// `0.0` 关闭；量级与 `region_youqing_weight` 同族（扫描定，初始 20-40）。
+    /// **三态语义**（与 [`crate::trainer::LocalRamenTrainer::effective_weak_boost`]
+    /// 对称，默认 `0.0` 按 build 自适应查表）：
+    /// - `> 0.0`：固定值（实验 override，所有 build 用该值）
+    /// - `= 0.0`：按智卡数查表（方案 Ⅰ 固化：智≤1 → 12，智≥2 → 0，见
+    ///   [`RamenPolicy::effective_region_weak_cover`]）
+    /// - `< 0.0`：显式关闭（= 旧行为，无弱位覆盖加分）
     pub region_weak_cover_weight: f32,
+    /// 地区覆盖"卡组无卡位"的每个位的惩罚（每覆盖 1 个 build 无卡位 -N 分）
+    ///
+    /// 与 `bias_sum` 配对使用：`bias_sum` 奖励"覆盖 build 有卡的位"，
+    /// 本项惩罚"覆盖 build 没有卡的位"（覆盖广但无卡位利用价值的反例地区，
+    /// 如第 2 年 id 5 中山-全）。历史值 `10.0` 是 2026-08-25 修正公式的定档
+    /// （令 id 5 含 2 无卡位时显著低于 id 9 智单点），本次参数化以便重扫。
+    pub region_waste_penalty: f32,
+    /// 地区覆盖"build 主训位（卡最多位）"的额外分量加成（C2 候选）
+    ///
+    /// `0.0` = 关闭（`bias_sum` 纯线性累加卡数，历史行为）；
+    /// `1.0` = 该地区覆盖 count 最大的训练位时，`bias_sum` 再 + 1 倍该位卡数
+    /// （主训位翻倍：速3卡的 build 覆盖速位 → bias_sum 3 → 6），强化"覆盖
+    /// 主训位"的地区相对"覆盖广但主位分量低"地区的优势。
+    /// 实验扫描定档，未固化前 preset 保持 0.0。
+    pub region_main_bias_bonus: f32,
+    /// 第 3 年地区选择"单点偏好"强度（实验扫参，默认 0 = 现状）。
+    ///
+    /// 只作用于第 3 年：组合内"单点地区"（`at_trains` 仅覆盖
+    /// 1 个训练位，即 id 10-14）数量少于本值的候选直接否决，`score_region`
+    /// 打分公式一字不动。见 [`RamenPolicy::decide_region`]。
+    ///
+    /// - `0`：现状（候选全 120 组合，公式原样）
+    /// - `1` / `2`：候选限定为「组合内至少含 1 / 2 个单点地区」（3 点地区仍可混入）
+    /// - `3`：纯单点（C(5,3)=10 个全单点组合）
+    ///
+    /// 扫描目的：回答「第 3 年选多训练地区 vs 单点训练地区」的整局收益差异
+    /// （2026-09-15 用户拍板：打分公式不动、扫参）。过滤后候选为空时回退
+    /// 全量候选（防御，正常档位不会触发）。
+    pub region_y3_single_focus: u8,
     // ===== Event =====
     /// 事件体力每点折算
     pub event_vital_weight: f32,
+    /// 实验：0=固定选项二，1=固定选项一，2=固定选项三，3=按终盘缺口和卡数选范围。
+    pub super_choice_mode: u8,
     /// 事件干劲每点折算
     pub event_motivation_weight: f32,
     /// 事件获得 bad flag（ill/bad_trainer）的惩罚
@@ -175,6 +247,10 @@ impl Default for RamenPolicyConfig {
             motivation_outing: 3,
             status_rate: 1.0,
             pt_rate: 8.0,
+            pt_tradeoff: 0.0,
+            pt_tradeoff_shining: 0.0,
+            pt_tradeoff_super: 0.0,
+            pt_cap_blend_turns: 0.0,
             cap_discount_weight: 0.0,
             failure_penalty: 60.0,
             effective_ramen_failure: true,
@@ -193,11 +269,14 @@ impl Default for RamenPolicyConfig {
             ramen_special_cost: 12.0,
             ramen_stock_cost: 0.4,
             region_xunlian_weight: 40.0,
-            region_pt_weight: 30.0,
             region_hint_weight: 15.0,
             region_youqing_weight: 1.5,
             region_weak_cover_weight: 0.0,
+            region_waste_penalty: 10.0,
+            region_main_bias_bonus: 0.0,
+            region_y3_single_focus: 0,
             event_vital_weight: 2.2,
+            super_choice_mode: 0,
             event_motivation_weight: 40.0,
             event_bad_flag_penalty: 300.0
         }
@@ -392,6 +471,29 @@ impl RamenPolicy {
                 return Ok(idx);
             }
         }
+        // 豁免带内（vital ∈ [wisdom_vital_floor, rest_threshold)）：**不是**把整个
+        // 门放给全部动作，而是只放行 智训练 / 休息 / 普通外出 / 治病 参与打分，
+        // 其余训练位（速/耐/力/根）与自由比赛仍视为被体力门限拦截。理由：速/耐等
+        // 位失败率体力阈值 ~50-54，30-40 体力下失败率 20-30%，线性失败期望低估
+        // 大失败尾部与失败回合浪费，实测整门放开扫参大亏（2026-09，见 issues.md）。
+        if wisdom_exempt {
+            // 先全量打分（保持 eval_cache 预填契约——LocalRamenTrainer B2 依赖
+            // 全部训练位 eval 已填），再按白名单把其余候选压到最低分：
+            // 豁免带内只允许 智训练 / 休息 / 普通外出 / 治病 取胜。
+            scores.clear();
+            self.score_train_actions_cached(game, actions, ramen, eval_cache, scores)?;
+            for (a, o) in actions.iter().zip(scores.iter_mut()) {
+                let allowed = match a.operation {
+                    Operation::Train(t) => t as usize == 4,
+                    Operation::Rest | Operation::NormalOuting | Operation::Clinic => true,
+                    _ => false
+                };
+                if !allowed {
+                    o.score = f32::MIN;
+                }
+            }
+            return Ok(argmax_index(scores));
+        }
         // 守门 3：心情低 → 外出（回干劲）
         if uma.motivation < self.config.motivation_outing {
             if let Some(idx) = actions
@@ -514,39 +616,95 @@ impl RamenPolicy {
     /// 曾实验的"少卡位加权"（`low_count_youqing`）全 101 种验证显示：智向 build
     /// 严重受损（-3447），改写为"主训位加权"方向；但 `bias_sum` 已隐式表达 build
     /// 训练倾向——本公式即"按卡组自适应"的最简落地，无需额外加权项。
+    ///
+    /// 第 3 年可叠加"单点偏好"（[`RamenPolicyConfig::region_y3_single_focus`]）：
+    /// 对候选按组合内单点地区数量过滤（`score_region` 公式不动），返回的选中
+    /// 下标与 `scores` 仍对齐**完整候选表**（被否决的组合分数为 0、不参与 argmax）。
     pub fn decide_region(
-        &self, game: &RamenGame, _year_idx: usize, actions: &[RamenAction]
+        &self, game: &RamenGame, year_idx: usize, actions: &[RamenAction]
     ) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         if actions.is_empty() {
             anyhow::bail!("RegionSelect 阶段候选为空");
         }
+        // 第 3 年单点偏好：提前算好每个候选的单点地区数，只对年_idx==2 生效。
+        let focus = if year_idx == 2 { self.config.region_y3_single_focus as usize } else { 0 };
+        let mut single_counts = vec![0usize; actions.len()];
+        if focus > 0 {
+            for (i, a) in actions.iter().enumerate() {
+                let Operation::RegionSelect(combo) = a.operation else {
+                    anyhow::bail!("RegionSelect 候选应携带 RegionSelect 操作");
+                };
+                single_counts[i] = Self::count_single_point_regions(&combo)?;
+            }
+        }
+        // focus=0 时全部候选合格；focus>0 时只留单点数量达标的组合。
+        let mut eligible: Vec<usize> = (0..actions.len())
+            .filter(|&i| single_counts[i] >= focus)
+            .collect();
+        if eligible.is_empty() {
+            // 防御：过滤后为空（如 focus 超过当年可达单点上限 3），回退全量候选。
+            eligible = (0..actions.len()).collect();
+        }
         let mut scores: Vec<RamenPolicyOutput> = Vec::with_capacity(actions.len());
         let mut region_scores = vec![None; RAMENDATA.get().map_or(0, |data| data.ramen_region_effect.len())];
-        for a in actions {
+        for (i, a) in actions.iter().enumerate() {
             let Operation::RegionSelect(combo) = a.operation else {
                 anyhow::bail!("RegionSelect 候选应携带 RegionSelect 操作");
             };
             let mut out = RamenPolicyOutput::default();
-            for &rid in combo.iter() {
-                let cached = region_scores
-                    .get_mut(rid)
-                    .ok_or_else(|| anyhow::anyhow!("地区效果缺失: region_id={rid}"))?;
-                let score = match *cached {
-                    Some(score) => score,
-                    None => {
-                        let score = self.score_region(game, rid)?;
-                        *cached = Some(score);
-                        score
-                    }
-                };
-                out.score += score;
-            }
-            if self.collect_details {
-                out.reason = format!("{combo:?}");
+            if eligible.contains(&i) {
+                for &rid in combo.iter() {
+                    let cached = region_scores
+                        .get_mut(rid)
+                        .ok_or_else(|| anyhow::anyhow!("地区效果缺失: region_id={rid}"))?;
+                    let score = match *cached {
+                        Some(score) => score,
+                        None => {
+                            let score = self.score_region(game, rid)?;
+                            *cached = Some(score);
+                            score
+                        }
+                    };
+                    out.score += score;
+                }
+                if self.collect_details {
+                    out.reason = format!("{combo:?}");
+                }
+            } else if self.collect_details {
+                out.reason = format!("{combo:?}（单点{}/{} < {focus} 否决）", single_counts[i], combo.len());
             }
             scores.push(out);
         }
-        Ok((argmax_index(&scores), scores))
+        let mut best = eligible[0];
+        for &i in eligible.iter().skip(1) {
+            if scores[i].score > scores[best].score {
+                best = i;
+            }
+        }
+        Ok((best, scores))
+    }
+
+    /// 组合中"单点地区"（`at_trains` 仅覆盖 1 个训练位、即 `ramen_region_effect`
+    /// 里 `RegionEffect::at_trains.len() == 1`）的数量。
+    ///
+    /// 第 3 年数据下单点地区为 id 10-14（youqing 50/60 单槽）、3 点地区为
+    /// id 15-19（youqing 40 × 3 槽）；用 `at_trains` 长度判断而非硬编码 id，
+    /// 数据变更时仍成立。
+    fn count_single_point_regions(regions: &[usize; 3]) -> Result<usize> {
+        let Some(data) = RAMENDATA.get() else {
+            anyhow::bail!("RAMENDATA 未初始化");
+        };
+        let mut n = 0usize;
+        for &rid in regions {
+            let region = data
+                .ramen_region_effect
+                .get(rid)
+                .ok_or_else(|| anyhow::anyhow!("地区效果缺失: region_id={rid}"))?;
+            if region.at_trains.len() == 1 {
+                n += 1;
+            }
+        }
+        Ok(n)
     }
 
     /// RegionSelect 阶段（仅索引）
@@ -807,10 +965,42 @@ impl RamenPolicy {
         let pt_gain = value.status_pt[5] as f32;
         // 注：`status_gain` 内部已乘 status_rate，此处不可再乘（否则成平方）
         let attr = attr_gain;
-        // PT 不打折：PT 是独立追求目标（终局 skill_pt 直接计分），
-        // 为拿 PT 继续训练已满位是正当行为；打折只会扭曲"PT vs 属性"的取舍
-        // （训练等级成长等跨回合前瞻留给 MCTS 搜索，单点启发式承认上限）。
-        let pt = pt_gain * self.config.pt_rate;
+        // 已满位训练的 PT 按独立折算价（评分换PT系数）：主位剩余空间为 0 时
+        // 该训练的主属性收益被截断（status_gain=0），只剩副属性+PT；此时 PT 的
+        // 策略价值不再用 pt_rate（会高估约 32 倍），而用可调的 pt_tradeoff /
+        // pt_tradeoff_super（超级拉面分级）。未满位训练仍用 pt_rate 全额折算。
+        // 0.0 = 关闭（保留旧口径，行为逐位不变）。
+        let cap_left_main = (game.uma().five_status_limit[train] - game.uma().five_status[train]).max(0);
+        let main_full = inc_main > 0 && cap_left_main == 0;
+        let blend = if inc_main > 0 && self.config.pt_cap_blend_turns > 0.0 {
+            (cap_left_main as f32 / (inc_main as f32 * self.config.pt_cap_blend_turns)).clamp(0.0, 1.0)
+        } else if main_full {
+            0.0
+        } else {
+            1.0
+        };
+        let eff_pt_rate = if blend < 1.0 && self.config.pt_tradeoff > 0.0 {
+            // 彩圈分级：有彩圈（友情训练）的已满位 PT 真实产出高（实测 267-340），
+            // 用 pt_tradeoff_shining 定价；无彩圈（PT≈40）用 pt_tradeoff 重压。
+            let base = if eval.shining > 0 && self.config.pt_tradeoff_shining > 0.0 {
+                self.config.pt_tradeoff_shining
+            } else {
+                self.config.pt_tradeoff
+            };
+            let full_rate = if self.config.pt_tradeoff_super > 0.0 && game.is_super_ramen_turn() {
+                self.config.pt_tradeoff_super
+            } else {
+                base
+            };
+            if blend == 0.0 {
+                full_rate
+            } else {
+                full_rate + (self.config.pt_rate - full_rate) * blend
+            }
+        } else {
+            self.config.pt_rate
+        };
+        let pt = pt_gain * eff_pt_rate;
         // 体力成本（消耗按 train_vital_value 折算）
         let vital_cost = (-value.vital).max(0) as f32 * self.config.train_vital_value;
         let shining = eval.shining as f32 * self.config.shining_bonus;
@@ -942,6 +1132,24 @@ impl RamenPolicy {
 
     // ========== RegionSelect 单地区价值 ==========
 
+    /// 地区弱位覆盖加分权重（三态，见 [`RamenPolicyConfig::region_weak_cover_weight`]）
+    ///
+    /// - `config > 0`：固定值（实验 override）
+    /// - `config == 0`：按智卡数查表（推荐 preset 默认）——智卡 ≤1 给 12（speed/stamina
+    ///   类 build 弱位覆盖与弱位 boost 5.0 配套，2026-09-15 全 101 种×7build 扫描定档），
+    ///   智卡 ≥2 给 0（弱位 boost 查表对智=2 关闭、智≥3 微调，弱位覆盖同步关闭）。
+    /// - `config < 0`：显式关闭（旧行为）
+    fn effective_region_weak_cover(game: &RamenGame, config: f32) -> f32 {
+        if config > 0.0 {
+            config
+        } else if config < 0.0 {
+            0.0
+        } else {
+            let w = game.card_type_count[4];
+            if w <= 1 { 12.0 } else { 0.0 }
+        }
+    }
+
     /// 单个地区的静态价值（`bias_sum × youqing` + 无卡位惩罚）
     ///
     /// 语义：`region.youqing` 在 `at_trains` 内每个训练位**独立生效**——
@@ -965,6 +1173,7 @@ impl RamenPolicy {
             .ok_or_else(|| anyhow::anyhow!("地区效果缺失: region_id={region_id}"))?;
         // 该地区覆盖的训练位在卡组里的分量；无卡位贡献 0
         let mut bias_sum = 0.0f32;
+        let mut max_count = 0u32;
         let mut n_waste = 0u32;
         // 弱位覆盖数：at_trains 里"带卡少但不是没有"（card_type_count == 1）的位
         // —— 与弱位训练偏好（ramen_weak_train_boost）对应：这些位吃面后训练收益被放大，
@@ -976,6 +1185,7 @@ impl RamenPolicy {
                 let count = game.card_type_count[t];
                 if count > 0 {
                     bias_sum += count as f32;
+                    max_count = max_count.max(count as u32);
                     if count == 1 {
                         n_weak_cover += 1;
                     }
@@ -984,16 +1194,23 @@ impl RamenPolicy {
                 }
             }
         }
+        // C2 主训位翻倍：地区覆盖 build 卡最多的训练位时，bias_sum 再 + 该位卡数 × bonus
+        // （bonus=1.0 时主位分量翻倍），强化"覆盖主训位"地区相对"覆盖广但主位分量低"的优势。
+        if self.config.region_main_bias_bonus > 0.0 && max_count > 0 {
+            bias_sum += max_count as f32 * self.config.region_main_bias_bonus;
+        }
         // xunlian（第 1 年）与 youqing（第 2/3 年）都按 bias_sum 缩放：
         // 第 2/3 年地区的 xunlian 恒为 0，若只算 xunlian 则同年所有候选同分、
         // argmax 恒取第一个，卡组构成完全不参与决策。
+        // 注：pt_bonus 与 hint_count 不在本公式内——同年内各地区这两项恒定
+        // （第 2 年 pt_bonus=0、第 3 年 pt_bonus=50；hint_count 各年恒定），
+        // 常量项不改变 argmax，已从地区选择打分移除（D 清理，行为逐位不变；
+        // hint 项在吃面选择 `score_ramen_action` 中仍有区分度，走降级路径）。
         Ok(bias_sum
             * (region.xunlian as f32 * self.config.region_xunlian_weight
                 + region.youqing as f32 * self.config.region_youqing_weight)
-            + region.pt_bonus as f32 * self.config.region_pt_weight
-            + region.hint_count as f32 * self.config.region_hint_weight
-            + n_weak_cover as f32 * self.config.region_weak_cover_weight
-            - n_waste as f32 * 10.0) // 每个无卡位 -10
+            + n_weak_cover as f32 * Self::effective_region_weak_cover(game, self.config.region_weak_cover_weight)
+            - n_waste as f32 * self.config.region_waste_penalty)
     }
 
     // ========== Event 打分 ==========
@@ -1181,18 +1398,45 @@ impl RamenPolicy {
     ///
     /// 不是硬编码返回下标 1，而是**按身份查找**携带该选项的候选位置。
     /// 候选顺序若变化，仍能钉住「选项二」而不是「第 2 个候选」。
-    /// 不按卡组打分（属手写策略调参，不在本次范围）。
+    /// 默认保持固定选项二；super_choice_mode=3 按当前缺口和卡型数估值，不读取未来随机结果。
     pub fn decide_super_ramen(
-        &self, _game: &RamenGame, actions: &[RamenAction]
+        &self, game: &RamenGame, actions: &[RamenAction]
     ) -> Result<(usize, Vec<RamenPolicyOutput>)> {
         if actions.is_empty() {
             anyhow::bail!("SuperRamenSelect 阶段候选为空");
         }
+        let target = match self.config.super_choice_mode { 1 => 0, 2 => 2, _ => FIXED_SUPER_RAMEN_INDEX };
+        if self.config.super_choice_mode == 3 {
+            let options = get_super_ramen_clone_train_options()?;
+            let mut scores = Vec::with_capacity(actions.len());
+            for action in actions {
+                let Operation::SuperRamenSelect(option) = action.operation else {
+                    anyhow::bail!("超级拉面候选类型错误");
+                };
+                let trains = options.get(option).ok_or_else(|| anyhow::anyhow!("超级拉面范围越界"))?;
+                let mut score = 0.0;
+                for &tr in trains {
+                    let i = tr as usize;
+                    // 以卡数估计未来六回合训练能力，属性价值仍由真实终局评分表计算。
+                    let gain = 6 * (50 + 30 * game.card_type_count[i].max(0));
+                    score += self.status_gain(game, i, gain) * (1.0 + game.card_type_count[i].max(0) as f32);
+                }
+                let mut out = RamenPolicyOutput { score, ..Default::default() };
+                if self.collect_details {
+                    out.add("super_range_margin", score);
+                    out.reason = format!("超级拉面选项{}：终盘缺口估值{score:.0}", option + 1);
+                }
+                scores.push(out);
+            }
+            let mut best = actions.iter().position(|a| matches!(a.operation, Operation::SuperRamenSelect(1))).unwrap_or(0);
+            for i in 0..scores.len() { if scores[i].score > scores[best].score { best = i; } }
+            return Ok((best, scores));
+        }
         let idx = actions
             .iter()
-            .position(|a| matches!(a.operation, Operation::SuperRamenSelect(i) if i == FIXED_SUPER_RAMEN_INDEX))
+            .position(|a| matches!(a.operation, Operation::SuperRamenSelect(i) if i == target))
             .ok_or_else(|| {
-                anyhow::anyhow!("候选中找不到超级拉面选项下标 {FIXED_SUPER_RAMEN_INDEX}")
+                anyhow::anyhow!("候选中找不到超级拉面选项下标 {target}")
             })?;
         let mut scores = Vec::with_capacity(actions.len());
         for (i, _) in actions.iter().enumerate() {
@@ -1200,10 +1444,12 @@ impl RamenPolicy {
             if i == idx {
                 out.score = 1.0;
                 if self.collect_details {
-                    out.reason = "固定选项二".to_string();
+                    out.reason = if target == FIXED_SUPER_RAMEN_INDEX { "固定选项二".to_string() }
+                        else { format!("实验固定选项{}", target + 1) };
                 }
             } else if self.collect_details {
-                out.reason = "非选项二".to_string();
+                out.reason = if target == FIXED_SUPER_RAMEN_INDEX { "非选项二".to_string() }
+                    else { format!("非实验固定选项{}", target + 1) };
             }
             scores.push(out);
         }
@@ -1219,6 +1465,84 @@ mod tests {
         gamedata::init_global,
         utils::{get_workspace_root, init_test_logger}
     };
+
+    /// 超级拉面固定实验按动作身份选择，候选顺序变化不能改变选项。
+    #[test]
+    fn test_round5_super_choice_identity() -> anyhow::Result<()> {
+        use crate::utils::Checks;
+        std::env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let game=make_game()?;
+        let actions=vec![RamenAction::super_ramen_select(2),RamenAction::super_ramen_select(0),RamenAction::super_ramen_select(1)];
+        let mut checks=Checks::new();
+        for (mode,expected) in [(0,2),(1,1),(2,0)] {
+            let mut cfg=RamenPolicyConfig::default(); cfg.super_choice_mode=mode;
+            checks.check(RamenPolicy::new(cfg).decide_super_ramen(&game,&actions)?.0==expected,"按固定选项身份选择");
+        }
+        let mut cfg=RamenPolicyConfig::default(); cfg.super_choice_mode=3;
+        let policy=RamenPolicy::new(cfg);
+        let first=policy.decide_super_ramen(&game,&actions)?.0;
+        let mut reverse=actions.clone(); reverse.reverse();
+        let second=policy.decide_super_ramen(&game,&reverse)?.0;
+        checks.check(actions[first]==reverse[second],"缺口策略不随候选顺序改变");
+        let mut late = game.clone();
+        late.uma.five_status = late.uma.five_status_limit;
+        late.uma.five_status[3] -= 500;
+        late.card_type_count[3] = 2;
+        let (idx, scores) = policy.decide_super_ramen(&late, &actions)?;
+        checks.check(scores[2].score==0.0,"选项二不覆盖唯一有缺口的根性位，估值为零");
+        checks.check(scores[idx].score>0.0 && idx!=2,"自适应选择覆盖缺口的选项");
+        late.uma.five_status = late.uma.five_status_limit;
+        checks.check(policy.decide_super_ramen(&late,&actions)?.0==2,"全部满位平局时回退默认选项二");
+        checks.finish()
+    }
+
+    /// 近上限定价在真实评分入口验证：窗口外/满位端点、连续过渡、彩圈及超拉面。
+    #[test]
+    fn test_pt_cap_blend_scoring_boundaries() -> anyhow::Result<()> {
+        use crate::utils::Checks;
+        let root = get_workspace_root()?;
+        std::env::set_current_dir(root)?;
+        init_global()?;
+        let mut game = make_game()?;
+        game.base.turn = 60;
+        let action = RamenAction::new(Operation::Train(TrainingType::Speed));
+        let mut eval = RamenTrainEval::default();
+        eval.value.status_pt = [100, 0, 0, 0, 0, 10];
+        let mut config = RamenPolicyConfig::default();
+        config.pt_rate = 64.0;
+        config.pt_tradeoff = 37.0;
+        config.pt_tradeoff_shining = 36.0;
+        config.pt_tradeoff_super = 35.0;
+        let base = RamenPolicy::new(config.clone());
+        config.pt_cap_blend_turns = 2.0;
+        let blend = RamenPolicy::new(config);
+        let mut checks = Checks::new();
+        for (left, expected_rate) in [(300,64.0), (200,64.0), (100,50.5), (1,37.135), (0,37.0)] {
+            game.uma.five_status[0] = game.uma.five_status_limit[0] - left;
+            let old = base.score_train_action_eval(&game, &action, &eval)?;
+            let new = blend.score_train_action_eval(&game, &action, &eval)?;
+            let pt = new.breakdown.iter().find(|(name,_)| *name=="pt").map(|(_,v)|*v).unwrap_or(-1.0);
+            println!("left={left} old={} new={} pt={pt}",old.score,new.score);
+            checks.check((pt-expected_rate*10.0).abs()<0.001,"PT价格符合独立手算预期");
+            if left==0 || left>=200 {
+                checks.check(old==new,"满位和窗口外完整输出与原策略逐位相同");
+            }
+        }
+        game.uma.five_status[0] = game.uma.five_status_limit[0] - 100;
+        eval.shining = 1;
+        for (turn,want) in [(60,500.0),(72,495.0)] {
+            game.base.turn=turn;
+            let out=blend.score_train_action_eval(&game,&action,&eval)?;
+            let pt=out.breakdown.iter().find(|(name,_)| *name=="pt").map(|(_,v)|*v).unwrap_or(-1.0);
+            checks.check((pt-want).abs()<0.001,"彩圈/超拉面端点使用对应PT价格");
+        }
+        eval.value.status_pt[0]=0;
+        let old=base.score_train_action_eval(&game,&action,&eval)?;
+        let new=blend.score_train_action_eval(&game,&action,&eval)?;
+        checks.check(old==new,"主属性零增量不误触发过渡或除零");
+        checks.finish()
+    }
 
     #[test]
     fn test_fixed_region_selection() -> anyhow::Result<()> {
@@ -1354,6 +1678,94 @@ mod tests {
         println!("两者选择是否不同: {}", combos[idx_s] != combos[idx_w]);
         assert_ne!(combos[idx_s], combos[idx_w], "不同 build 必须选出不同的第 3 年地区组合");
         Ok(())
+    }
+
+    /// 第 3 年"单点偏好"（`region_y3_single_focus`）候选过滤语义：
+    /// `score_region` 公式不动，只按组合内单点地区数量否决候选；选中下标与
+    /// `scores` 对齐完整候选表；仅第 3 年生效；过滤后候选为空时回退全量。
+    #[test]
+    fn test_region_y3_single_focus_filters_combos() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+
+        use crate::{gamedata::ramen::RAMENDATA, utils::Checks};
+        let combos = crate::game::ramen::rules::get_region_combinations(2)?;
+        let actions: Vec<RamenAction> = combos
+            .iter()
+            .map(|&c| RamenAction::no_ramen(Operation::RegionSelect(c)))
+            .collect();
+        let game = make_game()?;
+        let data = RAMENDATA.get().expect("init_global 后 RAMENDATA 已装载");
+        let is_single = |rid: usize| data.ramen_region_effect[rid].at_trains.len() == 1;
+
+        let mut cfg = RamenPolicyConfig::default();
+        let f0 = RamenPolicy::new(cfg.clone());
+        cfg.region_y3_single_focus = 2;
+        let f2 = RamenPolicy::new(cfg.clone());
+        cfg.region_y3_single_focus = 3;
+        let f3 = RamenPolicy::new(cfg.clone());
+        cfg.region_y3_single_focus = 4; // 超过当年可达单点上限（3），必然过滤为空
+        let f4 = RamenPolicy::new(cfg);
+
+        let (i0, _s0) = f0.decide_region(&game, 2, &actions)?;
+        let (i2, _s2) = f2.decide_region(&game, 2, &actions)?;
+        let (i3, s3) = f3.decide_region(&game, 2, &actions)?;
+        let (i4, _s4) = f4.decide_region(&game, 2, &actions)?;
+        println!(
+            "Y3 选区: focus=0 → {:?} / focus=2 → {:?} / focus=3 → {:?} / focus=4 → {:?}",
+            combos[i0], combos[i2], combos[i3], combos[i4]
+        );
+
+        let single = |combo: &[usize; 3]| combo.iter().filter(|&&r| is_single(r)).count();
+        let mut c = Checks::new();
+        c.check(single(&combos[i3]) == 3, "focus=3 选中组合全为单点地区");
+        c.check(single(&combos[i2]) >= 2, "focus=2 选中组合至少含 2 个单点地区");
+        c.check(s3.len() == actions.len(), "focus=3 的 scores 与完整候选表同长");
+        c.check(i3 < actions.len(), "focus=3 选中下标在完整候选表范围内");
+        c.check(
+            s3.iter().zip(&actions).all(|(o, a)| {
+                let Operation::RegionSelect(combo) = a.operation else { return false };
+                o.score != 0.0 || single(&combo) < 3
+            }),
+            "被否决候选分数为 0（不参与 argmax），当选候选分数非 0"
+        );
+        c.check(combos[i4] == combos[i0], "focus=4 过滤为空→回退全量，选区与 focus=0 一致");
+        c.check(combos[i3] != combos[i0], "focus=3 与 focus=0 选区不同（扫描档位确实改变选区）");
+        c.finish()
+    }
+
+    /// `region_y3_single_focus` 只作用于第 3 年：第 1/2 年带任意 focus 的决策
+    /// 与 focus=0 逐位一致（配对实验其余年份两臂等价的依据）。
+    #[test]
+    fn test_region_y3_single_focus_ignored_outside_y3() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+
+        use crate::{game::ramen::rules::get_region_combinations, utils::Checks};
+        let game = make_game()?;
+        let mut cfg = RamenPolicyConfig::default();
+        let f0 = RamenPolicy::new(cfg.clone());
+        cfg.region_y3_single_focus = 3;
+        let f3 = RamenPolicy::new(cfg);
+        let mut c = Checks::new();
+        for year_idx in 0..2usize {
+            let combos = get_region_combinations(year_idx)?;
+            let actions: Vec<RamenAction> = combos
+                .iter()
+                .map(|&x| RamenAction::no_ramen(Operation::RegionSelect(x)))
+                .collect();
+            let (ia, _) = f0.decide_region(&game, year_idx, &actions)?;
+            let (ib, _) = f3.decide_region(&game, year_idx, &actions)?;
+            c.check(
+                ia == ib,
+                &format!("第 {} 年选区不受 region_y3_single_focus 影响", year_idx + 1)
+            );
+        }
+        c.finish()
     }
 
     /// 构造一个可用的 RamenGame（默认卡组 102601，train 阶段可打分）

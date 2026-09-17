@@ -1375,20 +1375,24 @@ impl RamenGame {
             self.ramen.absent_cards.clear();
             // 回合固定流：角标 + 人头分布 + hint
             let mut fixed = self.turn_fixed.take();
+            let raw_types = match fixed.as_mut() {
+                Some(f) => assign_train_feeling_type(f),
+                None => assign_train_feeling_type(rng)
+            };
+            self.turn_fixed = fixed;
+            let feelings: [FeelingType; 5] =
+                raw_types.map(|v| FeelingType::try_from(v).unwrap_or(FeelingType::A));
+            // 超级拉面回合（72-77）角标**照常抽取但不落库**：诀窍机制已结束，
+            // 训练不产生诀窍槽（与在线协议角标全 0 → None 一致）。不落库但保留
+            // 抽签消耗，使后续 distribute_all/hint 的固定流偏移与旧行为逐位一致。
+            self.ramen.train_feeling_type = if self.is_super_ramen_turn() { None } else { Some(feelings) };
+            let mut fixed = self.turn_fixed.take();
             match fixed.as_mut() {
                 Some(f) => {
-                    let raw_types = assign_train_feeling_type(f);
-                    let feelings: [FeelingType; 5] =
-                        raw_types.map(|v| FeelingType::try_from(v).unwrap_or(FeelingType::A));
-                    self.ramen.train_feeling_type = Some(feelings);
                     self.distribute_all(f)?;
                     self.distribute_hint(f)?;
                 }
                 None => {
-                    let raw_types = assign_train_feeling_type(rng);
-                    let feelings: [FeelingType; 5] =
-                        raw_types.map(|v| FeelingType::try_from(v).unwrap_or(FeelingType::A));
-                    self.ramen.train_feeling_type = Some(feelings);
                     self.distribute_all(rng)?;
                     self.distribute_hint(rng)?;
                 }
@@ -2404,11 +2408,11 @@ struct AlwaysTrueRng;
         c.finish()
     }
 
-    /// 拉面杯要求卡组必须包含新友人卡（card_id=30305）
+    /// 拉面杯要求卡组必须包含新友人卡（card_id=30305，rank 0-4，idrank 303050-303054）
     ///
     /// 校验逻辑：
-    /// - 合法：含 `idrank / 10 == 30305` 且突破等级 0-4（上游 de9d611 起 rank=0 也接受）
-    /// - 非法：完全无 30305；rank=5-9 由 `SupportCard::new` 以「Rank超出范围」拒绝
+    /// - 合法：idrank 满足 `idrank / 10 == 30305 && 0 <= rank <= 4`（rank=0 为未突破）
+    /// - 非法：rank=5-9（303055-303059）、或完全无 30305
     #[test]
     fn test_ramen_newgame_requires_new_friend() -> Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -2425,15 +2429,23 @@ struct AlwaysTrueRng;
         let msg = err.to_string();
         assert!(msg.contains("新友人"), "错误消息应提示新友人: {msg}");
 
-        // 2. rank=5（idrank=303055）：通过友人判定，但由 SupportCard::new 以越界拒绝
+        // 2. rank=0（idrank=303050，未突破）：应合法（旧注释曾误判为非法）
+        let deck_rank0 = [302424, 302894, 303044, 302924, 303024, 303050];
+        let result = RamenGame::newgame(TEST_UMA_ID, &deck_rank0, TEST_INHERIT);
+        println!("rank=0 应合法: {}", result.is_ok());
+        assert!(result.is_ok(), "rank=0（未突破）应合法");
+
+        // 3. rank=5（idrank=303055）：应报错（rank 超出 [0,4]）
         let deck_rank5 = [302424, 302894, 303044, 302924, 303024, 303055];
         let result = RamenGame::newgame(TEST_UMA_ID, &deck_rank5, TEST_INHERIT);
         let msg = result.as_ref().err().map(|e| format!("{e:#}")).unwrap_or_default();
         println!("rank=5 被拒绝: {}，错误: {msg}", result.is_err());
         assert!(result.is_err(), "rank=5 应被拒绝（突破等级超出范围）");
-        assert!(msg.contains("Rank超出范围"), "rank=5 应由越界检查拒绝: {msg}");
+        // 2026-09-18 合并上游：rank 范围检查前移到 `newgame` 的新友人判定里，
+        // rank=5 不再走到 `SupportCard::new`，因此错误文案是「新友人」而不是「Rank超出范围」。
+        assert!(msg.contains("新友人"), "rank=5 应由新友人判定拒绝: {msg}");
 
-        // 3. 合法 rank=0-4：应成功（上游 de9d611 起不再拒绝 rank=0）
+        // 4. 合法 rank=0-4：应成功（rank=0 为未突破，上游 de9d611 起不再拒绝）
         for rank in 0..=4u32 {
             let idrank = 303050 + rank;
             let deck = [302424, 302894, 303044, 302924, 303024, idrank];
@@ -4956,4 +4968,41 @@ struct AlwaysTrueRng;
 
         c.finish()
     }
+
+    #[test]
+    fn test_super_ramen_turn_no_angle_tag() -> Result<()> {
+        // 超级拉面回合（72-77）：训练诀窍角标照常抽签但不落库（None ⇒ 训练
+        // 不产生诀窍槽）——与在线协议角标全 0 一致（2026-09，见 issues.md）。
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        let mut rng = StdRng::seed_from_u64(3);
+
+        // 超级拉面、非比赛回合：跑 distribute 分支（而非 reset_distribution）
+        game.base.turn = 74;
+        println!("turn74 是否比赛回合: {}", game.is_race_turn());
+        assert!(!game.is_race_turn(), "turn74 不应是比赛回合");
+        game.run_distribute(&mut rng)?;
+        println!(
+            "t74 角标={:?}（期望 None）分布非空={}",
+            game.ramen.train_feeling_type,
+            game.base.distribution.iter().any(|d| !d.is_empty())
+        );
+        assert!(game.ramen.train_feeling_type.is_none(), "72-77 训练角标不落库");
+        assert!(
+            game.base.distribution.iter().any(|d| !d.is_empty()),
+            "分布分配未被跳过"
+        );
+
+        // 对照：普通回合仍分配角标
+        game.base.turn = 60;
+        game.run_distribute(&mut rng)?;
+        println!("t60 角标={:?}（期望 Some）", game.ramen.train_feeling_type);
+        assert!(game.ramen.train_feeling_type.is_some(), "普通回合仍分配角标");
+        Ok(())
+    }
+
 }

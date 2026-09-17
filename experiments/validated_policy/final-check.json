@@ -1,0 +1,14 @@
+{
+  "variants": ["base", "ptblend200", "ptblend200-capd0-rgn1", "ptblend200-capd0-rgn1-supermode3", "ptblend200-capd0-rgn1-supermode1"],
+  "runs": 10,
+  "cases": [
+    {"name": "configured", "cohort": "fixed", "uma": 106402, "deck": [303174, 303124, 303044, 302894, 303064, 303054], "blue_count": [15, 0, 0, 0, 3], "extra_count": [0, 10, 20, 40, 40, 40], "seed": 917820000},
+    {"name": "speed", "cohort": "preset", "uma": 106402, "deck": [302754, 303124, 302984, 303044, 303064, 303054], "blue_count": [15, 0, 0, 0, 3], "extra_count": [0, 10, 20, 40, 40, 40], "seed": 917821000},
+    {"name": "stamina", "cohort": "preset", "uma": 106402, "deck": [302754, 303124, 303044, 302814, 303064, 303054], "blue_count": [15, 0, 0, 0, 3], "extra_count": [0, 10, 20, 40, 40, 40], "seed": 917822000},
+    {"name": "power_wisdom", "cohort": "preset", "uma": 106402, "deck": [303144, 302834, 303064, 302894, 302684, 303054], "blue_count": [15, 0, 0, 0, 3], "extra_count": [0, 10, 20, 40, 40, 40], "seed": 917823000},
+    {"name": "speed_wisdom", "cohort": "preset", "uma": 106402, "deck": [302754, 303124, 303044, 303064, 302894, 303054], "blue_count": [15, 0, 0, 0, 3], "extra_count": [0, 10, 20, 40, 40, 40], "seed": 917824000},
+    {"name": "wisdom", "cohort": "preset", "uma": 106402, "deck": [302754, 303044, 303064, 302894, 302684, 303054], "blue_count": [15, 0, 0, 0, 3], "extra_count": [0, 10, 20, 40, 40, 40], "seed": 917825000},
+    {"name": "sta0_wis2", "cohort": "preset", "uma": 106402, "deck": [302754, 303144, 302714, 303064, 302894, 303054], "blue_count": [15, 0, 0, 0, 3], "extra_count": [0, 10, 20, 40, 40, 40], "seed": 917826000},
+    {"name": "spd2_gut0", "cohort": "preset", "uma": 106402, "deck": [302754, 303124, 303044, 303144, 303064, 303054], "blue_count": [15, 0, 0, 0, 3], "extra_count": [0, 10, 20, 40, 40, 40], "seed": 917827000}
+  ]
+}

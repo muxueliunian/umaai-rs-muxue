@@ -1,30 +1,33 @@
 # 用户覆盖配置（Phase 2 步骤 2+3 改造）
 # 这里只写你要改的项；未列出则使用 default_config.toml 的开发默认。
-# [config_override] 段字段均为可选覆盖（None = 不覆盖 default）；未知字段会解析报错（防拼错）。
-# 完整段说明见 default_config.toml 顶部"配置段"块：simulation / search / policy / output / dev
+# 完整段说明见 default_config.toml 顶部"配置段"块
 
 # ---------- 拉面杯第3年地区选择策略（**顶层覆盖**；fixed 仅第3年生效）----------
-# 注意：顶层字段必须写在所有 [xxx] 段**之前**（本文件顶部），写在 [mcts] 段后会
-# 被 [mcts] 的未知字段检查吸收，解除注释也不生效。要启用请把下面两行移到文件顶
-# 部（第 5 行注释之后）再取消注释：
 ramen_region_strategy = "all"   # "all"（默认）/"fixed"（仅第3年，跳过 120 组合枚举）
 # ramen_region_fixed = [[10, 12, 14]]   # 仅当 fixed 时生效，长度必须 = 1
 
 # ---------- 常用区：[config_override] 段 ----------
 [config_override]
-uma = 101901
-cards = [303124, 303114, 303084, 303094, 303064, 303054]
-blue_count = [15, 0, 3, 0, 0]
 # 种马额外属性 [速度, 耐力, 力量, 根性, 智力, 技能点]
-extra_count = [0, 40, 40, 20, 20, 40]
-log_level = "info"
-
+extra_count = [0, 10, 20, 40, 40, 40]
+# PT 重视程度 (1.0-8.0), 1.0为最重视评分, 8.0会用~3000评分换~400pt
+# 默认为2.0(2-3速最优配置), 速卡少时需回调到1.0
+pt_favor_rate = 2.0
 # 线程数（建议 = CPU 核心数；特定处理器如 Intel 14900k 若崩溃/蓝屏可改为 8）
 num_threads = 16
+log_level = "info"
+
+uma = 106402
+cards = [303174, 303124, 303044, 302894, 303064, 303054]
+blue_count = [15, 0, 0, 0, 3]
 
 # 训练员类型（可选覆盖 default_config.toml 的 trainer）
 # "manual" | "random" | "handwritten" | "collector" | "neuralnet" | "mcts"
 trainer = "handwritten"
+
+# 在线决策记录开关（默认开：每局一目录 logs/game{id}/，含原始快照 + decisions.csv + meta.json）
+# 关闭则取消下行注释：
+# luck_record = false
 
 # 温泉选择是否允许蒙特卡洛自由发挥（安卓马建议 false 减少世界线；须写在本段内才生效）
 mcts_selected_onsen = true

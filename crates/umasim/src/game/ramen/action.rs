@@ -921,7 +921,14 @@ impl RamenAction {
     fn fill_feeling_gauge(
         &self, game: &mut super::RamenGame, train: usize, params: &TrainParams, is_xiahesu: bool
     ) -> Result<()> {
-        if let Some(train_feelings) = game.ramen.train_feeling_type {
+        // 夏合宿「全 MAX」与训练角标无关：合宿回合协议不发角标
+        // （train_feeling_type=[0,0,0,0,0]→None），但规则要求所有动作
+        // （训练/比赛/休息/外出）都让三种槽填满→每种 +1 诀窍。若仍按
+        // `if let Some` 门控，合宿训练会漏掉 3 诀窍/回合，使在线对局合宿
+        // 训练被系统性低估（MCTS 一训练就亏诀窍 → 出现"高体力一选休息"）。
+        // 2026-09 定位，见 issues.md。
+        let train_feelings = game.ramen.train_feeling_type.unwrap_or([super::FeelingType::A; 5]);
+        if is_xiahesu || game.ramen.train_feeling_type.is_some() {
             let base_dist = super::rules::calc_gauge_base_distribution(&game.ramen.selected_regions);
             // 支援卡数量：仅统计类型为 Card 的 person（分身是同一索引在分布中重复出现，自然计入）。
             // 不得用固定索引排除（旧布局 p!=6&&p!=7 会把 NPC/理事长/记者误算进来）。
@@ -1218,7 +1225,7 @@ pub fn get_available_ramens(state: &super::RamenState, selected_regions: &[usize
 
 #[cfg(test)]
 mod tests {
-    use super::{super::RamenState, *};
+    use super::{super::{RamenGame, RamenStage, RamenState}, *};
     use crate::{
         gamedata::init_global,
         utils::{Checks, get_workspace_root, init_test_logger}
@@ -2271,6 +2278,70 @@ mod tests {
         c.check(wrong_begin.is_err(), "Begin 阶段同样返回 Err");
 
         c.finish()
+    }
+
+    #[test]
+    fn test_camp_train_fills_gauge_without_angle_tag() -> anyhow::Result<()> {
+        // 夏合宿「全 MAX」与训练角标无关：train_feeling_type=None（在线协议
+        // 合宿角标全 0）时，训练动作也必须三种槽填满→每种 +1 诀窍，与
+        // 休息/比赛/出行一致（2026-09 修复，见 issues.md）。
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("info");
+        let _ = init_global();
+
+        use rand::{SeedableRng, rngs::StdRng};
+
+        let deck = [302424, 302894, 303044, 302924, 303024, 303054];
+        let inherit = || crate::game::InheritInfo {
+            blue_count: [15, 3, 0, 0, 0],
+            extra_count: [0, 30, 0, 0, 30, 30]
+        };
+        let mut game = RamenGame::newgame(102601, &deck, inherit())?;
+        game.base.turn = 60; // 第三年夏合宿（60 <= turn < 64）
+        game.base.distribution = vec![vec![]; 5]; // 训练路径需要 5 行分布（newgame 不预填）
+        game.stage = RamenStage::Train;
+        game.ramen.train_feeling_type = None; // 协议 0 角标
+        game.ramen.feeling_slot = [0, 0, 0];
+        game.ramen.feeling_stock = [1, 3, 1];
+
+        let action = RamenAction::no_ramen(Operation::Train(TrainingType::Wisdom));
+        let mut rng = StdRng::seed_from_u64(1);
+        game.apply_action(&action, &mut rng)?;
+        println!(
+            "合宿 None 角标训练后 stock={:?} slot={:?}（期望 stock=[2,4,2]）",
+            game.ramen.feeling_stock, game.ramen.feeling_slot
+        );
+        assert_eq!(game.ramen.feeling_stock, [2, 4, 2], "合宿训练必须每种 +1 诀窍");
+        assert_eq!(game.ramen.feeling_slot, [0, 0, 0], "槽填满后清零");
+
+        // 对照：同样的合宿回合，休息动作本来就能 +1/+1/+1（防止回归到不对称）
+        let mut game2 = RamenGame::newgame(102601, &deck, inherit())?;
+        game2.base.turn = 60;
+        game2.base.distribution = vec![vec![]; 5];
+        game2.stage = RamenStage::Train;
+        game2.ramen.train_feeling_type = None;
+        game2.ramen.feeling_slot = [0, 0, 0];
+        game2.ramen.feeling_stock = [1, 3, 1];
+        let rest = RamenAction::no_ramen(Operation::Rest);
+        game2.apply_action(&rest, &mut rng)?;
+        println!("合宿休息后 stock={:?}（期望 [2,4,2]）", game2.ramen.feeling_stock);
+        assert_eq!(game2.ramen.feeling_stock, [2, 4, 2], "休息照常 +1/+1/+1");
+
+        // 对照：普通回合（非合宿）+ None 角标 → 不填充（72-77 等 URA 回合语义）
+        let mut game3 = RamenGame::newgame(102601, &deck, inherit())?;
+        game3.base.turn = 74; // 超级拉面回合，无角标语义
+        game3.base.distribution = vec![vec![]; 5];
+        game3.stage = RamenStage::Train;
+        game3.ramen.train_feeling_type = None;
+        game3.ramen.feeling_slot = [0, 0, 0];
+        game3.ramen.feeling_stock = [1, 3, 1];
+        let act3 = RamenAction::no_ramen(Operation::Train(TrainingType::Wisdom));
+        game3.apply_action(&act3, &mut rng)?;
+        println!("URA None 角标训练后 stock={:?}（期望原样 [1,3,1]）", game3.ramen.feeling_stock);
+        assert_eq!(game3.ramen.feeling_stock, [1, 3, 1], "URA 训练不填诀窍槽");
+
+        Ok(())
     }
 
 }

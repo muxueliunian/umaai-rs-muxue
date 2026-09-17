@@ -38,7 +38,7 @@ use umasim::{
     output::decision_log::DecisionLogRow,
     search::SearchConfig,
     trainer::{
-        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection, RandomTrainer, RecommendedRamenTrainer
+        LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RandomTrainer, RecommendedRamenTrainer
     },
     utils::{get_workspace_root, load_game_config}
 };
@@ -84,9 +84,23 @@ struct BenchConfig {
     /// mcts 专用：是否用 UCB 分配预算（false 为均匀分配）
     #[serde(default = "default_search_ucb")]
     search_ucb: bool,
-    /// mcts 专用：取分口径 "score" | "pt"
-    #[serde(default = "default_search_selection")]
-    search_selection: String,
+    /// handwritten 专用：策略变体 token 串（`RecommendedRamenTrainer::with_tokens`），
+    /// 如 `rgn1`（reserve 截断增量）/ `rgn2`（满位豁免）/ `reserve20`（调低预留）。
+    /// 空 = 正式 preset。实验用，防止把手写参数混入 preset。
+    /// 与 `region_weak_cover` 互斥。
+    #[serde(default)]
+    tokens: String,
+    /// handwritten 专用：地区弱位覆盖加分权重（`RamenPolicyConfig::region_weak_cover_weight`），
+    /// 走 `RecommendedRamenTrainer::with_experiment_overrides` 只覆盖该参数，其余 10 个
+    /// 实验参数取正式 preset 精确值，保证与 `new()` 的唯一差异就是本权重。
+    /// `None` = 正式 preset（0.0，弱位覆盖不加分）。与 `tokens` 互斥。
+    #[serde(default)]
+    region_weak_cover: Option<f32>,
+    /// 覆盖卡组：5/6 个支援卡 idrank（`"id1,id2,id3,id4,id5[,friend]"`，逗号分隔）。
+    /// 指定后跳过 preset builds，只跑这一组卡（表格标签 `custom_deck`），
+    /// 用于配卡对照实验（如"默认卡组 vs GA 通解"同种子配对）。
+    #[serde(default)]
+    deck: Option<String>,
     /// mcts 专用：激进度上限
     ///
     /// 缺省 **0.0**（取普通均值）而非 `SearchConfig::default()` 的 50.0：
@@ -118,11 +132,6 @@ fn default_search_ucb() -> bool {
     false
 }
 
-/// `search_selection` 缺省值
-fn default_search_selection() -> String {
-    "score".to_string()
-}
-
 /// 内置默认值（与 bench_config.toml 保持一致；文件缺失时使用）
 impl Default for BenchConfig {
     fn default() -> Self {
@@ -139,7 +148,9 @@ impl Default for BenchConfig {
             search_n: default_search_n(),
             search_stages: default_search_stages(),
             search_ucb: default_search_ucb(),
-            search_selection: default_search_selection(),
+            tokens: String::new(),
+            region_weak_cover: None,
+            deck: None,
             radical_factor_max: 0.0
         }
     }
@@ -158,18 +169,23 @@ fn apply_cli(mut cfg: BenchConfig) -> Result<BenchConfig> {
             Arg::Long("search-n") => cfg.search_n = bench::parse_value(&mut parser, "search-n")?,
             Arg::Long("search-stages") => cfg.search_stages = bench::parse_value(&mut parser, "search-stages")?,
             Arg::Long("search-ucb") => cfg.search_ucb = bench::parse_value(&mut parser, "search-ucb")?,
-            Arg::Long("search-selection") => {
-                cfg.search_selection = bench::parse_value(&mut parser, "search-selection")?
-            }
             Arg::Long("radical-factor") => {
                 cfg.radical_factor_max = bench::parse_value(&mut parser, "radical-factor")?
             }
+            Arg::Long("tokens") => cfg.tokens = bench::parse_value(&mut parser, "tokens")?,
+            Arg::Long("region-weak-cover") => {
+                cfg.region_weak_cover = Some(bench::parse_value(&mut parser, "region-weak-cover")?)
+            }
+            Arg::Long("deck") => cfg.deck = Some(bench::parse_value(&mut parser, "deck")?),
             Arg::Long("help") | Arg::Short('h') => {
                 println!(
                     "用法: bench_base [--runs N] [--seed S] [--log] [--out DIR]
 \n                     	[--trainer random|handwritten|mcts]
+\n                     	[--deck 「id1,id2,id3,id4,id5[,friend]」]（覆盖卡组，跳过 preset builds）
+\n                     	handwritten 专用: [--tokens TOKEN串]（如 --tokens rgn1 / rgn2 / reserve20）
+\n                     	                  [--region-weak-cover F]（覆盖地区弱位加分权重，与 --tokens 互斥）
 \n                     	mcts 专用: [--search-n N] [--search-stages train,ramen,...] [--search-ucb]
-\n                     	           [--search-selection score|pt] [--radical-factor F] [--search-ucb true|false]\n\
+\n                     	           [--radical-factor F] [--search-ucb true|false]\n\
                      缺省参数读取 workspace 根 bench_config.toml"
                 );
                 std::process::exit(0);
@@ -195,6 +211,26 @@ fn load_bench_config(workspace_root: &std::path::Path) -> Result<BenchConfig> {
         println!("提示: 未找到 bench_config.toml，使用内置默认参数");
         Ok(BenchConfig::default())
     }
+}
+
+/// 解析 `--deck` 覆盖串：`"id1,id2,id3,id4,id5[,friend]"`（idrank，逗号分隔）。
+/// 传 5 个时友人位用配置的 `friend`；传 6 个则第 6 个为友人。
+fn parse_deck_override(s: &str, friend: u32) -> Result<[u32; 6]> {
+    let v: Vec<u32> = s
+        .split(',')
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| p.parse::<u32>())
+        .collect::<std::result::Result<_, _>>()?;
+    anyhow::ensure!(
+        v.len() == 5 || v.len() == 6,
+        "--deck 需要 5 个支援卡 idrank（友人可省略）或 6 个含友人，收到 {} 个: {s}",
+        v.len()
+    );
+    let mut deck = [0u32; 6];
+    deck[..5].copy_from_slice(&v[..5]);
+    deck[5] = if v.len() == 6 { v[5] } else { friend };
+    Ok(deck)
 }
 
 /// 按决策阶段分组统计耗时（mean us / max us / 次数），按阶段名排序
@@ -254,22 +290,18 @@ fn main() -> Result<()> {
     };
 
     println!(
-        "===== bench_base: uma={} {} runs={} base_seed={} trainer={} builds={} =====",
+        "===== bench_base: uma={} {} runs={} base_seed={} trainer={} tokens={:?} builds={} =====",
         cfg.uma,
         uma_name,
         cfg.runs,
         cfg.seed,
         cfg.trainer,
+        cfg.tokens,
         builds.len()
     );
 
     // mcts 参数提前解析：跑批循环里再报错等于跑了一半才发现参数拼错
     let search_stages = RamenSearchStages::parse(&cfg.search_stages)?;
-    let search_selection = match cfg.search_selection.as_str() {
-        "score" => RamenSelection::Score,
-        "pt" => RamenSelection::Pt,
-        other => anyhow::bail!("未知 search_selection: {other}（可选 score / pt）")
-    };
     let search_config = SearchConfig::new_game_config(&game_config)
         .with_search_n(cfg.search_n)
         .with_max_depth(0) // 拉面无 leaf 估值器，只能跑到终局
@@ -277,17 +309,25 @@ fn main() -> Result<()> {
         .with_radical_factor_max(cfg.radical_factor_max);
     if cfg.trainer == "mcts" {
         println!(
-            "  mcts 参数: search_n={}/候选 stages={} ucb={} selection={} radical_factor_max={} threads={} group_size={} expected_stdev={}",
-            cfg.search_n, cfg.search_stages, cfg.search_ucb, cfg.search_selection, cfg.radical_factor_max,
+            "  mcts 参数: search_n={}/候选 stages={} ucb={} radical_factor_max={} threads={} group_size={} expected_stdev={}",
+            cfg.search_n, cfg.search_stages, cfg.search_ucb, cfg.radical_factor_max,
             game_config.collector.threads, search_config.search_group_size, search_config.expected_search_stdev
         );
     }
 
     let pick = CardPickOpts::default();
-    let mut all_results: Vec<BuildResults> = Vec::with_capacity(builds.len());
+    // --deck 覆盖模式：只跑一组自定义卡组；否则按 preset builds 自动拉卡
+    let deck_jobs: Vec<(String, [u32; 6])> = if let Some(ds) = &cfg.deck {
+        vec![("custom_deck".to_string(), parse_deck_override(ds, cfg.friend)?)]
+    } else {
+        builds
+            .iter()
+            .map(|b| Ok((b.name(), b.make_deck(&pick, cfg.friend)?)))
+            .collect::<Result<Vec<_>>>()?
+    };
+    let mut all_results: Vec<BuildResults> = Vec::with_capacity(deck_jobs.len());
     let mut all_rows: Vec<DecisionLogRow> = Vec::new();
-    for (idx, build) in builds.iter().enumerate() {
-        let deck = build.make_deck(&pick, cfg.friend)?;
+    for (idx, (build_name, deck)) in deck_jobs.iter().enumerate() {
         // 打印卡组信息（含卡名）
         let cards_desc = deck
             .iter()
@@ -297,7 +337,7 @@ fn main() -> Result<()> {
             })
             .collect::<Vec<_>>()
             .join(", ");
-        println!("[{}] {} 卡组: [{}]", idx + 1, build.name(), cards_desc);
+        println!("[{}] {} 卡组: [{}]", idx + 1, build_name, cards_desc);
 
         let mut outcomes = Vec::with_capacity(cfg.runs);
         for i in 0..cfg.runs {
@@ -311,14 +351,31 @@ fn main() -> Result<()> {
                     (outcome, trainer.take_records())
                 }
                 "handwritten" => {
-                    let trainer = LoggingTrainer::new(RecommendedRamenTrainer::new(), log_seed);
+                    if !cfg.tokens.is_empty() && cfg.region_weak_cover.is_some() {
+                        anyhow::bail!("--tokens 与 --region-weak-cover 互斥，不能同时指定");
+                    }
+                    let trainer = if let Some(w) = cfg.region_weak_cover {
+                        // 只覆盖地区弱位加分权重，其余 10 个实验参数取正式 preset 精确值
+                        // （即 RecommendedRamenTrainer::new()，含 2026-09-17 GA 方向定稿：
+                        // pt_rates=[56,64,64] / pt_tradeoff=37 / weak_cover 直值 35 等），
+                        // 保证与 `new()` 的唯一差异就是本权重。
+                        LoggingTrainer::new(
+                            RecommendedRamenTrainer::with_experiment_overrides(
+                                [56.0, 64.0, 64.0], 0.5, 0.5, 200.0, 0.15, 40.0, 8.0, 8.0, 0.0, w, true
+                            ),
+                            log_seed
+                        )
+                    } else if cfg.tokens.is_empty() {
+                        LoggingTrainer::new(RecommendedRamenTrainer::new(), log_seed)
+                    } else {
+                        LoggingTrainer::new(RecommendedRamenTrainer::with_tokens(&cfg.tokens)?, log_seed)
+                    };
                     let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())
                 }
                 "mcts" => {
                     let mcts = RamenMctsTrainer::new(search_config.clone())
-                        .with_stages(search_stages)
-                        .with_selection(search_selection);
+                        .with_stages(search_stages);
                     let trainer = LoggingTrainer::new(mcts, log_seed);
                     let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())
@@ -339,7 +396,7 @@ fn main() -> Result<()> {
                 outcome.elapsed_ms,
             );
             if cfg.decision_log {
-                log.save_to(&out_dir.join(format!("bench_base_decision_{}_{}.csv", build.name(), run_idx)))?;
+                log.save_to(&out_dir.join(format!("bench_base_decision_{}_{}.csv", build_name, run_idx)))?;
             }
             all_rows.extend(log.rows);
             outcomes.push(outcome);
@@ -351,7 +408,7 @@ fn main() -> Result<()> {
         let rmj_mean = outcomes.iter().map(|r| r.rmj_ok as f64).sum::<f64>() / outcomes.len().max(1) as f64;
         println!(
             "  {} 汇总: mean={:.0} median={:.0} min={:.0} max={:.0} std={:.0} RMJ={:.2}/3 自选比赛达标={:.0}%",
-            build.name(),
+            build_name,
             stats.mean,
             stats.median,
             stats.min,
@@ -360,7 +417,7 @@ fn main() -> Result<()> {
             rmj_mean,
             free_race_rate(&outcomes) * 100.0,
         );
-        all_results.push(BuildResults { name: build.name(), outcomes });
+        all_results.push(BuildResults { name: build_name.clone(), outcomes });
     }
 
     // ===== 落盘结果 CSV（合并单文件，build 列为第一列）=====

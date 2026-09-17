@@ -40,6 +40,9 @@ ratatui = { version = "0.29.0", features = ["all-widgets", "macros", "palette", 
 text-to-ascii-art = "0.1.10"
 flexi_logger = "0.31.7"
 
+# 局目录打包（umaai 局末自动把 logs/game{id}/ 打成 logs/game{id}.zip）
+zip = "8.6.0"
+
 # ONNX 推理
 tract-onnx = "0.22.0"
 ndarray = "0.17.1"

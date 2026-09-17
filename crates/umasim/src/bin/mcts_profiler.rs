@@ -40,7 +40,7 @@ use umasim::{
     game::InheritInfo,
     gamedata::init_global_with_config,
     search::SearchConfig,
-    trainer::{LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection},
+    trainer::{LoggingTrainer, RamenMctsTrainer, RamenSearchStages},
     utils::{get_workspace_root, load_game_config}
 };
 
@@ -95,7 +95,6 @@ fn main() -> Result<()> {
     let build_mcts = || {
         RamenMctsTrainer::new(search_config.clone())
             .with_stages(stages.clone())
-            .with_selection(RamenSelection::Score)
     };
 
     let mut total_score = 0i64;

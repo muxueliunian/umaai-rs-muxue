@@ -1,4 +1,5 @@
 pub mod decision;
+pub mod plot;
 pub mod protocol;
 #[cfg(feature = "onnx")]
 pub mod ramen_nn;

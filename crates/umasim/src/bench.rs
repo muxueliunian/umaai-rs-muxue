@@ -793,8 +793,17 @@ average = [1, 0, 1, 1, 2]
     // 2026-09 更新：吃面 PT 增量 / eat_count 延后到 NextTurn 后，训练阶段
     // 用吃面前 PT 算 ramen_pt_effect / region_bonus 档位，纯推荐策略整局偏低；
     // 基准重抓。
-    const BASELINE_SCORE: i32 = 63870;
-    const BASELINE_FIVE: [i32; 5] = [3337, 2293, 2200, 1086, 829];
+    // 2026-09-17 重抓：合宿训练诀窍全 MAX 修复（d9374e8）与近期策略调整后
+    // 的当前行为（score/five）。改动前基线（63870 / [3337,2293,2200,1086,829]）
+    // 在干净 master 上已过期（最近策略调优未同步重抓）。
+    // 2026-09-17 二次重抓：GA 方向 9 旋钮组合档定稿进入 preset（pt_rate Y1 56/
+    // pt_tradeoff 37/超拉面 35/弱位覆盖 35/友情 0.4/hint 8/max_sac 200/
+    // ramen_window 0.15/ck 0.15），同种子 68118→70138。
+    // 2026-09-18 三次重抓：第十二轮配对验收的组合档进入 preset（ptblend 8/capd 0/
+    // hintlv 600/trd 44.25/trds 34.5/trdsh 25/gap 4.98/overflow 3.04/reserve 157/
+    // rgn 1/supermode 3/out 0），同种子 70138→69219。
+    const BASELINE_SCORE: i32 = 69219;
+    const BASELINE_FIVE: [i32; 5] = [3337, 2313, 2200, 1177, 1348];
 
     /// 把三个地区 id 格式化成与决策日志 `action_desc` 相同的 `地区[a,b,c]`。
     fn region_desc(regions: [usize; 3]) -> String {

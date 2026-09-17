@@ -645,7 +645,17 @@ pub struct GameConfig {
     /// [`Self::ramen_region_policy`] 必须保持中性的 `handwritten`，否则启动报冲突。
     /// 模型仍取 [`Self::ramen_region_model_path`]，此时它是**整局动作模型**。
     #[serde(default)]
-    pub ramen_trainer_policy: RamenTrainerPolicy
+    pub ramen_trainer_policy: RamenTrainerPolicy,
+    /// 在线决策记录开关（默认开；仅 umaai 实时运行使用，离线 sim/bench 不读）
+    ///
+    /// 开时按局落盘 `logs/game{id}/`：`thisTurn.json` 原文 + `decisions.csv` +
+    /// `meta.json`（详见 `umaai::decision::record` 与 issues.md 对应规划条目）。
+    #[serde(default = "default_luck_record")]
+    pub luck_record: bool,
+}
+
+fn default_luck_record() -> bool {
+    true
 }
 
 fn default_mcts_turn_bonus() -> i32 {
@@ -653,7 +663,8 @@ fn default_mcts_turn_bonus() -> i32 {
 }
 
 fn default_pt_favor_rate() -> f32 {
-    8.0
+    // 与 gamedata/default_config.toml 保持一致（2.0 = 2026-09-15 扫参 + N=4096 深测定档）
+    2.0
 }
 
 fn default_race_grades() -> Vec<i32> {
@@ -699,7 +710,8 @@ impl GameConfig {
             ramen_region_fixed: None,
             ramen_region_policy: RamenRegionPolicy::default(),
             ramen_region_model_path: None,
-            ramen_trainer_policy: RamenTrainerPolicy::default()
+            ramen_trainer_policy: RamenTrainerPolicy::default(),
+            luck_record: default_luck_record()
         }
     }
 
@@ -1064,7 +1076,10 @@ pub struct OverrideConfig {
     pub pt_favor_rate: Option<f32>,
     /// 比赛等级表 72 项（可选覆盖；Phase 2 步骤 1 引入）
     #[serde(default)]
-    pub race_grades: Option<Vec<i32>>
+    pub race_grades: Option<Vec<i32>>,
+    /// 在线决策记录开关（可选覆盖；默认开）
+    #[serde(default)]
+    pub luck_record: Option<bool>
 }
 
 impl OverrideGameConfig {
@@ -1105,6 +1120,9 @@ impl OverrideGameConfig {
         }
         if let Some(v) = o.race_grades {
             ret.race_grades = v;
+        }
+        if let Some(v) = o.luck_record {
+            ret.luck_record = v;
         }
         let m = self.mcts;
         if let Some(v) = m.search_n {
@@ -1194,7 +1212,8 @@ mod tests {
             num_threads: None,
             mcts_turn_bonus: None,
             pt_favor_rate: None,
-            race_grades: None
+            race_grades: None,
+            luck_record: None
         }
     }
 
@@ -1364,6 +1383,30 @@ uma = 100901
             RamenRegionStrategy::default() == RamenRegionStrategy::All,
             "RamenRegionStrategy 缺省应为 All（对照）",
         );
+        c.finish()
+    }
+
+    /// 在线决策记录开关：默认开 + `[config_override]` 可关（merge 生效）
+    #[test]
+    fn test_luck_record_default_and_override() -> Result<()> {
+        let base = load_real_default()?;
+        let mut c = Checks::new();
+        c.check(base.luck_record, "default_config.toml 缺省应为开（true）");
+
+        // 不写 luck_record → merge 保留默认开
+        let ov_plain: OverrideGameConfig = toml::from_str(r#"[config_override]
+uma = 101901"#)?;
+        c.check(
+            ov_plain.clone().merge(&base).luck_record,
+            "未覆盖时 luck_record 保持默认开",
+        );
+
+        // [config_override] 写 luck_record = false → merge 后关
+        let ov_off: OverrideGameConfig = toml::from_str(r#"[config_override]
+luck_record = false"#)?;
+        let merged_off = ov_off.merge(&base);
+        println!("luck_record=false merge 后: {}", merged_off.luck_record);
+        c.check(!merged_off.luck_record, "luck_record = false 应覆盖为关");
         c.finish()
     }
 

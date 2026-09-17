@@ -6,6 +6,7 @@
 //! 具体场景逻辑（温泉 / 拉面）在 `scenario`，决策后处理（luck / 输出）在 `decision`。
 
 use std::{
+    path::PathBuf,
     sync::Arc,
     time::Instant
 };
@@ -18,7 +19,7 @@ use rand::{SeedableRng, rngs::StdRng};
 use serde::Serialize;
 use text_to_ascii_art::to_art;
 use umasim::{
-    game::Game,
+    game::{Game, ramen::RamenStage},
     gamedata::init_global_with_config,
     neural::Evaluator,
     output::{DecisionSink, HumanReadableSink, StdoutJsonSink},
@@ -28,13 +29,14 @@ use umasim::{
 };
 
 use crate::{
-    decision::{LastReasonSink, LuckScoreTracker, ReasonGate},
+    decision::{LastReasonSink, LuckScoreTracker, ReasonGate, RecordingSink, record},
     protocol::urafile::UraFileWatcher,
     region::{ClientTrainerParts, build_client_trainer},
     scenario::{onsen, ramen}
 };
 
 pub mod decision;
+pub mod plot;
 pub mod protocol;
 #[cfg(feature = "onnx")]
 pub mod ramen_nn;
@@ -126,10 +128,10 @@ async fn main_guard() -> Result<()> {
         colored::control::set_override(false);
         let js = Arc::new(StdoutJsonSink);
         json_sink = Some(js.clone());
-        js
+        Arc::new(RecordingSink::new(StdoutJsonSink))
     } else {
         json_sink = None;
-        Arc::new(HumanReadableSink)
+        Arc::new(RecordingSink::new(HumanReadableSink))
     };
     let json_mode = args.json;
 
@@ -291,34 +293,70 @@ async fn main_guard() -> Result<()> {
     // DecisionInfo::scenario_extra 下发给 AIRedirector）。
     let mut luck_tracker = LuckScoreTracker::new();
 
-    loop {
-        let contents = watcher.watch("thisTurn.json")?;
-        // 收到一份新 JSON：通知 AIRed "开始计算本回合"
-        emit_info("compute_start");
-        // 按 baseGame.scenarioId 分发（12=温泉 / 14=拉面）到对应场景模块
-        match crate::protocol::parse_game_by_scenario(&contents) {
-            Ok(crate::protocol::ParsedGame::Onsen(game)) => {
-                onsen::process_onsen(
-                    game, &mut trainer, &sink, &mut luck_tracker, &mut rng, json_mode, &emit_info, &game_config,
-                )?;
-            }
-            Ok(crate::protocol::ParsedGame::Ramen { game, single_mode_chara_id }) => {
-                ramen::process_ramen(
-                    game, single_mode_chara_id, &ramen_trainer, &reason_slot, &sink, &mut luck_tracker, &mut rng,
-                    json_mode, &emit_info,
-                )?;
-            }
-            Err(e) => {
-                // json 模式：发 error JSON 行（不再用 println 污染 stdout 严格 JSON 流）
-                // human 模式：保留原 println 红色提示，玩家可见
-                emit_error(&format!("解析回合信息出错: {e}"));
-                if !json_mode {
-                    println!("{}", format!("解析回合信息出错: {e}").red());
-                    println!("----------");
+    // 在线决策记录器（默认开）：每局一个 logs/game{id}/ 目录——接收到的
+    // thisTurn.json 原文 + decisions.csv（策略计算结果）+ meta.json。
+    // 未 init（luck_record=false 或本函数早退）时所有入口 no-op。
+    record::init(game_config.luck_record, PathBuf::from("logs"))?;
+
+    // watch 循环包进闭包：无论是正常退出还是出错返回，都要收尾当前局
+    // （meta.json 结束时间 / end_reason），避免 Ctrl-C 丢局尾数据行。
+    let watch_result: Result<()> = (|| {
+        loop {
+            let contents = watcher.watch("thisTurn.json")?;
+            // 收到一份新 JSON：通知 AIRed "开始计算本回合"
+            emit_info("compute_start");
+            // 按 baseGame.scenarioId 分发（12=温泉 / 14=拉面）到对应场景模块
+            match crate::protocol::parse_game_by_scenario(&contents) {
+                Ok(crate::protocol::ParsedGame::Onsen(game)) => {
+                    // 本期在线记录只做拉面：温泉不调 on_snapshot，其 emit 行因
+                    // 无快照上下文自动 no-op（RecordingSink 已整体包装）
+                    onsen::process_onsen(
+                        game, &mut trainer, &sink, &mut luck_tracker, &mut rng, json_mode, &emit_info, &game_config,
+                    )?;
+                }
+                Ok(crate::protocol::ParsedGame::Ramen { game, single_mode_chara_id }) => {
+                    // 记录点 1（接收到的游戏数据）：parse 后立即按局留档——
+                    // 切局检测 / 新局目录 / 原文文件 / Begin（skip）行都在记录器内完成
+                    let chara_id = single_mode_chara_id.unwrap_or(game.uma().uma_id as u64);
+                    let turn = game.turn() as u32;
+                    let stage = format!("{:?}", game.stage);
+                    let skip = (game.stage == RamenStage::Begin).then(|| {
+                        // Begin = 协议「不派发」快照：按离线同口径标注 skip 原因
+                        let v = serde_json::from_str::<serde_json::Value>(&contents)
+                            .unwrap_or(serde_json::Value::Null);
+                        record::classify_begin_reason(&v).to_string()
+                    });
+                    record::on_snapshot(
+                        &record::SnapMeta::normal(chara_id, turn, stage)
+                            .with_skip(skip)
+                            .with_max_turn(game.max_turn() as u32),
+                        &contents,
+                    );
+                    ramen::process_ramen(
+                        game, single_mode_chara_id, &ramen_trainer, &reason_slot, &sink, &mut luck_tracker, &mut rng,
+                        json_mode, &emit_info,
+                    )?;
+                    // 末回合第 2 份快照（如 turn77_2）的决策行已全部落盘 →
+                    // 立即写 meta + 生成 luck_trend.svg（切局/退出仅作兜底）
+                    record::on_turn_done();
+                }
+                Err(e) => {
+                    // 解析失败：原文仍留档（归当前局 / game_unknown），CSV 记 skip(parse_error)
+                    record::on_snapshot(&record::SnapMeta::failed(format!("parse_error: {e}")), &contents);
+                    // json 模式：发 error JSON 行（不再用 println 污染 stdout 严格 JSON 流）
+                    // human 模式：保留原 println 红色提示，玩家可见
+                    emit_error(&format!("解析回合信息出错: {e}"));
+                    if !json_mode {
+                        println!("{}", format!("解析回合信息出错: {e}").red());
+                        println!("----------");
+                    }
                 }
             }
         }
-    }
+    })();
+    // 收尾当前局（正常退出与 Err 路径都走到这里）
+    record::finalize_shutdown();
+    watch_result
 }
 
 /// 出错时按 Enter 暂停（仅发布版，CI / 开发默认不阻塞 stdin）

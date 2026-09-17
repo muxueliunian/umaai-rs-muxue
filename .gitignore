@@ -21,6 +21,9 @@ master.mdb
 .gopath/
 /tmp/
 
+# 运气分重放分析产物（明细/统计 CSV，按需生成）
+luck_replay*.csv
+
 
 # 各轮实验的一次性驱动脚本（根目录 scratch_*）：只在本机跑，不入库。
 # 预登记、冻结输入与结果证据都在 logs/ 下（logs/ 本身也不入库）。

@@ -27,7 +27,9 @@ use umasim::{
     game::{InheritInfo, Trainer, ramen::RamenGame},
     gamedata::{GAMEDATA, init_global_with_config},
     global,
-    trainer::{LoggingTrainer, RamenHandwrittenTrainer, RandomTrainer},
+    trainer::{
+        LoggingTrainer, RamenHandwrittenTrainer, RandomTrainer, RecommendedRamenTrainer
+    },
     utils::{get_workspace_root, load_game_config}
 };
 
@@ -52,6 +54,18 @@ struct Config {
     friend: u32,
     /// 训练员名称。
     trainer: String,
+    /// handwritten（正式推荐 preset）专用：地区弱位覆盖权重三态
+    /// （None=preset 默认按智卡数查表；负=显式关闭；正=固定值实验）。
+    region_weak_cover: Option<f32>,
+    /// recommended 专用：地区 youqing 权重覆盖（None=preset 值）。
+    region_youqing_weight: Option<f32>,
+    /// recommended 专用：地区无卡位惩罚覆盖（None=preset 值）。
+    region_waste_penalty: Option<f32>,
+    /// recommended 专用：主训位翻倍加分（C2，None=preset 0.0 关闭）。
+    region_main_bias_bonus: Option<f32>,
+    /// recommended 专用：第3年地区选择"单点偏好"强度（0=现状，1..=3=组合内
+    /// 至少含 1..=3 个单点地区；实验扫参，见 RamenPolicyConfig::region_y3_single_focus）。
+    region_y3_single_focus: u8,
     /// 汇总 CSV 输出路径。
     out: String,
     /// 代表卡选择参数（pool_size/min_panel/pick 均可由 CLI 覆盖）。
@@ -67,6 +81,11 @@ impl Default for Config {
             seed: 42,
             friend: DEFAULT_FRIEND,
             trainer: "handwritten".to_string(),
+            region_weak_cover: None,
+            region_youqing_weight: None,
+            region_waste_penalty: None,
+            region_main_bias_bonus: None,
+            region_y3_single_focus: 0,
             out: "logs/bench_compositions.csv".to_string(),
             pick: CardPickOpts::default(),
             cards_file: None
@@ -95,6 +114,10 @@ struct Summary {
     status_mean: [f64; 5],
     /// 训练技能 PT 均值。
     skill_pt_mean: f64,
+    /// 第 2 年实际选区（记录第一局 Outcome，供核实实验臂确实改变第 3 年选区，Y2 应不受影响）。
+    region_y2: String,
+    /// 第 3 年实际选区（记录第一局 Outcome，供核实单点偏好档位确实改变第 3 年选区）。
+    region_y3: String,
     /// 三年 RMJ 全通率。
     rmj_all_rate: f64,
     /// 五次友人出行完成率。
@@ -115,6 +138,8 @@ impl Summary {
         ];
         row.extend(self.status_mean.iter().map(|mean| format!("{mean:.3}")));
         row.push(format!("{:.3}", self.skill_pt_mean));
+        row.push(self.region_y2.clone());
+        row.push(self.region_y3.clone());
         row.push(format!("{:.4}", self.rmj_all_rate));
         row.push(format!("{:.4}", self.friend_all_rate));
         row
@@ -131,6 +156,26 @@ fn parse_args() -> Result<Config> {
             Arg::Long("seed") => cfg.seed = bench::parse_value(&mut parser, "seed")?,
             Arg::Long("friend") => cfg.friend = bench::parse_value(&mut parser, "friend")?,
             Arg::Long("trainer") => cfg.trainer = bench::parse_value(&mut parser, "trainer")?,
+            Arg::Long("region-weak-cover") => {
+                // 三态：0/负/正，原样写入 with_experiment_overrides
+                cfg.region_weak_cover = Some(bench::parse_value(&mut parser, "region-weak-cover")?)
+            }
+            Arg::Long("region-youqing-weight") => {
+                cfg.region_youqing_weight = Some(bench::parse_value(&mut parser, "region-youqing-weight")?)
+            }
+            Arg::Long("region-waste-penalty") => {
+                cfg.region_waste_penalty = Some(bench::parse_value(&mut parser, "region-waste-penalty")?)
+            }
+            Arg::Long("region-main-bias") => {
+                cfg.region_main_bias_bonus = Some(bench::parse_value(&mut parser, "region-main-bias")?)
+            }
+            Arg::Long("region-y3-single-focus") => {
+                cfg.region_y3_single_focus = bench::parse_value(&mut parser, "region-y3-single-focus")?;
+                ensure!(
+                    cfg.region_y3_single_focus <= 3,
+                    "--region-y3-single-focus 只能为 0..=3（0=现状；3=纯单点）"
+                );
+            }
             Arg::Long("out") => cfg.out = bench::parse_value(&mut parser, "out")?,
             Arg::Long("min-panel") => cfg.pick.min_panel = bench::parse_value(&mut parser, "min-panel")?,
             Arg::Long("pool-size") => cfg.pick.pool_size = bench::parse_value(&mut parser, "pool-size")?,
@@ -139,7 +184,10 @@ fn parse_args() -> Result<Config> {
             Arg::Long("help") | Arg::Short('h') => {
                 println!(
                     "用法: bench_compositions [--runs N] [--seed S] [--friend IDRANK] \
-                     [--trainer random|handwritten] [--min-panel N] [--pool-size N] [--pick N] \
+                     [--trainer random|handwritten|recommended] [--min-panel N] [--pool-size N] [--pick N] \
+                     [--region-weak-cover F]（recommended 专用：三态 0=按智卡数查表/负=关/正=固定值） \
+                     [--region-youqing-weight F] [--region-waste-penalty F] [--region-main-bias F] \
+                     [--region-y3-single-focus N]（recommended 专用：0=现状/1..=3=第3年组合内至少含 N 个单点地区） \
                      [--cards-file FILE] [--out FILE]"
                 );
                 std::process::exit(0);
@@ -149,8 +197,8 @@ fn parse_args() -> Result<Config> {
     }
     ensure!(cfg.runs > 0, "--runs 必须大于 0");
     ensure!(
-        matches!(cfg.trainer.as_str(), "random" | "handwritten"),
-        "--trainer 只能为 random 或 handwritten"
+        matches!(cfg.trainer.as_str(), "random" | "handwritten" | "recommended"),
+        "--trainer 只能为 random / handwritten / recommended"
     );
     Ok(cfg)
 }
@@ -232,6 +280,8 @@ fn run_composition<T: Trainer<RamenGame>>(
     let mut rmj_all = 0_usize;
     let mut friend_all = 0_usize;
     let mut failed = 0_usize;
+    // 第一局成功 Outcome 的年度选区（同构成同种子下选区确定，取首局即可核实）。
+    let mut first_regions: Option<[[usize; 3]; 3]> = None;
 
     for run_idx in 0..cfg.runs {
         let run_idx_u = run_idx as u64;
@@ -239,6 +289,9 @@ fn run_composition<T: Trainer<RamenGame>>(
         let trainer = make_trainer(log_seed);
         match bench::run_seeded(DEFAULT_UMA, &deck, &DEFAULT_INHERIT, cfg.seed, run_idx_u, &trainer) {
             Ok(outcome) => {
+                if first_regions.is_none() {
+                    first_regions = Some(outcome.yearly_selected_regions);
+                }
                 scores.push(outcome.score);
                 for (idx, value) in outcome.five_status.iter().enumerate() {
                     status_sum[idx] += i64::from(*value);
@@ -259,6 +312,7 @@ fn run_composition<T: Trainer<RamenGame>>(
     let mut sorted: Vec<f64> = scores.iter().map(|score| f64::from(*score)).collect();
     sorted.sort_by(f64::total_cmp);
     let stats = bench::summarize(&sorted);
+    let regions = first_regions.unwrap_or([[0; 3]; 3]);
     Summary {
         composition: composition.clone(),
         deck,
@@ -269,6 +323,8 @@ fn run_composition<T: Trainer<RamenGame>>(
         score_p10: bench::percentile(&sorted, 0.1),
         status_mean: std::array::from_fn(|idx| status_sum[idx] as f64 / divisor),
         skill_pt_mean: skill_pt_sum as f64 / divisor,
+        region_y2: bench::encode_region_cell(&regions[1]),
+        region_y3: bench::encode_region_cell(&regions[2]),
         rmj_all_rate: rmj_all as f64 / divisor,
         friend_all_rate: friend_all as f64 / divisor
     }
@@ -305,6 +361,33 @@ fn run_all(
 ) -> Result<Vec<Summary>> {
     let random = |seed: u64| LoggingTrainer::new(RandomTrainer, seed);
     let handwritten = |seed: u64| LoggingTrainer::new(RamenHandwrittenTrainer::new(), seed);
+    // 正式推荐 preset（三年分治 + 全机制）。`region_weak_cover` 为 None 时用 preset 默认
+    // （= 方案Ⅰ 按智卡数查表）；显式给值时用实验覆盖入口，其余 10 项保持 preset 精确值。
+    let recommended = |seed: u64| match cfg.region_weak_cover {
+        None => {
+            // preset 默认（弱位覆盖走 §方案Ⅰ 查表），再叠加 youqing / waste / main_bias 覆盖
+            let trainer = RecommendedRamenTrainer::new().with_region_weights(
+                cfg.region_youqing_weight,
+                cfg.region_waste_penalty,
+                None,
+                cfg.region_main_bias_bonus
+            ).with_region_y3_single_focus(cfg.region_y3_single_focus);
+            LoggingTrainer::new(trainer, seed)
+        }
+        Some(w) => {
+            let trainer = RecommendedRamenTrainer::with_experiment_overrides(
+                [16.0, 64.0, 64.0], 0.5, 0.5, 140.0, 0.10, 40.0, 8.0, 6.0, 0.0, w, true
+            )
+            .with_region_weights(
+                cfg.region_youqing_weight,
+                cfg.region_waste_penalty,
+                None,
+                cfg.region_main_bias_bonus
+            )
+            .with_region_y3_single_focus(cfg.region_y3_single_focus);
+            LoggingTrainer::new(trainer, seed)
+        }
+    };
     let mut summaries = Vec::with_capacity(compositions.len());
     for (idx, composition) in compositions.iter().enumerate() {
         let deck = composition.build_deck(representatives, cfg.friend)?;
@@ -318,6 +401,7 @@ fn run_all(
         let summary = match cfg.trainer.as_str() {
             "random" => run_composition(cfg, composition, deck, &random),
             "handwritten" => run_composition(cfg, composition, deck, &handwritten),
+            "recommended" => run_composition(cfg, composition, deck, &recommended),
             _ => unreachable!("训练员已在参数解析时校验")
         };
         summaries.push(summary);
@@ -341,6 +425,8 @@ fn save_csv(path: &str, summaries: &[Summary]) -> Result<()> {
         "guts_mean",
         "wisdom_mean",
         "skill_pt_mean",
+        "region_y2",
+        "region_y3",
         "rmj_all_rate",
         "friend_all_rate"
     ];
@@ -367,7 +453,7 @@ fn main() -> Result<()> {
         None => bench::select_representatives(&cfg.pick)?
     };
     println!(
-        "开始基准：trainer={} compositions={} runs_each={} total_runs={} base_seed={} friend={} min_panel={}",
+        "开始基准：trainer={} compositions={} runs_each={} total_runs={} base_seed={} friend={} min_panel={} region_y3_single_focus={}",
         cfg.trainer,
         compositions.len(),
         cfg.runs,
@@ -375,6 +461,7 @@ fn main() -> Result<()> {
         cfg.seed,
         cfg.friend,
         cfg.pick.min_panel,
+        cfg.region_y3_single_focus
     );
 
     let started = Instant::now();

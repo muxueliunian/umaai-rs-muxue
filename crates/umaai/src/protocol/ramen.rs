@@ -177,6 +177,22 @@ fn default_last_ramen() -> i32 {
     -1
 }
 
+/// 协议 `selected_regions` → `RamenState::selected_regions`（`[usize; 3]`）
+///
+/// 规则（与 `into_game` 的数据获取不全判定口径一致）：
+/// - **空数组**（实测 turn 0/1 快照会发 `[]`）→ 视为「没选择地区」，落 game 侧默认状态 `[0, 0, 0]`；
+/// - 负值（`-1` 未选占位）→ 该位保持 `0`；
+/// - 长度不足 3 → 缺位保持 `0`；长度超过 3 → 只取前 3 位（越界项忽略，不 panic）。
+fn map_selected_regions(raw: &[i32]) -> [usize; 3] {
+    let mut arr = [0usize; 3];
+    for (i, &r) in raw.iter().take(3).enumerate() {
+        if r >= 0 {
+            arr[i] = r as usize;
+        }
+    }
+    arr
+}
+
 /// 协议 `active_effect_array` 的单项 `{category, id, value}`
 ///
 /// 仅在 `into_game` 内用其长度做 stage dispatch 判断，不落入 `RamenState`；
@@ -304,15 +320,7 @@ impl GameStatus for GameStatusRamen {
         } else {
             Some(ramen.super_ramen as usize)
         };
-        game.ramen.selected_regions = {
-            let mut arr = [0usize; 3];
-            for (i, &r) in ramen.selected_regions.iter().enumerate() {
-                if i < 3 && r >= 0 {
-                    arr[i] = r as usize;
-                }
-            }
-            arr
-        };
+        game.ramen.selected_regions = map_selected_regions(&ramen.selected_regions);
         game.ramen.current_ramen = if ramen.last_ramen < 0 || ramen.active_effect_array.is_empty() {
             None
         } else {
@@ -414,7 +422,56 @@ impl GameStatus for GameStatusRamen {
             }
         }
 
+        // 6. RMJ 派生状态恢复（协议快照不携带 → AI 侧按「每年成功 / 第 3 年大成功」假设补齐）
+        //
+        // 背景：`rmj_results`（年度 RMJ 结果，第 2/3 年常驻驱动 `ramen_success_effect` /
+        // `ramen_fail_effect`）与 `train_level_bonus`（RMJ 成功 → 训练等级 +1）只存在于
+        // 游戏内部状态，协议 JSON 没有对应字段。不补齐会让**第 2/3 年的每次 rollin**
+        // 系统性缺失训练等级加成与常驻成功效果——实测 turn23→24 的期望骤降
+        // ~2300–3000 分（与随机种子无关，四局一致），且会拖低在线 AI 的决策质量。
+        //
+        // 依据：`check_rmj` 是纯函数（`scenario_pt >= ramen_success_pt[year]`），阈值
+        // 1500 / 3000 / 3500（第 3 年 ≥5000 为大成功），正常育成基本达标；故按每年
+        // 成功、第 3 年大成功假设补齐（两者 `is_success()` 均为 true）。
+        let rmj_done = rmj_done_count(base.turn, &game.stage);
+        game.ramen.rmj_results = vec![true; rmj_done];
+        game.ramen.train_level_bonus = rmj_done as i32;
+
+        // 7. 新年窗口 scenario_pt 归一化（协议快照携带的是「上一年遗留值」）
+        //
+        // 实测：新年首回合（turn 24 / 48 / 72）在**当年首次吃面入账前**，协议
+        // `scenario_pt` 仍是上一年终值（如 3150 / 6000），而模拟在 turn23 的 RMJ
+        // 结算时已把它归零、下一年重新累计。若直接沿用协议值，从该快照出发的 rollin
+        // 会把这笔上一年 PT 一直带到下一年末（实测虚高 ~1900 分）。
+        //
+        // 判据：`active_effect_array` 为空 = 当年尚未吃面（吃面后效果数组非空），
+        // 此时按模拟语义归零；已吃面（非空）则保留当年累计值。
+        if matches!(base.turn, 24 | 48 | 72) && ramen.active_effect_array.is_empty() {
+            game.ramen.scenario_pt = 0;
+        }
+
         Ok(game)
+    }
+}
+
+/// 已结算的 RMJ 次数（用于按「每年成功」假设恢复 `rmj_results` / `train_level_bonus`）
+///
+/// RMJ 在 turn 23 / 47 / 71 的 `NextTurn` 阶段结算；同一回合内**结算前**的快照
+/// （`Train` / `AfterTrain` / `NextTurn`）仍算上一次数量，**结算后**（`RegionSelect`
+/// 起，含 `RegionSelect` / `BeginAfterRegionSelect`）计入本次。
+///
+/// 返回值为**已完成的年份数**：turn < 23 → 0，第 2 年（24..47）→ 1，
+/// 第 3 年（48..71）→ 2，URA 期（> 71）→ 3。
+fn rmj_done_count(turn: i32, stage: &RamenStage) -> usize {
+    let settled_this_turn = matches!(stage, RamenStage::RegionSelect | RamenStage::BeginAfterRegionSelect);
+    match turn {
+        t if t < 23 => 0,
+        23 => usize::from(settled_this_turn),
+        t if t < 47 => 1,
+        47 => 1 + usize::from(settled_this_turn),
+        t if t < 71 => 2,
+        71 => 2 + usize::from(settled_this_turn),
+        _ => 3
     }
 }
 
@@ -555,17 +612,130 @@ mod tests {
     /// selected_regions 映射
     #[test]
     fn test_selected_regions_mapping() {
-        let raw = [1, 4, 5];
-        let arr: [usize; 3] = {
-            let mut a = [0usize; 3];
-            for (i, &r) in raw.iter().enumerate() {
-                if i < 3 && r >= 0 {
-                    a[i] = r as usize;
-                }
+        // 正常三值
+        assert_eq!(map_selected_regions(&[1, 4, 5]), [1, 4, 5]);
+        // 开局空数组（实测 turn 0/1）→ 没选择地区，落 game 默认状态
+        assert_eq!(map_selected_regions(&[]), [0, 0, 0]);
+        // -1 未选占位 → 该位 0；混选时保留有效位
+        assert_eq!(map_selected_regions(&[-1, -1, -1]), [0, 0, 0]);
+        assert_eq!(map_selected_regions(&[3, -1, 7]), [3, 0, 7]);
+        // 长度异常：不足补 0 / 超出只取前 3（不 panic）
+        assert_eq!(map_selected_regions(&[2]), [2, 0, 0]);
+        assert_eq!(map_selected_regions(&[1, 2, 3, 4]), [1, 2, 3]);
+        println!("selected_regions 映射用例全部通过");
+    }
+
+    /// RMJ 已完成次数边界：turn 23/47/71 同回合内「结算前 / 结算后」区分
+    #[test]
+    fn test_rmj_done_count_boundaries() {
+        use umasim::game::ramen::RamenStage;
+        assert_eq!(rmj_done_count(0, &RamenStage::Train), 0);
+        assert_eq!(rmj_done_count(22, &RamenStage::Train), 0);
+        // turn 23 同回合：训练 / 结算中（结算前）→ 0；地区选择起（结算后）→ 1
+        assert_eq!(rmj_done_count(23, &RamenStage::Train), 0);
+        assert_eq!(rmj_done_count(23, &RamenStage::NextTurn), 0);
+        assert_eq!(rmj_done_count(23, &RamenStage::RegionSelect), 1);
+        assert_eq!(rmj_done_count(23, &RamenStage::BeginAfterRegionSelect), 1);
+        assert_eq!(rmj_done_count(24, &RamenStage::RamenSelect), 1);
+        assert_eq!(rmj_done_count(46, &RamenStage::Train), 1);
+        assert_eq!(rmj_done_count(47, &RamenStage::Train), 1);
+        assert_eq!(rmj_done_count(47, &RamenStage::RegionSelect), 2);
+        assert_eq!(rmj_done_count(48, &RamenStage::Train), 2);
+        assert_eq!(rmj_done_count(70, &RamenStage::Train), 2);
+        assert_eq!(rmj_done_count(71, &RamenStage::Train), 2);
+        assert_eq!(rmj_done_count(71, &RamenStage::RegionSelect), 3);
+        assert_eq!(rmj_done_count(72, &RamenStage::Train), 3);
+        assert_eq!(rmj_done_count(77, &RamenStage::Train), 3);
+        println!("RMJ 次数边界用例全部通过");
+    }
+
+    /// 协议重建补齐 RMJ 派生状态（真实快照驱动）
+    ///
+    /// 回归背景：`rmj_results` / `train_level_bonus` 协议不携带，缺失会让第 2/3 年
+    /// rollin 系统性缺少训练等级加成与常驻成功效果（turn23→24 期望骤降 ~2300–3000）。
+    #[test]
+    fn test_into_game_restores_rmj_state() {
+        use std::fs;
+
+        use crate::protocol::{ParsedGame, parse_game_by_scenario};
+        use umasim::{game::Game, gamedata::init_global};
+
+        let workspace_root = umasim::utils::get_workspace_root().expect("workspace root");
+        let dir = workspace_root.join("logs").join("SendGameStatusPlugin");
+        if !dir.is_dir() {
+            eprintln!("样本目录不存在：{}（跳过本测试）", dir.display());
+            return;
+        }
+        let _ = std::env::set_current_dir(&workspace_root);
+        let _ = init_global();
+
+        let load = |name: &str| -> Option<RamenGame> {
+            let path = dir.join(name);
+            if !path.is_file() {
+                return None;
             }
-            a
+            let contents = fs::read_to_string(&path).expect("read sample");
+            match parse_game_by_scenario(&contents).expect("parse sample") {
+                ParsedGame::Ramen { game, .. } => Some(game),
+                ParsedGame::Onsen(_) => panic!("样本应为拉面剧本")
+            }
         };
-        assert_eq!(arr, [1, 4, 5]);
+
+        // 第 2 年快照：补 1 次（第 1 年 RMJ 成功）
+        if let Some(game) = load("game7075_turn24_2.json") {
+            println!(
+                "turn24_2: turn={} bonus={} rmj={:?}",
+                game.turn(),
+                game.ramen.train_level_bonus,
+                game.ramen.rmj_results
+            );
+            assert_eq!(game.ramen.train_level_bonus, 1, "第 2 年应补 1 次 RMJ 成功加成");
+            assert_eq!(game.ramen.rmj_results, vec![true], "第 2 年 rmj_results 应为 [true]");
+        }
+        // 第 1 年内快照：不应有 RMJ 结果
+        if let Some(game) = load("game7075_turn13.json") {
+            println!("turn13: bonus={} rmj={:?}", game.ramen.train_level_bonus, game.ramen.rmj_results);
+            assert_eq!(game.ramen.train_level_bonus, 0, "第 1 年内不应有 RMJ 加成");
+            assert!(game.ramen.rmj_results.is_empty(), "第 1 年内 rmj_results 应为空");
+        }
+        // 新年窗口 scenario_pt：首回合未吃面（active_effect 空）→ 归零；已吃面 → 保留当年值
+        for (name, expect_pt) in [("game7075_turn24_2.json", 0), ("game7075_turn24_3.json", 400)] {
+            if let Some(game) = load(name) {
+                println!("{name}: scenario_pt={} (期望 {expect_pt})", game.ramen.scenario_pt);
+                assert_eq!(game.ramen.scenario_pt, expect_pt, "{name} 新年窗口 scenario_pt 归一化不符");
+            }
+        }
+        // turn23 同回合边界：训练（结算前）→ 0；地区选择（结算后）→ 1
+        for (name, expect) in [("game7075_turn23_2.json", 0), ("game7075_turn23_4.json", 1)] {
+            if let Some(game) = load(name) {
+                println!("{name}: stage={:?} bonus={}", game.stage, game.ramen.train_level_bonus);
+                assert_eq!(game.ramen.train_level_bonus, expect, "{name} RMJ 次数边界不符");
+            }
+        }
+    }
+
+    /// 空数组可被协议层反序列化（`RamenStatus` 读取容忍 `selected_regions: []`）
+    ///
+    /// 回归背景：开局快照会发空数组，裸定长 `[i32; 3]` 会让整份快照
+    /// `invalid length 0, expected an array of length 3` 解析失败。
+    ///
+    /// ❗本地与上游的表示不同：上游改成 `Vec<i32>`，本地保留定长 `[i32; 3]` 并用
+    /// [`de_regions_tolerant`] 只放行 0 项 / 3 项，因此空数组在**反序列化阶段**就落成
+    /// `[0, 0, 0]`，而不是先读成空 `Vec` 再由 `map_selected_regions` 补零。
+    #[test]
+    fn test_empty_selected_regions_deserializes() {
+        let status: RamenStatus =
+            serde_json::from_str(r#"{"selected_regions": []}"#).expect("空数组必须可反序列化");
+        assert_eq!(status.selected_regions, [0, 0, 0], "空数组读入为未选状态");
+        assert_eq!(
+            map_selected_regions(&status.selected_regions),
+            [0, 0, 0],
+            "空数组 → 没选择地区（game 默认状态）"
+        );
+        // 缺字段（serde default）同样落到默认状态
+        let bare: RamenStatus = serde_json::from_str("{}").expect("缺字段必须可反序列化");
+        assert_eq!(map_selected_regions(&bare.selected_regions), [0, 0, 0]);
+        println!("空数组 / 缺字段反序列化用例通过");
     }
 
     /// super_ramen / last_ramen -1 → None

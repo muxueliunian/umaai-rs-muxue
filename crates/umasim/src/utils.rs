@@ -517,7 +517,8 @@ pub(crate) fn fallback_override_game_config() -> OverrideGameConfig {
             num_threads: None,
             mcts_turn_bonus: None,
             pt_favor_rate: None,
-            race_grades: None
+            race_grades: None,
+            luck_record: None
         },
         mcts: OverrideMctsConfig::default(),
         ramen_region_strategy: None,

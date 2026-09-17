@@ -203,3 +203,25 @@
 ### 温泉遗留段
 - `onsen_order` / `mcts_selected_onsen` 等温泉专属配置移到 `default_config.toml` / `game_config.toml` 文件末尾，标注"Phase 6 预期删除"
 - `game_config.toml` `[onsen_order]` / `[config_override]` 段保留（OverrideGameConfig 解析依赖）
+
+### 在线记录开关（`luck_record`）
+- `luck_record = true`（默认）：umaai 实时运行按局落盘 `logs/game{id}/`（`id` = `single_mode_chara_id`）
+- `game_config.toml` 的 `[config_override]` 段可覆盖为 `false` 关闭；离线 sim/bench/重放工具不读该开关、不写日志
+
+## 在线决策记录（`crates/umaai/src/decision/record.rs`）
+
+umaai 实时监听游戏数据时，把「接收到的游戏数据」与「策略计算结果」按局落盘，**每局一个目录、全部产物平铺**：
+
+| 文件 | 内容 |
+|---|---|
+| `game{id}_turn{turn}[_{seq}].json` | watch 收到的 `thisTurn.json` **原文**（每份一文件；序号与 SendGameStatusPlugin 归档同口径） |
+| `decisions.csv` | 逐决策点明细（与离线 `luck_replay` **同 schema**；`step` / `chain_len` 在线留空） |
+| `meta.json` | 局元信息：起止时间 / 起始回合 / `mid_entry` / 结束原因 / `snapshots` / `csv_rows` / `decision_rows` / `total_luck_end` |
+| `luck_trend.svg` | 该局运气分趋势图（3 子图：期望评分 / 运气分 / 运气波动；局数据完整收尾时**自动生成**） |
+
+- **挂载点**：`main.rs` watch 循环 parse 后调 `record::on_snapshot`（接收数据 + 切局检测）；输出 sink 外包一层 `RecordingSink`（转发内层 + 记录每条决策 emit，链式中间项也不漏）
+- **全局形态**：`OnceLock<Mutex<Option<OnlineRecorder>>>`，`record::init` 前所有入口 no-op——离线工具复用同一份 lib 代码不会误写日志
+- **切局 / 收尾**：`chara_id` 变化即收尾上一局（`end_reason=switch`）；`main.rs` 在 watch 循环结束（含 Err 路径）调 `record::finalize_shutdown()`
+- **无每快照缓冲**：行即时落盘；本快照无决策时 `no_emit` 行在其下一条快照到达（或收尾）时补出
+- **局末自动出图**：**触发点 = 末回合第 2 份快照（拉面 `turn77_2`，含决策行那份）处理完后**（`main.rs` 在 `process_ramen` 返回后调 `record::on_turn_done()`）立即写 `meta.json`（`end_reason=game_end`）+ 由 `plot::luck_trend::render_game` 生成 `luck_trend.svg`；第一份末回合快照是 Begin skip 无决策行故不在此触发；切局 / 退出降级为兜底（`end_done` 局不再重写，中途停止的局在此补写）；生成后在终端以绿色打印**绝对路径**（`dunce` 去 `\\?\`，走 stderr，`--json` 模式 stdout 不受影响）
+- **本期范围**：仅拉面（`scenarioId=14`）；温泉无 `single_mode_chara_id` 切局键，未纳入
