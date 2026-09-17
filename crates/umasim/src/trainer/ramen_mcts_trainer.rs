@@ -1392,13 +1392,14 @@ mod tests {
         // 2026-09 更新：吃面 PT 增量 / eat_count 延后到 NextTurn，训练阶段用吃面前 PT
         // 算 ramen_pt_effect / region_bonus 档位，整局数值变化（拉面效果变弱导致整局偏低），
         // 基准重抓。
-        // 2026-09-18 重抓：上一版数值早于 preset 定稿（本次改动实测逐位不变，仅为同步）。
-        c.check(score == 64151, "评分与改动前逐位相同");
+        // 2026-09-18 重抓：上游新 preset + **本地 Score 选择轴**下的实测值。
+        // 上游同用例写 64151 / [3337,2238,1820,1184,1217] / 8253，那是 PT 轴的数字。
+        c.check(score == 61516, "评分与改动前逐位相同");
         c.check(
-            game.uma.five_status == [3337, 2238, 1820, 1184, 1217],
+            game.uma.five_status == [3337, 2014, 1946, 1026, 1236],
             "五维与改动前逐位相同"
         );
-        c.check(game.uma.skill_pt == 8253, "技能点与改动前逐位相同");
+        c.check(game.uma.skill_pt == 7956, "技能点与改动前逐位相同");
         c.check(game.ramen.scenario_pt == 0, "剧本 PT 与改动前逐位相同");
         c.check(searched == 58, "searched_count 与改动前逐位相同");
         c.finish()
@@ -1546,8 +1547,9 @@ mod tests {
         // `select_action` 的合并短路 `!game.is_race_turn()` 不成立，见本文件 495-547）。
         // 2026-09 更新：吃面 PT 增量延后到 NextTurn 后，本回合 PT 档位提升延后生效，
         // 整局搜索路径微小变化，SpecialSelect 调用 / 重搜数基线重抓。
-        // 2026-09-18 重抓：上一版快照早于 preset 定稿（本次改动实测逐位不变，仅为同步）。
-        c.check(special_calls == 28, "SpecialSelect 调用数与改动前逐位相同");
+        // 2026-09-18 重抓：上游新 preset + **本地 Score 选择轴**下的实测值。
+        // 上游同用例写 28，那是它把选动作硬切 PT 轴之后的数字，本地不适用。
+        c.check(special_calls == 30, "SpecialSelect 调用数与改动前逐位相同");
         c.check(special_searches == 0, "SpecialSelect 重搜数与改动前逐位相同");
         // 再留一条与具体数字解耦的语义上界，防止将来重抓快照时把比例抬上去
         c.check(
@@ -2057,9 +2059,12 @@ mod tests {
         }
         let mut c = Checks::new();
         c.check(!combined.is_empty(), "至少捕获一次 RamenSelect 搜索");
+        // 2026-09-18 合并上游：合并搜索路径改为按面聚合回三阶段下标后暴露
+        // `last_decision()`（此前清空摘要，导致「只吃面」回合整回合没有运气分更新）。
+        // 探针的语义仍是「搜了但摘要是否对外可见」，期望值随之从 false 翻成 true。
         c.check(
-            combined.iter().all(|p| !p.exposes_decision_info),
-            "合并路径搜索后 last_decision 为空（既有行为，本次未改）"
+            combined.iter().all(|p| p.exposes_decision_info),
+            "合并路径搜索后 last_decision 有内容（上游按面聚合后暴露）"
         );
         c.finish()
     }
