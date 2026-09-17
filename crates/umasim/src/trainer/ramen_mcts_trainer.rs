@@ -38,7 +38,7 @@ use std::{
     sync::{
         Arc,
         Mutex,
-        atomic::{AtomicUsize, Ordering}
+        atomic::{AtomicBool, AtomicUsize, Ordering}
     },
     time::{Duration, Instant}
 };
@@ -309,6 +309,17 @@ pub struct RamenMctsTrainer {
     pub selection: RamenSelection,
     /// 是否输出每步决策日志
     pub verbose: bool,
+    /// 运行期静音：为真时压制 [`Self::verbose`] 的一切上屏输出
+    ///
+    /// 与 `verbose` 的分工：`verbose` 是**装配期**开关（调用方构造时定下），本字段是
+    /// **运行期**开关，可在 `&self` 上临时翻转。地区对照模式要在随机流副本上多跑一次
+    /// 搜索，那一跑的「首选 / 终局维度差」不该混进屏幕——执行的是另一条推荐，而这些
+    /// 日志行本身没有任何「这是参照侧」的标注，玩家会当成本次推荐读。
+    ///
+    /// ❗**只影响日志**。决策、随机流、摘要、`reason_sink` 一概不受影响：理由**数据**
+    /// 那一路由宿主自己的门去挡（见 `umaai::decision::ReasonGate`），两者职责不同，
+    /// 不要互相代替。
+    quiet: AtomicBool,
     /// `RamenSelect` 是否用合并动作（ramen + targets 一次决策）搜索
     ///
     /// 打开时 `SpecialSelect` 不再是独立决策点：`RamenSelect` 的搜索结果里
@@ -355,6 +366,18 @@ pub struct RamenMctsTrainer {
     decision_probe: Option<Arc<Mutex<Vec<DecisionProbe>>>>
 }
 
+/// [`RamenMctsTrainer::quiet_scope`] 的 RAII 守卫：析构即恢复 verbose 上屏
+pub struct QuietScope<'a> {
+    /// 被静音的训练员
+    trainer: &'a RamenMctsTrainer
+}
+
+impl Drop for QuietScope<'_> {
+    fn drop(&mut self) {
+        self.trainer.quiet.store(false, Ordering::Relaxed);
+    }
+}
+
 impl RamenMctsTrainer {
     /// 用指定搜索配置创建（默认搜全部阶段、按 `score` 口径取最优、打开合并动作搜索）
     pub fn new(config: SearchConfig) -> Self {
@@ -364,6 +387,7 @@ impl RamenMctsTrainer {
             stages: RamenSearchStages::all(),
             selection: RamenSelection::Score,
             verbose: false,
+            quiet: AtomicBool::new(false),
             use_combined_ramen_select: true,
             last_breakdown: Mutex::new(None),
             searched: AtomicUsize::new(0),
@@ -437,6 +461,20 @@ impl RamenMctsTrainer {
         self
     }
 
+    /// 在守卫存活期间压制 verbose 上屏输出；守卫析构时自动恢复
+    ///
+    /// 用 RAII 而不是「手动置位 / 复位」：被静音的那一跑中途可能 `?` 早退，手动复位
+    /// 会被跳过，此后整局的决策日志都不见了。只影响日志，不影响决策与随机流。
+    pub fn quiet_scope(&self) -> QuietScope<'_> {
+        self.quiet.store(true, Ordering::Relaxed);
+        QuietScope { trainer: self }
+    }
+
+    /// 本次是否真要把 verbose 日志打出去（装配期开关**且**当前没被静音）
+    fn verbose_now(&self) -> bool {
+        self.verbose && !self.quiet.load(Ordering::Relaxed)
+    }
+
     /// `SpecialSelect` 直接命中合并搜索缓存的次数
     pub fn combined_cache_hits(&self) -> usize {
         self.combined_cache_hits.load(Ordering::Relaxed)
@@ -480,7 +518,7 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
             return;
         };
         self.reason_sink.emit(&data);
-        if self.verbose {
+        if self.verbose_now() {
             for line in render_reason_lines(&data) {
                 info!("{line}");
             }
@@ -531,7 +569,7 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     /// 内部归约出的 0/1，其均值是达成率，差值即达成率之差——不要再拿它与 PT
     /// 均值互推，那正是这套观测要避免的错误。
     fn log_terminal_breakdown(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
-        if !self.verbose || output.terminal_results.len() != output.actions.len() {
+        if !self.verbose_now() || output.terminal_results.len() != output.actions.len() {
             return;
         }
         let Some(base) = output.terminal_results.get(chosen) else {
@@ -767,7 +805,7 @@ impl RamenMctsTrainer {
                 self.stash_search_breakdown(&output);
                 self.log_terminal_breakdown(game.turn() as i32, idx, &output);
                 self.emit_decision_reason(game.turn() as i32, idx, &output);
-                if self.verbose {
+                if self.verbose_now() {
                     let (res, _) = &output.action_results[idx];
                     info!(
                         "[MCTS][回合 {}] 阶段 {:?} 合并 {} 候选 -> combined#{idx} {} (mean={:.0} n={})",
@@ -814,7 +852,7 @@ impl RamenMctsTrainer {
         self.stash_search_breakdown(&output);
         self.log_terminal_breakdown(game.turn() as i32, idx, &output);
         self.emit_decision_reason(game.turn() as i32, idx, &output);
-        if self.verbose {
+        if self.verbose_now() {
             let (res, _) = &output.action_results[idx];
             info!(
                 "[MCTS][回合 {}] 阶段 {:?} {} 候选 -> #{idx} {} (mean={:.0} n={})",

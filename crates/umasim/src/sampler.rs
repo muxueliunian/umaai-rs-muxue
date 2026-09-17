@@ -1309,6 +1309,30 @@ mod tests {
         Ok(())
     }
 
+    /// 同理打印 `npy_ood_half101` 那批分布外数据所用的空间
+    ///
+    /// 构成与追加卡取自该批采集自己的日志原文（`logs/oodbench/ctl_s10.log` 首行：
+    /// 「构成 2,1,0,0,2，追加卡 [303064]」）。存在的理由是**旧数据的组合身份**：
+    /// 那批导出只写了 `combo_key`，要把它换成完整马娘/卡组字段就必须按同一口径
+    /// 重新枚举一次计划表，再用 `index % plan_count` 定位。计划数须为 190，
+    /// 与该批 `meta.json` 记录的 `plan_count` 逐值相同，否则说明枚举口径已变。
+    #[test]
+    fn test_ood_w2_plan_dump() -> Result<()> {
+        setup()?;
+        let counts = parse_shape("2,1,0,0,2")?;
+        let shape = DeckShape {
+            name: Box::leak(format_shape_name(&counts).into_boxed_str()),
+            counts
+        };
+        let space = SamplingSpace::custom(&[303064], shape)?;
+        for (i, plan) in space.plans().iter().enumerate() {
+            let deck: Vec<String> = plan.deck.iter().map(|c| c.to_string()).collect();
+            println!("OODPLAN {i} {} {} {}", plan.uma, deck.join(","), plan.shape);
+        }
+        println!("OODPLAN_COUNT {}", space.len());
+        Ok(())
+    }
+
     /// `gen2_v1` 空间：规模符合手算，且每个计划逐字段合法
     ///
     /// 合法性逐条查：无重复卡、6 张卡角色两两不同、无一张与马娘同角色、

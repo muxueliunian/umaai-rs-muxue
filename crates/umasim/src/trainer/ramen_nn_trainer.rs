@@ -186,10 +186,11 @@ pub enum SpecialSelectMode {
 ///
 /// # 错误
 ///
-/// 文件读不出、输入形状与 [`features::INPUT_DIM`] 不符、优化或转换失败时报错。
+/// 文件读不出、输入形状与 [`features::INPUT_DIM`] 不符、优化或转换失败，
+/// 或**图的输出契约**与 [`validate_output_contract`] 不符时报错。
 fn build_runnable(model_path: &Path, batch: usize) -> Result<OnnxModel> {
     ensure!(batch >= 1, "batch 必须 >= 1，实得 {batch}");
-    tract_onnx::onnx()
+    let plan = tract_onnx::onnx()
         .model_for_path(model_path)
         .context("无法读取 ONNX 模型文件")?
         .with_input_fact(0, f32::fact([batch, features::INPUT_DIM]).into())
@@ -197,7 +198,51 @@ fn build_runnable(model_path: &Path, batch: usize) -> Result<OnnxModel> {
         .into_optimized()
         .context("模型优化失败")?
         .into_runnable()
-        .context("模型转换失败")
+        .context("模型转换失败")?;
+    validate_output_contract(&plan, batch)
+        .with_context(|| format!("ONNX 图输出契约校验失败: {}", model_path.display()))?;
+    Ok(plan)
+}
+
+/// 校验**图本身**的输出契约：单输出、f32、形状 `[batch, OUTPUT_DIM]`
+///
+/// 旁车 JSON 里的 `input_dim` / `output_dim` 是**模型作者的声明**，与图实际长什么样
+/// 是两件事：旁车写对、图导错（少一个头、多一个输出、dtype 不是 f32）时，旧实现要到
+/// **第一次真实决策**才在 `infer_features` 的长度检查里炸。那时候一局已经跑了一半，
+/// 客户端也已经对用户宣称网络生效。这里把它提到加载阶段。
+///
+/// 只读 tract 优化后图的 fact，**不跑任何推理**——因此不会额外计进
+/// [`infer_request_count`]，也不会污染「整局恰好 3 次推理」这条隔离证据。
+///
+/// 输入形状已由 [`build_runnable`] 固定成 `[batch, INPUT_DIM]`，因此这里的输出形状
+/// 必然是具体值；拿不到具体值本身就说明图没能被特化，同样报错。
+///
+/// # 错误
+///
+/// 输出个数不为 1、元素类型不是 f32、形状不是 `[batch, OUTPUT_DIM]`，或输出 fact
+/// 读不出 / 不是具体形状时报错。
+fn validate_output_contract(plan: &OnnxModel, batch: usize) -> Result<()> {
+    let graph = plan.model();
+    ensure!(
+        graph.outputs.len() == 1,
+        "ONNX 图输出个数为 {}，契约要求恰好 1 个（policy {POLICY_DIM} + choice {CHOICE_DIM} + value {VALUE_DIM} 拼成的单张量）",
+        graph.outputs.len()
+    );
+    let fact = graph.output_fact(0).context("读取 ONNX 图输出 fact 失败")?;
+    ensure!(
+        fact.datum_type == f32::datum_type(),
+        "ONNX 图输出元素类型为 {:?}，契约要求 f32",
+        fact.datum_type
+    );
+    let shape = fact
+        .shape
+        .as_concrete()
+        .ok_or_else(|| anyhow!("ONNX 图输出形状未特化为具体值: {:?}", fact.shape))?;
+    ensure!(
+        shape == [batch, OUTPUT_DIM],
+        "ONNX 图输出形状为 {shape:?}，契约要求 [{batch}, {OUTPUT_DIM}]"
+    );
+    Ok(())
 }
 
 /// 拉面杯神经网络训练员
@@ -321,6 +366,15 @@ impl RamenNnTrainer {
         Ok(RamenNnOutput { policy, value })
     }
 
+    /// 本模型旁车里的三路 value 反归一化常数
+    ///
+    /// 存在的理由：GPU 侧车返回的是**已按成员 0 尺度重归一化**的 value，解码必须用
+    /// 与 policy **同一个模型**的常数。把常数从这里取出来，批量调度器就不必自己再读
+    /// 一遍旁车 JSON，也就不会与 [`Self::infer_features`] 的解码口径分叉。
+    pub fn value_norm(&self) -> RamenValueNorm {
+        self.value_norm
+    }
+
     /// 开关自选比赛硬守门（默认开启）
     ///
     /// 守门只在 `Train` 阶段生效：区间内剩余可比赛回合已不够补齐缺口时，无视 policy
@@ -364,12 +418,30 @@ impl RamenNnTrainer {
     pub fn prepare_decision(
         &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
     ) -> Result<DecisionPrep> {
+        Ok(self.prepare_decision_labeled(game, actions, rng)?.into())
+    }
+
+    /// 同 [`Self::prepare_decision`]，但**保留「为什么不需要推理」**
+    ///
+    /// [`DecisionPrep::Resolved`] 把三种完全不同的出口压成同一个下标：自选比赛硬守门、
+    /// `SpecialSelect` 整阶段转手写、唯一候选收敛。客户端要在屏幕与协议上**照实**标注
+    /// 来源，就不能拿一个下标反推，更不能为了标来源再跑一遍守门判定——那会变成第二份
+    /// 判定逻辑。于是把判定结果原样带出来，[`Self::prepare_decision`] 退化成本函数的
+    /// 一层映射，两条路因此不会漂移。
+    ///
+    /// # 错误
+    ///
+    /// 与 [`Self::prepare_decision`] 完全一致：候选为空、特征编码失败、
+    /// [`SpecialSelectMode::Canonical`] 下联合决策根还原失败，或单候选落格检查失败时报错。
+    pub fn prepare_decision_labeled(
+        &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
+    ) -> Result<LabeledPrep> {
         ensure!(!actions.is_empty(), "候选动作为空");
         let stage = ramen_effective_stage(game, actions);
         // 自选比赛硬守门优先于网络输出：不达标直接育成失败，不是可权衡的价值项
         if self.race_shield && stage == RamenStage::Train {
             if let Some(idx) = free_race_gate_index(game, actions, race_gate_slack()) {
-                return Ok(DecisionPrep::Resolved(idx));
+                return Ok(LabeledPrep::RaceGate(idx));
             }
         }
         // SpecialSelect 是联合决策的第二拍，推理状态由 special_mode 决定；
@@ -377,15 +449,15 @@ impl RamenNnTrainer {
         let prep = if stage == RamenStage::SpecialSelect {
             match self.special_mode {
                 SpecialSelectMode::Handwritten => {
-                    DecisionPrep::Resolved(self.fallback.select_action(game, actions, rng)?)
+                    LabeledPrep::HandwrittenStage(self.fallback.select_action(game, actions, rng)?)
                 }
                 SpecialSelectMode::Canonical => {
-                    DecisionPrep::NeedsInference(encode(&canonical_ramen_select_root(game)?)?)
+                    LabeledPrep::NeedsInference(encode(&canonical_ramen_select_root(game)?)?)
                 }
-                SpecialSelectMode::Raw => DecisionPrep::NeedsInference(encode(game)?)
+                SpecialSelectMode::Raw => LabeledPrep::NeedsInference(encode(game)?)
             }
         } else {
-            DecisionPrep::NeedsInference(encode(game)?)
+            LabeledPrep::NeedsInference(encode(game)?)
         };
 
         // 单候选：唯一候选必然中选，policy 取任何值都改不了 argmax 的结果，
@@ -404,9 +476,9 @@ impl RamenNnTrainer {
         // 等价性的准确表述：**正常模型与合法局面下，动作与随机流不变**。
         // 它**不**保留依赖真实推理的错误行为——推理失败、模型输出非有限值等，
         // 在这条路径上不会再被触发。
-        if actions.len() == 1 && matches!(prep, DecisionPrep::NeedsInference(_)) {
+        if actions.len() == 1 && matches!(prep, LabeledPrep::NeedsInference(_)) {
             self.score_actions(game, actions, &[0.0f32; POLICY_DIM])?;
-            return Ok(DecisionPrep::Resolved(0));
+            return Ok(LabeledPrep::SingleCandidate(0));
         }
         Ok(prep)
     }
@@ -547,6 +619,38 @@ pub enum DecisionPrep {
     NeedsInference(Vec<f32>)
 }
 
+/// 一个决策点在推理之前的准备结果，**带上「为什么」**
+///
+/// [`DecisionPrep`] 面向批量调度器，它只关心「要不要推理」，三种不推理的出口压成一个
+/// [`DecisionPrep::Resolved`] 就够了。客户端要把来源照实写进屏幕与协议，需要的信息更细，
+/// 于是由 [`RamenNnTrainer::prepare_decision_labeled`] 直接给出本枚举，
+/// [`DecisionPrep`] 退化成它的一层 [`From`] 映射——判定逻辑只有一份。
+#[derive(Debug, Clone)]
+pub enum LabeledPrep {
+    /// 自选比赛硬守门命中：无视 policy 直接选「比赛」，**没有跑推理**
+    RaceGate(usize),
+    /// `SpecialSelect` 整阶段按 [`SpecialSelectMode::Handwritten`] 口径转交手写策略
+    ///
+    /// ❗这条路会**消耗随机流**（手写策略内部取随机数），与另外两种不推理的出口不同。
+    HandwrittenStage(usize),
+    /// 候选只有一个：argmax 的结果与 policy 无关，整次推理省掉
+    SingleCandidate(usize),
+    /// 需要一次网络推理，`features` 是已编码好的模型输入
+    NeedsInference(Vec<f32>)
+}
+
+impl From<LabeledPrep> for DecisionPrep {
+    /// 丢掉「为什么」，只保留「要不要推理」
+    fn from(value: LabeledPrep) -> Self {
+        match value {
+            LabeledPrep::RaceGate(i) | LabeledPrep::HandwrittenStage(i) | LabeledPrep::SingleCandidate(i) => {
+                Self::Resolved(i)
+            }
+            LabeledPrep::NeedsInference(f) => Self::NeedsInference(f)
+        }
+    }
+}
+
 /// 在已打分的候选里取 logit 最大者；并列取更小下标
 ///
 /// # 错误
@@ -617,8 +721,167 @@ mod tests {
             ramen::{RamenGame, RamenStage}
         },
         gamedata::init_global,
-        utils::{Checks, get_workspace_root, init_test_logger}
+        utils::{Checks, cleanup_test_dir, get_workspace_root, init_test_logger, unique_test_dir}
     };
+
+    /// 最小 ONNX fixture 构造器（只够表达「输入 → 一两个输出」的图）
+    ///
+    /// 用途是覆盖**负向**契约：旁车 JSON 声明正确、但图本身导错。这类模型不可能
+    /// 从正式权重里改出来（改 JSON 只能模拟旁车错，模拟不了图错），也不该往仓库里
+    /// 塞二进制；所以按 ONNX 的 protobuf 线格式**当场生成**，完全可复现。
+    ///
+    /// 只用到 protobuf 的两种 wire type：varint（0）与 length-delimited（2）。
+    /// 字段号取自 ONNX 的 `onnx.proto`：
+    /// `ModelProto{1:ir_version, 2:producer_name, 7:graph, 8:opset_import}`、
+    /// `GraphProto{1:node, 2:name, 5:initializer, 11:input, 12:output}`、
+    /// `NodeProto{1:input, 2:output, 3:name, 4:op_type}`、
+    /// `ValueInfoProto{1:name, 2:type}`、`TypeProto{1:tensor_type}`、
+    /// `TypeProto.Tensor{1:elem_type, 2:shape}`、`TensorShapeProto{1:dim}`、
+    /// `Dimension{1:dim_value}`、`TensorProto{1:dims, 2:data_type, 8:name, 9:raw_data}`、
+    /// `OperatorSetIdProto{1:domain, 2:version}`。
+    mod onnx_fixture {
+        /// 追加一个 protobuf varint
+        fn varint(mut v: u64, out: &mut Vec<u8>) {
+            loop {
+                let b = (v & 0x7f) as u8;
+                v >>= 7;
+                if v == 0 {
+                    out.push(b);
+                    return;
+                }
+                out.push(b | 0x80);
+            }
+        }
+
+        /// 追加一个 `字段号 + wire type` 标签
+        fn tag(field: u32, wire: u32, out: &mut Vec<u8>) {
+            varint(u64::from((field << 3) | wire), out);
+        }
+
+        /// 追加一个 varint 字段
+        fn put_varint(field: u32, v: u64, out: &mut Vec<u8>) {
+            tag(field, 0, out);
+            varint(v, out);
+        }
+
+        /// 追加一个 length-delimited 字段（字符串 / 字节串 / 嵌套消息）
+        fn put_bytes(field: u32, v: &[u8], out: &mut Vec<u8>) {
+            tag(field, 2, out);
+            varint(v.len() as u64, out);
+            out.extend_from_slice(v);
+        }
+
+        /// `TypeProto`：元素类型恒为 FLOAT(1)，形状为给定的具体维度
+        fn type_proto(dims: &[usize]) -> Vec<u8> {
+            let mut shape = Vec::new();
+            for &d in dims {
+                let mut dim = Vec::new();
+                put_varint(1, d as u64, &mut dim);
+                put_bytes(1, &dim, &mut shape);
+            }
+            let mut tensor = Vec::new();
+            put_varint(1, 1, &mut tensor);
+            put_bytes(2, &shape, &mut tensor);
+            let mut ty = Vec::new();
+            put_bytes(1, &tensor, &mut ty);
+            ty
+        }
+
+        /// `ValueInfoProto`
+        fn value_info(name: &str, dims: &[usize]) -> Vec<u8> {
+            let mut v = Vec::new();
+            put_bytes(1, name.as_bytes(), &mut v);
+            put_bytes(2, &type_proto(dims), &mut v);
+            v
+        }
+
+        /// 单输入单输出的 `NodeProto`
+        fn node(op: &str, name: &str, input: &str, output: &str) -> Vec<u8> {
+            let mut n = Vec::new();
+            put_bytes(1, input.as_bytes(), &mut n);
+            put_bytes(2, output.as_bytes(), &mut n);
+            put_bytes(3, name.as_bytes(), &mut n);
+            put_bytes(4, op.as_bytes(), &mut n);
+            n
+        }
+
+        /// 双输入单输出的 `NodeProto`（MatMul 用）
+        fn node2(op: &str, name: &str, a: &str, b: &str, output: &str) -> Vec<u8> {
+            let mut n = Vec::new();
+            put_bytes(1, a.as_bytes(), &mut n);
+            put_bytes(1, b.as_bytes(), &mut n);
+            put_bytes(2, output.as_bytes(), &mut n);
+            put_bytes(3, name.as_bytes(), &mut n);
+            put_bytes(4, op.as_bytes(), &mut n);
+            n
+        }
+
+        /// 全 0 的 f32 `TensorProto` initializer
+        fn zero_initializer(name: &str, rows: usize, cols: usize) -> Vec<u8> {
+            let mut t = Vec::new();
+            put_varint(1, rows as u64, &mut t);
+            put_varint(1, cols as u64, &mut t);
+            put_varint(2, 1, &mut t);
+            put_bytes(8, name.as_bytes(), &mut t);
+            put_bytes(9, &vec![0u8; rows * cols * 4], &mut t);
+            t
+        }
+
+        /// 把 `GraphProto` 包成完整 `ModelProto`
+        fn wrap_model(graph: Vec<u8>) -> Vec<u8> {
+            let mut opset = Vec::new();
+            put_bytes(1, b"", &mut opset);
+            put_varint(2, 13, &mut opset);
+            let mut m = Vec::new();
+            put_varint(1, 7, &mut m);
+            put_bytes(2, b"umaai-test-fixture", &mut m);
+            put_bytes(7, &graph, &mut m);
+            put_bytes(8, &opset, &mut m);
+            m
+        }
+
+        /// 输出形状 = 输入形状的图（`Identity`）：输出维度**错**的负向 fixture
+        pub fn identity_model(dim: usize) -> Vec<u8> {
+            let mut g = Vec::new();
+            put_bytes(1, &node("Identity", "n0", "X", "Y"), &mut g);
+            put_bytes(2, b"identity", &mut g);
+            put_bytes(11, &value_info("X", &[1, dim]), &mut g);
+            put_bytes(12, &value_info("Y", &[1, dim]), &mut g);
+            wrap_model(g)
+        }
+
+        /// 两个输出的图：输出**个数**错的负向 fixture
+        pub fn two_output_model(dim: usize) -> Vec<u8> {
+            let mut g = Vec::new();
+            put_bytes(1, &node("Identity", "n0", "X", "Y"), &mut g);
+            put_bytes(1, &node("Identity", "n1", "X", "Z"), &mut g);
+            put_bytes(2, b"two_outputs", &mut g);
+            put_bytes(11, &value_info("X", &[1, dim]), &mut g);
+            put_bytes(12, &value_info("Y", &[1, dim]), &mut g);
+            put_bytes(12, &value_info("Z", &[1, dim]), &mut g);
+            wrap_model(g)
+        }
+
+        /// `X[1,in] @ W[in,out]` 的图，W 全 0：输出契约**正确**的正向 fixture
+        pub fn matmul_model(input_dim: usize, output_dim: usize) -> Vec<u8> {
+            let mut g = Vec::new();
+            put_bytes(1, &node2("MatMul", "n0", "X", "W", "Y"), &mut g);
+            put_bytes(2, b"matmul", &mut g);
+            put_bytes(5, &zero_initializer("W", input_dim, output_dim), &mut g);
+            put_bytes(11, &value_info("X", &[1, input_dim]), &mut g);
+            put_bytes(12, &value_info("Y", &[1, output_dim]), &mut g);
+            wrap_model(g)
+        }
+    }
+
+    /// 与冻结契约一致的旁车 JSON 文本（`input_dim` / `output_dim` 都**声明正确**）
+    fn valid_sidecar_json() -> String {
+        format!(
+            r#"{{"input_dim":{},"output_dim":{},"value_normalization":{{"center":[0.0,0.0,0.0],"scale":[1.0,1.0,1.0]}}}}"#,
+            features::INPUT_DIM,
+            OUTPUT_DIM
+        )
+    }
 
     const TEST_UMA_ID: u32 = 102601;
     const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
@@ -626,6 +889,132 @@ mod tests {
         blue_count: [15, 3, 0, 0, 0],
         extra_count: [0, 30, 0, 0, 30, 30]
     };
+
+    /// [`LabeledPrep`] 到 [`DecisionPrep`] 的降级映射逐项正确
+    ///
+    /// 三种「不需要推理」的出口必须全部落进 `Resolved` 且**下标原样带过**——映射写错
+    /// 会让批量后端拿到一个不同的动作；反过来，客户端靠 `LabeledPrep` 区分来源，
+    /// 三者塌成一个变体就分不出「网络算的」和「守门顶上的」。
+    ///
+    /// # 错误
+    ///
+    /// 任一观测未通过时返回错误。
+    #[test]
+    fn test_labeled_prep_downgrades_to_decision_prep() -> Result<()> {
+        let mut c = Checks::new();
+        for (labeled, want_idx) in [
+            (LabeledPrep::RaceGate(3), 3usize),
+            (LabeledPrep::HandwrittenStage(1), 1),
+            (LabeledPrep::SingleCandidate(0), 0)
+        ] {
+            let tag = format!("{labeled:?}");
+            let down: DecisionPrep = labeled.into();
+            println!("  {tag} → {down:?}");
+            c.check(
+                matches!(down, DecisionPrep::Resolved(i) if i == want_idx),
+                &format!("{tag} 降级成 Resolved({want_idx})")
+            );
+        }
+        let feats = vec![0.0f32; features::INPUT_DIM];
+        let down: DecisionPrep = LabeledPrep::NeedsInference(feats.clone()).into();
+        c.check(
+            matches!(&down, DecisionPrep::NeedsInference(f) if f.len() == feats.len()),
+            "NeedsInference 原样带过，特征长度不变"
+        );
+        c.finish()
+    }
+
+    /// **旁车声明正确、ONNX 图输出错**时，必须在 `load` 就报错
+    ///
+    /// review#2：旧实现只校验旁车 JSON 自称的维度，图的输出个数 / 类型 / 形状完全
+    /// 没看，错误要等到第一次真实决策才在 `infer_features` 里爆出来——那时一局已经
+    /// 跑了一半、客户端也已经向用户宣称网络生效。
+    ///
+    /// 三个 fixture 都**当场生成**，不依赖未入库的正式权重；旁车 JSON 一律写成
+    /// 与冻结契约一致的正确值，所以报错只可能来自图本身。
+    ///
+    /// 正向 fixture（`MatMul` 到 `[1,245]`）同时证明这条校验**不会误杀**合法图。
+    #[test]
+    fn test_load_rejects_wrong_graph_output_contract() -> Result<()> {
+        let root = get_workspace_root()?;
+        std::env::set_current_dir(&root)?;
+        let _ = init_test_logger("error");
+        let mut c = Checks::new();
+        let dir = unique_test_dir("nn_graph_contract")?;
+        println!("fixture 目录: {}", dir.display());
+
+        let cases: [(&str, Vec<u8>, &str); 3] = [
+            (
+                "wrong_dim",
+                onnx_fixture::identity_model(features::INPUT_DIM),
+                "形状"
+            ),
+            (
+                "two_outputs",
+                onnx_fixture::two_output_model(features::INPUT_DIM),
+                "输出个数"
+            ),
+            (
+                "good",
+                onnx_fixture::matmul_model(features::INPUT_DIM, OUTPUT_DIM),
+                ""
+            )
+        ];
+
+        for (name, bytes, want) in cases {
+            let model = dir.join(format!("{name}.onnx"));
+            let sidecar = dir.join(format!("{name}.onnx.json"));
+            std::fs::write(&model, &bytes)?;
+            std::fs::write(&sidecar, valid_sidecar_json())?;
+            let got = RamenNnTrainer::load(&model);
+            match (want.is_empty(), got) {
+                (false, Err(e)) => {
+                    let msg = format!("{e:#}");
+                    println!("{name} → {msg}");
+                    c.check(msg.contains(want), &format!("{name}: 加载阶段报错且提到「{want}」"));
+                }
+                (false, Ok(_)) => {
+                    c.check(false, &format!("{name}: 图输出不合契约却加载成功"));
+                }
+                (true, Ok(_)) => {
+                    println!("{name} → 加载成功");
+                    c.check(true, &format!("{name}: 合法图（输出 [1,{OUTPUT_DIM}]）正常加载，校验不误杀"));
+                }
+                (true, Err(e)) => {
+                    println!("{name} → {e:#}");
+                    c.check(false, &format!("{name}: 合法图被误杀"));
+                }
+            }
+        }
+
+        cleanup_test_dir(&dir)?;
+        c.check(!dir.exists(), "本次 fixture 目录已清理（且清理前核对过在 target/test-tmp 之下）");
+        c.finish()
+    }
+
+    /// 校验图输出契约时**不额外产生推理请求**
+    ///
+    /// 「整局恰好 3 次推理」是地区接入的隔离证据，加载期偷跑一次推理会把它污染成 4。
+    #[test]
+    fn test_output_contract_check_costs_no_inference() -> Result<()> {
+        let root = get_workspace_root()?;
+        std::env::set_current_dir(&root)?;
+        let _ = init_test_logger("error");
+        let mut c = Checks::new();
+        let dir = unique_test_dir("nn_graph_contract_cost")?;
+        let model = dir.join("good.onnx");
+        std::fs::write(&model, onnx_fixture::matmul_model(features::INPUT_DIM, OUTPUT_DIM))?;
+        std::fs::write(dir.join("good.onnx.json"), valid_sidecar_json())?;
+
+        let before = infer_request_count();
+        let loaded = RamenNnTrainer::load(&model);
+        let after = infer_request_count();
+        println!("加载前后推理请求数: {before} → {after}");
+        c.check(loaded.is_ok(), "合法 fixture 加载成功");
+        c.check(after == before, "加载（含图输出契约校验）不计入任何推理请求");
+        cleanup_test_dir(&dir)?;
+        c.finish()
+    }
 
     /// 把开局局面推进到第一个真正的决策阶段
     ///
