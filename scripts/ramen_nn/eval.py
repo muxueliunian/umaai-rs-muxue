@@ -12,10 +12,24 @@ import torch
 from torch.utils.data import DataLoader
 
 try:
-    from .data import NpyShard, RamenDataset, ValueNormalization, load_shards, stable_split_refs
+    from .data import (
+        NpyShard,
+        RamenDataset,
+        ValueNormalization,
+        load_shards,
+        split_refs_by_combos,
+        stable_split_refs,
+    )
     from .model import RamenNetwork, model_from_checkpoint
 except ImportError:
-    from data import NpyShard, RamenDataset, ValueNormalization, load_shards, stable_split_refs
+    from data import (
+        NpyShard,
+        RamenDataset,
+        ValueNormalization,
+        load_shards,
+        split_refs_by_combos,
+        stable_split_refs,
+    )
     from model import RamenNetwork, model_from_checkpoint
 
 STAGE_NAMES = {
@@ -166,6 +180,19 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--data", type=Path, action="append", required=True)
     parser.add_argument("--labels", type=Path, action="append", required=True)
     parser.add_argument("--checkpoint", type=Path, required=True)
+    parser.add_argument(
+        "--validation-combos",
+        type=Path,
+        help="开发验证组合清单 JSON；给出后按 `split_refs_by_combos` 取划分，"
+        "与 train.py 同一口径。带 combo_fields 的数据必须走这条路径",
+    )
+    parser.add_argument(
+        "--combo-fields",
+        nargs=2,
+        action="append",
+        metavar=("DATA_DIR", "FIELDS_NPY"),
+        help="给缺 `combo_fields.npy` 的旧目录外挂完整字段，同 train.py",
+    )
     parser.add_argument("--split", choices=("train", "validation", "all"), default="validation")
     parser.add_argument("--batch-size", type=int, default=1024)
     parser.add_argument("--workers", type=int, default=0)
@@ -195,7 +222,7 @@ def main() -> None:
     args = _parse_args()
     device = _choose_device(args.device)
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
-    shards = load_shards(args.data, args.labels)
+    shards = load_shards(args.data, args.labels, {Path(d): Path(f) for d, f in (args.combo_fields or [])})
     split = checkpoint.get("split", {})
     validation_fraction = float(split.get("validation_fraction", 0.1))
     split_seed = int(split.get("seed", 20260830))
@@ -203,7 +230,13 @@ def main() -> None:
     # 「验证集」里混进训练过的卡组，指标静默偏乐观。加入 split_by 之前的 checkpoint
     # 一律是按样本切的，与 train.py 的回退口径一致。
     split_by = str(split.get("split_by", "sample"))
-    train_refs, validation_refs = stable_split_refs(shards, validation_fraction, split_seed, split_by)
+    if args.validation_combos is not None:
+        payload = json.loads(args.validation_combos.read_text(encoding="utf-8"))
+        combos = payload["combos"] if isinstance(payload, dict) else payload
+        train_refs, validation_refs = split_refs_by_combos(shards, combos)
+        split_by = f"combos:{args.validation_combos}"
+    else:
+        train_refs, validation_refs = stable_split_refs(shards, validation_fraction, split_seed, split_by)
     if args.split == "train":
         refs = train_refs
     elif args.split == "validation":

@@ -12,14 +12,11 @@ value 标签使用 leave-one-rollout-out cross-fitting：第 k 个随机世界�
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Iterable
-
 import numpy as np
 
 INPUT_DIM = 754
@@ -227,15 +224,6 @@ def _required_array(root: Path, name: str, mmap: bool = True) -> np.ndarray:
     return np.load(path, mmap_mode="r" if mmap else None, allow_pickle=False)
 
 
-def _hash_small_arrays(arrays: Iterable[np.ndarray]) -> str:
-    """哈希小型索引数组，供 sidecar 对齐校验。"""
-
-    digest = hashlib.sha256()
-    for array in arrays:
-        digest.update(np.asarray(array).tobytes(order="C"))
-    return digest.hexdigest()
-
-
 def _display_path(path: Path) -> str:
     """生成不泄露用户目录的元数据路径。"""
 
@@ -343,7 +331,15 @@ def generate_label_sidecar(source: Path, output: Path, config: LabelConfig, over
         "samples": n,
         "candidates": int(scores.shape[0]),
         "rollouts": int(scores.shape[1]),
-        "index_ptr_sha256": _hash_small_arrays((index, ptr)),
+        # 对齐凭据全部是**实际字段**，不是指纹：`index.npy` 原样落在本目录，
+        # 训练侧 `NpyShard._validate` 会与数据目录的 `index` 逐值比较；
+        # 下面几项再把 CSR 的两个端点与首尾样本 id 显式钉住，错配立刻报出来。
+        "alignment": {
+            "index_first": int(index[0]),
+            "index_last": int(index[-1]),
+            "cand_ptr_first": int(ptr[0]),
+            "cand_ptr_last": int(ptr[-1]),
+        },
         "config": asdict(config),
         "value_mean": np.mean(value, axis=0, dtype=np.float64).tolist(),
         "value_stdev": np.std(value, axis=0, ddof=1, dtype=np.float64).tolist(),

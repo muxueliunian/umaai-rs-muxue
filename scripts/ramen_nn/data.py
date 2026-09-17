@@ -49,15 +49,14 @@ def _read_rollout_width(data_dir: Path) -> int | None:
     return None if value is None else int(value)
 
 
-def _read_label_rollouts(label_dir: Path) -> int | None:
-    """从标签目录的 labels.json 读生成标签时用掉的 rollout 数。"""
+def _read_label_meta(label_dir: Path) -> dict:
+    """读标签目录的 labels.json；缺文件时返回空字典。"""
 
     meta_path = label_dir / "labels.json"
     if not meta_path.is_file():
-        return None
+        return {}
     with meta_path.open(encoding="utf-8") as handle:
-        value = json.load(handle).get("rollouts")
-    return None if value is None else int(value)
+        return json.load(handle)
 
 
 def _read_plan_count(data_dir: Path) -> int | None:
@@ -121,9 +120,10 @@ class ValueNormalization:
 class NpyShard:
     """一组 reduced 数据与其标签 sidecar。"""
 
-    def __init__(self, data_dir: Path, label_dir: Path) -> None:
+    def __init__(self, data_dir: Path, label_dir: Path, combo_fields_path: Path | None = None) -> None:
         self.data_dir = data_dir.resolve()
         self.label_dir = label_dir.resolve()
+        self.combo_fields_source = None if combo_fields_path is None else combo_fields_path.resolve()
         self.x = _load(self.data_dir, "x")
         self.stage = _load(self.data_dir, "stage")
         self.turn = _load(self.data_dir, "turn")
@@ -139,7 +139,9 @@ class NpyShard:
         # rollout 预算防错配：同一批根可以派生出多套只有列宽不同的数据/标签，它们的
         # index、cand_ptr 完全相同，错配不会被主键校验拦住。直接比对两侧记录的列宽。
         self.rollout_width = _read_rollout_width(self.data_dir)
-        label_rollouts = _read_label_rollouts(self.label_dir)
+        self.label_meta = _read_label_meta(self.label_dir)
+        label_rollouts = self.label_meta.get("rollouts")
+        label_rollouts = None if label_rollouts is None else int(label_rollouts)
         if self.rollout_width is not None and label_rollouts is not None and self.rollout_width != label_rollouts:
             raise ValueError(
                 f"{self.label_dir}: 标签用了 {label_rollouts} 个 rollout，"
@@ -151,6 +153,14 @@ class NpyShard:
         self.combo_key = np.load(combo_path, mmap_mode="r") if combo_path.exists() else None
         fields_path = self.data_dir / "combo_fields.npy"
         self.combo_fields = np.load(fields_path, mmap_mode="r", allow_pickle=False) if fields_path.exists() else None
+        if self.combo_fields_source is not None:
+            # 外挂字段：旧导出只写了 combo_key，完整字段由实际采样计划补出（见
+            # `backfill_combo_fields.py`）。补出之后组合身份**只认字段**，故这里
+            # 直接丢掉旧键——两套口径并存会让「按哪个切分」变成隐式选择。
+            if self.combo_fields is not None:
+                raise ValueError(f"{self.data_dir}: 目录里已有 combo_fields.npy，不能再外挂一份")
+            self.combo_fields = np.load(self.combo_fields_source, mmap_mode="r", allow_pickle=False)
+            self.combo_key = None
         # 原始 rollout 列只在 `--raw` 导出的目录里存在，且体积远大于其余数组，
         # 故不在构造时打开：只有按列窗口评估时才 mmap。
         self._cand_scores: np.ndarray | None = None
@@ -248,17 +258,46 @@ class NpyShard:
             raise ValueError(f"{self.label_dir}: policy target 泄漏到非法格位")
         if not np.isfinite(self.value_target).all():
             raise ValueError(f"{self.label_dir}: value target 含非有限值")
+        # 标签 sidecar 记的是**实际字段**而不是指纹：逐项与数据目录比对。
+        alignment = self.label_meta.get("alignment")
+        if alignment is not None:
+            actual = {
+                "index_first": int(self.index[0]),
+                "index_last": int(self.index[-1]),
+                "cand_ptr_first": int(self.cand_ptr[0]),
+                "cand_ptr_last": int(self.cand_ptr[-1]),
+            }
+            bad = {k: (v, actual[k]) for k, v in alignment.items() if int(v) != actual[k]}
+            if bad:
+                raise ValueError(f"{self.label_dir}: 对齐字段与 {self.data_dir} 不符 {bad}")
+        if "samples" in self.label_meta and int(self.label_meta["samples"]) != n:
+            raise ValueError(f"{self.label_dir}: 记的样本数 {self.label_meta['samples']} != {n}")
 
     def __len__(self) -> int:
         return len(self.index)
 
 
-def load_shards(data_dirs: Sequence[Path], label_dirs: Sequence[Path]) -> list[NpyShard]:
-    """按位置配对加载多个数据目录，并拒绝跨目录重复样本 id。"""
+def load_shards(
+    data_dirs: Sequence[Path],
+    label_dirs: Sequence[Path],
+    combo_fields: dict[Path, Path] | None = None,
+) -> list[NpyShard]:
+    """按位置配对加载多个数据目录，并拒绝跨目录重复样本 id。
+
+    ``combo_fields`` 把「数据目录 → 外挂完整字段 `.npy`」映射进来，供缺
+    ``combo_fields.npy`` 的旧导出使用；键按 ``resolve()`` 后比较。
+    """
 
     if not data_dirs or len(data_dirs) != len(label_dirs):
         raise ValueError("--data 与 --labels 必须非空且一一对应")
-    shards = [NpyShard(data, labels) for data, labels in zip(data_dirs, label_dirs, strict=True)]
+    extra = {} if combo_fields is None else {k.resolve(): v for k, v in combo_fields.items()}
+    shards = [
+        NpyShard(data, labels, extra.get(data.resolve()))
+        for data, labels in zip(data_dirs, label_dirs, strict=True)
+    ]
+    unused = set(extra) - {shard.data_dir for shard in shards}
+    if unused:
+        raise ValueError(f"--combo-fields 指向了不在 --data 里的目录: {sorted(map(str, unused))}")
     ids = np.concatenate([np.asarray(shard.index) for shard in shards])
     if np.unique(ids).size != ids.size:
         raise ValueError("多个数据目录之间存在重复 index")
@@ -285,17 +324,37 @@ def resolve_plan_count(shards: Sequence[NpyShard]) -> int:
 
 def split_refs_by_combos(shards: Sequence[NpyShard], validation_combos: Sequence[Sequence[int]]) -> tuple[np.ndarray, np.ndarray]:
     """按预登记的完整马娘/卡组字段切分；不计算内容哈希，拒绝混入缺字段的旧导出。"""
-    held = sorted(tuple(int(v) for v in row) for row in validation_combos)
-    if any(len(row) != 7 for row in held):
+    rows = [tuple(int(v) for v in row) for row in validation_combos]
+    if any(len(row) != 7 for row in rows):
         raise ValueError("留出组合必须是马娘加六张卡")
+    held = set(rows)
+    if len(held) != len(rows):
+        raise ValueError(f"留出清单里有重复组合：{len(rows)} 行只有 {len(held)} 个不同组合")
     train, validation = [], []
+    train_combos: set[tuple[int, ...]] = set()
+    validation_seen: set[tuple[int, ...]] = set()
     for shard_idx, shard in enumerate(shards):
         fields = getattr(shard, "combo_fields", None)
         if fields is None:
             raise ValueError("缺 combo_fields.npy；旧数据必须先从实际计划字段建立映射，不能猜测组合键")
         for local_idx, row in enumerate(fields):
             key = tuple(int(v) for v in row)
-            (validation if key in held else train).append((shard_idx, local_idx))
+            if key in held:
+                validation.append((shard_idx, local_idx))
+                validation_seen.add(key)
+            else:
+                train.append((shard_idx, local_idx))
+                train_combos.add(key)
+    # 同一组合只能在一侧：按字段取键时这本该自动成立，显式查一遍是为了挡住
+    # 「清单与数据字段宽度/顺序口径不同」这类会静默泄漏的错配。
+    crossing = train_combos & validation_seen
+    if crossing:
+        raise ValueError(f"有 {len(crossing)} 个组合同时落在训练与验证两侧")
+    if not train or not validation:
+        raise ValueError(
+            f"按组合划分产生空集合：训练 {len(train)} 条、验证 {len(validation)} 条；"
+            f"清单 {len(held)} 个组合，数据里命中 {len(validation_seen)} 个"
+        )
     return np.asarray(train, dtype=np.int64).reshape(-1, 2), np.asarray(validation, dtype=np.int64).reshape(-1, 2)
 
 
@@ -476,6 +535,13 @@ def describe_split(shards: Sequence[NpyShard], train_refs: np.ndarray, validatio
             result[int(shards[int(shard_idx)].stage[int(local_idx)])] += 1
         return result
 
+    def combo_count(refs: np.ndarray) -> int | None:
+        """该侧涉及的不同组合数；有目录缺完整字段时不报这一项。"""
+
+        if any(shard.combo_fields is None for shard in shards):
+            return None
+        return len({tuple(int(v) for v in shards[int(s)].combo_fields[int(i)]) for s, i in refs})
+
     return {
         "total": int(sum(len(shard) for shard in shards)),
         "train": int(len(train_refs)),
@@ -484,4 +550,10 @@ def describe_split(shards: Sequence[NpyShard], train_refs: np.ndarray, validatio
         "validation_stage_counts": counts(validation_refs),
         "data_dirs": [_display_path(shard.data_dir) for shard in shards],
         "label_dirs": [_display_path(shard.label_dir) for shard in shards],
+        "combo_fields_sources": [
+            None if shard.combo_fields_source is None else _display_path(shard.combo_fields_source)
+            for shard in shards
+        ],
+        "train_combos": combo_count(train_refs),
+        "validation_combos": combo_count(validation_refs),
     }

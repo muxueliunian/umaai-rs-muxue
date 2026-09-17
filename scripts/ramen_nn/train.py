@@ -36,6 +36,7 @@ try:
         fit_value_normalization,
         load_shards,
         repeat_train_refs,
+        split_refs_by_combos,
         stable_split_refs,
         subsample_train_refs,
     )
@@ -51,6 +52,7 @@ except ImportError:
         fit_value_normalization,
         load_shards,
         repeat_train_refs,
+        split_refs_by_combos,
         stable_split_refs,
         subsample_train_refs,
     )
@@ -503,6 +505,22 @@ def _parse_args() -> argparse.Namespace:
         "而训练数据的槽位与卡片类型完全相关，开启会让模型记顺序而非读属性。仅作消融用",
     )
     parser.add_argument(
+        "--validation-combos",
+        type=Path,
+        help="开发验证组合清单 JSON（`combos` 为若干 [马娘, 卡1..卡6] 完整字段行）。"
+        "给出后按 `split_refs_by_combos` 划分，`--split-by` / `--validation-fraction` 不再参与。"
+        "带 combo_fields 的数据**必须**走这条路径：完整字段在场时按 index 或旧哈希切分"
+        "会把同一副卡组切到两侧",
+    )
+    parser.add_argument(
+        "--combo-fields",
+        nargs=2,
+        action="append",
+        metavar=("DATA_DIR", "FIELDS_NPY"),
+        help="给缺 `combo_fields.npy` 的旧 `--data` 目录外挂一份 `[N,7]` 完整字段。"
+        "字段须由实际采样计划补出（见 `backfill_combo_fields.py`），不得由组合键反推",
+    )
+    parser.add_argument(
         "--split-by",
         choices=("combo", "sample"),
         default="combo",
@@ -526,11 +544,15 @@ def main() -> None:
     init_seed = args.seed if args.init_seed is None else args.init_seed
     seed_everything(init_seed)
     device = _choose_device(args.device)
-    shards = load_shards(args.data, args.labels)
+    combo_fields_map = {Path(d): Path(f) for d, f in (args.combo_fields or [])}
+    if len(combo_fields_map) != len(args.combo_fields or []):
+        raise ValueError("--combo-fields 对同一个目录给了多份字段")
+    shards = load_shards(args.data, args.labels, combo_fields_map)
     resume_checkpoint = None
     split_fraction = args.validation_fraction
     split_seed = split_seed_arg
     split_by = args.split_by
+    validation_combos_path = args.validation_combos
     if args.resume is not None:
         resume_checkpoint = torch.load(args.resume, map_location="cpu", weights_only=False)
         saved_split = resume_checkpoint.get("split", {})
@@ -538,7 +560,27 @@ def main() -> None:
         split_seed = int(saved_split.get("seed", split_seed))
         # split_by 加入前的 checkpoint 一律是按样本切的
         split_by = str(saved_split.get("split_by", "sample"))
-    train_refs, validation_refs = stable_split_refs(shards, split_fraction, split_seed, split_by)
+        # 划分必须跨断点保持同一份：checkpoint 里存了清单路径与两侧条数，
+        # 续跑以 checkpoint 为准并逐项核对，避免换了清单还接着训。
+        saved_combos = saved_split.get("validation_combos_path")
+        if saved_combos is not None:
+            if validation_combos_path is not None and str(validation_combos_path) != saved_combos:
+                raise ValueError(f"--resume 的 checkpoint 用的是 {saved_combos}，与本次 {validation_combos_path} 不同")
+            validation_combos_path = Path(saved_combos)
+        elif validation_combos_path is not None:
+            raise ValueError("--resume 的 checkpoint 不是按组合清单划分的，不能中途改口径")
+    validation_combos = None
+    if validation_combos_path is not None:
+        payload = json.loads(validation_combos_path.read_text(encoding="utf-8"))
+        validation_combos = payload["combos"] if isinstance(payload, dict) else payload
+        train_refs, validation_refs = split_refs_by_combos(shards, validation_combos)
+        saved_counts = {} if resume_checkpoint is None else resume_checkpoint.get("split", {})
+        for key, value in (("train_refs", len(train_refs)), ("validation_refs", len(validation_refs))):
+            if saved_counts.get(key) not in (None, value):
+                raise ValueError(f"--resume 划分不一致：{key} 记的是 {saved_counts[key]}，现在是 {value}")
+        print(f"按组合划分：清单 {len(validation_combos)} 个组合 → 训练 {len(train_refs)} 条 / 验证 {len(validation_refs)} 条")
+    else:
+        train_refs, validation_refs = stable_split_refs(shards, split_fraction, split_seed, split_by)
     full_train_size = int(len(train_refs))
     if args.max_train_samples is not None:
         # 抽稀属于「样本身份」，走 split_seed：固定它就能让不同 init_seed 的多次训练
@@ -706,6 +748,10 @@ def main() -> None:
         "train_action_weights": None if train_action_weights is None else train_action_weights.cpu().tolist(),
         "train_action_counts": train_action_counts,
         "split": split_summary,
+        "validation_combos": None if validation_combos_path is None else {
+            "path": str(validation_combos_path),
+            "combos": len(validation_combos),
+        },
         "seeds": {"seed": args.seed, "split_seed": split_seed, "init_seed": init_seed},
         "schedule": {
             "steps_per_epoch": steps_per_epoch,
@@ -810,6 +856,9 @@ def main() -> None:
                 "validation_fraction": split_fraction,
                 "seed": split_seed,
                 "split_by": split_by,
+                "validation_combos_path": None if validation_combos_path is None else str(validation_combos_path),
+                "train_refs": int(len(train_refs)),
+                "validation_refs": int(len(validation_refs)),
                 "full_train_size": full_train_size,
                 "max_train_samples": args.max_train_samples,
             },
