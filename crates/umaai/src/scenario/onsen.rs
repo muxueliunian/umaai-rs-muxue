@@ -79,6 +79,7 @@ pub fn process_onsen(
     emit_with_luck(trainer, &game, sink, luck_tracker, chara_id, onsen_kind);
 
     // 计算完成：通知下游 watcher 进入阻塞状态
+    emit_info("compute_done");
     eprintln!("计算完成，等待新数据...");
     Ok(())
 }

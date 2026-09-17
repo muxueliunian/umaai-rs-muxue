@@ -7,8 +7,12 @@
 pub mod luck_score;
 pub use luck_score::LuckScoreTracker;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering}
+};
 
+use serde_json::{Map, Value, json, to_value};
 use umasim::{
     game::{Game, Trainer},
     gamedata::GAMECONSTANTS,
@@ -52,6 +56,135 @@ impl LastReasonSink {
 impl DecisionReasonSink for LastReasonSink {
     fn emit(&self, reason: &DecisionReasonData) {
         *self.inner.lock().expect("reason sink") = Some(reason.clone());
+    }
+}
+
+/// 可临时静音的理由出口（套在真正的 [`LastReasonSink`] 外面）
+///
+/// 地区对照模式会在**随机流副本**上多跑一次既有装配。那一次如果是真搜索，它照样会
+/// 经 `RamenMctsTrainer::emit_decision_reason` 把理由写进共用的槽位；而本回合真正执行
+/// 的是网络那条，屏幕上就会出现「参照搜索的首选」被当成网络推荐的理由。
+///
+/// 解决办法不是事后清空槽位——那会连带删掉链式决策里**其它步骤**已经写好的有效理由。
+/// 这里在写入口上做门：参照那一跑之前静音，跑完立刻恢复，其它步骤的理由一个不少。
+pub struct ReasonGate {
+    /// 真正的理由槽位
+    inner: Arc<dyn DecisionReasonSink>,
+    /// 静音中（参照侧正在跑）
+    muted: AtomicBool
+}
+
+impl ReasonGate {
+    /// 把一个理由出口包成可静音的门
+    pub fn new(inner: Arc<dyn DecisionReasonSink>) -> Arc<Self> {
+        Arc::new(Self {
+            inner,
+            muted: AtomicBool::new(false)
+        })
+    }
+
+    /// 在守卫存活期间静音；守卫析构时自动恢复
+    ///
+    /// 用 RAII 而不是「手动置位 / 复位」：参照那一跑中间可能 `?` 早退，手动复位会被
+    /// 跳过，此后整局的理由都被静音。
+    pub fn mute(&self) -> ReasonMuteGuard<'_> {
+        self.muted.store(true, Ordering::Relaxed);
+        ReasonMuteGuard { gate: self }
+    }
+
+    /// 当前是否静音（测试与诊断用）
+    pub fn is_muted(&self) -> bool {
+        self.muted.load(Ordering::Relaxed)
+    }
+}
+
+impl DecisionReasonSink for ReasonGate {
+    fn emit(&self, reason: &DecisionReasonData) {
+        if self.muted.load(Ordering::Relaxed) {
+            return;
+        }
+        self.inner.emit(reason);
+    }
+}
+
+/// [`ReasonGate::mute`] 的 RAII 守卫：析构即恢复
+pub struct ReasonMuteGuard<'a> {
+    /// 被静音的门
+    gate: &'a ReasonGate
+}
+
+impl Drop for ReasonMuteGuard<'_> {
+    fn drop(&mut self) {
+        self.gate.muted.store(false, Ordering::Relaxed);
+    }
+}
+
+#[cfg(test)]
+mod reason_gate_tests {
+    use anyhow::{Result, bail};
+
+    use super::*;
+    use crate::utils::Checks;
+
+    /// 造一条可辨认的理由数据（内容不参与判定，只看它到没到槽位）
+    fn sample_reason(turn: i32) -> DecisionReasonData {
+        DecisionReasonData {
+            turn,
+            metric: "score".to_string(),
+            threshold: 0.0,
+            max_display: 5,
+            chosen_index: 0,
+            chosen_desc: "候选A".to_string(),
+            chosen_mean: 1.0,
+            chosen_n: 1,
+            rivals: Vec::new()
+        }
+    }
+
+    /// 理由门：静音期间丢弃、恢复后照常写入，且**不清掉**已经写好的理由
+    ///
+    /// 第三条是关键：对照模式只想挡住「参照那一跑」，链式决策里前一步已经写进槽位的
+    /// 理由必须原样留着——粗暴地事后清空槽位会把它一起删掉。
+    ///
+    /// # 错误
+    ///
+    /// 任一观测未通过时返回错误。
+    #[test]
+    fn test_reason_gate_mutes_only_the_guarded_run() -> Result<()> {
+        let mut c = Checks::new();
+        let slot = LastReasonSink::new();
+        let gate = ReasonGate::new(slot.clone());
+
+        // 1) 不静音：正常写入
+        gate.emit(&sample_reason(1));
+        let got = slot.take();
+        println!("未静音 → {:?}", got.as_ref().map(|d| d.turn));
+        c.check(got.map(|d| d.turn) == Some(1), "未静音时理由正常写入槽位");
+
+        // 2) 链式前一步先写一条，再静音跑一次参照：前一条必须留着，参照那条被丢弃
+        gate.emit(&sample_reason(2));
+        {
+            let _guard = gate.mute();
+            c.check(gate.is_muted(), "守卫存活期间处于静音");
+            gate.emit(&sample_reason(99));
+        }
+        c.check(!gate.is_muted(), "守卫析构后自动恢复");
+        let got2 = slot.take();
+        println!("静音一跑之后 → {:?}", got2.as_ref().map(|d| d.turn));
+        c.check(got2.map(|d| d.turn) == Some(2), "❗前一步的理由还在，参照那条没进来");
+
+        // 3) 恢复之后照常写入
+        gate.emit(&sample_reason(3));
+        c.check(slot.take().map(|d| d.turn) == Some(3), "恢复后理由照常写入");
+
+        // 4) 守卫在 `?` 早退路径上同样会析构：用一个必定返回 Err 的闭包模拟
+        let early = || -> Result<()> {
+            let _guard = gate.mute();
+            bail!("模拟参照侧中途报错");
+        };
+        println!("早退 → {:?}", early().err().map(|e| e.to_string()));
+        c.check(!gate.is_muted(), "参照侧中途报错后静音也已恢复（没把整局静音掉）");
+        c.finish()
     }
 }
 
@@ -137,7 +270,7 @@ pub fn emit_with_luck_decision<G: Game>(
     );
 
     // 每候选 action_luck：T(n, action_i) - T(n)（AIRedirector 关心，玩家模式跳过）
-    let action_luck = serde_json::json!(
+    let action_luck = json!(
         info.candidate_scores
             .iter()
             .enumerate()
@@ -150,26 +283,33 @@ pub fn emit_with_luck_decision<G: Game>(
 
     // 挂载 scenario_extra：snapshot + action_luck（必挂）+ reason（仅拉面 MCTS）+
     // ramen_action（仅 ramen 路径）
-    let extra = match serde_json::to_value(tracker.snapshot()) {
-        Ok(mut v) => {
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("action_luck".into(), action_luck);
-                // reason：拉面 MCTS 路径挂，其他 trainer 不挂
-                if let Some(data) = reason_data {
-                    if let Ok(reason_v) = serde_json::to_value(data) {
-                        obj.insert("reason".into(), reason_v);
-                    }
-                }
-                // ramen_action：仅 ramen 路径填（"吃面/X(替换Ax1+Bx2)" 等）
-                if let Some(action_text) = ramen_action {
-                    obj.insert("ramen_action".into(), action_text.into());
-                }
-            }
-            Some(v)
-        }
-        Err(_) => None
+    //
+    // ❗**合并而不是覆盖**：决策本身可能已经带了信息（`decision_source` 来源标签、
+    // 地区对照模式的 `region_compare`）。旧实现直接 `info.scenario_extra = extra`，
+    // 于是「执行侧是真地区搜索」那条决策一走 luck 挂载，对照结果与来源标签就在
+    // JSON 里凭空消失。这里以决策自带的对象为底，再把 luck 相关键盖上去——
+    // 键名冲突时以 luck 为准（与旧行为一致），不冲突的一律保留。
+    let mut merged = match info.scenario_extra.take() {
+        Some(Value::Object(map)) => map,
+        _ => Map::new()
     };
-    info.scenario_extra = extra;
+    if let Ok(Value::Object(snapshot)) = to_value(tracker.snapshot()) {
+        for (k, v) in snapshot {
+            merged.insert(k, v);
+        }
+    }
+    merged.insert("action_luck".into(), action_luck);
+    // reason：拉面 MCTS 路径挂，其他 trainer 不挂
+    if let Some(data) = reason_data {
+        if let Ok(reason_v) = to_value(data) {
+            merged.insert("reason".into(), reason_v);
+        }
+    }
+    // ramen_action：仅 ramen 路径填（"吃面/X(替换Ax1+Bx2)" 等）
+    if let Some(action_text) = ramen_action {
+        merged.insert("ramen_action".into(), action_text.into());
+    }
+    info.scenario_extra = Some(Value::Object(merged));
 
     sink.emit(&info, &game.view());
 }

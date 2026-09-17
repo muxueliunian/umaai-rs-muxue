@@ -56,7 +56,7 @@
 //! 改写后的数字即 NPC chara_id 来源（与 `NPC_CHARA_IDS` 一一对齐）。
 
 use anyhow::Result;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, de::Error as DeError};
 use std::ops::Deref;
 
 use crate::protocol::{GameStatus, GameStatusBase};
@@ -111,7 +111,13 @@ pub struct RamenStatus {
     #[serde(default = "default_super_ramen")]
     pub super_ramen: i32,
     /// 当年已选地区（`region_id`）
-    #[serde(default)]
+    ///
+    /// ❗**只接受已知形状**：小黑板插件在「本年还没选地区」时给的形状并不稳定——旧版给
+    /// `[-1, -1, -1]`，2026-09-15 实测已出现 `[]`。定长 `[i32; 3]` 直接反序列化空数组
+    /// 会报 `invalid length 0, expected an array of length 3`，整条 `thisTurn.json`
+    /// 解析失败、该回合 AI 完全不出推荐，故走 [`de_regions_tolerant`]：它放行 0 项与
+    /// 3 项，**拒绝**长度 1 / 2 / >3（那些形状没有已知含义，补零会编造出一个假的完整局面）。
+    #[serde(default, deserialize_with = "de_regions_tolerant")]
     pub selected_regions: [i32; 3],
     /// 基础增量（按 region 配方）
     #[serde(default)]
@@ -125,6 +131,43 @@ pub struct RamenStatus {
     /// 下次吃面可获 PT
     #[serde(default)]
     pub next_scenario_pt: i32
+}
+
+/// 只接受**已知形状**地反序列化 `selected_regions`
+///
+/// 已知的三种形状，各自对应一个明确的含义：
+///
+/// | 形状 | 含义 | 结果 |
+/// |---|---|---|
+/// | 字段缺失 | 旧 json / 测试 fixture | `[0, 0, 0]`（`#[serde(default)]`，既有行为） |
+/// | `[]` | 本年还没选地区 / 数据尚未完整（2026-09-15 实测出现） | `[0, 0, 0]` |
+/// | `[-1, -1, -1]` | 旧版插件表示「未选」 | 原样带出，`into_game` 里只写 `r >= 0` 的项，落成 `[0, 0, 0]` |
+/// | `[a, b, c]` | 已选三个地区 | 原样带出 |
+///
+/// ❗长度 1 / 2 / >3 **一律报错**，不补零也不截断：那些形状我们没有见过，也就没有依据
+/// 说第几项对应第几个地区。补零会让「只收到 1 个地区」的帧看起来像「选了 1 个地区、
+/// 另外两个是 0 号地区」这样一个**完整**的地区状态，AI 会照着这个编出来的局面出推荐。
+/// 报错至少会在屏幕上说出「这一帧没看懂」，本回合不出推荐，比出一个错推荐好。
+///
+/// # 错误
+///
+/// 长度不是 0 或 3 时报 `invalid_length`；该字段不是数组、或元素不是整数时按 serde
+/// 原样报错——这类形状变化属于协议真出问题，不该静默吞掉。
+fn de_regions_tolerant<'de, D>(de: D) -> Result<[i32; 3], D::Error>
+where
+    D: Deserializer<'de>
+{
+    let raw: Vec<i32> = Vec::deserialize(de)?;
+    match raw.len() {
+        // 空数组 = 本年未选 / 数据未到位，与 `Default` 及 `[-1,-1,-1]` 同口径落成全 0；
+        // turn 2..=71 时 `into_game` 的「数据获取不全」门会拦下这一帧，不进决策。
+        0 => Ok([0i32; 3]),
+        3 => Ok([raw[0], raw[1], raw[2]]),
+        n => Err(<D::Error as DeError>::invalid_length(
+            n,
+            &"selected_regions 只接受 0 项（未选）或 3 项（完整地区组合）"
+        ))
+    }
 }
 
 fn default_super_ramen() -> i32 {
@@ -452,6 +495,61 @@ mod tests {
         assert_eq!(arr[0], umasim::game::ramen::FeelingType::C);
         assert_eq!(arr[1], umasim::game::ramen::FeelingType::A);
         assert_eq!(arr[4], umasim::game::ramen::FeelingType::B);
+    }
+
+    /// `selected_regions` 只接受已知形状：0 项 / 3 项 / 字段缺失
+    ///
+    /// 2026-09-15 现场回归：插件在未选年时改成给 `[]`，定长 `[i32; 3]` 直接报
+    /// `invalid length 0, expected an array of length 3`，整条 `thisTurn.json` 解析失败，
+    /// 屏幕上只剩「解析回合信息出错」，那一局从 turn 1 起再也没有推荐。
+    ///
+    /// ❗反过来，长度 1 / 2 / >3 **必须报错**：补零会把一个没看懂的帧伪装成完整地区状态
+    /// 送进决策，AI 会照着编出来的局面出推荐——这比不出推荐糟得多。
+    ///
+    /// # 错误
+    ///
+    /// 任一观测未通过时返回错误。
+    #[test]
+    fn test_selected_regions_accepts_only_known_shapes() -> Result<()> {
+        use serde_json::from_str;
+
+        use crate::utils::Checks;
+
+        let mut c = Checks::new();
+        for (text, want) in [
+            ("[]", [0, 0, 0]),              // 新插件：未选年
+            ("[-1, -1, -1]", [-1, -1, -1]), // 旧插件：未选年
+            ("[0, 1, 4]", [0, 1, 4])        // 已选年
+        ] {
+            let json = format!("{{\"selected_regions\": {text}}}");
+            let parsed: Result<RamenStatus, _> = from_str(&json);
+            match &parsed {
+                Ok(p) => println!("{text} → {:?}", p.selected_regions),
+                Err(e) => println!("{text} → 解析失败 {e}")
+            }
+            c.check(
+                parsed.as_ref().is_ok_and(|p| p.selected_regions == want),
+                &format!("{text} 解析为 {want:?}")
+            );
+        }
+        // 字段整个缺失时走 serde default
+        let none: Result<RamenStatus, _> = from_str("{}");
+        println!("缺字段 → {:?}", none.as_ref().map(|p| p.selected_regions));
+        c.check(
+            none.as_ref().is_ok_and(|p| p.selected_regions == [0, 0, 0]),
+            "字段缺失走 serde default（[0,0,0]，既有行为不变）"
+        );
+
+        // 未知长度必须报错，且错误里点名该字段，便于屏幕上排查
+        for text in ["[7]", "[7, 8]", "[7, 8, 9, 10]"] {
+            let json = format!("{{\"selected_regions\": {text}}}");
+            let parsed: Result<RamenStatus, _> = from_str(&json);
+            let msg = parsed.as_ref().err().map(ToString::to_string).unwrap_or_default();
+            println!("{text} → {msg}");
+            c.check(parsed.is_err(), &format!("{text} 被拒绝（不补零、不截断）"));
+            c.check(msg.contains("selected_regions"), &format!("{text} 的错误里点名了该字段"));
+        }
+        c.finish()
     }
 
     /// selected_regions 映射

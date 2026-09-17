@@ -28,13 +28,17 @@ use umasim::{
 };
 
 use crate::{
-    decision::{LastReasonSink, LuckScoreTracker},
+    decision::{LastReasonSink, LuckScoreTracker, ReasonGate},
     protocol::urafile::UraFileWatcher,
+    region::{ClientTrainerParts, build_client_trainer},
     scenario::{onsen, ramen}
 };
 
 pub mod decision;
 pub mod protocol;
+#[cfg(feature = "onnx")]
+pub mod ramen_nn;
+pub mod region;
 pub mod scenario;
 pub mod utils;
 
@@ -188,10 +192,67 @@ async fn main_guard() -> Result<()> {
     let ramen_mcts_config = SearchConfig::new_game_config(&game_config);
     let ramen_stages = umasim::trainer::RamenSearchStages::parse(&game_config.mcts.ramen_search_stages)?;
     let reason_slot = LastReasonSink::new();
-    let ramen_trainer = RamenMctsTrainer::new(ramen_mcts_config)
+    // 理由出口套一层可静音的门：地区对照模式会在随机流副本上多跑一次搜索，那一跑的理由
+    // 不能写进共用槽位（否则屏幕上会拿参照搜索的理由去解释网络的推荐）。门只在那一跑
+    // 期间静音，链式决策里其它步骤的理由一条不少。
+    let reason_gate = ReasonGate::new(reason_slot.clone());
+    let ramen_mcts = RamenMctsTrainer::new(ramen_mcts_config)
         .with_stages(ramen_stages)
         .verbose(true)
-        .with_reason_sink(reason_slot.clone());
+        .with_reason_sink(reason_gate.clone());
+
+    // 决策来源分两层：`ramen_trainer_policy` 决定整局归谁（默认 `mcts`），
+    // `ramen_region_policy` 决定地区那一步归谁（默认 `handwritten`）。
+    // 模型在此处**每进程加载一次**。配置冲突 / 未开 onnx feature / 模型缺失都在这里
+    // 报错退出，不静默回退成手写或搜索。
+    // human_mode = !json_mode：对照模式的那行「两条推荐」只在 human 模式直接上屏，
+    // --json 下 stdout 必须严格只有 JSON。
+    let ramen_trainer = build_client_trainer(
+        &game_config,
+        ramen_stages,
+        ClientTrainerParts {
+            mcts: ramen_mcts,
+            human_mode: !json_mode,
+            reason_gate: Some(reason_gate.clone())
+        }
+    )?;
+    info!(
+        "{}",
+        format!(
+            "拉面决策来源: {} (ramen_trainer_policy={:?}, ramen_region_policy={:?}, \
+             ramen_search_stages={}, ramen_region_strategy={:?})",
+            ramen_trainer.label(),
+            game_config.ramen_trainer_policy,
+            game_config.ramen_region_policy,
+            game_config.mcts.ramen_search_stages,
+            game_config.ramen_region_strategy
+        )
+        .bright_yellow()
+    );
+    if ramen_trainer.skips_search() {
+        // 模型路径这一项在本模式下被复用成**整局动作模型**，必须说清楚，
+        // 免得用户以为它只管地区。
+        info!(
+            "{}",
+            format!(
+                "整局网络模式：所有动作决策（含地区）直接由 {} argmax 给出，完全不跑搜索；\
+                 事件选项与友人事件仍走手写策略，自选比赛硬守门保留",
+                game_config.ramen_region_model_path.as_deref().unwrap_or("<未配置>")
+            )
+            .bright_yellow()
+        );
+        log::warn!(
+            "整局网络模式下 [mcts] 的搜索参数（search_n / ramen_search_stages / use_ucb 等）\
+             **不参与 NN 动作决策**，本次一次搜索都不会跑。\
+             ❗但它们仍会被解析：ramen_search_stages 写错照样在启动时报错，搜索训练员也照常构造\
+             （构造完随即丢弃）。不必删除，保留即可"
+        );
+    }
+    if ramen_trainer.label() == "handwritten" && game_config.ramen_region_model_path.is_some() {
+        log::warn!(
+            "ramen_region_model_path 已配置但 ramen_region_policy = \"handwritten\"：本次不加载地区模型"
+        );
+    }
 
     // Phase 4 feature 拆分后，onnx 评估器路径已 cfg gate 到 `onnx` feature。
     // 当前通道层不依赖 onnx（不需要 tract-onnx 巨大依赖链），强制走 MctsTrainer

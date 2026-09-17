@@ -81,6 +81,31 @@ impl LuckScoreTracker {
         self.last_single_mode_id
     }
 
+    /// 登记「当前正在处理的是哪一局」，返回**这一帧是不是新一局的开始**
+    ///
+    /// 与 [`Self::on_new_turn`] 的分工：本方法只管**育成身份**，
+    /// `on_new_turn` 只管**运气数值**。两件事必须分开，因为不是每一帧都有搜索评分：
+    /// 整局网络模式（`ramen_trainer_policy = "nn"`）一次搜索都不跑，
+    /// `on_new_turn` 整局都不会被调用；身份登记若还挂在它上面，`last_single_mode_id`
+    /// 就永远是 `None`，同一局的**每一帧**都会被判成新局——屏幕反复打印「育成开始」，
+    /// 按协议处理 `new_game` 的客户端也会反复重置 UI。
+    ///
+    /// ❗**不注入任何假 baseline**：新局时把数值状态一并清空（与旧的
+    /// `*tracker = LuckScoreTracker::new()` 等价），但 `initial_terminal_baseline`
+    /// 保持 `None`。首次真有评分的那一回合，`on_new_turn` 里
+    /// `initial_terminal_baseline.is_none()` 这一支照样会走重置路径并返回 `None`，
+    /// 因此有搜索评分的那条路行为与本方法引入前逐字一致。
+    ///
+    /// 同一局重复调用是幂等的：返回 `false`，且不触碰任何已累积的数值。
+    pub fn begin_game(&mut self, single_mode_id: u64) -> bool {
+        if self.last_single_mode_id == Some(single_mode_id) {
+            return false;
+        }
+        *self = Self::new();
+        self.last_single_mode_id = Some(single_mode_id);
+        true
+    }
+
     /// 把「原期望评分」换算为显示分
     ///
     /// `display = raw + (max_turn − turn) × bonus`
@@ -154,7 +179,60 @@ impl LuckScoreTracker {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+
     use super::*;
+    use crate::utils::Checks;
+
+    /// `begin_game`：同一局只报一次新局，换 ID 再报一次，且**不注入假 baseline**
+    ///
+    /// 这是整局网络模式（一次搜索都不跑、`on_new_turn` 整局不被调用）下
+    /// 「每一帧都被判成新局」的回归。第 3 组观测守住「有评分那条路行为不变」：
+    /// 登记身份之后 `initial_terminal_baseline` 仍是 `None`，首次真有评分的回合照样
+    /// 走 `on_new_turn` 的重置支并返回 `None`。
+    ///
+    /// # 错误
+    ///
+    /// 任一观测未通过时返回错误。
+    #[test]
+    fn test_begin_game_registers_identity_without_baseline() -> Result<()> {
+        let mut c = Checks::new();
+        let mut t = LuckScoreTracker::new();
+
+        // 1) 同一局连续多帧：只有第一帧算新局
+        let first = t.begin_game(7);
+        let second = t.begin_game(7);
+        let third = t.begin_game(7);
+        println!("同一局三帧 → {first} / {second} / {third}");
+        c.check(first, "第 1 帧报新局");
+        c.check(!second && !third, "同一局的后续帧不再报新局");
+        c.check(t.last_single_mode_id() == Some(7), "身份已登记");
+
+        // 2) 登记身份不造 baseline
+        let snap = t.snapshot();
+        println!("登记后 snapshot: {snap:?}");
+        c.check(t.initial_terminal_baseline.is_none(), "❗没有注入假的 initial baseline");
+        c.check(t.prev_turn_terminal_baseline.is_none(), "❗没有注入假的上回合 baseline");
+        c.check(snap.total_luck_score == 0.0, "运气分仍是 0");
+        c.check(snap.last_turn_delta.is_none(), "回合运气分仍是 None");
+
+        // 3) 有评分的那条路不变：首次 on_new_turn 仍走重置支、仍返回 None
+        let delta = t.on_new_turn(7, 50000.0, 5, 78, 1);
+        println!("登记之后首次 on_new_turn → {delta:?}");
+        c.check(delta.is_none(), "首次有评分的回合仍返回 None（与本方法引入前一致）");
+        c.check(t.snapshot().initial_terminal_baseline == 50078.0, "initial 由真实评分建立");
+
+        // 4) 换一局：再报一次新局，且已累积的数值被清掉
+        t.on_new_turn(7, 50150.0, 6, 78, 1);
+        c.check(t.snapshot().total_luck_score != 0.0, "换局前确有累积（否则下一条观测是空跑）");
+        let changed = t.begin_game(8);
+        println!("换局 → {changed}");
+        c.check(changed, "换 ID 报新局");
+        c.check(t.last_single_mode_id() == Some(8), "身份切到新一局");
+        c.check(t.snapshot().total_luck_score == 0.0, "换局清空累积的运气分");
+        c.check(t.initial_terminal_baseline.is_none(), "换局后同样不预置 baseline");
+        c.finish()
+    }
 
     /// 首回合：`on_new_turn` 返回 `None`、initial 按 turn=0 换算、current 按回合换算
     #[test]
