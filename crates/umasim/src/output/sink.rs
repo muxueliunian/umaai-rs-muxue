@@ -30,7 +30,7 @@
 //! `--json` 模式 stdout 严格只 JSON，三种消息类型用顶层 `type` 字段区分：
 //!
 //! - `decision`：AI 决策（与 `DecisionSink::emit` 对应）
-//! - `info`：提示信息（`connected` / `compute_start` / `compute_next_step` / `new_game`）
+//! - `info`：提示信息（`connected` / `compute_start` / `compute_next_step` / `compute_done` / `new_game`）
 //! - `error`：错误信息（只带 `message` 字段，不细分类型）
 //!
 //! `emit_info` / `emit_error` 是 `StdoutJsonSink` 的额外方法，不在 `DecisionSink`
@@ -38,7 +38,33 @@
 //! 和 `Arc<StdoutJsonSink>`（info/error 用），human 模式下不需要后者。
 
 use colored::Colorize;
-use crate::output::{DecisionInfo, view::GameView};
+use crate::output::{
+    DecisionInfo,
+    decision::{
+        SOURCE_RAMEN_HANDWRITTEN_STAGE, SOURCE_RAMEN_NN, SOURCE_RAMEN_RACE_GATE,
+        SOURCE_RAMEN_SINGLE_CANDIDATE, SOURCE_REGION_HANDWRITTEN, SOURCE_REGION_NN, SOURCE_REGION_SEARCH
+    },
+    view::GameView
+};
+
+/// 把决策来源标签渲染成给玩家看的短语
+///
+/// ❗`None`（未标注来源）走**中性文案**：`candidate_scores` 为空只说明这一步
+/// 没有搜索评分，**不能**据此断言是手写逻辑——网络接管地区时同样没有搜索评分。
+/// 未知标签原样带出，便于排查而不是误报。
+fn decision_source_text(label: Option<&str>) -> &str {
+    match label {
+        None => "无搜索评分",
+        Some(SOURCE_REGION_NN) => "神经网络地区策略",
+        Some(SOURCE_REGION_HANDWRITTEN) => "手写地区策略",
+        Some(SOURCE_REGION_SEARCH) => "MCTS地区搜索",
+        Some(SOURCE_RAMEN_NN) => "神经网络直接决策",
+        Some(SOURCE_RAMEN_RACE_GATE) => "自选比赛硬守门",
+        Some(SOURCE_RAMEN_SINGLE_CANDIDATE) => "唯一候选无需推理",
+        Some(SOURCE_RAMEN_HANDWRITTEN_STAGE) => "该阶段手写策略",
+        Some(other) => other
+    }
+}
 
 /// AI 决策的输出契约
 ///
@@ -85,14 +111,29 @@ pub struct HumanReadableSink;
 
 impl DecisionSink for HumanReadableSink {
     fn emit(&self, info: &DecisionInfo, _view: &GameView) {
-        // 手写 fallback 决策（`candidate_scores` 为空）——主要指默认配置
-        // `ramen_search_stages="train,ramen"` 下 region 未开启、地区选择走手写逻辑。
-        // 它没有搜索评分，luck 行的「期望评分」只是回合加成的换算、运气恒 0，混入会误导，
-        // 故地区选择改为显示所选地区并标注【手写逻辑】、跳过 luck 行。其余 None 阶段的
-        // 决策不再被 main.rs 合成（见 `calc_ramen_training` 的 `decide`），不会到达本分支。
-        if info.candidate_scores.is_empty() && info.decision_kind == "region_select" {
+        // 无搜索评分的地区决策（`candidate_scores` 为空）。两种来源都会落到这里：
+        // 默认配置 `ramen_search_stages="train,ramen"` 下 region 未开启走手写 fallback，
+        // 以及 `ramen_region_policy="nn"` 下网络接管外层地区。两者都没有搜索评分，
+        // luck 行的「期望评分」只是回合加成换算、运气恒 0，混入会误导，故只显示所选
+        // 地区并标注**来源**、跳过 luck 行。
+        //
+        // ❗来源取自 `scenario_extra.decision_source`（见 [`DecisionInfo::with_source`]），
+        // **不再**把「没有搜索评分」等同于手写：未标注时走中性文案。
+        //
+        // 触发条件是「没有搜索评分」**且**满足下列之一：
+        //
+        // 1. `decision_kind == "region_select"`——默认 MCTS 装配下地区未开搜索时走手写
+        //    fallback，这条线在本分支引入时就有，保持原样；
+        // 2. **带来源标签**——整局网络模式（`ramen_trainer_policy = "nn"`）下训练 / 吃面 /
+        //    隐藏风味 / 地区每一步都没有搜索评分，但都标了真实来源，必须照样上屏。
+        //
+        // 反过来，默认 MCTS 装配里**没有**来源标签的那些无评分决策（比赛回合的 `train`、
+        // 合并搜索路径的 `ramen_select`）仍然静默——它们在本改动前就不上屏，不借机改默认行为。
+        let no_score = info.candidate_scores.is_empty();
+        if no_score && (info.source_label().is_some() || info.decision_kind == "region_select") {
             if let Some(desc) = info.candidate_descriptions.get(info.action_index) {
-                println!("{}", format!("选择{desc}（手写逻辑）").magenta());
+                let src = decision_source_text(info.source_label());
+                println!("{}", format!("选择{desc}（{src}）").magenta());
             }
             return;
         }
@@ -197,7 +238,7 @@ impl StdoutJsonSink {
     /// 发出一条 `info` JSON 行（stdout 严格 JSON 流的一部分）
     ///
     /// `event` 取值由调用方负责保证合法（已知取值：`connected` / `compute_start` /
-    /// `compute_next_step` / `new_game`）；sink 不做取值校验，按字符串透传。
+    /// `compute_next_step` / `compute_done` / `new_game`）；sink 不做取值校验，按字符串透传。
     ///
     /// **不在 `DecisionSink` trait 内**——`main.rs` 在 `--json` 分支显式持有
     /// `Arc<StdoutJsonSink>`（具体类型），绕过 trait 直接调本方法。
@@ -239,7 +280,10 @@ impl StdoutJsonSink {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+
     use super::*;
+    use crate::utils::Checks;
 
     /// 构造一个最小可用的 DecisionInfo 用于测试
     ///
@@ -259,6 +303,124 @@ mod tests {
         ];
         info.candidate_n = vec![1024, 800, 256];
         info
+    }
+
+    /// 地区决策的来源文案：不把「没有搜索评分」当成「手写」
+    ///
+    /// 三条分支各验一次。这是 review#1 的核心：`nn` 接管地区时同样没有搜索评分，
+    /// 旧实现会把它印成「手写逻辑」。
+    #[test]
+    fn test_decision_source_text_never_claims_handwritten() {
+        let unknown = decision_source_text(None);
+        let nn = decision_source_text(Some(SOURCE_REGION_NN));
+        let other = decision_source_text(Some("some_future_source"));
+        println!("未标注 → {unknown} / {SOURCE_REGION_NN} → {nn} / 未知标签 → {other}");
+        assert!(!unknown.contains("手写"), "未标注来源时不得声称手写");
+        assert_eq!(nn, "神经网络地区策略");
+        assert_eq!(other, "some_future_source", "未知标签原样带出便于排查");
+    }
+
+    /// 每个来源标签都有**互不相同**的中文文案，且没有一条谎称手写
+    ///
+    /// 「网络推理 / 比赛硬守门 / 唯一候选」必须能在屏幕上被区分开——这是整局网络模式
+    /// 的来源真实性要求；三者渲染成同一句话就等于把来源抹平了。
+    ///
+    /// # 错误
+    ///
+    /// 任一观测未通过时返回错误。
+    #[test]
+    fn test_every_source_label_renders_distinctly() -> Result<()> {
+        let mut c = Checks::new();
+        let labels = [
+            SOURCE_REGION_NN,
+            SOURCE_REGION_HANDWRITTEN,
+            SOURCE_REGION_SEARCH,
+            SOURCE_RAMEN_NN,
+            SOURCE_RAMEN_RACE_GATE,
+            SOURCE_RAMEN_SINGLE_CANDIDATE,
+            SOURCE_RAMEN_HANDWRITTEN_STAGE
+        ];
+        let mut texts: Vec<&str> = Vec::new();
+        for label in labels {
+            let text = decision_source_text(Some(label));
+            println!("  {label} → {text}");
+            c.check(text != label, &format!("{label} 有专门的中文文案（不是原样带出）"));
+            texts.push(text);
+        }
+        let mut sorted = texts.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        c.check(sorted.len() == texts.len(), "各来源文案互不相同");
+        c.check(
+            !decision_source_text(Some(SOURCE_RAMEN_NN)).contains("手写"),
+            "网络推理那一步不会被印成手写"
+        );
+        c.check(
+            decision_source_text(None) == "无搜索评分",
+            "未标注来源仍走中性文案（不声称手写）"
+        );
+        c.finish()
+    }
+
+    /// 无评分决策的上屏门槛：带来源标签就打，没标签且不是地区就静默
+    ///
+    /// 第二条守的是「默认 MCTS 路径保持现状」：比赛回合的 `train`、合并搜索路径的
+    /// `ramen_select` 都是无评分且无标签，本改动前不上屏，现在也不该上屏。
+    ///
+    /// # 错误
+    ///
+    /// 任一观测未通过时返回错误。
+    #[test]
+    fn test_no_score_branch_requires_label_or_region() -> Result<()> {
+        /// 复刻 `HumanReadableSink::emit` 的上屏判据（本测试观测的就是这条判据）
+        fn would_print(info: &DecisionInfo) -> bool {
+            info.candidate_scores.is_empty()
+                && (info.source_label().is_some() || info.decision_kind == "region_select")
+        }
+
+        let mut c = Checks::new();
+        let mk = |kind: &str| DecisionInfo {
+            action_index: 0,
+            decision_kind: kind.to_string(),
+            candidate_descriptions: vec!["候选A".to_string(), "候选B".to_string()],
+            ..DecisionInfo::default()
+        };
+
+        for kind in ["train", "ramen_select", "special_select", "region_select"] {
+            let labelled = mk(kind).with_source(SOURCE_RAMEN_NN);
+            println!("  {kind} + ramen_nn → 上屏 {}", would_print(&labelled));
+            c.check(would_print(&labelled), &format!("{kind} 带来源标签时上屏"));
+            HumanReadableSink.emit(&labelled, &GameView::default());
+        }
+
+        let bare_train = mk("train");
+        println!("  train 无标签 → 上屏 {}", would_print(&bare_train));
+        c.check(!would_print(&bare_train), "无标签的 train（比赛回合 fallback）仍然静默");
+        let bare_ramen = mk("ramen_select");
+        c.check(!would_print(&bare_ramen), "无标签的 ramen_select（合并搜索）仍然静默");
+        let bare_region = mk("region_select");
+        c.check(would_print(&bare_region), "无标签的 region_select 仍然上屏（默认手写地区不变）");
+
+        let mut scored = mk("train").with_source(SOURCE_RAMEN_NN);
+        scored.candidate_scores = vec![1.0, 2.0];
+        c.check(!would_print(&scored), "有搜索评分时不走无评分分支");
+        c.finish()
+    }
+
+    /// 带 `region_nn` 来源的地区决策走无评分分支且不 panic
+    #[test]
+    fn test_human_readable_sink_region_nn_branch() {
+        let info = DecisionInfo {
+            action_index: 1,
+            decision_kind: "region_select".to_string(),
+            candidate_descriptions: vec!["地区A".to_string(), "地区B".to_string()],
+            ..DecisionInfo::default()
+        }
+        .with_source(SOURCE_REGION_NN);
+        assert!(info.candidate_scores.is_empty(), "地区决策无搜索评分");
+        assert_eq!(info.source_label(), Some(SOURCE_REGION_NN));
+        HumanReadableSink.emit(&info, &GameView::default());
+        println!("region_nn 地区决策 emit 完成");
     }
 
     /// EmptySink 不 panic 即过（静默丢弃，无副作用可断言）
@@ -377,11 +539,11 @@ mod tests {
 
     /// emit_info 输出正确格式：`{"type":"info","event":"<event>"}`
     ///
-    /// 覆盖 4 种已知 event 取值（`connected` / `compute_start` / `compute_next_step` /
-    /// `new_game`）。println 让人眼核对每行的 JSON 结构与 event 值。
+    /// 覆盖 5 种已知 event 取值（`connected` / `compute_start` / `compute_next_step` /
+    /// `compute_done` / `new_game`）。println 让人眼核对每行的 JSON 结构与 event 值。
     #[test]
     fn test_stdout_json_sink_info() {
-        for event in ["connected", "compute_start", "compute_next_step", "new_game"] {
+        for event in ["connected", "compute_start", "compute_next_step", "compute_done", "new_game"] {
             StdoutJsonSink.emit_info(event);
             println!("emit_info({event}) 完成（应输出 {{\"type\":\"info\",\"event\":\"{event}\"}}）");
         }

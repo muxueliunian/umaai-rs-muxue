@@ -623,7 +623,29 @@ pub struct GameConfig {
     ///
     /// 例如 `[[10, 12, 14]]`：第3年固定选 [10,12,14]
     #[serde(default)]
-    pub ramen_region_fixed: Option<Vec<[usize; 3]>>
+    pub ramen_region_fixed: Option<Vec<[usize; 3]>>,
+    /// 拉面杯**地区选择决策来源**（`handwritten` 默认 / `nn` 显式开启）
+    ///
+    /// 与 [`Self::ramen_region_strategy`] 正交：`strategy` 决定**候选怎么枚举**，
+    /// 本字段决定**谁从候选里挑**。`Nn` 仅接管客户端实际对局的三次 `RegionSelect`，
+    /// 搜索内部 rollout 的地区选择不受影响（仍是手写基策）。
+    #[serde(default)]
+    pub ramen_region_policy: RamenRegionPolicy,
+    /// 地区网络模型路径（仅 `ramen_region_policy = "nn"` 生效）
+    ///
+    /// ❗与 [`Self::neuralnet_model_path`]（温泉 leaf evaluator 模型）**分开**：
+    /// 两者结构与用途都不同，混用会在加载时因维度不符报错。
+    /// 需同目录存在同名 `.json` 旁车（`<model>.onnx.json`）。
+    #[serde(default)]
+    pub ramen_region_model_path: Option<String>,
+    /// 拉面杯**整局决策来源**（`mcts` 默认 / `nn` 整局直接走网络）
+    ///
+    /// 取 `Nn` 时整局一次搜索都不跑，`[mcts]` 下的搜索参数**不参与动作决策**
+    /// （客户端仍会解析它们、仍会构造搜索训练员后丢弃，不是「完全不读取」）；
+    /// [`Self::ramen_region_policy`] 必须保持中性的 `handwritten`，否则启动报冲突。
+    /// 模型仍取 [`Self::ramen_region_model_path`]，此时它是**整局动作模型**。
+    #[serde(default)]
+    pub ramen_trainer_policy: RamenTrainerPolicy
 }
 
 fn default_mcts_turn_bonus() -> i32 {
@@ -674,7 +696,10 @@ impl GameConfig {
             pt_favor_rate: default_pt_favor_rate(),
             race_grades: default_race_grades(),
             ramen_region_strategy: RamenRegionStrategy::default(),
-            ramen_region_fixed: None
+            ramen_region_fixed: None,
+            ramen_region_policy: RamenRegionPolicy::default(),
+            ramen_region_model_path: None,
+            ramen_trainer_policy: RamenTrainerPolicy::default()
         }
     }
 
@@ -784,6 +809,71 @@ pub enum RamenRegionStrategy {
     Fixed
 }
 
+/// 拉面杯地区选择的**决策来源**
+///
+/// 与 [`RamenRegionStrategy`]（候选怎么枚举）正交：本枚举决定**谁从候选里挑**。
+///
+/// - `Handwritten`（默认）：沿用既有装配——`ramen_search_stages` 打开 `region`
+///   时走搜索，否则落手写推荐策略。行为与本枚举引入前逐字一致。
+/// - `Nn`：客户端实际对局的三次 `RegionSelect`（turn 2 / 23 / 47）交给
+///   `ramen_region_model_path` 指定的 ONNX 网络；**搜索内部 rollout 的地区选择
+///   仍是手写基策**，模型不进 rollout evaluator。
+/// - `NnCompare` / `MctsCompare`：**对照模式**——同一局面下把网络与既有装配
+///   （`ramen_search_stages` 含 `region` 时是真搜索，否则是手写基策）各跑一次，
+///   屏幕上两条推荐都打印；区别只在**哪一条算本次的执行推荐**：`NnCompare` 取
+///   网络那条，`MctsCompare` 取既有装配那条。
+///   ❗对照那一侧跑在随机流的**副本**上，不推进外层 `rng`：开不开对照，网络这一侧
+///   看到的随机状态都一样。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RamenRegionPolicy {
+    #[default]
+    #[serde(rename = "handwritten")]
+    Handwritten,
+    #[serde(rename = "nn")]
+    Nn,
+    #[serde(rename = "nn_compare")]
+    NnCompare,
+    #[serde(rename = "mcts_compare")]
+    MctsCompare
+}
+
+impl RamenRegionPolicy {
+    /// 本模式是否需要加载地区网络模型（`nn` 与两种对照模式都要）
+    pub fn needs_model(self) -> bool {
+        !matches!(self, Self::Handwritten)
+    }
+
+    /// 本模式是否要额外算出「既有装配」那一侧的推荐用于对照显示
+    pub fn shows_compare(self) -> bool {
+        matches!(self, Self::NnCompare | Self::MctsCompare)
+    }
+
+    /// 本模式下**执行推荐**是否取网络那一条
+    ///
+    /// `Handwritten` 不走接管路径，返回 `false` 只是把 match 补全。
+    pub fn nn_is_primary(self) -> bool {
+        matches!(self, Self::Nn | Self::NnCompare)
+    }
+}
+
+/// 拉面杯**整局决策来源**（与 [`RamenRegionPolicy`] 分层：本枚举管**全部**决策）
+///
+/// - `Mcts`（默认）：训练 / 吃面 / 隐藏风味等走 MCTS 搜索，地区那一步再由
+///   [`RamenRegionPolicy`] 决定归谁。与本枚举引入前逐字一致。
+/// - `Nn`：**整局所有动作决策**（含地区）直接由 ONNX 网络 argmax 给出，**完全不跑搜索**。
+///   ❗事件选项与友人事件仍走手写策略（choice 头没训练），单候选局面也不跑推理——
+///   「纯网络」指的是**动作决策**这条线，不是把手写代码全部拿掉。
+///   ❗闭环实测：同族模型（R4 g123）直接决策相对 `search_n=8192` 的 MCTS 基线
+///   配对差 **−8947 分**（95% CI [−10208, −7686]，10/10 全负）。这是**实验用**取值。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RamenTrainerPolicy {
+    #[default]
+    #[serde(rename = "mcts")]
+    Mcts,
+    #[serde(rename = "nn")]
+    Nn
+}
+
 /// 策略参数（手写/未来模型策略参数）
 ///
 /// 当前承载拉面杯第3年地区选择策略；后续扩展可加入超级拉面选择策略、未来模型策略参数等。
@@ -859,7 +949,23 @@ pub struct OverrideGameConfig {
     /// `None` = 不覆盖 default；写 `ramen_region_fixed = [[.., .., ..]]` 即覆盖；
     /// 要显式清空 default 的 fixed 组合可写空数组 `[]`。
     #[serde(default)]
-    pub ramen_region_fixed: Option<Vec<[usize; 3]>>
+    pub ramen_region_fixed: Option<Vec<[usize; 3]>>,
+    /// 地区决策来源（顶层覆盖；对应 `GameConfig::ramen_region_policy`）
+    ///
+    /// `None` = 不覆盖 default_config.toml（即保持 `handwritten`）。
+    #[serde(default)]
+    pub ramen_region_policy: Option<RamenRegionPolicy>,
+    /// 地区网络模型路径（顶层覆盖；对应 `GameConfig::ramen_region_model_path`）
+    ///
+    /// `None` = 不覆盖 default。模型不随仓库发布，请填本机绝对路径或相对
+    /// workspace 根目录的路径。
+    #[serde(default)]
+    pub ramen_region_model_path: Option<String>,
+    /// 整局决策来源（顶层覆盖；对应 `GameConfig::ramen_trainer_policy`）
+    ///
+    /// `None` = 不覆盖 default（即 `mcts`）；写 `ramen_trainer_policy = "nn"` 即整局走网络。
+    #[serde(default)]
+    pub ramen_trainer_policy: Option<RamenTrainerPolicy>
 }
 
 /// MCTS 覆盖配置：每个字段都是可选覆盖（`None` = 不覆盖 `default_config.toml`）。
@@ -1049,6 +1155,15 @@ impl OverrideGameConfig {
         if let Some(v) = self.ramen_region_fixed {
             ret.ramen_region_fixed = Some(v);
         }
+        if let Some(v) = self.ramen_region_policy {
+            ret.ramen_region_policy = v;
+        }
+        if let Some(v) = self.ramen_region_model_path {
+            ret.ramen_region_model_path = Some(v);
+        }
+        if let Some(v) = self.ramen_trainer_policy {
+            ret.ramen_trainer_policy = v;
+        }
         ret
     }
 }
@@ -1089,7 +1204,10 @@ mod tests {
             config_override: cfg,
             mcts: OverrideMctsConfig::default(),
             ramen_region_strategy: None,
-            ramen_region_fixed: None
+            ramen_region_fixed: None,
+            ramen_region_policy: None,
+            ramen_region_model_path: None,
+            ramen_trainer_policy: None
         }
     }
 

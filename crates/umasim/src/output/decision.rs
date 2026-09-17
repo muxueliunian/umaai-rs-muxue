@@ -84,7 +84,92 @@ pub struct DecisionInfo {
     pub scenario_extra: Option<serde_json::Value>
 }
 
+/// 决策来源标签：**整局网络直接决策**（`ramen_trainer_policy = "nn"`）
+///
+/// 与 [`SOURCE_REGION_NN`] 的区别是接管面：那个只接管地区，这个接管整局所有动作决策
+/// （事件选项仍走手写）。两者都**没有搜索评分**，渲染端按本标签区分文案。
+///
+/// ❗只在**真的跑了一次网络推理**的那一步用本标签。同一模式下还有两类不经推理就定案的
+/// 步骤，各有自己的标签：[`SOURCE_RAMEN_RACE_GATE`]、[`SOURCE_RAMEN_SINGLE_CANDIDATE`]。
+pub const SOURCE_RAMEN_NN: &str = "ramen_nn";
+
+/// 决策来源标签：**自选比赛硬守门**命中（整局网络模式下）
+///
+/// 守门是硬性义务而非价值权衡：区间内剩余可比赛回合已不够补齐缺口时，无视 policy
+/// 直接选「比赛」。这一步**没有跑推理**，不能标成 [`SOURCE_RAMEN_NN`]。
+pub const SOURCE_RAMEN_RACE_GATE: &str = "ramen_race_gate";
+
+/// 决策来源标签：**唯一候选**直接定案（整局网络模式下）
+///
+/// 候选只有一个时 argmax 的结果与 policy 无关，整次推理被省掉。这一步同样**没有跑推理**。
+pub const SOURCE_RAMEN_SINGLE_CANDIDATE: &str = "ramen_single_candidate";
+
+/// 决策来源标签：`SpecialSelect` 整阶段按配置交给手写策略（整局网络模式下）
+///
+/// 只在 `SpecialSelectMode::Handwritten` 口径下出现；客户端默认取 `Canonical`，
+/// 因此正常不会看到。留着是为了让来源标签覆盖 `prepare_decision` 的**全部**出口，
+/// 不出现「无标签」的空洞。
+pub const SOURCE_RAMEN_HANDWRITTEN_STAGE: &str = "ramen_handwritten_stage";
+
+/// 决策来源标签：**地区搜索**做出的地区选择
+///
+/// 只在对照模式 `ramen_region_policy = "mcts_compare"` 且 `ramen_search_stages` 含
+/// `region` 时出现：执行推荐就是那条真搜索决策本身，**带完整候选评分**。与
+/// [`SOURCE_REGION_HANDWRITTEN`] 的区别正是「这一侧到底搜没搜」。
+pub const SOURCE_REGION_SEARCH: &str = "region_search";
+
+/// 决策来源标签：**既有装配**（手写地区基策）做出的地区选择
+///
+/// 只在对照模式（`ramen_region_policy = "mcts_compare"` 且未开 region 搜索）下
+/// 出现：此时执行推荐取自手写基策，屏幕必须照实说是手写，而不是含糊的「无搜索评分」。
+pub const SOURCE_REGION_HANDWRITTEN: &str = "region_handwritten";
+
+/// 决策来源标签：**仅接管外层地区选择**的神经网络
+///
+/// 见 `umaai::region`。用常量而不是散落的字符串字面量，避免写端与读端拼错。
+pub const SOURCE_REGION_NN: &str = "region_nn";
+
 impl DecisionInfo {
+    /// [`Self::scenario_extra`] 里承载**决策来源**的键名
+    ///
+    /// 走既有的 `scenario_extra` 出口而不是新增顶层字段：下游按
+    /// `serde_json::Value` 解析，多一个键向后兼容。
+    pub const SOURCE_KEY: &'static str = "decision_source";
+
+    /// 标注本条决策由谁做出
+    ///
+    /// ❗只标注**来源**，不伪造任何评分：`score` / `candidate_scores` /
+    /// `candidate_n` 一律保持原样。上层按 `candidate_scores` 是否为空决定要不要
+    /// 走 luck 挂载，因此本方法**不改变 luck baseline 口径**。
+    ///
+    /// `scenario_extra` 已是 JSON 对象时就地插入键；为 `None` 时新建一个只含该键
+    /// 的对象。（`scenario_extra` 在本项目里恒为对象或 `None`，不存在第三种形态。）
+    pub fn with_source(mut self, label: &str) -> Self {
+        let value = serde_json::Value::String(label.to_string());
+        match self.scenario_extra {
+            Some(serde_json::Value::Object(ref mut map)) => {
+                map.insert(Self::SOURCE_KEY.to_string(), value);
+            }
+            _ => {
+                let mut map = serde_json::Map::new();
+                map.insert(Self::SOURCE_KEY.to_string(), value);
+                self.scenario_extra = Some(serde_json::Value::Object(map));
+            }
+        }
+        self
+    }
+
+    /// 读取决策来源标签；**未标注时为 `None`**
+    ///
+    /// ❗`None` 的含义是「来源未知」，**不等于**「手写」。渲染端据此走中性文案，
+    /// 不得把「没有搜索评分」当成「手写逻辑」。
+    pub fn source_label(&self) -> Option<&str> {
+        self.scenario_extra
+            .as_ref()?
+            .get(Self::SOURCE_KEY)?
+            .as_str()
+    }
+
     /// 构造一个最小可用的 `DecisionInfo`（仅含 action_index）
     pub fn from_index(action_index: usize) -> Self {
         Self {
@@ -120,6 +205,33 @@ mod tests {
         assert!(info.candidate_descriptions.is_empty());
         assert!(info.candidate_n.is_empty(), "默认无局数概念");
         assert!(info.scenario_extra.is_none());
+    }
+
+    /// 来源标签：写入 / 读出 / 未标注为 None，且不动任何评分字段
+    #[test]
+    fn test_source_label_roundtrip() {
+        let bare = DecisionInfo::from_index(3);
+        assert_eq!(bare.source_label(), None, "未标注时来源为 None（≠ 手写）");
+
+        let tagged = DecisionInfo {
+            action_index: 3,
+            candidate_descriptions: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            ..DecisionInfo::default()
+        }
+        .with_source(SOURCE_REGION_NN);
+        assert_eq!(tagged.source_label(), Some(SOURCE_REGION_NN));
+        assert!(tagged.candidate_scores.is_empty(), "标注来源不伪造搜索评分");
+        assert_eq!(tagged.score, 0.0, "标注来源不改 score");
+
+        // 已有 scenario_extra 时就地插入，不丢原有键
+        let merged = DecisionInfo {
+            scenario_extra: Some(serde_json::json!({"ramen_action": "吃面/札幌"})),
+            ..DecisionInfo::default()
+        }
+        .with_source(SOURCE_REGION_NN);
+        let extra = merged.scenario_extra.as_ref().expect("scenario_extra");
+        assert_eq!(extra.get("ramen_action").and_then(|v| v.as_str()), Some("吃面/札幌"));
+        assert_eq!(merged.source_label(), Some(SOURCE_REGION_NN));
     }
 
     #[test]
