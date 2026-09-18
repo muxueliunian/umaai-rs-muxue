@@ -1,4 +1,8 @@
-"""云端正式采集驱动：显式清单、累计有效目标、断点续跑、12 小时截止。"""
+"""云端正式采集驱动：显式清单、累计有效目标、断点续跑、清单自带截止。
+
+截止秒数取自清单的 `seconds` 字段，不在本文件里写死；R6 是 72000 秒（20 小时），
+0914 那轮是 43200 秒（12 小时）。
+"""
 
 import argparse
 import json
@@ -167,7 +171,8 @@ def run(args):
         if not complete:
             remain = int(deadline - time.time())
             if remain <= 0:
-                raise TimeoutError("12 小时窗口结束，完整分片保留")
+                raise TimeoutError(
+                    f"采集窗口结束（清单声明 {plan['seconds']} 秒），完整分片保留")
             cmd = [str(exe), "--space-version", plan["space"]["version"],
                    "--indices-file", str(plan_dir / job["indices"]),
                    "--start", "0", "--count", str(job["count"]), "--accepted-target", str(job["target"]),
