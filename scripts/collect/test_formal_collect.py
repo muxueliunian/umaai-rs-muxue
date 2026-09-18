@@ -30,11 +30,14 @@ class FormalTests(unittest.TestCase):
         """正式计划总量和重复任务保护。"""
         directory = ROOT / "scripts/collect/formal2048_0914"
         plan = formal.read_json(directory / "manifest.json")
-        self.assertEqual(formal.check_plan(directory, plan), 45600)
+        # 该轮的口径写在命令行上：2048 / 22800，与 manifest 的事实交叉核对。
+        self.assertEqual(formal.check_plan(directory, plan, 2048, 22800), 45600)
+        with self.assertRaises(ValueError):
+            formal.check_plan(directory, plan, 1024, 22800)
         bad = copy.deepcopy(plan)
         bad["jobs"][1] = bad["jobs"][0]
         with self.assertRaises(ValueError):
-            formal.check_plan(directory, bad)
+            formal.check_plan(directory, bad, 2048, 22800)
 
     def test_full_fields_split(self):
         """相同完整卡组跨目录仍落同一侧，且不回落到旧哈希切分。"""
