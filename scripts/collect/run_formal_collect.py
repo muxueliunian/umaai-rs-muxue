@@ -64,10 +64,22 @@ def execute(command, evidence, deadline, threads):
         raise RuntimeError(f"进程未成功：exit={code} timeout={timed_out}，见 {evidence}")
 
 
-def check_plan(plan_dir, plan):
-    """开跑前验证全部清单、留出排除和配额，不执行采集。"""
-    if plan["search_n"] != 2048 or plan["use_ucb"] or plan["target_valid"] != 22800:
-        raise ValueError("正式配方必须为 2048 / uniform / 22800 有效根")
+def check_plan(plan_dir, plan, expect_search_n, expect_target_valid):
+    """开跑前验证全部清单、留出排除和配额，不执行采集。
+
+    `expect_*` 是**操作者在命令行上显式声明的意图**，与 manifest 里的事实交叉核对。
+    历史上这两个数字写死在本文件里（2048 / 22800）：能挡住手滑，但每换一轮配方就要改代码，
+    而改代码本身又会被「已跟踪代码有未提交修改，拒绝正式采集」那条拦住。改成
+    「manifest 提供事实、命令行提供意图、两者必须一致」后，
+    **单改 manifest 仍然无法静默改变开跑口径**——这条防线原样保留。
+    """
+    if plan["search_n"] != expect_search_n or plan["target_valid"] != expect_target_valid:
+        raise ValueError(
+            f"清单与命令行声明不符：manifest 是 search_n={plan['search_n']} / "
+            f"target_valid={plan['target_valid']}，命令行声明的是 "
+            f"{expect_search_n} / {expect_target_valid}")
+    if plan["use_ucb"] or plan["search_n"] <= 0 or plan["shard_size"] <= 0:
+        raise ValueError("正式配方必须 uniform（use_ucb=false），且 search_n / shard_size 为正")
     definitions = read_json(plan_dir / "plans.json")
     held = {p["plan"] for p in read_json(plan_dir / "holdout.json")["plans"]}
     seen, targets = set(), {}
@@ -91,7 +103,7 @@ def check_plan(plan_dir, plan):
             if not plan["index_reservation"][0] <= index < plan["index_reservation"][1]:
                 raise ValueError("index 越界")
             seen.add(index)
-    if sum(targets.values()) != 22800:
+    if sum(targets.values()) != plan["target_valid"]:
         raise ValueError("有效根总配额错误")
     return len(seen)
 
@@ -100,7 +112,7 @@ def run(args):
     """校验统一计划及资产后顺序采集，断点沿用最初截止而不自动续命。"""
     plan_dir = args.plan.resolve()
     plan = read_json(plan_dir / "manifest.json")
-    check_plan(plan_dir, plan)
+    check_plan(plan_dir, plan, args.expect_search_n, args.expect_target_valid)
     if args.validate_only:
         print("正式清单校验通过；未启动采集")
         return
@@ -143,7 +155,7 @@ def run(args):
             saved_meta = read_json(ROOT / state["exports"][job["name"]] / "meta.json")
             saved_manifest = read_json(output / "data" / job["name"] / "manifest.json")
             if (saved_meta["stats"]["samples"] != job["target"]
-                    or saved_meta["stats"]["rollout_width"] != 2048
+                    or saved_meta["stats"]["rollout_width"] != plan["search_n"]
                     or saved_manifest["work_indices"] != identity["indices"][job["name"]]
                     or saved_manifest["accepted"] != job["target"]):
                 raise ValueError("已完成任务的证据缺失或字段变化")
@@ -156,15 +168,18 @@ def run(args):
             remain = int(deadline - time.time())
             if remain <= 0:
                 raise TimeoutError("12 小时窗口结束，完整分片保留")
-            cmd = [str(exe), "--space-version", "gen2_v1", "--indices-file", str(plan_dir / job["indices"]),
+            cmd = [str(exe), "--space-version", plan["space"]["version"],
+                   "--indices-file", str(plan_dir / job["indices"]),
                    "--start", "0", "--count", str(job["count"]), "--accepted-target", str(job["target"]),
-                   "--search-n", "2048", "--shard-size", "32", "--output-dir", str(data),
+                   "--search-n", str(plan["search_n"]),
+                   "--shard-size", str(plan["shard_size"]), "--output-dir", str(data),
                    "--region-quota-permille-y1", str(job["quota_y1"]),
                    "--region-quota-permille", job["quota_y2_y3"], "--rollin", "nn", "--model", str(model),
                    "--model-id", plan["model_id"], "--max-seconds", str(remain)]
             execute(cmd, output / "evidence" / f"{job['name']}_{stamp}", deadline, args.threads)
         mf = read_json(manifest)
-        if (mf["accepted"] != job["target"] or mf["search_n"] != 2048 or mf["premises"]["use_ucb"]
+        if (mf["accepted"] != job["target"] or mf["search_n"] != plan["search_n"]
+                or mf["premises"]["use_ucb"]
                 or mf["work_indices"] != identity["indices"][job["name"]] or mf["git_commit"] != commit):
             raise ValueError("采集完成清单或有效根不符")
         sampler = mf["sampler"]
@@ -186,11 +201,11 @@ def run(args):
                 raise ValueError(f"采集资产与冻结原文字节不同：{relative}")
         # 每次导出到新目录，失败产物原样保留，不覆盖；采集完成但未导出时可以重试。
         export = output / "npy" / f"{job['name']}_{stamp}"
-        execute([str(export_exe), "--space-version", "gen2_v1", "--input", str(data),
+        execute([str(export_exe), "--space-version", plan["space"]["version"], "--input", str(data),
                  "--output-dir", str(export), "--raw"],
                 output / "evidence" / f"export_{job['name']}_{stamp}", deadline, args.threads)
         meta = read_json(export / "meta.json")
-        if meta["stats"]["samples"] != job["target"] or meta["stats"]["rollout_width"] != 2048:
+        if meta["stats"]["samples"] != job["target"] or meta["stats"]["rollout_width"] != plan["search_n"]:
             raise ValueError("导出有效根或列宽错误")
         state["completed"].append(job["name"])
         state.setdefault("exports", {})[job["name"]] = str(export.relative_to(ROOT))
@@ -198,12 +213,17 @@ def run(args):
         print(f"完成 {job['name']}: {job['target']} 有效根", flush=True)
     state["finished"] = time.time()
     write_json(state_path, state)
-    print("22800 个有效根采集及逐任务 raw 导出完成；未启动训练", flush=True)
+    print(f"{plan['target_valid']} 个有效根采集及逐任务 raw 导出完成；未启动训练", flush=True)
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--plan", type=Path, default=ROOT / "scripts/collect/formal2048_0914")
+    # 必填，且必须与 --plan 指向的 manifest 完全一致：让「这一轮到底按什么口径跑」
+    # 必须在命令行上写出来，从而留在 shell 历史与 evidence/args.json 里。
+    # 0914 那轮是 --expect-search-n 2048 --expect-target-valid 22800。
+    parser.add_argument("--expect-search-n", type=int, required=True)
+    parser.add_argument("--expect-target-valid", type=int, required=True)
     parser.add_argument("--validate-only", action="store_true")
     parser.add_argument("--exe", type=Path)
     parser.add_argument("--export-exe", type=Path)

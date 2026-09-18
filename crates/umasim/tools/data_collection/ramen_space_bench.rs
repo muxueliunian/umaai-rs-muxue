@@ -53,6 +53,7 @@ use rayon::prelude::*;
 use umasim::{
     bench,
     collector::{compute_file_signature, fnv1a64, try_get_git_commit},
+    exp_config::{EffectiveSearchFacts, ScoringOverride, report_effective},
     gamedata::{GameConfig, RamenRegionStrategy, init_global_with_config},
     sampler::{DeckPlan, SamplingSpace, gen1_inherit, space_from_cli, space_version_by_name},
     search::SearchConfig,
@@ -180,6 +181,14 @@ struct BenchArgs {
     /// `--trainer search` 的每候选搜索次数；教师数据用的是 512
     #[arg(long, default_value_t = 512)]
     search_n: usize,
+
+    /// 显式固定 `pt_favor_rate`（进终局 `score_pt`）
+    ///
+    /// 不给时由实验入口常量钉死（`umasim::exp_config::PINNED_PT_FAVOR_RATE`），
+    /// **不回落 `game_config.toml`**。❗`pt_favor_rate = 1` 与 Score 轴**并不等价**：
+    /// 上游 `70550cd` 的 `score_pt` 用 `skill_pt`（不含 Hint 折算），`score` 用 `total_pt()`（含）。
+    #[arg(long)]
+    pt_favor_rate: Option<f32>,
 
     /// `--trainer search` 的激进度因子最大值
     ///
@@ -1034,8 +1043,29 @@ fn main() -> Result<()> {
         );
         game_config.ramen_region_strategy = RamenRegionStrategy::All;
     }
+    // 评分口径在 `init_global_with_config` **之前**钉死，初始化后再回报生效值
+    let scoring = ScoringOverride {
+        selection: RamenSelection::Score,
+        pt_favor_rate: args.pt_favor_rate
+    };
+    let eff_rate = scoring.apply(&mut game_config)?;
     init_global_with_config(&game_config)?;
     let kind = select_trainer(&args)?;
+    report_effective(
+        &scoring,
+        eff_rate,
+        &EffectiveSearchFacts {
+            search_n: args.search_n,
+            use_ucb: false,
+            radical_factor_max: args.radical_factor_max,
+            stages: format!("trainer={}", args.trainer),
+            rollout_policy: match args.rollout_model.as_ref() {
+                Some(p) => format!("NN rollout: {}", p.display()),
+                None => "手写推荐策略".to_string()
+            },
+            region_strategy: "all（本入口强制）".to_string()
+        }
+    );
 
     let space = build_space(&args)?;
     let all_plans = space.plans();

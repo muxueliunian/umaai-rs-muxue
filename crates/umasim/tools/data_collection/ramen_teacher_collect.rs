@@ -45,6 +45,7 @@ use umasim::{
             training_sample::{RamenSampleBatch, RamenTrainingSample, SAMPLE_FORMAT_VERSION}
         }
     },
+    exp_config::{EffectiveSearchFacts, ScoringOverride, report_effective},
     gamedata::{GAMECONFIG, RamenRegionStrategy, init_global_with_config},
     sampler::{
         SampledPosition,
@@ -55,7 +56,7 @@ use umasim::{
         space_version_by_name
     },
     search::{FlatSearch, SearchConfig},
-    trainer::RamenHandwrittenTrainer,
+    trainer::{RamenHandwrittenTrainer, RamenSelection},
     utils::{get_workspace_root, init_logger, load_game_config}
 };
 #[cfg(feature = "onnx")]
@@ -134,6 +135,14 @@ struct CollectArgs {
     /// 激进度因子最大值（必须显式写入 SearchConfig；游戏配置 1.4，SearchConfig::default 是 50.0）
     #[arg(long, default_value_t = 1.4)]
     radical_factor_max: f64,
+
+    /// 显式固定 `pt_favor_rate`（进终局 `score_pt`）
+    ///
+    /// 不给时由实验入口常量钉死（`umasim::exp_config::PINNED_PT_FAVOR_RATE`），
+    /// **不回落 `game_config.toml`**。❗`pt_favor_rate = 1` 与 Score 轴**并不等价**：
+    /// 上游 `70550cd` 的 `score_pt` 用 `skill_pt`（不含 Hint 折算），`score` 用 `total_pt()`（含）。
+    #[arg(long)]
+    pt_favor_rate: Option<f32>,
 
     /// 第 2/3 年地区选择采样配额（千分之几），逗号分隔 `Y2,Y3`
     #[arg(long, value_delimiter = ',', num_args = 1, default_value = "20,30")]
@@ -967,6 +976,15 @@ fn main() -> Result<()> {
         );
         game_config.ramen_region_strategy = RamenRegionStrategy::All;
     }
+    // 评分口径在 `init_global_with_config` **之前**钉死，初始化后再回报生效值。
+    // ❗本入口**不经过** `RamenMctsTrainer`：`collect_one` 直接调 `FlatSearch`，
+    // 有序 rollout 记录的是 `outcome.score.score`（真实 Score），Python 侧标签也从
+    // 该原始 score 生成。上游客户端改走 PT 轴**不会**让这里的标签变成 PT。
+    let scoring = ScoringOverride {
+        selection: RamenSelection::Score,
+        pt_favor_rate: args.pt_favor_rate
+    };
+    let eff_rate = scoring.apply(&mut game_config)?;
     let t = Instant::now();
     init_global_with_config(&game_config)?;
     timing.init_ms = t.elapsed().as_millis();
@@ -983,6 +1001,18 @@ fn main() -> Result<()> {
         ramen_region_strategy: strategy
     };
     premises.check()?;
+    report_effective(
+        &scoring,
+        eff_rate,
+        &EffectiveSearchFacts {
+            search_n: args.search_n,
+            use_ucb: search_cfg.use_ucb,
+            radical_factor_max: search_cfg.radical_factor_max,
+            stages: "teacher: 全阶段（FlatSearch 直调，不经 RamenMctsTrainer）".to_string(),
+            rollout_policy: "手写推荐策略（教师口径）".to_string(),
+            region_strategy: format!("{strategy:?}")
+        }
+    );
     if (premises.radical_factor_max - 50.0).abs() < 1e-12 {
         println!(
             "警告: radical_factor_max=50.0 是 SearchConfig::default，排名加权有效样本约 40。游戏配置是 1.4。"

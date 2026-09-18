@@ -8,6 +8,22 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
 
+# 分层的**固定身份**：层名与两个地区配额（千分之几）。每层采多少根由
+# `--layer-targets` 在命令行给出，因为那是随轮次变化的预算决策；
+# 而「哪几层、各自定向抓哪一年的地区选择」是配方结构，不随预算变。
+# 顺序即 `--layer-targets` 的顺序，不要重排。
+LAYER_SPEC = [("general", 0, "0,0"), ("region_y1", 1000, "0,0"),
+              ("region_y2", 0, "1000,0"), ("region_y3", 0, "0,1000")]
+
+# 任务**发射顺序**：最贵且最不可替代的层排最前。与 `LAYER_SPEC`（= `--layer-targets`
+# 的参数顺序）故意分开，免得改了发射顺序就悄悄改掉同一条命令行的含义。
+#
+# 存在的理由：驱动顺序执行，撞上截止会在当前任务失败退出、**后面的任务根本不跑**。
+# 而 region_y3 每根 120 候选，约占总算力一半，又是搜索相对手写增益最大的决策点
+# （实测 g = W − V^手写 在 Y3 约 1300，普通根只有 ~100）。把它放最后，等于把最贵的
+# 证据完全压在截断风险上。general 是可替换的大宗，放最后降级最平滑。
+EMIT_ORDER = ["region_y3", "region_y2", "region_y1", "general"]
+
 
 def write_json(path, value):
     """清单一计划一行、序号每行32项，便于审阅；不生成内容指纹。"""
@@ -49,8 +65,14 @@ def enumerate_plans(recipe):
     return plans
 
 
-def prepare(dump_path, output):
-    """冻结计划、留出组合、分层配额及独立世界；只允许写全新目录。"""
+def prepare(dump_path, output, *, recipe_id, model, model_id, search_n, layer_targets,
+            index_start, index_end, seconds):
+    """冻结计划、留出组合、分层配额及独立世界；只允许写全新目录。
+
+    除 `dump_path` / `output` 外的参数全部来自命令行，**没有隐含默认**：
+    每一轮采集的口径都必须在命令行上写出来，才能在 `args.json` 与 shell 历史里留痕。
+    0914 那轮的取值见 `scripts/collect/formal2048_0914/manifest.json`，可原样重放。
+    """
     if output.exists():
         raise FileExistsError(output)
     recipe = json.loads((ROOT / "scripts/collect/gen2_v1_recipe.json").read_text(encoding="utf-8"))
@@ -75,7 +97,7 @@ def prepare(dump_path, output):
     held_ids = {p["plan"] for p in held}
 
     # 全区间独占；实际 index 不连续，index % 4288 严格定位原空间计划。
-    reserved_start, reserved_end = 20_000_000, 300_000_000
+    reserved_start, reserved_end = index_start, index_end
     for path in (ROOT / "training_data").rglob("manifest.json"):
         mf = json.loads(path.read_text(encoding="utf-8-sig"))
         indices = mf.get("work_indices")
@@ -85,10 +107,20 @@ def prepare(dump_path, output):
         elif int(mf.get("index_start", 0)) < reserved_end and int(mf.get("index_end", 0)) > reserved_start:
             raise ValueError(f"号段与既有 manifest 相交：{path}")
     cycle = (reserved_start + len(plans) - 1) // len(plans)
+    # index = cycle×4288 + plan，而 cycle 每消耗一个候选序号就加一，故号段**跨度**由
+    # 候选序号总数决定，与有效根目标不是一回事。放在这里提前算，免得循环跑到最后
+    # 才撞上「index 越过独占号段」那条笼统的报错。
+    attempts_total = 2 * sum(layer_targets) * len(recipe["space"]["shapes"])
+    if (cycle + attempts_total) * len(plans) >= reserved_end:
+        need = (cycle + attempts_total + 1) * len(plans)
+        raise ValueError(
+            f"号段宽度不足：本配方共 {attempts_total} 个候选序号，最大 index 会到约 {need}，"
+            f"越过 --index-end {reserved_end}；请把 --index-end 放宽到 {need} 以上")
     jobs = []
     all_indices = []
-    layers = [("general", 5000, 0, "0,0"), ("region_y1", 100, 1000, "0,0"),
-              ("region_y2", 300, 0, "1000,0"), ("region_y3", 300, 0, "0,1000")]
+    layers = [(name, target, y1, y23) for (name, y1, y23), target
+              in zip(LAYER_SPEC, layer_targets)]
+    layers.sort(key=lambda entry: EMIT_ORDER.index(entry[0]))
     for layer, target, y1, y23 in layers:
         for shape in range(4):
             pools = [[p for p in plans if p["shape"] == shape and p["uma"] == uma
@@ -125,20 +157,41 @@ def prepare(dump_path, output):
         evidence="nn_model_registry.md 的 R4 七马娘记录及 logs/newdeck_pair_0913/deck_coverage.txt；后者已报告两速卡在八组 R4 数据均为零",
         boundary="这是已确认未见子集的留出，不声称覆盖所有历史未见组合；不得混进本轮训练",
         plans=held))
+    target_valid = sum(job["target"] for job in jobs)
     write_json(output / "manifest.json", dict(
-        recipe_id="gen2_v1_formal2048_0914", status="frozen", space=recipe["space"],
-        model="saved_models/arms/ens_R4_g123.onnx", model_id="ens_R4_g123_30k",
-        rollin="nn", search_n=2048, shard_size=32, inherit=recipe["inherit"],
+        recipe_id=recipe_id, status="frozen", space=recipe["space"],
+        model=model, model_id=model_id,
+        rollin="nn", search_n=search_n, shard_size=32, inherit=recipe["inherit"],
         epsilon=0.15, seed_base=88241484357425, use_ucb=False, radical_factor_max=1.4,
-        target_valid=22800, seconds=43200, jobs=jobs,
+        target_valid=target_valid, seconds=seconds, jobs=jobs,
         index_reservation=[reserved_start, reserved_end], holdout_count=len(held),
         spare_policy="每层构成双倍候选清单；达到有效目标即停，备用耗尽则失败，不改配方"))
-    print(f"计划={len(plans)} 留出={len(held)} 有效目标=22800 清单及备用={len(all_indices)}")
+    print(f"计划={len(plans)} 留出={len(held)} 有效目标={target_valid} 清单及备用={len(all_indices)}")
+    print(f"号段={reserved_start}..{reserved_end} 实际最大 index={max(all_indices)} "
+          f"search_n={search_n} model_id={model_id}")
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rust-dump", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--recipe-id", required=True, help="写进 manifest 的配方名，例如 gen2_v1_formal1024_0918")
+    parser.add_argument("--model", required=True, help="roll-in 模型路径（相对工作区根）")
+    parser.add_argument("--model-id", required=True, help="roll-in 模型显式版本名，进 manifest 与 rollin 身份")
+    parser.add_argument("--search-n", type=int, required=True, help="每候选 rollout 数")
+    parser.add_argument("--layer-targets", required=True,
+                        help="四层**每个构成**的有效根目标，逗号分隔，顺序固定为 "
+                             "general,region_y1,region_y2,region_y3（0914 那轮是 5000,100,300,300）")
+    parser.add_argument("--index-start", type=int, required=True)
+    parser.add_argument("--index-end", type=int, required=True)
+    parser.add_argument("--seconds", type=int, required=True, help="采集总截止秒数（0914 是 43200 = 12h）")
     args = parser.parse_args()
-    prepare(args.rust_dump, args.output)
+    targets = [int(v) for v in args.layer_targets.split(",")]
+    if len(targets) != len(LAYER_SPEC) or any(t <= 0 for t in targets):
+        raise ValueError(f"--layer-targets 需要 {len(LAYER_SPEC)} 个正整数，顺序 "
+                         f"{','.join(name for name, _, _ in LAYER_SPEC)}")
+    if args.search_n <= 0 or args.index_start >= args.index_end or args.seconds <= 0:
+        raise ValueError("--search-n / --seconds 必须为正，且 --index-start < --index-end")
+    prepare(args.rust_dump, args.output, recipe_id=args.recipe_id, model=args.model,
+            model_id=args.model_id, search_n=args.search_n, layer_targets=targets,
+            index_start=args.index_start, index_end=args.index_end, seconds=args.seconds)

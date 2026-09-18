@@ -75,6 +75,10 @@
 //! `--search-n` 在 `SearchConfig::new_game_config` **之前**改 `mcts.search_n`，
 //! 走的是与客户端逐字相同的那条装配路径；它是 UCB 停止阈值，**不是**整次搜索总预算。
 //!
+//! `--pt-favor-rate`（可选）同样只改内存配置：不给时由
+//! [`umasim::exp_config::PINNED_PT_FAVOR_RATE`] 钉死，**不回落 `game_config.toml`**；
+//! 实际生效值由 [`umasim::exp_config::report_effective`] 打印。
+//!
 //! ## 用法
 //!
 //! ```text
@@ -109,10 +113,11 @@ use rayon::{ThreadPoolBuilder, current_num_threads};
 use serde::Deserialize;
 use umasim::{
     bench,
+    exp_config::{EffectiveSearchFacts, ScoringOverride, report_effective},
     game::InheritInfo,
     gamedata::{GameConfig, init_global_with_config, ramen::RAMENDATA},
     search::{SearchConfig, SearchProbe},
-    trainer::{LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RecommendedRamenTrainer},
+    trainer::{LoggingTrainer, RamenMctsTrainer, RamenSearchStages, RamenSelection, RecommendedRamenTrainer},
     utils::{Array6, get_workspace_root, init_logger_stdout, load_game_config}
 };
 #[cfg(feature = "onnx")]
@@ -252,6 +257,13 @@ struct Args {
     threads: Option<usize>,
     /// 覆盖合并配置的 `mcts.search_n`（UCB 停止阈值，**不是**整次搜索总预算）
     search_n: Option<usize>,
+    /// 显式固定 `pt_favor_rate`（进终局 `score_pt`）
+    ///
+    /// 本入口选动作固定走 [`RamenSelection::Score`]（= 本地既有行为与全部历史基准的
+    /// 口径，上游 `c0189d1` 硬切 PT 轴未采纳），该倍率不参与选动作；不给时由
+    /// [`ScoringOverride`] 钉死为 `umasim::exp_config::PINNED_PT_FAVOR_RATE`，
+    /// **不回落 `game_config.toml`**。
+    pt_favor_rate: Option<f32>,
     /// 本次实际执行的策略（`--trainer`），同时覆盖登记用的 `game_config.trainer`
     policy: Policy,
     /// `--trainer nn` 的 ONNX 模型路径
@@ -276,6 +288,7 @@ impl Default for Args {
             plan_range: None,
             threads: None,
             search_n: None,
+            pt_favor_rate: None,
             policy: Policy::Mcts,
             model: None,
             special_mode: "canonical".to_string(),
@@ -376,6 +389,10 @@ fn parse_args() -> Result<Args> {
             }
             "--search-n" => {
                 args.search_n = Some(need()?.parse()?);
+                i += 2;
+            }
+            "--pt-favor-rate" => {
+                args.pt_favor_rate = Some(need()?.parse()?);
                 i += 2;
             }
             "--trainer" => {
@@ -907,6 +924,14 @@ fn main() -> Result<()> {
     }
     game_config.trainer = want.to_string();
 
+    // 评分口径在 `init_global_with_config` **之前**钉死，初始化后再回报生效值。
+    // ❗本入口选动作固定 Score（`RamenMctsTrainer::new` 的默认轴），上游 c0189d1
+    // 的 PT 轴未采纳；倍率仍要钉，因为它随 GAMECONSTANTS 进 `search_score().score_pt`。
+    let scoring = ScoringOverride {
+        selection: RamenSelection::Score,
+        pt_favor_rate: args.pt_favor_rate
+    };
+    let eff_rate = scoring.apply(&mut game_config)?;
     let mcts_config = SearchConfig::new_game_config(&game_config);
     init_logger_stdout("ramen_client_game_bench", &game_config.log_level)?;
     init_global_with_config(&game_config)?;
@@ -994,6 +1019,22 @@ fn main() -> Result<()> {
     println!(
         "ramen_region_strategy={:?} mcts_selected_onsen={} mcts_selection={:?}",
         game_config.ramen_region_strategy, game_config.mcts_selected_onsen, game_config.mcts_selection
+    );
+    report_effective(
+        &scoring,
+        eff_rate,
+        &EffectiveSearchFacts {
+            search_n: mcts_config.search_n,
+            use_ucb: mcts_config.use_ucb,
+            radical_factor_max: mcts_config.radical_factor_max,
+            stages: game_config.mcts.ramen_search_stages.clone(),
+            rollout_policy: format!("{:?}", args.policy),
+            region_strategy: format!("{:?}", game_config.ramen_region_strategy)
+        }
+    );
+    println!(
+        "[生效口径] RamenMctsTrainer.selection={:?} pt_favor_rate={eff_rate}（❗`mcts_selection` 是温泉 MctsTrainer 的字段，与拉面无关）",
+        scoring.selection
     );
     match &args.plans_file {
         Some(path) => println!(

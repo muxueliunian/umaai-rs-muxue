@@ -49,6 +49,7 @@ use umasim::{
         Game, InheritInfo, Trainer,
         ramen::{RamenAction, RamenGame, RamenStage, RamenState, features::encode}
     },
+    exp_config::{EffectiveSearchFacts, ScoringOverride, report_effective},
     gamedata::{EventChoice, EventData, RamenRegionStrategy, init_global_with_config},
     sampler::{SamplingSpace, gen1_inherit, space_from_cli, space_version_by_name},
     search::{
@@ -179,6 +180,16 @@ struct RootArgs {
     /// 教师的激进度上限（与正式口径一致）
     #[arg(long, default_value_t = 1.4)]
     radical_factor_max: f64,
+
+    /// 显式固定 `pt_favor_rate`（进终局 `score_pt`）
+    ///
+    /// 本入口选动作固定走 [`RamenSelection::Score`]，该倍率不参与选动作；不给时由
+    /// [`ScoringOverride`] 钉死为 [`umasim::exp_config::PINNED_PT_FAVOR_RATE`]，
+    /// **不回落 `game_config.toml`**。仍然记录，是因为上游 `70550cd` 后它进
+    /// `search_score().score_pt`，而 `pt_favor_rate = 1` 与 Score 轴**并不等价**
+    /// （`score_pt` 不含 Hint 折算、`score` 含）。
+    #[arg(long)]
+    pt_favor_rate: Option<f32>,
 
     /// rollout 基策用的 ONNX 模型（CPU 侧）
     #[arg(long)]
@@ -4561,7 +4572,25 @@ fn main() -> Result<()> {
     let mut game_config = load_game_config()?;
     // 与 `ramen_space_bench` 同一前提：Y3 地区必须交回策略，否则测的不是同一个分布
     game_config.ramen_region_strategy = RamenRegionStrategy::All;
+    // 评分口径在 `init_global_with_config` **之前**钉死，初始化后再回报生效值
+    let scoring = ScoringOverride {
+        selection: RamenSelection::Score,
+        pt_favor_rate: args.pt_favor_rate
+    };
+    let eff_rate = scoring.apply(&mut game_config)?;
     init_global_with_config(&game_config)?;
+    report_effective(
+        &scoring,
+        eff_rate,
+        &EffectiveSearchFacts {
+            search_n: args.search_n,
+            use_ucb: false,
+            radical_factor_max: args.radical_factor_max,
+            stages: format!("{:?}", args.mode),
+            rollout_policy: format!("NN rollout: {}", args.rollout_model.display()),
+            region_strategy: "all（本入口强制）".to_string()
+        }
+    );
 
     if let Some(w) = args.workers {
         rayon::ThreadPoolBuilder::new()
