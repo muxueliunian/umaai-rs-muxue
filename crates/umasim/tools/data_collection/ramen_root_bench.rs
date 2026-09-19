@@ -283,7 +283,8 @@ struct RootArgs {
     /// 整局搜索的叶深度路由（只被 [`Mode::GameSmoke`] 消费）
     ///
     /// `uniform`（默认，**既有行为**：全局用 `--leaf-h` 给的那一个深度，不给就是 full）
-    /// 或 `hybrid-y3-full`（第三年 `RegionSelect` 完整续跑 + 原 rf，其余根按 `--leaf-h` 截断 + mean）。
+    /// 或 `hybrid-y3-full`（第三年 `RegionSelect` 完整续跑 + 原 rf，其余根按 `--leaf-h` 截断 + mean）
+    /// 或 `hybrid-y3-full-mean`（同上，但第三年地区根也按 mean 聚合，只取消截断、不改根目标）。
     #[arg(long, default_value = "uniform")]
     game_route: String,
 
@@ -501,7 +502,17 @@ fn check_game_route(args: &RootArgs, depths: &[LeafDepth]) -> Result<LeafRoute> 
                 LeafDepth::Full => bail!("--game-route hybrid-y3-full 的普通根深度不能是 full")
             }
         }
-        other => bail!("未知 --game-route {other}：只支持 uniform 或 hybrid-y3-full")
+        "hybrid-y3-full-mean" => {
+            let d = depths
+                .first()
+                .copied()
+                .ok_or_else(|| anyhow!("--game-route hybrid-y3-full-mean 必须同时给一个 --leaf-h（普通根的截断深度）"))?;
+            match d {
+                LeafDepth::Turns(h) => Ok(LeafRoute::HybridY3FullMean(h)),
+                LeafDepth::Full => bail!("--game-route hybrid-y3-full-mean 的普通根深度不能是 full")
+            }
+        }
+        other => bail!("未知 --game-route {other}：只支持 uniform / hybrid-y3-full / hybrid-y3-full-mean")
     }
 }
 
@@ -1960,7 +1971,12 @@ enum LeafRoute {
     /// 全局单一深度（既有行为）
     Uniform(LeafDepth),
     /// 保守混合：第三年 `RegionSelect` 走 [`LeafDepth::Full`] + 原 rf，其余走 `Turns(h)` + mean
-    HybridY3Full(i32)
+    HybridY3Full(i32),
+    /// 只取消第三年地区的截断：该根走 [`LeafDepth::Full`] 但仍按 mean 聚合，其余走 `Turns(h)` + mean
+    ///
+    /// 与 [`LeafRoute::HybridY3Full`] 的唯一区别是第三年地区根的**根目标**不换回 rf，
+    /// 于是它相对 `Uniform(Turns(h))` 只改了一件事（截断 → 完整续跑）。
+    HybridY3FullMean(i32)
 }
 
 /// 一个根的路由判定结果（进日志与逐根 CSV）
@@ -1968,8 +1984,12 @@ enum LeafRoute {
 struct RouteDecision {
     /// 本根实际使用的叶深度
     depth: LeafDepth,
-    /// 路由标签（`uniform` / `y3_region_full` / `other_trunc`）
+    /// 路由标签（`uniform` / `y3_region_full` / `y3_region_full_mean` / `other_trunc`）
     tag: &'static str,
+    /// 完整续跑的根是否仍按 mean 聚合（只有 [`LeafRoute::HybridY3FullMean`] 的第三年地区根为真）
+    ///
+    /// 截断根恒按 mean，与本字段无关；本字段只决定 `Full` 根走 rf 还是 mean。
+    full_mean: bool,
     /// 地区选择的年份归档下标（0/1/2）；非地区根为 `None`
     region_year_idx: Option<usize>
 }
@@ -1995,6 +2015,7 @@ impl LeafRoute {
             LeafRoute::Uniform(d) => RouteDecision {
                 depth: d,
                 tag: "uniform",
+                full_mean: false,
                 region_year_idx
             },
             LeafRoute::HybridY3Full(h) => {
@@ -2002,12 +2023,31 @@ impl LeafRoute {
                     RouteDecision {
                         depth: LeafDepth::Full,
                         tag: "y3_region_full",
+                        full_mean: false,
                         region_year_idx
                     }
                 } else {
                     RouteDecision {
                         depth: LeafDepth::Turns(h),
                         tag: "other_trunc",
+                        full_mean: false,
+                        region_year_idx
+                    }
+                }
+            }
+            LeafRoute::HybridY3FullMean(h) => {
+                if region_year_idx == Some(2) {
+                    RouteDecision {
+                        depth: LeafDepth::Full,
+                        tag: "y3_region_full_mean",
+                        full_mean: true,
+                        region_year_idx
+                    }
+                } else {
+                    RouteDecision {
+                        depth: LeafDepth::Turns(h),
+                        tag: "other_trunc",
+                        full_mean: false,
                         region_year_idx
                     }
                 }
@@ -2019,7 +2059,8 @@ impl LeafRoute {
     fn tag(self) -> String {
         match self {
             LeafRoute::Uniform(d) => format!("uniform:{}", d.tag()),
-            LeafRoute::HybridY3Full(h) => format!("hybrid_y3_full:h{h}")
+            LeafRoute::HybridY3Full(h) => format!("hybrid_y3_full:h{h}"),
+            LeafRoute::HybridY3FullMean(h) => format!("hybrid_y3_full_mean:h{h}")
         }
     }
 
@@ -2029,6 +2070,9 @@ impl LeafRoute {
             LeafRoute::Uniform(d) => format!("全局单一深度 {}；根目标 {}", d.tag(), d.objective()),
             LeafRoute::HybridY3Full(h) => format!(
                 "第三年 RegionSelect → full + 原 rf；其余根 → h{h} + mean（rf 不参与聚合）"
+            ),
+            LeafRoute::HybridY3FullMean(h) => format!(
+                "第三年 RegionSelect → full + mean；其余根 → h{h} + mean（全局 rf 不参与聚合）"
             )
         }
     }
@@ -3172,7 +3216,8 @@ struct WaveTrainer<'a> {
     /// 整局搜索的叶深度**路由**
     ///
     /// [`LeafRoute::Uniform`] 逐字保持既有行为；[`LeafRoute::HybridY3Full`] 只把
-    /// 第三年 `RegionSelect` 退回完整续跑 + 原 rf，其余根仍按 mean 聚合。
+    /// 第三年 `RegionSelect` 退回完整续跑 + 原 rf，其余根仍按 mean 聚合；
+    /// [`LeafRoute::HybridY3FullMean`] 同样退回完整续跑，但该根仍按 mean 聚合。
     route: LeafRoute,
     /// 累计统计
     stats: Mutex<GameStats>
@@ -3218,6 +3263,8 @@ impl Trainer<RamenGame> for WaveTrainer<'_> {
         // 截断走 mean 选择器（rf 不参与聚合），且 `raw_cells` 会因叶结果直接报错。
         let mut leaf_deferrals = 0usize;
         let (best, rf_actual) = match route.depth {
+            // 只取消截断、不换根目标：完整续跑的真实终局照样按 mean 选
+            LeafDepth::Full if route.full_mean => (mean_select(&out.arm_cells(), actions.len(), 0, self.n)?.0, 0.0),
             LeafDepth::Full => {
                 let cells = out.raw_cells()?;
                 let (b, _, rf, _) = official_result_full(self.search, game, actions, &cells, rng)?;
@@ -3245,7 +3292,7 @@ impl Trainer<RamenGame> for WaveTrainer<'_> {
             candidates: actions.len(),
             route: route.tag,
             depth: route.depth.tag(),
-            objective: route.depth.objective_tag(),
+            objective: if route.full_mean { "mean" } else { route.depth.objective_tag() },
             rf_actual,
             policy_requests: wave.policy_requests,
             leaf_requests: wave.leaf_requests,
@@ -5449,6 +5496,7 @@ mod tests {
         }
 
         let hybrid = LeafRoute::HybridY3Full(8);
+        let hybrid_mean = LeafRoute::HybridY3FullMean(8);
         let uni_full = LeafRoute::Uniform(LeafDepth::Full);
         let uni_h8 = LeafRoute::Uniform(LeafDepth::Turns(8));
         let mut region_turns: Vec<i32> = Vec::new();
@@ -5528,6 +5576,19 @@ mod tests {
             );
             c.check(d.region_year_idx == want_year, &format!("t{turn} {stage} 的年份归档应为 {want_year:?}"));
             c.check(d.tag == if want_full { "y3_region_full" } else { "other_trunc" }, "路由标签与深度一致");
+            c.check(!d.full_mean, "rf 混合路由的完整续跑根不走 mean");
+            // mean 混合：深度与年份判定和 rf 混合逐点相同，只有第三年地区根的根目标换成 mean
+            let dm = hybrid_mean.decide(&root)?;
+            println!("    mean 混合→{} ({})，full_mean={}", dm.depth.tag(), dm.tag, dm.full_mean);
+            c.check(
+                dm.depth == d.depth && dm.region_year_idx == d.region_year_idx,
+                "mean 混合的深度与年份判定同 rf 混合"
+            );
+            c.check(dm.full_mean == want_full, "只有第三年地区根的 full_mean 为真");
+            c.check(
+                dm.tag == if want_full { "y3_region_full_mean" } else { "other_trunc" },
+                "mean 混合路由标签与深度一致"
+            );
             // Uniform 两支必须逐字保持既有行为
             c.check(matches!(uf.depth, LeafDepth::Full) && uf.tag == "uniform", "Uniform(full) 不受路由影响");
             c.check(
