@@ -1,0 +1,135 @@
+{
+  "recipe_id": "gen2_2s1e2w_formal1024_0919",
+  "status": "frozen",
+  "space": {
+    "version": "gen2_2s1e2w_v1",
+    "identity_mode": "explicit_fields_no_hash",
+    "plan_count": 420,
+    "umas": [
+      100603,
+      102403,
+      112901,
+      110602,
+      113101,
+      108702,
+      100301,
+      114101
+    ],
+    "umas_note": "gen1 七个 + 114101 神威启示；101901 爱丽数码不在本空间",
+    "cards": [
+      302754,
+      302984,
+      302424,
+      302824,
+      303024,
+      302924,
+      303044,
+      303004,
+      302834,
+      302894,
+      303054,
+      303124,
+      303114,
+      303084,
+      302774,
+      303064
+    ],
+    "cards_note": "与 gen2_v1 同一卡池；本构成只用到其中 8 速 / 2 耐 / 2 智 / 友人，两张智卡 302894 与 303064 每个计划都带",
+    "friend_card": 303054,
+    "shapes": [
+      {
+        "counts": [
+          2,
+          1,
+          0,
+          0,
+          2
+        ],
+        "name": "2速1耐2智1友"
+      }
+    ],
+    "legality": {
+      "uma_vs_card": "按 chara_id 实际比对，同角色不可共存",
+      "card_vs_card": "同上，按角色查整副卡，与卡类型无关；303084 根杏目与 302424 速杏目均为角色 1129，不可同时出现",
+      "friend_card_included_in_check": true
+    }
+  },
+  "model": "saved_models/arms/ens_NT4096_AllHistory_g123.onnx",
+  "model_id": "ens_NT4096_AllHistory_g123",
+  "rollin": "nn",
+  "search_n": 1024,
+  "shard_size": 32,
+  "inherit": {
+    "blue_count": [
+      15,
+      0,
+      0,
+      0,
+      3
+    ],
+    "extra_count": [
+      10,
+      10,
+      20,
+      20,
+      20,
+      40
+    ],
+    "source": "umasim::sampler::gen1_inherit()，与 v5/v6/R2/R3/R4/R5 全部教师数据一致",
+    "note": "与 §15.11 客户端面板的 blue [15,0,3,0,0] / extra [0,20,20,40,40,40] 不同；教师采集沿用 gen1_inherit，不改"
+  },
+  "epsilon": 0.15,
+  "seed_base": 88241484357425,
+  "use_ucb": false,
+  "radical_factor_max": 1.4,
+  "target_valid": 10000,
+  "seconds": 21600,
+  "jobs": [
+    {
+      "name": "region_y3_s1",
+      "layer": "region_y3",
+      "shape": 0,
+      "target": 500,
+      "indices": "indices/region_y3_s1.json",
+      "count": 1000,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,1000"
+    },
+    {
+      "name": "region_y2_s1",
+      "layer": "region_y2",
+      "shape": 0,
+      "target": 500,
+      "indices": "indices/region_y2_s1.json",
+      "count": 1000,
+      "quota_y1": 0,
+      "quota_y2_y3": "1000,0"
+    },
+    {
+      "name": "region_y1_s1",
+      "layer": "region_y1",
+      "shape": 0,
+      "target": 200,
+      "indices": "indices/region_y1_s1.json",
+      "count": 400,
+      "quota_y1": 1000,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "general_s1",
+      "layer": "general",
+      "shape": 0,
+      "target": 8800,
+      "indices": "indices/general_s1.json",
+      "count": 17600,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0"
+    }
+  ],
+  "index_reservation": [
+    2400000000,
+    2410000000
+  ],
+  "holdout_count": 38,
+  "spare_policy": "每层构成双倍候选清单；达到有效目标即停，备用耗尽则失败，不改配方"
+}

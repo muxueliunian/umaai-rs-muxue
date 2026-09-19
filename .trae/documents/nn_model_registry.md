@@ -283,3 +283,25 @@ R6 已经把非留出组合全覆盖了，追采的意义是每个组合多几�
 
 号段占用已由生成器自动核验：它扫 `training_data/**/manifest.json` 的 `work_indices`，
 R6 数据此时已落地本机，`[1500000000,2300000000)` 无冲突。
+
+## 9. 2速1耐2智 定向补采号段预登记（2026-09-19）
+
+新空间 `gen2_2s1e2w_v1`（`sampler.rs`）：马娘与卡池同 gen2_v1，只有 `2速1耐2智1友` 一种构成，
+**420 个组合**（手算 6×28×2 + 2×21×2，单测核对）。gen2_v1 四种构成都只带 1 智，
+本构成在当前世代数据里完全缺席；单独成版本是因为给 gen2_v1 追加构成会改写 `index % 4288` 的语义。
+
+配方 `scripts/collect/formal1024_2s1e2w_0919/`，`recipe_id = gen2_2s1e2w_formal1024_0919`，
+口径同 R6（`search_n=1024`、roll-in `ens_NT4096_AllHistory_g123`、ε 0.15、gen1_inherit），
+**10000 有效根**：general 8800 / y1 200 / y2 500 / y3 500；本机采集，截止 21600 秒。
+留出 **38 个组合**（每马娘按完整字段排序每十取一），只作闭环验收，不得混进训练。
+
+| 区间 | 状态与用途 |
+|---|---|
+| [2400000000,2410000000) | **正式采集独占预留**；实际最大 index 2408400113 |
+| [2410000000,2420000000) | 本机吞吐冒烟（正式序号 + 420×30000），产物在 `target/smoke_2s1e2w_0919/`，不入数据 |
+
+```text
+python scripts/collect/prepare_gen2_formal.py --recipe scripts/collect/gen2_2s1e2w_recipe.json   --rust-dump target/gen2_2s1e2w_plan_dump_0919.txt --output scripts/collect/formal1024_2s1e2w_0919   --recipe-id gen2_2s1e2w_formal1024_0919 --model saved_models/arms/ens_NT4096_AllHistory_g123.onnx   --model-id ens_NT4096_AllHistory_g123 --search-n 1024 --layer-targets 8800,200,500,500   --index-start 2400000000 --index-end 2410000000 --seconds 21600
+```
+
+生成器改成按配方读空间后，用 R7 原参数重放 `formal1024_0918b` **逐字节零差异**。

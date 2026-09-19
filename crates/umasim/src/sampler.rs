@@ -423,11 +423,31 @@ pub const GEN2_V1: SpaceVersion = SpaceVersion {
     shapes: &GEN2_V1_SHAPES
 };
 
+/// `gen2_2s1e2w_v1` 的唯一构成：2速1耐2智1友
+///
+/// gen2_v1 的 4 种构成都只带 1 智，本构成（GA 通解卡组的形状）在那一代数据里完全缺席。
+/// gen2 卡池恰有 2 张智卡（302894 / 303064），故每个计划都同时带这两张。
+pub const GEN2_2S1E2W_SHAPES: [DeckShape; 1] = [DeckShape {
+    counts: [2, 1, 0, 0, 2],
+    name: "2速1耐2智1友"
+}];
+
+/// 2速1耐2智 定向补采空间：马娘与卡池同 [`GEN2_V1`]，只换构成
+///
+/// 单独成版本而不是给 gen2_v1 加第 5 种构成：gen2_v1 的计划表是 `index % 4288`
+/// 的语义，追加构成会让既有 R6/R7 数据的 index 全部指向别的组合。
+pub const GEN2_2S1E2W_V1: SpaceVersion = SpaceVersion {
+    name: "gen2_2s1e2w_v1",
+    umas: &GEN2_V1_UMAS,
+    cards: &GEN2_V1_CARD_POOL,
+    shapes: &GEN2_2S1E2W_SHAPES
+};
+
 /// 全部已注册的具名空间版本
 ///
 /// gen1 **不在此表内**：它没有版本名，走 [`SamplingSpace::gen1`] 的原路径，
 /// 身份字段与既有数据保持一致。
-pub const SPACE_VERSIONS: &[SpaceVersion] = &[GEN2_V1];
+pub const SPACE_VERSIONS: &[SpaceVersion] = &[GEN2_V1, GEN2_2S1E2W_V1];
 
 /// 按版本名取出已注册的空间版本
 ///
@@ -1306,6 +1326,60 @@ mod tests {
             println!("GEN2PLAN {i} {} {} {}", plan.uma, deck.join(","), plan.shape);
         }
         println!("GEN2PLAN_COUNT {}", space.len());
+        Ok(())
+    }
+
+    /// 同理打印 gen2_2s1e2w_v1 的全部计划
+    #[test]
+    fn test_gen2_2s1e2w_plan_dump() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::from_version(&GEN2_2S1E2W_V1)?;
+        for (i, plan) in space.plans().iter().enumerate() {
+            let deck: Vec<String> = plan.deck.iter().map(|c| c.to_string()).collect();
+            println!("GEN2PLAN {i} {} {} {}", plan.uma, deck.join(","), plan.shape);
+        }
+        println!("GEN2PLAN_COUNT {}", space.len());
+        Ok(())
+    }
+
+    /// `gen2_2s1e2w_v1` 空间：规模符合手算，且每个计划都是 2速1耐2智1友、角色两两不同
+    ///
+    /// 手算：8 速卡里帝王 302754、速杏目 302424 各与一个马娘同角色；
+    /// 6 个马娘 C(8,2)=28 对速卡、帝王与杏目两马娘 C(7,2)=21 对，均 ×2 张耐卡 ×1 种智卡组合，
+    /// 合计 6×56 + 2×42 = 420。
+    #[test]
+    fn test_gen2_2s1e2w_space_all_legal() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::from_version(&GEN2_2S1E2W_V1)?;
+        println!("gen2_2s1e2w_v1 共 {} 个组合", space.len());
+        if space.len() != 420 {
+            bail!("组合数 {} 与手算的 420 不符", space.len());
+        }
+        for plan in space.plans() {
+            let uma_chara = plan.uma / 100;
+            let mut charas: Vec<u32> = vec![uma_chara];
+            let mut counts = [0usize; 5];
+            for (i, &card) in plan.deck.iter().enumerate() {
+                let chara = chara_of_card(card)?;
+                if charas.contains(&chara) {
+                    bail!("计划 {plan:?} 里角色 {chara} 重复（含马娘）");
+                }
+                charas.push(chara);
+                let ty = global!(GAMEDATA).get_card(card / 10)?.card_type;
+                if i < 5 {
+                    counts[ty as usize] += 1;
+                } else if ty != CARD_TYPE_FRIEND {
+                    bail!("计划 {plan:?} 末位 {card} 不是友人卡");
+                }
+            }
+            if counts != [2, 1, 0, 0, 2] || plan.shape != "2速1耐2智1友" {
+                bail!("计划 {plan:?} 类型分布 {counts:?} 不是 2速1耐2智");
+            }
+            if !(plan.deck.contains(&302894) && plan.deck.contains(&303064)) {
+                bail!("计划 {plan:?} 没有同时带两张智卡");
+            }
+        }
+        println!("全部 {} 个计划逐字段合法", space.len());
         Ok(())
     }
 

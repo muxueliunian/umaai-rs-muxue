@@ -66,7 +66,7 @@ def enumerate_plans(recipe):
     return plans
 
 
-def prepare(dump_path, output, *, recipe_id, model, model_id, search_n, layer_targets,
+def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, search_n, layer_targets,
             index_start, index_end, seconds):
     """冻结计划、留出组合、分层配额及独立世界；只允许写全新目录。
 
@@ -76,7 +76,8 @@ def prepare(dump_path, output, *, recipe_id, model, model_id, search_n, layer_ta
     """
     if output.exists():
         raise FileExistsError(output)
-    recipe = json.loads((ROOT / "scripts/collect/gen2_v1_recipe.json").read_text(encoding="utf-8"))
+    recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
+    shape_count = len(recipe["space"]["shapes"])
     plans = enumerate_plans(recipe)
     dumped = []
     for line in dump_path.read_text(encoding="utf-8-sig").splitlines():
@@ -84,15 +85,20 @@ def prepare(dump_path, output, *, recipe_id, model, model_id, search_n, layer_ta
             _, index, uma, deck, shape = line.split(maxsplit=4)
             dumped.append((int(index), int(uma), [int(v) for v in deck.split(",")], shape))
     expected = [(p["plan"], p["uma"], p["deck"], recipe["space"]["shapes"][p["shape"]]["name"]) for p in plans]
-    if dumped != expected or len(plans) != 4288:
+    if dumped != expected or len(plans) != recipe["space"]["plan_count"]:
         raise ValueError("独立枚举与 Rust 计划字段/顺序不一致")
 
-    # 只从已有证据明确未见的两张新速卡/新马娘中选泛化留出，其他新组合不猜历史覆盖。
+    # gen2_v1：只从已有证据明确未见的两张新速卡/新马娘中选泛化留出，其他新组合不猜历史覆盖。
+    # every_tenth_all：整个空间都未见过（如 2速1耐2智 定向补采），每格全部计划参与留出。
+    rule = recipe.get("holdout_rule", "unseen_new_cards")
+    if rule not in ("unseen_new_cards", "every_tenth_all"):
+        raise ValueError(f"未知留出规则 {rule}")
     held = []
     for uma in recipe["space"]["umas"]:
-        for shape in range(4):
+        for shape in range(shape_count):
             unseen = sorted([p for p in plans if p["uma"] == uma and p["shape"] == shape
-                             and (uma == 114101 or any(c in p["deck"] for c in (303124, 303114)))],
+                             and (rule == "every_tenth_all" or uma == 114101
+                                  or any(c in p["deck"] for c in (303124, 303114)))],
                             key=lambda p: p["fields"])
             held.extend(unseen[9::10])
     held_ids = {p["plan"] for p in held}
@@ -123,7 +129,7 @@ def prepare(dump_path, output, *, recipe_id, model, model_id, search_n, layer_ta
               in zip(LAYER_SPEC, layer_targets)]
     layers.sort(key=lambda entry: EMIT_ORDER.index(entry[0]))
     for layer, target, y1, y23 in layers:
-        for shape in range(4):
+        for shape in range(shape_count):
             pools = [[p for p in plans if p["shape"] == shape and p["uma"] == uma
                       and p["plan"] not in held_ids] for uma in recipe["space"]["umas"]]
             pools = [sorted(pool, key=lambda p: p["fields"]) for pool in pools if pool]
@@ -153,11 +159,16 @@ def prepare(dump_path, output, *, recipe_id, model, model_id, search_n, layer_ta
     if any(i % len(plans) in held_ids for i in all_indices):
         raise ValueError("正式清单含留出组合")
     write_json(output / "plans.json", plans)
-    write_json(output / "holdout.json", dict(
-        method="uma×shape 内完整字段排序，每十个取第十个；仅已确认未见的两张新速卡或 114101",
-        evidence="nn_model_registry.md 的 R4 七马娘记录及 logs/newdeck_pair_0913/deck_coverage.txt；后者已报告两速卡在八组 R4 数据均为零",
-        boundary="这是已确认未见子集的留出，不声称覆盖所有历史未见组合；不得混进本轮训练",
-        plans=held))
+    if rule == "every_tenth_all":
+        holdout_text = dict(method="uma×shape 内完整字段排序，每十个取第十个；空间内全部计划参与",
+                            evidence=recipe["holdout_note"],
+                            boundary="留出组合只作闭环验收，不得混进本轮训练")
+    else:
+        holdout_text = dict(
+            method="uma×shape 内完整字段排序，每十个取第十个；仅已确认未见的两张新速卡或 114101",
+            evidence="nn_model_registry.md 的 R4 七马娘记录及 logs/newdeck_pair_0913/deck_coverage.txt；后者已报告两速卡在八组 R4 数据均为零",
+            boundary="这是已确认未见子集的留出，不声称覆盖所有历史未见组合；不得混进本轮训练")
+    write_json(output / "holdout.json", dict(**holdout_text, plans=held))
     target_valid = sum(job["target"] for job in jobs)
     write_json(output / "manifest.json", dict(
         recipe_id=recipe_id, status="frozen", space=recipe["space"],
@@ -176,6 +187,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--rust-dump", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--recipe", type=Path, default=ROOT / "scripts/collect/gen2_v1_recipe.json",
+                        help="空间身份来源；默认 gen2_v1，2速1耐2智 补采用 gen2_2s1e2w_recipe.json")
     parser.add_argument("--recipe-id", required=True, help="写进 manifest 的配方名，例如 gen2_v1_formal1024_0918")
     parser.add_argument("--model", required=True, help="roll-in 模型路径（相对工作区根）")
     parser.add_argument("--model-id", required=True, help="roll-in 模型显式版本名，进 manifest 与 rollin 身份")
@@ -193,6 +206,6 @@ if __name__ == "__main__":
                          f"{','.join(name for name, _, _ in LAYER_SPEC)}")
     if args.search_n <= 0 or args.index_start >= args.index_end or args.seconds <= 0:
         raise ValueError("--search-n / --seconds 必须为正，且 --index-start < --index-end")
-    prepare(args.rust_dump, args.output, recipe_id=args.recipe_id, model=args.model,
+    prepare(args.rust_dump, args.output, recipe_path=args.recipe, recipe_id=args.recipe_id, model=args.model,
             model_id=args.model_id, search_n=args.search_n, layer_targets=targets,
             index_start=args.index_start, index_end=args.index_end, seconds=args.seconds)
