@@ -1988,11 +1988,15 @@ impl RecommendedRamenTrainer {
             policy.vital_rest_eating = eating_rest;
             // 保守风险预算：只影响策略打分，不改变规则层真实失败率。
             policy.effective_ramen_failure = false;
-            // 残余收益折扣（方案 E）：主属性快满时打折副属性+PT，提前分流。初始 1.0 待矩阵验证。
-            policy.cap_discount_weight = 1.0;
+            // 副属性残余收益折扣（方案 E）：0 = 主属性接近上限时不再给副属性/PT 打折。
+            // 0.0 为第十二轮配对验收的组合值（token capd0）。
+            policy.cap_discount_weight = 0.0;
 
             let mut local = LocalRamenConfig::default();
-            local.status_reserve_max = 40.0;
+            // 预留上限空间：40 → 157（第十二轮配对验收组合值，token reserve157）。
+            local.status_reserve_max = 157.0;
+            // 预留惩罚按实际可增长量计算，已满位不再虚增透支（token rgn1）。
+            local.reserve_gain_mode = 1;
             local.dynamic_vital = true;
             local.probabilistic_hint = true;
             local.expected_fail = true;
@@ -2012,8 +2016,10 @@ impl RecommendedRamenTrainer {
             local.friend_future_hidden_weight = 0.0;
             // 动态属性平衡：按五维完成度修正训练边际价值（短板追赶 + 近上限衰减）。
             local.dynamic_status_balance = true;
-            local.status_gap_strength = 0.5;
-            local.status_overflow_strength = 0.5;
+            // 短板追赶 / 近上限衰减强度：0.5 / 0.5 → 4.98 / 3.04（第十二轮组合值，
+            // 对应 token g1498-g2498-g3498-o1304-o2304-o3304）。
+            local.status_gap_strength = 4.98;
+            local.status_overflow_strength = 3.04;
             local.ramen_lookahead_weight = 0.0;
             local.ramen_lookahead_samples = 1;
             local.effective_ramen_failure = false;
@@ -2036,15 +2042,23 @@ impl RecommendedRamenTrainer {
             local.friend_rest_max_special = 4;
             local.deadline_urgency_scale = 0.0;
             local.dynamic_special_targets = true;
-            // 已满位训练 PT 定价：有彩圈 36（评分峰值，7 build×100 局 +533）；无彩圈档由下方 GA 方向上调（16→37）
-            policy.pt_tradeoff_shining = 36.0;
             // ===== GA 方向定稿（2026-09-17 ga_lab 合并，9 旋钮组合档）=====
             // 来源：ga_lab fork (479fb38) 跨轮一致 GA 方向；本地 CRN 配对验证
             // （4 马 × 2 种子块 = 420 局配对，组合档 Δ=+1394 t=12.55，8/8 单元显著）。
             // 注意：单项均≤0/惰性，收益来自组合交互；weakboost(ramen_weak_train_boost)
             // 单独 -1017 且拖累组合 → 明确不采纳。
-            policy.pt_tradeoff = 37.0;              // 满位普通档 16→37（GA 100% 上调）覆盖上行定稿
-            policy.pt_tradeoff_super = 35.0;        // 超拉面回合 0→35（GA 97%）
+            // ===== 第十二轮配对验收（2026-09-18）=====
+            // 两个独立随机卡组池（各 160 副全新卡组 × 300 局，同卡组同种子配对）上，本组合相对
+            // 上一版推荐组合（ptblend200-capd0-rgn1-supermode3-hintlv600）随机组 +130.4 [+93.6,+167.2]
+            // 与 +147.6 [+108.2,+187.0]；相对本文件改动前的默认 preset 累计 +517 / +552（同批配对均值可加）。
+            // 消融、验收池说明与限制见 experiments/validated_policy/README.md。
+            policy.pt_tradeoff = 44.25;             // 满位普通档 16→37（GA）→44.25（第十二轮）
+            policy.pt_tradeoff_super = 34.5;        // 超拉面回合 0→35（GA）→34.5（第十二轮）
+            policy.pt_tradeoff_shining = 25.0;      // 已满位有彩圈 36→25（第十二轮）
+            policy.pt_cap_blend_turns = 8.0;        // 近上限连续 PT 定价窗口 = 8.00 次训练（第十二轮）
+            policy.super_choice_mode = 3;           // 超级拉面按终盘属性缺口与卡型数选范围（第十二轮）
+            policy.outing_base = 0.0;               // 外出基准分 15→0（第十一轮消融 +15.2 [+12.1,+18.3]）
+            local.hint_card_aware = 6.0;            // 逐卡 Hint 倍率 0→6.00（沿用已发布档 hintlv600，第十二轮复核 675→600 零损失）
             policy.region_weak_cover_weight = 35.0; // 弱位覆盖 查表→35（GA 97%；>0 直值）
             policy.region_youqing_weight = 0.4;     // 友情词条 1.5→0.4（GA top 100% 降）
             local.hint_bonus = 8.0;                 // 掌握度 6→8
@@ -3418,8 +3432,9 @@ mod tests {
             &[302424,302894,303044,302924,303024,303054],
             InheritInfo { blue_count:[15,3,0,0,0], extra_count:[0,30,0,0,30,30] })?;
         game.base.turn=38;
-        let base=RecommendedRamenTrainer::with_tokens("ptblend200")?;
-        let candidate=RecommendedRamenTrainer::with_tokens("ptblend200-capd0-rgn1")?;
+        // 2026-09-18：两条臂显式钉住 capd/reserve，机制验证不再随 new() 的 preset 漂移。
+        let base=RecommendedRamenTrainer::with_tokens("ptblend200-capd100-reserve40-rgn0")?;
+        let candidate=RecommendedRamenTrainer::with_tokens("ptblend200-capd0-reserve40-rgn1")?;
         let mut c=Checks::new();
         for y in 0..3 {
             let mut expected=base.years[y].policy.config.clone();
@@ -3463,7 +3478,7 @@ mod tests {
         let mut checks = Checks::new();
         for year in 0..3 {
             let got = &variant.years[year].config;
-            checks.check(base.years[year].config.hint_card_aware == 0.0, "默认关闭逐卡 Hint 估值");
+            checks.check(base.years[year].config.hint_card_aware == 6.0, "preset 启用第十二轮验收的逐卡 Hint 估值");
             checks.check(got.hint_card_aware == 1.0, "hintlv 写入三年");
             checks.check(got.hint_bonus == base.years[year].config.hint_bonus
                 && got.max_base_score_sacrifice == base.years[year].config.max_base_score_sacrifice
@@ -3484,7 +3499,8 @@ mod tests {
             game.uma.five_status[i] = game.uma.five_status_limit[i];
         }
         let on = &variant.years[2];
-        let off = &base.years[2];
+        let off_trainer = RecommendedRamenTrainer::with_tokens("hintlv0")?;
+        let off = &off_trainer.years[2];
         let mut multi = false;
         for person_index in 0..game.base.deck.len() {
             let levels = (1 + game.base.deck[person_index].card_value().hint_level).min(5);
@@ -3508,7 +3524,7 @@ mod tests {
         let mut checks = Checks::new();
         for year in 0..3 {
             let mut expected = base.years[year].policy.config.clone();
-            checks.check(expected.pt_cap_blend_turns==0.0,"默认关闭实验");
+            checks.check(expected.pt_cap_blend_turns==8.0,"preset 采用第十二轮验收窗口");
             expected.pt_cap_blend_turns=2.0;
             checks.check(variant.years[year].policy.config==expected,"只覆盖窗口字段");
         }
@@ -3529,7 +3545,7 @@ mod tests {
             let variant = RecommendedRamenTrainer::with_tokens(&format!("supermode{mode}"))?;
             for year in 0..3 {
                 let mut expected = base.years[year].policy.config.clone();
-                checks.check(expected.super_choice_mode == 0, "默认固定选项二");
+                checks.check(expected.super_choice_mode == 3, "preset 采用第十二轮验收的自适应范围");
                 expected.super_choice_mode = mode;
                 checks.check(variant.years[year].policy.config == expected, "只覆盖超级拉面模式");
             }
@@ -3538,6 +3554,31 @@ mod tests {
             checks.check(RecommendedRamenTrainer::with_tokens(bad).is_err(), "非法或未保留开关报错");
         }
         println!("超级拉面模式的三年隔离与参数校验完成");
+        checks.finish()
+    }
+
+    /// 正式 preset 必须与第十二轮验收用的组合串逐位一致。
+    ///
+    /// 该串就是两个独立池上验收的那只（out/rmb/r3f 三项等于 preset 现值，无需 token）；
+    /// 窗口、PT 定价、缺口/溢出强度、预留口径与超级拉面模式一旦漂移，本测试直接失败，
+    /// 避免验收的是一个组合、线上跑的是另一个组合。
+    #[test]
+    fn preset_matches_validated_round12_combo() -> anyhow::Result<()> {
+        use crate::utils::Checks;
+        const COMBO: &str = "ptblend800-capd0-hintlv600-trd4425-trds3450-trdsh2500-g1498-g2498-g3498-o1304-o2304-o3304-reserve157-rgn1-supermode3";
+        let preset = RecommendedRamenTrainer::new();
+        let combo = RecommendedRamenTrainer::with_tokens(COMBO)?;
+        let mut checks = Checks::new();
+        for year in 0..3 {
+            let (p, c) = (&preset.years[year], &combo.years[year]);
+            checks.check(p.policy.config == c.policy.config, "三年策略配置与验收串逐位一致");
+            checks.check(p.config.hint_card_aware == c.config.hint_card_aware, "逐卡 Hint 倍率一致");
+            checks.check(p.config.status_gap_strength == c.config.status_gap_strength, "短板追赶强度一致");
+            checks.check(p.config.status_overflow_strength == c.config.status_overflow_strength, "近上限衰减强度一致");
+            checks.check(p.config.status_reserve_max == c.config.status_reserve_max, "预留上限一致");
+            checks.check(p.config.reserve_gain_mode == c.config.reserve_gain_mode, "预留口径一致");
+        }
+        println!("preset 与第十二轮验收组合串逐位一致");
         checks.finish()
     }
 }

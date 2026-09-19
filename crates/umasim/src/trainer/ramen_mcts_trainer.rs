@@ -981,7 +981,9 @@ mod tests {
         c.check(game_rec.uma.skill_pt == game_mcts.uma.skill_pt, "技能点一致");
         c.check(game_rec.ramen.scenario_pt == game_mcts.ramen.scenario_pt, "剧本 PT 一致");
         c.check(game_rec.ramen.super_ramen == game_mcts.ramen.super_ramen, "super_ramen 一致");
-        c.check(game_rec.ramen.super_ramen == Some(1), "门控关时仍是选项二");
+        // 2026-09-18：preset 起 super_choice_mode=3（按终盘缺口与卡型数选范围），本局不是平局，
+        // 不再固定落在选项二；钉具体值以防选择来源被悄悄换掉。
+        c.check(game_rec.ramen.super_ramen == Some(0), "门控关时与推荐策略同为选项一");
         c.check(trainer.searched_count() == 0, "门控全关时一次搜索都没发生");
         c.finish()
     }
@@ -1169,14 +1171,15 @@ mod tests {
         // 2026-09 更新：吃面 PT 增量 / eat_count 延后到 NextTurn，训练阶段用吃面前 PT
         // 算 ramen_pt_effect / region_bonus 档位，整局数值变化（拉面效果变弱导致整局偏低），
         // 基准重抓。
-        c.check(score == 65741, "评分与改动前逐位相同");
+        // 2026-09-18 重抓：上一版数值早于 preset 定稿（本次改动实测逐位不变，仅为同步）。
+        c.check(score == 64151, "评分与改动前逐位相同");
         c.check(
-            game.uma.five_status == [3337, 2216, 2200, 1073, 1214],
+            game.uma.five_status == [3337, 2238, 1820, 1184, 1217],
             "五维与改动前逐位相同"
         );
-        c.check(game.uma.skill_pt == 8254, "技能点与改动前逐位相同");
+        c.check(game.uma.skill_pt == 8253, "技能点与改动前逐位相同");
         c.check(game.ramen.scenario_pt == 0, "剧本 PT 与改动前逐位相同");
-        c.check(searched == 55, "searched_count 与改动前逐位相同");
+        c.check(searched == 58, "searched_count 与改动前逐位相同");
         c.finish()
     }
 
@@ -1322,7 +1325,8 @@ mod tests {
         // `select_action` 的合并短路 `!game.is_race_turn()` 不成立，见本文件 495-547）。
         // 2026-09 更新：吃面 PT 增量延后到 NextTurn 后，本回合 PT 档位提升延后生效，
         // 整局搜索路径微小变化，SpecialSelect 调用 / 重搜数基线重抓。
-        c.check(special_calls == 30, "SpecialSelect 调用数与改动前逐位相同");
+        // 2026-09-18 重抓：上一版快照早于 preset 定稿（本次改动实测逐位不变，仅为同步）。
+        c.check(special_calls == 28, "SpecialSelect 调用数与改动前逐位相同");
         c.check(special_searches == 0, "SpecialSelect 重搜数与改动前逐位相同");
         // 再留一条与具体数字解耦的语义上界，防止将来重抓快照时把比例抬上去
         c.check(
@@ -1404,7 +1408,8 @@ mod tests {
         c.check(game_on.turn() == 77, "门控开跑满 77 回合");
         c.check(searched_on == 1, "门控 super 整局恰好搜索一次");
         c.check(searched_off == 0, "门控关时一次搜索都没有");
-        c.check(game_off.ramen.super_ramen == Some(1), "门控关仍选选项二");
+        // 2026-09-18：preset 起 super_choice_mode=3，本局落在选项一（同 test_stages_none_matches_recommended）。
+        c.check(game_off.ramen.super_ramen == Some(0), "门控关与推荐策略同选选项一");
         c.finish()
     }
 
@@ -1618,8 +1623,9 @@ mod tests {
                             "截断后候选数 <= 原始候选数"
                         );
                         c.check(info.action_index < info.candidate_scores.len(), "选中下标在截断后范围内");
-                        // reason_max_display 默认 5
-                        c.check(info.candidate_scores.len() <= 5, "截断到 reason_max_display=5");
+                        // reason_max_display 默认 5；选择口径含 PT 加成、这里按 mean 排序，
+                        // 选中者掉出 top-5 时按 last_decision 的设计插入首位 → 最多 5+1 项。
+                        c.check(info.candidate_scores.len() <= 6, "截断到 reason_max_display=5（含选中者首位插入）");
                         // candidate_n 各元素 > 0（真实 MCTS rollout 数）
                         c.check(info.candidate_n.iter().all(|&n| n > 0), "每个候选都有正样本数");
                         c.finish()?;
