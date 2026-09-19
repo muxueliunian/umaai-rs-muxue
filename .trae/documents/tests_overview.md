@@ -636,6 +636,18 @@ cargo run --release --bin bench_compositions -- --runs 100 --seed 42 --trainer h
 - 代表卡选择：各类型取最新 5 张满破 SSR 作候选池，`--min-panel` / `--pool-size` / `--pick` 可调
 - 构成总数 101 的验证由 `bench` 模块测试覆盖
 
+### `bin/ramen_mcts_pair_bench.rs`
+
+MCTS 训练员 vs 手写逻辑**整局配对基准**（闭环口径）：同一 (build, 种子, 局号) 下两策略各跑整局、共用规则主种子，配对差 Δ = 评分_mcts − 评分_handwritten。
+
+```bash
+cargo run --release --bin ramen_mcts_pair_bench -- --seeds 61444,42,7 --runs 3 --out logs/mcts_pair.csv
+```
+
+- MCTS 参数默认 = 生产实际值（game_config [mcts] + ramen_search_stages）；`--search-n` 等覆盖仅限对照实验
+- 生产档耗时约 3.4 分钟/局（region 门控 120 候选占大头），扫测先用 `--runs 1` 探时间
+- bin 内冒烟测试（`cargo test --release -p umasim --bin ramen_mcts_pair_bench`，小预算）：配对守卫（两局 rule_seed 一致）/ 同参两次逐位可复现 / CSV 结构
+
 ## 附注
 
 - **ignored 测试（5 个）**：`bench_sample_bucket_vs_weighted_index`（game/traits，分桶 microbench）、`test_crn_pairing_gain` / `test_crn_pairing_gain_ramen`（CRN 收益测量，耗时）、`microbench_top_fns`（微基准）、`test_terminal_breakdown_demo`（整局诊断演示）——均按需手动运行

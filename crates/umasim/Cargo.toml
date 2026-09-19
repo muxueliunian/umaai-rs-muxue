@@ -71,6 +71,10 @@ path = "tools/data_collection/ramen_advantage_probe.rs"
 # 让 cargo 直接跳过该目标，而不是编一个只会 bail 的空壳
 required-features = ["cli", "onnx"]
 
+[[bin]]
+name = "ramen_mcts_pair_bench"
+path = "src/bin/ramen_mcts_pair_bench.rs"
+
 [features]
 default = ["cli", "diag"]
 diag = []

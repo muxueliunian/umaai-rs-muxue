@@ -17,8 +17,11 @@
   python3 scripts/bench_commit_compare.py --base 04c739c --head current
   python3 scripts/bench_commit_compare.py --base 86de303 --head 04c739c --rounds 3 --search-n 8192
   python3 scripts/bench_commit_compare.py --base 86de303 --head current --bench-mcts --whole-runs 100
+  python3 scripts/bench_commit_compare.py --base 91e4b03 --head current --force-bench --bench-runs 300
 
 `--head current` 表示用当前工作树（含未提交改动），其余情况自动创建独立 worktree。
+`--force-bench` 在两版都有 perf_probe 时强制走 bench 模式（bench_base 手写整局遍历全部
+player_builds、同 seed 配对，同时输出耗时与评分两份配对表；单决策根的 probe 只作诊断）。
 产物写到 logs/commit-compare/<base>__<head>_<时间戳>/（manifest.json + rounds.csv + report.txt）。
 """
 import argparse
@@ -268,6 +271,9 @@ def main():
     ap.add_argument("--whole-runs", type=int, default=None, help="附加手写整局耗时对比（局数，默认不跑）")
     ap.add_argument("--bench-mcts", action="store_true", help="bench 模式附加 MCTS 小预算整局（search-n 64）")
     ap.add_argument("--bench-mcts-runs", type=int, default=5, help="bench 模式 MCTS 局数（默认 5）")
+    ap.add_argument("--force-bench", action="store_true",
+                    help="两版都有 perf_probe 时也强制走 bench 模式（bench_base 手写整局遍历全部 player_builds 配对，含耗时+评分）")
+    ap.add_argument("--bench-runs", type=int, default=100, help="bench 模式手写整局局数（默认 100；单局约 1ms，可放心加大）")
     ap.add_argument("--build-jobs", type=int, default=1,
                    help="并行构建版本数（默认 1=串行；并行构建可能因共享 ~/.cargo 缓存锁竞争卡死）")
     ap.add_argument("--probe-only", action="store_true", help="base 缺 perf_probe 时报错而非回退 bench 模式")
@@ -279,7 +285,9 @@ def main():
     head_sha = resolve_sha(args.head)
     base_short, head_short = base_sha[:7], head_sha[:7]
     probe_ok_base, probe_ok_head = has_probe_in_commit(args.base, base_sha), has_probe_in_commit(args.head, head_sha)
-    mode = "probe" if (probe_ok_base and probe_ok_head) else "bench"
+    mode = "bench" if args.force_bench else ("probe" if (probe_ok_base and probe_ok_head) else "bench")
+    if args.force_bench and args.probe_only:
+        sys.exit("--force-bench 与 --probe-only 互斥，请只保留一个")
     if mode == "bench" and args.probe_only:
         sys.exit(
             f"base={args.base} 或 head={args.head} 的 commit 不含 {PROBE_SRC}（探测: "
@@ -361,6 +369,7 @@ def main():
             "seed": args.seed, "search_seed": args.search_seed, "build": args.build,
             "deck": args.deck, "whole_runs": args.whole_runs,
             "bench_mcts": args.bench_mcts, "bench_mcts_runs": args.bench_mcts_runs,
+            "force_bench": args.force_bench, "bench_runs": args.bench_runs,
         },
     }
     with open(out_dir / "manifest.json", "w", encoding="utf-8") as f:
@@ -443,33 +452,49 @@ def main():
             d = ws["head"]["mean_ms"] - ws["base"]["mean_ms"]
             emit(f"head-base mean_ms Δ = {d:+.3f} ({fmt_pct(d, ws['base']['mean_ms'])})")
     else:
-        log("[bench] 模式：开始 bench_base 整局测量")
-        # ===== bench 模式：手写整局耗时（同 seed 逐局配对）=====
-        hw_base = run_bench_base(versions[0], "handwritten", 100, out_dir / "bench-base-hw", args)
-        hw_head = run_bench_base(versions[1], "handwritten", 100, out_dir / "bench-head-hw", args)
+        log(f"[bench] 模式：开始 bench_base 整局测量（runs={args.bench_runs}，遍历全部 player_builds）")
+        # ===== bench 模式：手写整局耗时 + 评分（同 seed 逐局配对，全部 builds）=====
+        hw_base = run_bench_base(versions[0], "handwritten", args.bench_runs, out_dir / "bench-base-hw", args)
+        hw_head = run_bench_base(versions[1], "handwritten", args.bench_runs, out_dir / "bench-head-hw", args)
         base_rows = load_bench_csv(hw_base)
         head_rows = load_bench_csv(hw_head)
         by_seed = {}
         for r in base_rows:
-            by_seed.setdefault(r["build"], {})[r["seed"]] = float(r["elapsed_ms"])
+            by_seed.setdefault(r["build"], {})[r["seed"]] = (float(r["elapsed_ms"]), float(r["score"]))
         pairs = []
         for r in head_rows:
             b = by_seed.get(r["build"], {}).get(r["seed"])
             if b is not None:
-                pairs.append((r["build"], r["seed"], b, float(r["elapsed_ms"])))
+                pairs.append((r["build"], r["seed"], b[0], b[1], float(r["elapsed_ms"]), float(r["score"])))
         emit("")
-        emit("===== 手写整局耗时（bench_base handwritten，runs=100，同 seed 配对）=====")
-        emit(f"{'build':<14} {'base_mean':>10} {'head_mean':>10} {'Δms':>9} {'%':>8}   n")
+        emit(f"===== 手写整局耗时（bench_base handwritten，runs={args.bench_runs}，同 seed 配对）=====")
+        emit(f"{'build':<14} {'base_med':>10} {'head_med':>10} {'Δms':>9} {'%':>8}   n")
         for build_name in sorted({p[0] for p in pairs}):
             sub = [p for p in pairs if p[0] == build_name]
             bs = median(p[2] for p in sub)
-            hs = median(p[3] for p in sub)
+            hs = median(p[4] for p in sub)
             delta = hs - bs
             emit(f"{build_name:<14} {bs:>10.3f} {hs:>10.3f} {delta:>+9.3f} {fmt_pct(delta, bs):>8}   {len(sub)}")
+        emit("")
+        emit(f"===== 手写整局评分（bench_base handwritten，runs={args.bench_runs}，同 seed 配对）=====")
+        emit(f"{'build':<14} {'base_med':>10} {'head_med':>10} {'Δ分':>9} {'配对Δ':>9} {'%':>7}   n")
+        for build_name in sorted({p[0] for p in pairs}):
+            sub = [p for p in pairs if p[0] == build_name]
+            bs = median(p[3] for p in sub)
+            hs = median(p[5] for p in sub)
+            delta = hs - bs
+            paired = median(p[5] - p[3] for p in sub)
+            emit(f"{build_name:<14} {bs:>10.0f} {hs:>10.0f} {delta:>+9.0f} "
+                 f"{paired:>+9.0f} {fmt_pct(paired, bs):>7}   {len(sub)}")
         write_csv(
             out_dir / "bench_paired.csv",
             ["build", "seed", "base_elapsed_ms", "head_elapsed_ms"],
-            [[p[0], p[1], f"{p[2]:.3f}", f"{p[3]:.3f}"] for p in pairs]
+            [[p[0], p[1], f"{p[2]:.3f}", f"{p[4]:.3f}"] for p in pairs]
+        )
+        write_csv(
+            out_dir / "bench_score_paired.csv",
+            ["build", "seed", "base_score", "head_score"],
+            [[p[0], p[1], f"{p[3]:.0f}", f"{p[5]:.0f}"] for p in pairs]
         )
         if args.bench_mcts:
             mc_base = run_bench_base(

@@ -2,6 +2,13 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-19
+- **MCTS vs 手写整局配对基准（固化评估入口）**：新增 `ramen_mcts_pair_bench` bin——同 (build, 种子, 局号) 下 MCTS 训练员与正式推荐手写策略各跑整局（共享规则主种子强行配对，两局 `rule_seed` 不一致即报错），配对差 Δ = 评分_mcts − 评分_handwritten 逐局落 CSV + 按 build/全局的均值、SE、95% CI、胜负汇总；MCTS 参数默认**取生产实际值**（game_config `[mcts]` + `ramen_search_stages`，与在线构造同款），`--search-n` 等覆盖仅限对照实验；bin 内冒烟测试（配对守卫 / 同参两次逐位可复现 / CSV 结构），project_context / tests_overview 同步
+- **experiments/validated_policy 迁至 scripts/validated_policy**：`scripts/` 是官方脚本区，挪过来与 `plot_*.py`、`bench_commit_compare.py` 同级；内容不变
+- **生产训练员门控含 region**：`gamedata/default_config.toml` 的 `ramen_search_stages` 由 `train,ramen` 改为 `train,ramen,region`——第 1 年地区（turn 2）和第 2/3 年地区（turn 23/47）纳入搜索，与 online 路径同款
+- **`bench_commit_compare.py` 加 `--force-bench / --bench-runs`**：两版都有 perf_probe 时也可强制走 bench 模式（手写整局遍历全部 player_builds、同 seed 配对、同时输出耗时与评分配对），bench 默认局数 100；补充 example 命令
+- **AGENTS.md 工作纪律微调**：精简对话规则段、删除独立的「需求澄清」条目（融入「项目特定上下文」）；明确 commit 前必读 git log + project_context + changelog 的项目启动纪律；文档清单与更新纪律同步精简
+
 ## 2026-09-17
 - **拉面杯逐卡 Hint 精确估值（可选）**：把固定 Hint 价值换成按卡面 Hint 等级与剩余可得的逐人头精确折算，默认关闭；一批全新 160 副随机卡组独立验收随机组 +174.0 [+153.0,+195.0]、预设 +77.7、固定卡组 −121.0 未证实，定位与 supermode3 同为“随机卡组可选”，关闭路径逐位不变。
 - **拉面杯可选策略与验证**：新增近属性上限的连续技能PT估值和按终盘缺口选择超级拉面范围的可选开关，保留默认行为；提供固定/随机卡组配对工具、冻结复现配置、结果分析及边界回归，注明固定卡组和线上/MCTS适用限制。

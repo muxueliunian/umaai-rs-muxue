@@ -38,6 +38,7 @@
   - `ramen_teacher_collect` / `ramen_export_npy` / `ramen_space_bench`（需 `cli`）：NN 教师数据采集 / 导出 / 动作空间扫描
   - `trainer_overhead_diagnostic` / `mcts_rollout_switch_verify` / `calc_training_value_microbench`（`tools/data_collection/`）：诊断与微基准
   - `composition_profile_matrix` / `minimal_strategy_ab`：实验用（前者已退役，仅打印结论）
+- `ramen_mcts_pair_bench`：**MCTS 训练员 vs 手写逻辑整局配对基准**（同 (build, 种子, 局号) 下两策略各跑整局、共享规则主种子，配对差 Δ = 评分_mcts − 评分_handwritten，逐局 CSV + 均值/SE/95%CI 汇总；MCTS 参数默认取生产实际值，见「MCTS vs 手写评估」节）
 
 ### umaai（通道层，`crates/umaai`）
 - **职责**：监听 `thisTurn.json` → 按 `scenarioId` 分发重建游戏 → AI 决策 → sink 输出（屏幕 / stdout JSON）
@@ -148,6 +149,22 @@ python3 scripts/bench_commit_compare.py --base 86de303 --head current --bench-mc
 - 后台运行时若 cargo 构建「产物已产出但进程不退、CPU≈0」，多为被杀任务残留的孤儿 cargo 仍
   持有目标目录 `.cargo-lock`（可用 `flock -n <该文件> -c true` 探测），需在宿主侧
   `lsof` / `fuser` 定位后 kill。
+
+## MCTS vs 手写整局配对评估（ramen_mcts_pair_bench）
+
+量化「相同随机局面下 MCTS 训练员比正式推荐手写策略强多少」的闭环基准：
+
+```bash
+cargo run --release --bin ramen_mcts_pair_bench -- \
+    --seeds 61444,42,7 --runs 3 --out logs/mcts_pair.csv
+cargo run --release --bin ramen_mcts_pair_bench -- --help   # 全部参数
+```
+
+- **配对口径**：同一 `(build, 种子, 局号)` 下 `RamenMctsTrainer` 与 `RecommendedRamenTrainer` 各跑完整局，两局共用同一规则主种子（`bench::seeded_rngs`），随机未来逐位一致；配对差 `Δ = 评分_mcts − 评分_handwritten`，CI/t 由逐局差聚合。`run_pair` 返回前校验两局 `rule_seed` 相等，配对失效即报错。
+- **MCTS 参数默认 = 生产实际值**：`SearchConfig::new_game_config(&game_config)` + `game_config.mcts.ramen_search_stages`，与 umaai 在线运行同款构造（本机：search_n=8192 / stages `train,ramen,region` / UCB 开 / radical 1.4）。`--search-n` 等覆盖后不再代表生产训练员，勿与生产档混比。
+- **耗时注意**：生产档 MCTS 整局约 3.4 分钟/局（region 门控第 2/3 年 120 候选占大头），扫测先用 `--runs 1` 探时间；手写侧整局 ≈ 1.3ms。
+- **与 bench_base 的差异**：bench_base 各策略独立跑批不配对；本基准强制同种子配对，消除随机世界漂移，差值可归因于策略选择。
+- 冒烟测试（bin 内 `#[cfg(test)]`，小预算不读 game_config）：配对守卫 / 同参两次逐位可复现 / CSV 结构。
 
 ## 测试
 

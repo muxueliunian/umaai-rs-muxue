@@ -2,27 +2,27 @@
 
 ## 对话规则与工作规范
 1. **语言要求**：必须使用中文进行思考和回答，语气要在简洁和专业的同时，保持轻松愉快
-2. **避免信息过载**：上下文容量有限，优先精简，不堆砌内容
+2. **避免信息过载**：上下文容量有限，需要分析大量代码/实验数据并提取结论时，使用子代理完成
 3. **重构期文档策略**：重构中项目，不要频繁更新文档（如changelog、memo等），在提交前统一更新
-4. **需求澄清**：首次开始新任务前，仔细检查用户给的初始需求和文档，提出任何不明确/错误的地方。
-5. **方案选择**：因为本项目涉及大量不在上下文中的领域知识，如果需要做方案选择，应该停下来给出建议并交给用户选择，不要直接生成代码
-6. **提案前审视**：提案前从"做减法"的角度重新考虑一次，但不要反复质疑自己。（这个审视过程不用回答，只是在内部思考一下）
-7. **网络问题需介入**：如果调用搜索工具遇到网页打不开，停下来提醒用户辅助解决。
+4. **方案选择**：因为本项目涉及大量不在上下文中的领域知识，如果需要做方案选择，应该停下来给出建议并交给用户选择，不要直接生成代码
+5. **提案前审视**：提案前从"做减法"的角度重新考虑一次，但不要反复质疑自己。（这个审视过程不用回答，只是在内部思考一下）
+6. **网络问题需介入**：如果调用搜索工具遇到网页打不开，停下来提醒用户辅助解决。
 
 ## 项目特定上下文
-项目结构、配置文件、开发环境等详细信息，参考相关文档中的 [project_context.md](.trae/documents/project_context.md)。
+- 由于项目规模较大，首次开始对话时，需要仔细阅读 git log, .trae/documents下的 project_context.md 和 changelog.md，以了解项目结构、配置文件、开发环境等详细信息; 仔细检查用户给的初始需求和文档比对，提出任何不明确/错误的地方。
+- 文档在 `.trae/documents/`，仅在有需要时载入。
+
 
 ## 相关文档
-`.trae/documents/`目录下还包含以下相关文档，仅在有需要时载入：
 - [glossary.md](.trae/documents/glossary.md)：术语表
-- [project_context.md](.trae/documents/project_context.md)：项目特定上下文（项目结构、配置文件、开发环境）
 - [ramen_memo_cn.md](.trae/documents/ramen_memo_cn.md)：拉面剧本备忘录（中文）
 - [ramen_refactor_development_plan.md](.trae/documents/archive/ramen_refactor_development_plan.md)：拉面重构开发计划（已归档，重构已完成）
 - [tests_overview.md](.trae/documents/tests_overview.md)：测试一览
 - [perf_profiling.md](.trae/documents/perf_profiling.md)：性能分析指南
 
-以及在项目中提交前需要更新的文档，有需要时可以载入：
-- [changelog.md](.trae/documents/changelog.md)：变更日志，更新内容需要包括由Agent和用户做的全部的修改，应简单概括修改的功能点和效果，不记入具体数据。同类修改项需要合并
+项目中git commit前要检查并更新文档：
+- [project_context.md](.trae/documents/project_context.md)：项目特定上下文（项目结构、配置文件、开发环境）
+- [changelog.md](.trae/documents/changelog.md)：变更日志，更新内容需要包括由Agent和用户做的全部的修改，应简单概括修改的功能点和效果，不记入具体数据或变量名。尽量简短，每个修改一行。
 - [issues.md](.trae/documents/issues.md)：问题记录，记载复杂问题的解决过程
 
 ## 安全注意事项
@@ -35,11 +35,12 @@
 - 使用脚本或工具间接做上面的操作，简短解释，并交给用户确认
 
 3. **符号链接、软链接必须检查绝对路径**: 在命令涉及符号链接、软链接时，必须确认绝对路径在工作区内，避免意外操作到关键系统文件。
+4. **删除文件前先列出文件列表**：检查列表，防止删除预期以外的文件
 
 ## Rust 编码规范
 ### 依赖管理
 1. **库使用**：使用标准库或第三方库需先添加`use`，不允许在不`use`的情况下直接以全名引用第三方库的内容
-2. **依赖添加**：禁止直接修改`Cargo.toml`的`dependencies`，应调用`cargo add`命令添加依赖，或者停下让用户添加依赖
+2. **依赖添加**：禁止直接修改`Cargo.toml`的`dependencies`，应调用`cargo add`命令添加依赖。cargo缓存不在工作区内，如果无法写入cargo缓存，应该停下让用户添加依赖，严禁自行尝试提权
 3. **工作空间依赖**：在workspace的子crate中添加的依赖项，应同步到workspace依赖中，并在子crate中使用workspace依赖
 
 ### 错误处理
