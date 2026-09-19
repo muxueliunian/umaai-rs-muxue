@@ -1,5 +1,10 @@
 # gen2_v1 正式采集
 
+> **当前有效配方已更新为 R8（2026-09-20）**：六份清单 `r8_*_0920/`，roll-in `ens_R67mix60k_g123`，
+> 共 80000 有效根，号段与配额见 `nn_model_registry.md` 第 10 节，生成命令见 `prepare_r8_0920.sh`，
+> 云端资产参考目录 `target/r8_cloud_assets_0920/`（不在 Git 内）。每份清单单独调用驱动，
+> `--expect-target-valid` 取该清单的 `target_valid`。下文 R6 的流程与约束同样适用。
+
 当前有效配方是 **`formal1024_0918/`（R6，2026-09-18）**。
 `formal2048_0914/` 是上一轮已完成的历史清单，`gen2_v1_recipe.json` 与
 `price0914_runs_*.json` 是更早的 512 定价资料——**两者都不得当成当前运行清单**。

@@ -1,0 +1,329 @@
+{
+  "recipe_id": "gen3_newuma_r8dagger_0920",
+  "status": "frozen",
+  "space": {
+    "version": "gen3_newuma_v1",
+    "identity_mode": "explicit_fields_no_hash",
+    "plan_count": 644,
+    "umas": [
+      106402
+    ],
+    "umas_note": "目白善信[赤心的驯鹿小姐]，此前全部教师数据 0 条",
+    "cards": [
+      302754,
+      302984,
+      302424,
+      302824,
+      303024,
+      302924,
+      303044,
+      303004,
+      302834,
+      302894,
+      303054,
+      303124,
+      303114,
+      303084,
+      302774,
+      303064
+    ],
+    "cards_note": "与 gen2_v1 同一卡池",
+    "friend_card": 303054,
+    "shapes": [
+      {
+        "counts": [
+          3,
+          1,
+          0,
+          0,
+          1
+        ],
+        "name": "3速1耐1智1友"
+      },
+      {
+        "counts": [
+          2,
+          2,
+          0,
+          0,
+          1
+        ],
+        "name": "2速2耐1智1友"
+      },
+      {
+        "counts": [
+          2,
+          1,
+          1,
+          0,
+          1
+        ],
+        "name": "2速1耐1力1智1友"
+      },
+      {
+        "counts": [
+          2,
+          0,
+          1,
+          1,
+          1
+        ],
+        "name": "2速1力1根1智1友"
+      },
+      {
+        "counts": [
+          2,
+          1,
+          0,
+          0,
+          2
+        ],
+        "name": "2速1耐2智1友"
+      }
+    ],
+    "shapes_note": "gen2_v1 四种原序 + 末尾 2速1耐2智1友",
+    "legality": {
+      "uma_vs_card": "按 chara_id 实际比对，同角色不可共存",
+      "card_vs_card": "同上，按角色查整副卡，与卡类型无关；303084 根杏目与 302424 速杏目均为角色 1129，不可同时出现",
+      "friend_card_included_in_check": true
+    }
+  },
+  "model": "saved_models/arms/ens_R67mix60k_g123.onnx",
+  "model_id": "ens_R67mix60k_g123",
+  "rollin": "nn",
+  "search_n": 1024,
+  "shard_size": 32,
+  "inherit": {
+    "blue_count": [
+      15,
+      0,
+      0,
+      0,
+      3
+    ],
+    "extra_count": [
+      10,
+      10,
+      20,
+      20,
+      20,
+      40
+    ],
+    "source": "umasim::sampler::gen1_inherit()，与 v5/v6/R2/R3/R4/R5 全部教师数据一致",
+    "note": "与 §15.11 客户端面板的 blue [15,0,3,0,0] / extra [0,20,20,40,40,40] 不同；教师采集沿用 gen1_inherit，不改"
+  },
+  "epsilon": 0.15,
+  "seed_base": 88241484357425,
+  "use_ucb": false,
+  "radical_factor_max": 1.4,
+  "target_valid": 8000,
+  "seconds": 10800,
+  "jobs": [
+    {
+      "name": "region_y3_s1",
+      "layer": "region_y3",
+      "shape": 0,
+      "target": 42,
+      "indices": "indices/region_y3_s1.json",
+      "count": 84,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,1000"
+    },
+    {
+      "name": "region_y3_s2",
+      "layer": "region_y3",
+      "shape": 1,
+      "target": 42,
+      "indices": "indices/region_y3_s2.json",
+      "count": 84,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,1000"
+    },
+    {
+      "name": "region_y3_s3",
+      "layer": "region_y3",
+      "shape": 2,
+      "target": 84,
+      "indices": "indices/region_y3_s3.json",
+      "count": 168,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,1000"
+    },
+    {
+      "name": "region_y3_s4",
+      "layer": "region_y3",
+      "shape": 3,
+      "target": 42,
+      "indices": "indices/region_y3_s4.json",
+      "count": 84,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,1000"
+    },
+    {
+      "name": "region_y3_s5",
+      "layer": "region_y3",
+      "shape": 4,
+      "target": 210,
+      "indices": "indices/region_y3_s5.json",
+      "count": 420,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,1000"
+    },
+    {
+      "name": "region_y2_s1",
+      "layer": "region_y2",
+      "shape": 0,
+      "target": 42,
+      "indices": "indices/region_y2_s1.json",
+      "count": 84,
+      "quota_y1": 0,
+      "quota_y2_y3": "1000,0"
+    },
+    {
+      "name": "region_y2_s2",
+      "layer": "region_y2",
+      "shape": 1,
+      "target": 42,
+      "indices": "indices/region_y2_s2.json",
+      "count": 84,
+      "quota_y1": 0,
+      "quota_y2_y3": "1000,0"
+    },
+    {
+      "name": "region_y2_s3",
+      "layer": "region_y2",
+      "shape": 2,
+      "target": 84,
+      "indices": "indices/region_y2_s3.json",
+      "count": 168,
+      "quota_y1": 0,
+      "quota_y2_y3": "1000,0"
+    },
+    {
+      "name": "region_y2_s4",
+      "layer": "region_y2",
+      "shape": 3,
+      "target": 42,
+      "indices": "indices/region_y2_s4.json",
+      "count": 84,
+      "quota_y1": 0,
+      "quota_y2_y3": "1000,0"
+    },
+    {
+      "name": "region_y2_s5",
+      "layer": "region_y2",
+      "shape": 4,
+      "target": 210,
+      "indices": "indices/region_y2_s5.json",
+      "count": 420,
+      "quota_y1": 0,
+      "quota_y2_y3": "1000,0"
+    },
+    {
+      "name": "region_y1_s1",
+      "layer": "region_y1",
+      "shape": 0,
+      "target": 14,
+      "indices": "indices/region_y1_s1.json",
+      "count": 28,
+      "quota_y1": 1000,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "region_y1_s2",
+      "layer": "region_y1",
+      "shape": 1,
+      "target": 14,
+      "indices": "indices/region_y1_s2.json",
+      "count": 28,
+      "quota_y1": 1000,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "region_y1_s3",
+      "layer": "region_y1",
+      "shape": 2,
+      "target": 28,
+      "indices": "indices/region_y1_s3.json",
+      "count": 56,
+      "quota_y1": 1000,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "region_y1_s4",
+      "layer": "region_y1",
+      "shape": 3,
+      "target": 14,
+      "indices": "indices/region_y1_s4.json",
+      "count": 28,
+      "quota_y1": 1000,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "region_y1_s5",
+      "layer": "region_y1",
+      "shape": 4,
+      "target": 70,
+      "indices": "indices/region_y1_s5.json",
+      "count": 140,
+      "quota_y1": 1000,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "general_s1",
+      "layer": "general",
+      "shape": 0,
+      "target": 702,
+      "indices": "indices/general_s1.json",
+      "count": 1404,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "general_s2",
+      "layer": "general",
+      "shape": 1,
+      "target": 702,
+      "indices": "indices/general_s2.json",
+      "count": 1404,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "general_s3",
+      "layer": "general",
+      "shape": 2,
+      "target": 1404,
+      "indices": "indices/general_s3.json",
+      "count": 2808,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "general_s4",
+      "layer": "general",
+      "shape": 3,
+      "target": 702,
+      "indices": "indices/general_s4.json",
+      "count": 1404,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0"
+    },
+    {
+      "name": "general_s5",
+      "layer": "general",
+      "shape": 4,
+      "target": 3510,
+      "indices": "indices/general_s5.json",
+      "count": 7020,
+      "quota_y1": 0,
+      "quota_y2_y3": "0,0"
+    }
+  ],
+  "index_reservation": [
+    3420000000,
+    3440000000
+  ],
+  "holdout_count": 62,
+  "spare_policy": "每层构成双倍候选清单；达到有效目标即停，备用耗尽则失败，不改配方"
+}

@@ -353,7 +353,10 @@ struct ManifestSpaceIdentity {
     /// 该版本的构成清单，按枚举顺序
     pub shapes: Vec<ManifestShape>,
     /// 枚举出的 (马娘, 卡组) 组合总数
-    pub plan_count: usize
+    pub plan_count: usize,
+    /// 每个计划都必须包含的支援卡；空时不写进 manifest，旧目录的清单因此逐字段不变
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub required: Vec<u32>
 }
 
 /// 一次采集的分项墙钟，单位毫秒
@@ -599,7 +602,8 @@ fn build_space(args: &CollectArgs) -> Result<(SamplingSpace, SpaceIdentity)> {
                 name: sh.name.to_string()
             })
             .collect(),
-        plan_count: space.len()
+        plan_count: space.len(),
+        required: version.required.to_vec()
     };
     Ok((space, SpaceIdentity::Explicit { identity }))
 }

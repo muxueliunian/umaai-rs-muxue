@@ -1,0 +1,62 @@
+{
+  "recipe_id": "gen3_userdeck_v1",
+  "purpose": "R8 实战配置定额：目白善信 + 用户实战卡组原样（待兼诗歌剧/千明代表/名将怒涛/青春永驻/优秀素质/骏川手纲），恰好 1 个计划",
+  "status": "frozen",
+  "space": {
+    "version": "gen3_userdeck_v1",
+    "identity_mode": "explicit_fields_no_hash",
+    "plan_count": 1,
+    "umas": [
+      106402
+    ],
+    "umas_note": "目白善信[赤心的驯鹿小姐]",
+    "cards": [
+      303174,
+      303124,
+      303044,
+      302894,
+      303064,
+      303054
+    ],
+    "cards_note": "卡池即实战卡组 6 张，恰好只组出这一副",
+    "friend_card": 303054,
+    "shapes": [
+      {
+        "counts": [
+          2,
+          1,
+          0,
+          0,
+          2
+        ],
+        "name": "2速1耐2智1友"
+      }
+    ],
+    "legality": {
+      "uma_vs_card": "按 chara_id 实际比对，同角色不可共存",
+      "card_vs_card": "同上，按角色查整副卡，与卡类型无关；303084 根杏目与 302424 速杏目均为角色 1129，不可同时出现",
+      "friend_card_included_in_check": true
+    }
+  },
+  "inherit": {
+    "blue_count": [
+      15,
+      0,
+      0,
+      0,
+      3
+    ],
+    "extra_count": [
+      10,
+      10,
+      20,
+      20,
+      20,
+      40
+    ],
+    "source": "umasim::sampler::gen1_inherit()，与 v5/v6/R2/R3/R4/R5 全部教师数据一致",
+    "note": "与 §15.11 客户端面板的 blue [15,0,3,0,0] / extra [0,20,20,40,40,40] 不同；教师采集沿用 gen1_inherit，不改"
+  },
+  "holdout_rule": "every_tenth_all",
+  "holdout_note": "只有 1 个计划且要进训练：每十取一规则下不产生留出。该配置的验收只能称「同配置新世界泛化」，不是未见组合泛化"
+}

@@ -711,7 +711,7 @@ fn run(args: &ExportArgs) -> Result<()> {
         ),
         (ExpectedSpace::Explicit { version }, _, Some(recorded)) => {
             let definition = space_version_by_name(version)?;
-            let expected = json!({
+            let mut expected = json!({
                 "version": definition.name,
                 "umas": definition.umas.iter().map(|u| u.game_id).collect::<Vec<_>>(),
                 "cards": definition.cards.iter().map(|c| c.idrank).collect::<Vec<_>>(),
@@ -720,6 +720,10 @@ fn run(args: &ExportArgs) -> Result<()> {
                 })).collect::<Vec<_>>(),
                 "plan_count": plan_count
             });
+            // 与采集器同口径：必带卡为空时不写该字段，旧目录的比对逐字段不变
+            if !definition.required.is_empty() {
+                expected["required"] = json!(definition.required);
+            }
             ensure!(recorded == &expected, "源空间完整字段与当前枚举定义不同");
             format!("显式版本 {version}")
         }

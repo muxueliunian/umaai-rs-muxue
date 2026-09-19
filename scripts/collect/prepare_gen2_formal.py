@@ -61,6 +61,9 @@ def enumerate_plans(recipe):
                 charas = [uma // 100] + [db[str(c // 10)]["charaId"] for c in deck]
                 if len(set(charas)) != 7:
                     continue
+                # 必带卡：保序过滤，与 Rust `SamplingSpace::from_version` 同口径
+                if not all(c in deck for c in space.get("required", [])):
+                    continue
                 plans.append(dict(plan=len(plans), uma=uma, deck=deck, shape=shape_id,
                                   fields=[uma] + sorted(deck)))
     return plans
@@ -68,6 +71,7 @@ def enumerate_plans(recipe):
 
 def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, search_n, layer_targets,
             index_start, index_end, seconds):
+    """`layer_targets` 是「构成 × 层」的有效根矩阵：`layer_targets[shape][layer]`，层序同 `LAYER_SPEC`。"""
     """冻结计划、留出组合、分层配额及独立世界；只允许写全新目录。
 
     除 `dump_path` / `output` 外的参数全部来自命令行，**没有隐含默认**：
@@ -78,6 +82,8 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
         raise FileExistsError(output)
     recipe = json.loads(recipe_path.read_text(encoding="utf-8"))
     shape_count = len(recipe["space"]["shapes"])
+    if len(layer_targets) != shape_count:
+        raise ValueError(f"配额矩阵有 {len(layer_targets)} 行，本空间有 {shape_count} 种构成")
     plans = enumerate_plans(recipe)
     dumped = []
     for line in dump_path.read_text(encoding="utf-8-sig").splitlines():
@@ -93,15 +99,23 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
     rule = recipe.get("holdout_rule", "unseen_new_cards")
     if rule not in ("unseen_new_cards", "every_tenth_all"):
         raise ValueError(f"未知留出规则 {rule}")
+    # 另一个空间定额采集的计划（如用户实战卡组）：本空间既不抽它也不留出它，
+    # 否则要么重复计数，要么把本该进训练的组合留成验收。
+    elsewhere = [list(f) for f in recipe.get("sampled_elsewhere_fields", [])]
+    elsewhere_ids = {p["plan"] for p in plans if p["fields"] in elsewhere}
+    if len(elsewhere_ids) != len(elsewhere):
+        raise ValueError(f"sampled_elsewhere_fields 有 {len(elsewhere)} 条，只在本空间找到 {len(elsewhere_ids)} 条")
     held = []
     for uma in recipe["space"]["umas"]:
         for shape in range(shape_count):
             unseen = sorted([p for p in plans if p["uma"] == uma and p["shape"] == shape
+                             and p["plan"] not in elsewhere_ids
                              and (rule == "every_tenth_all" or uma == 114101
                                   or any(c in p["deck"] for c in (303124, 303114)))],
                             key=lambda p: p["fields"])
             held.extend(unseen[9::10])
     held_ids = {p["plan"] for p in held}
+    excluded_ids = held_ids | elsewhere_ids
 
     # 全区间独占；实际 index 不连续，index % 4288 严格定位原空间计划。
     reserved_start, reserved_end = index_start, index_end
@@ -117,7 +131,7 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
     # index = cycle×4288 + plan，而 cycle 每消耗一个候选序号就加一，故号段**跨度**由
     # 候选序号总数决定，与有效根目标不是一回事。放在这里提前算，免得循环跑到最后
     # 才撞上「index 越过独占号段」那条笼统的报错。
-    attempts_total = 2 * sum(layer_targets) * len(recipe["space"]["shapes"])
+    attempts_total = 2 * sum(sum(row) for row in layer_targets)
     if (cycle + attempts_total) * len(plans) >= reserved_end:
         need = (cycle + attempts_total + 1) * len(plans)
         raise ValueError(
@@ -125,13 +139,13 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
             f"越过 --index-end {reserved_end}；请把 --index-end 放宽到 {need} 以上")
     jobs = []
     all_indices = []
-    layers = [(name, target, y1, y23) for (name, y1, y23), target
-              in zip(LAYER_SPEC, layer_targets)]
-    layers.sort(key=lambda entry: EMIT_ORDER.index(entry[0]))
-    for layer, target, y1, y23 in layers:
+    layers = [(k, name, y1, y23) for k, (name, y1, y23) in enumerate(LAYER_SPEC)]
+    layers.sort(key=lambda entry: EMIT_ORDER.index(entry[1]))
+    for k, layer, y1, y23 in layers:
         for shape in range(shape_count):
+            target = layer_targets[shape][k]
             pools = [[p for p in plans if p["shape"] == shape and p["uma"] == uma
-                      and p["plan"] not in held_ids] for uma in recipe["space"]["umas"]]
+                      and p["plan"] not in excluded_ids] for uma in recipe["space"]["umas"]]
             pools = [sorted(pool, key=lambda p: p["fields"]) for pool in pools if pool]
             # 同一马娘内等距走遍卡组，马娘间轮转；跨年份轮换起点。
             counts = [0] * len(pools)
@@ -158,6 +172,8 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
         raise ValueError("index 重复或越过独占号段")
     if any(i % len(plans) in held_ids for i in all_indices):
         raise ValueError("正式清单含留出组合")
+    if any(i % len(plans) in elsewhere_ids for i in all_indices):
+        raise ValueError("正式清单含另一空间定额采集的计划")
     write_json(output / "plans.json", plans)
     if rule == "every_tenth_all":
         holdout_text = dict(method="uma×shape 内完整字段排序，每十个取第十个；空间内全部计划参与",
@@ -193,16 +209,27 @@ if __name__ == "__main__":
     parser.add_argument("--model", required=True, help="roll-in 模型路径（相对工作区根）")
     parser.add_argument("--model-id", required=True, help="roll-in 模型显式版本名，进 manifest 与 rollin 身份")
     parser.add_argument("--search-n", type=int, required=True, help="每候选 rollout 数")
-    parser.add_argument("--layer-targets", required=True,
+    parser.add_argument("--layer-targets",
                         help="四层**每个构成**的有效根目标，逗号分隔，顺序固定为 "
-                             "general,region_y1,region_y2,region_y3（0914 那轮是 5000,100,300,300）")
+                             "general,region_y1,region_y2,region_y3（0914 那轮是 5000,100,300,300）；"
+                             "所有构成同一配额时用，与 --shape-layer-targets 二选一")
+    parser.add_argument("--shape-layer-targets",
+                        help="按构成分别给四层配额：每个构成一组 general,region_y1,region_y2,region_y3，"
+                             "构成之间用分号分隔，顺序同配方 shapes；与 --layer-targets 二选一")
     parser.add_argument("--index-start", type=int, required=True)
     parser.add_argument("--index-end", type=int, required=True)
     parser.add_argument("--seconds", type=int, required=True, help="采集总截止秒数（0914 是 43200 = 12h）")
     args = parser.parse_args()
-    targets = [int(v) for v in args.layer_targets.split(",")]
-    if len(targets) != len(LAYER_SPEC) or any(t <= 0 for t in targets):
-        raise ValueError(f"--layer-targets 需要 {len(LAYER_SPEC)} 个正整数，顺序 "
+    if (args.layer_targets is None) == (args.shape_layer_targets is None):
+        raise ValueError("--layer-targets 与 --shape-layer-targets 必须恰好给一个")
+    shape_count = len(json.loads(args.recipe.read_text(encoding="utf-8"))["space"]["shapes"])
+    if args.layer_targets is not None:
+        rows = [args.layer_targets] * shape_count
+    else:
+        rows = args.shape_layer_targets.split(";")
+    targets = [[int(v) for v in row.split(",")] for row in rows]
+    if any(len(row) != len(LAYER_SPEC) or any(t <= 0 for t in row) for row in targets):
+        raise ValueError(f"每个构成需要 {len(LAYER_SPEC)} 个正整数，顺序 "
                          f"{','.join(name for name, _, _ in LAYER_SPEC)}")
     if args.search_n <= 0 or args.index_start >= args.index_end or args.seconds <= 0:
         raise ValueError("--search-n / --seconds 必须为正，且 --index-start < --index-end")
