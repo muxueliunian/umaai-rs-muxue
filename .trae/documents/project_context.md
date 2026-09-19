@@ -39,6 +39,7 @@
   - `trainer_overhead_diagnostic` / `mcts_rollout_switch_verify` / `calc_training_value_microbench`（`tools/data_collection/`）：诊断与微基准
   - `composition_profile_matrix` / `minimal_strategy_ab`：实验用（前者已退役，仅打印结论）
 - `ramen_mcts_pair_bench`：**MCTS 训练员 vs 手写逻辑整局配对基准**（同 (build, 种子, 局号) 下两策略各跑整局、共享规则主种子，配对差 Δ = 评分_mcts − 评分_handwritten，逐局 CSV + 均值/SE/95%CI 汇总；MCTS 参数默认取生产实际值，见「MCTS vs 手写评估」节）
+- `ramen_region_topk`：**region 决策点 top-K 候选 dump**（手写策略推进到 turn 2/23/47 RegionSelect 决策点后跑一次 FlatSearch，输出 top-K 候选的 mean/stdev/count/weighted_mean/was_chosen CSV + top1-top2 Δmean 与 stdev 中位数 + mean vs radical 排序差异汇总；用于研究 region 门控下 top 选项的均值差与方差分布，见「region 决策点分析」节）
 
 ### umaai（通道层，`crates/umaai`）
 - **职责**：监听 `thisTurn.json` → 按 `scenarioId` 分发重建游戏 → AI 决策 → sink 输出（屏幕 / stdout JSON）
@@ -165,6 +166,25 @@ cargo run --release --bin ramen_mcts_pair_bench -- --help   # 全部参数
 - **耗时注意**：生产档 MCTS 整局约 3.4 分钟/局（region 门控第 2/3 年 120 候选占大头），扫测先用 `--runs 1` 探时间；手写侧整局 ≈ 1.3ms。
 - **与 bench_base 的差异**：bench_base 各策略独立跑批不配对；本基准强制同种子配对，消除随机世界漂移，差值可归因于策略选择。
 - 冒烟测试（bin 内 `#[cfg(test)]`，小预算不读 game_config）：配对守卫 / 同参两次逐位可复现 / CSV 结构。
+
+## region 决策点分析（ramen_region_topk）
+
+研究 region 门控纳入搜索后，**top-K 候选的均值差与方差分布**的工具（不跑整局）：
+
+```bash
+cargo run --release --bin ramen_region_topk -- \
+    --turns 2,23,47 --builds speed,wisdom --seeds 61444,42,7 \
+    --out logs/region_topk.csv
+cargo run --release --bin ramen_region_topk -- --help   # 全部参数
+```
+
+- **推进 + 搜索**：手写策略（`RecommendedRamenTrainer`，与 MCTS rollout 基策同源）从固定种子推进到指定回合的 **RegionSelect** 决策点（turn 2/23/47 是三年地区选择回合），然后 `FlatSearch::search` 一次拿 SearchOutput。
+- **CSV 列**：`seed, run, build, turn, year, candidates_total, searched_total, rank, original_idx, description, count, mean, stdev, weighted_mean, was_chosen`——每行 = 一个 region 点的 top-K 候选。
+- **汇总打印**：按 (turn, build) 分组的 `top1.top2 Δmean` 中位数 / `top1.stdev` 与 `top2.stdev` 中位数 / mean 排序 vs radical 加权排序的内部 swap 数。
+- **MCTS 参数默认 = 生产实际值**：与 `ramen_mcts_pair_bench` 同款取法；`--search-n` 覆盖仅限对照实验。
+- **耗时**：turn=2（10 候选）单点 <2s；turn=23/47（120 候选 × search_n=8192）单点 15-20s。63 region 点（3 turn × 7 build × 3 seed）约 6 分钟。
+- **首轮扫测结论（63 region 点）**：top1-top2 Δmean 中位数 16-374 分（占 top1 mean 的 ≤0.6%）；top1 vs top2 stdev 差异中位数 ±5% 且正负不定（**top-K 方差无系统差异**）；21 个 (turn, build) 组合中 5 个出现 mean 排序 vs radical 加权排序的内部 swap（多在第 3 年 power_wisdom/wisdom/speed_wisdom/sta0_wis2），但 top1 与 chosen 通常一致，差异集中在 top2-top3 位置。
+- 冒烟测试（bin 内）：推进到 RegionSelect 阶段 + dump top-K + CSV 结构。
 
 ## 测试
 

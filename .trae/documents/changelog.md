@@ -8,6 +8,7 @@
 - **生产训练员门控含 region**：`gamedata/default_config.toml` 的 `ramen_search_stages` 由 `train,ramen` 改为 `train,ramen,region`——第 1 年地区（turn 2）和第 2/3 年地区（turn 23/47）纳入搜索，与 online 路径同款
 - **`bench_commit_compare.py` 加 `--force-bench / --bench-runs`**：两版都有 perf_probe 时也可强制走 bench 模式（手写整局遍历全部 player_builds、同 seed 配对、同时输出耗时与评分配对），bench 默认局数 100；补充 example 命令
 - **AGENTS.md 工作纪律微调**：精简对话规则段、删除独立的「需求澄清」条目（融入「项目特定上下文」）；明确 commit 前必读 git log + project_context + changelog 的项目启动纪律；文档清单与更新纪律同步精简
+- **region 决策点 top-K 候选 dump 工具**：新增 `ramen_region_topk` bin——手写策略推进到 region 决策点（turn 2/23/47）后跑 FlatSearch，输出 top-K 候选的 (mean, stdev, count, weighted_mean, was_chosen) CSV + top1-top2 mean gap / stdev 中位数 / mean vs radical 排序差异汇总；MCTS 参数默认取生产实际值，bin 内冒烟测试（推进到 RegionSelect + dump 结构）——用途：研究 region 门控纳入搜索后 top 选项的均值差与方差分布；首轮扫测 3 turn × 7 build × 3 seed = 63 region 点：top1-top2 Δmean 中位数 ≤ 0.6%，top1 vs top2 stdev 差 ±5% 且正负不定（**top-K 候选方差无系统差异**），radical 加权排序 vs mean 排序在 21 个 (turn, build) 组合中有 5 个出现内部 swap（多在第 3 年 power_wisdom/wisdom/speed_wisdom 等 build）
 
 ## 2026-09-17
 - **拉面杯逐卡 Hint 精确估值（可选）**：把固定 Hint 价值换成按卡面 Hint 等级与剩余可得的逐人头精确折算，默认关闭；一批全新 160 副随机卡组独立验收随机组 +174.0 [+153.0,+195.0]、预设 +77.7、固定卡组 −121.0 未证实，定位与 supermode3 同为“随机卡组可选”，关闭路径逐位不变。

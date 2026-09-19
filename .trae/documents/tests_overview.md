@@ -648,6 +648,19 @@ cargo run --release --bin ramen_mcts_pair_bench -- --seeds 61444,42,7 --runs 3 -
 - 生产档耗时约 3.4 分钟/局（region 门控 120 候选占大头），扫测先用 `--runs 1` 探时间
 - bin 内冒烟测试（`cargo test --release -p umasim --bin ramen_mcts_pair_bench`，小预算）：配对守卫（两局 rule_seed 一致）/ 同参两次逐位可复现 / CSV 结构
 
+### `bin/ramen_region_topk.rs`
+
+region 决策点 top-K 候选 dump（**不跑整局**）：手写策略推进到 turn 2/23/47 的 RegionSelect 决策点 → 跑一次 FlatSearch → 输出 top-K 候选的 (mean, stdev, count, weighted_mean, was_chosen) CSV + top1-top2 Δmean 与 stdev 中位数 + mean vs radical 排序差异汇总。
+
+```bash
+cargo run --release --bin ramen_region_topk -- --turns 2,23,47 --builds speed,wisdom --seeds 61444,42,7 --out logs/region_topk.csv
+```
+
+- 用于研究 region 门控下 top 选项的均值差与方差分布
+- turn=2（10 候选）单点 <2s；turn=23/47（120 候选 × search_n=8192）单点 15-20s
+- MCTS 参数默认取生产实际值；`--search-n` 覆盖仅限对照
+- bin 内冒烟测试（`cargo test --release -p umasim --bin ramen_region_topk`，小预算）：推进到 RegionSelect 阶段 + dump top-K 非空 / CSV 结构
+
 ## 附注
 
 - **ignored 测试（5 个）**：`bench_sample_bucket_vs_weighted_index`（game/traits，分桶 microbench）、`test_crn_pairing_gain` / `test_crn_pairing_gain_ramen`（CRN 收益测量，耗时）、`microbench_top_fns`（微基准）、`test_terminal_breakdown_demo`（整局诊断演示）——均按需手动运行

@@ -75,6 +75,10 @@ required-features = ["cli", "onnx"]
 name = "ramen_mcts_pair_bench"
 path = "src/bin/ramen_mcts_pair_bench.rs"
 
+[[bin]]
+name = "ramen_region_topk"
+path = "src/bin/ramen_region_topk.rs"
+
 [features]
 default = ["cli", "diag"]
 diag = []
