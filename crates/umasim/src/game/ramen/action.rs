@@ -903,7 +903,15 @@ impl RamenAction {
 
             // 友人出行后获得隐藏风味（新友人固定2个）
             let special = 2;
-            game.ramen.special_feeling = (game.ramen.special_feeling + special).min(4);
+            let before = game.ramen.special_feeling;
+            game.ramen.special_feeling = (before + special).min(4);
+            // 观测：逐年友人出行次数与溢出浪费（纯采集，不影响逻辑）
+            if let Some(slot) = game.ramen.yearly_friend_outings.get_mut(game.ramen.obs_year) {
+                *slot += 1;
+            }
+            if let Some(slot) = game.ramen.yearly_friend_flavor_waste.get_mut(game.ramen.obs_year) {
+                *slot += (before + special - 4).max(0);
+            }
             diag!(">> 隐藏风味 +{} (={})", special, game.ramen.special_feeling);
             Ok(())
         } else {

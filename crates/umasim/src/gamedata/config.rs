@@ -630,6 +630,20 @@ pub struct GameConfig {
     /// `meta.json`（详见 `umaai::decision::record` 与 issues.md 对应规划条目）。
     #[serde(default = "default_luck_record")]
     pub luck_record: bool,
+    /// 拉面杯：友人出行是否必须走完 5 次（默认开）。
+    ///
+    /// 开时手写策略（及以手写为基策的 MCTS）对友人出行施加**完成硬门限**：
+    /// 剩余出行次数达到"剩余可出行回合数"时就强制出行（不再受隐藏风味闸门约束），
+    /// 保证 5 次走完。关时回到纯动态估值口径（可能主动跳过第 5 次）。
+    ///
+    /// 依据：第三年可出行回合被必赛/夏合宿压缩，纯估值口径下第 5 次约有
+    /// 8%~20% 的对局走不完（赛程越差越明显）；硬门限的代价见 experiments 记录。
+    #[serde(default = "default_friend_complete")]
+    pub friend_complete_required: bool,
+}
+
+fn default_friend_complete() -> bool {
+    true
 }
 
 fn default_luck_record() -> bool {
@@ -686,7 +700,8 @@ impl GameConfig {
             race_grades: default_race_grades(),
             ramen_region_strategy: RamenRegionStrategy::default(),
             ramen_region_fixed: None,
-            luck_record: default_luck_record()
+            luck_record: default_luck_record(),
+            friend_complete_required: default_friend_complete()
         }
     }
 
@@ -973,7 +988,10 @@ pub struct OverrideConfig {
     pub race_grades: Option<Vec<i32>>,
     /// 在线决策记录开关（可选覆盖；默认开）
     #[serde(default)]
-    pub luck_record: Option<bool>
+    pub luck_record: Option<bool>,
+    /// 友人出行是否必须走完 5 次（可选覆盖；默认开）
+    #[serde(default)]
+    pub friend_complete_required: Option<bool>
 }
 
 impl OverrideGameConfig {
@@ -1014,6 +1032,9 @@ impl OverrideGameConfig {
         }
         if let Some(v) = o.race_grades {
             ret.race_grades = v;
+        }
+        if let Some(v) = o.friend_complete_required {
+            ret.friend_complete_required = v;
         }
         if let Some(v) = o.luck_record {
             ret.luck_record = v;
@@ -1098,7 +1119,8 @@ mod tests {
             mcts_turn_bonus: None,
             pt_favor_rate: None,
             race_grades: None,
-            luck_record: None
+            luck_record: None,
+            friend_complete_required: None
         }
     }
 

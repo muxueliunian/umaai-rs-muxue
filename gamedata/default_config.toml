@@ -78,6 +78,15 @@ log_level = "info"
 # （开关在 game_config.toml 的 [config_override] 段可覆盖为 false）
 luck_record = true
 
+# ---------- 拉面杯：友人出行完成要求（仅 umaai 实时运行读取；离线 sim/bench 不读） ----------
+# 是否要求 5 次友人出行**必须走完**（默认开）。
+# 开：手写策略（及以手写为基策的 MCTS）施加完成硬门限——剩余出行次数达到
+#     "剩余可出行回合数"时强制出行（不再受隐藏风味闸门约束），保证 5 次走完。
+#     代价：末盘会挤掉部分训练回合，赛程越差（第三年必赛多）代价越高。
+# 关：回到纯动态估值口径，允许主动跳过价值不足的第 5 次。
+# 开关在 game_config.toml 的 [config_override] 段可覆盖为 false。
+friend_complete_required = true
+
 
 [mcts]
 # 每个动作搜索次数（默认 12288；计算太慢可选 8192/4096）

@@ -2,6 +2,11 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-21
+- **友人出行跨年配额定档 `[0,3,5]` + 新增「5 次必须走完」配置项**：preset 由 `[0,2,5]` 改为 `[0,3,5]`（第 1 年不启用、第 2 年放宽到 3 以消化提前的休息替代、第 3 年补满）；新增 `friend_complete_required`（`game_config.toml` / `gamedata/default_config.toml`，默认开）＝完成硬门限，开启时隐藏风味闸门不再阻断出行、剩余次数达到剩余可出行回合数即强制出行，保证 5 次走完；该开关经 `main.rs` 同时作用于 MCTS 的 fallback 手写策略与搜索 rollout 基策，`bench_base` 同口径读取。实测（700 局/单元同种子配对）：走完率 77%/92%→99.6%/100%，相对旧 `[0,2,5]` 配对差 −114/−86（不显著），硬门限项自身净代价 −159/−35
+- **新增友人出行实验 token 与观测列**：token `fcap`（跨年配额）/`fov3`（第三年风味闸门）/`furg3`+`frem3`（第三年强制补足）/`freq`·`freqoff`（完成硬门限）；决策日志给友人出行加「决策路径（恢复/常规）+ 次优动作与分数差」标注，用于区分"替换休息"与"替换训练"；结果 CSV 新增逐年友人出行次数、用满标记、隐藏风味溢出浪费等观测列
+- **重抓 preset 变更影响的整局快照**：`test_yearly_observability`（score/五维）、`test_ramen_three_stage_action_unchanged`（rollout 均值表）、MCTS gate-off 整局快照与 SpecialSelect 调用数、两处超级拉面选项断言；跨年配额单测改为钉 `[0,3,5]`
+
 ## 2026-09-19
 - **MCTS vs 手写整局配对基准（固化评估入口）**：新增 `ramen_mcts_pair_bench` bin——同 (build, 种子, 局号) 下 MCTS 训练员与正式推荐手写策略各跑整局（共享规则主种子强行配对，两局 `rule_seed` 不一致即报错），配对差 Δ = 评分_mcts − 评分_handwritten 逐局落 CSV + 按 build/全局的均值、SE、95% CI、胜负汇总；MCTS 参数默认**取生产实际值**（game_config `[mcts]` + `ramen_search_stages`，与在线构造同款），`--search-n` 等覆盖仅限对照实验；bin 内冒烟测试（配对守卫 / 同参两次逐位可复现 / CSV 结构），project_context / tests_overview 同步
 - **experiments/validated_policy 迁至 scripts/validated_policy**：`scripts/` 是官方脚本区，挪过来与 `plot_*.py`、`bench_commit_compare.py` 同级；内容不变

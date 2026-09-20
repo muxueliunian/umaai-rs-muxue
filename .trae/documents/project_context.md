@@ -60,6 +60,7 @@
 - `export_support_card/`：支援卡数据导出
 - 绘图与扫参：`plot_luck_trend.py`（运气分趋势图，与 `plot/` Rust 版样式对齐）、`plot_ptfavor_scan.py` / `summarize_ptfavor_scan.py`（pt_favor_rate 扫参汇总）
 - `deck_crn_compare.py`：卡组 CRN 对比
+- `friend_pacing_compare.py`：友人出行配额（`fcap` 等 token）配对对比——同 build 同 seed 配对差 + 走完率 / 逐年出行次数 / 风味浪费等结构指标
 - `bench_commit_compare.py`：跨 commit CPU 耗时对比编排（配合 `perf_probe` bin，见下「性能监测」节）
 - `ramen_nn/`：NN 管线脚本
 
@@ -91,6 +92,12 @@
 ### 在线记录开关（`luck_record`）
 - `luck_record = true`（默认）：umaai 实时运行按局落盘 `logs/game{id}/`（`id` = `single_mode_chara_id`）
 - `game_config.toml [config_override]` 可覆盖为 `false`；离线 sim/bench/重放工具不读该开关
+
+### 拉面杯友人出行完成要求（`friend_complete_required`）
+- `friend_complete_required = true`（默认）：5 次友人出行**必须走完**。手写策略施加完成硬门限——隐藏风味闸门不再阻断出行、"剩余出行次数 ≥ 剩余可出行回合数"时强制出行（可出行回合＝本人赛程排除必赛、夏合宿 60-63、超级拉面 72-77）
+- `game_config.toml [config_override]` 可覆盖为 `false`（回到纯动态估值口径，允许主动跳过价值不足的第 5 次）
+- 该开关经 `main.rs` 传给 `RamenMctsTrainer::with_friend_complete_required`，同时作用于 fallback 手写策略与搜索 rollout 基策（`FlatSearch::with_rollout_trainer`）；`bench_base` 也读该配置（token 里写 `freq` / `freqoff` 时以 token 为准）
+- 跨年配额 preset 为 `[0,3,5]`（`friend_outing_cumulative_caps`：第 1 年不启用 / 第 2 年 3 / 第 3 年补满），实验 token `fcap` 可复现其它档位；成因与代价见 issues.md 对应条目
 
 ## 开发环境
 

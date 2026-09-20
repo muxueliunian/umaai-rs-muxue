@@ -74,6 +74,10 @@ pub struct GameOutcome {
     pub yearly_selected_regions: [[usize; 3]; 3],
     /// 逐年观测：友情训练回合数（下标 0/1/2 = 第 1/2/3 年）。纯观测采集。
     pub yearly_friend_turns: [i32; 3],
+    /// 逐年观测：友人出行次数（下标 0/1/2 = 第 1/2/3 年）。纯观测采集。
+    pub yearly_friend_outings: [i32; 3],
+    /// 逐年观测：友人出行浪费的隐藏风味数（出行 +2、上限 4）。纯观测采集。
+    pub yearly_friend_flavor_waste: [i32; 3],
     /// 逐年观测：诀窍获得数（槽满清零 +1 的次数）。纯观测采集。
     pub yearly_gauge_gain: [i32; 3],
     /// 逐年观测：诀窍溢出数（库存超上限被丢弃）。纯观测采集。
@@ -108,6 +112,8 @@ pub fn run_seeded<T: Trainer<RamenGame>>(
         yearly_eat_count: game.ramen.yearly_eat_count,
         yearly_selected_regions: game.ramen.yearly_selected_regions,
         yearly_friend_turns: game.ramen.yearly_friend_turns,
+        yearly_friend_outings: game.ramen.yearly_friend_outings,
+        yearly_friend_flavor_waste: game.ramen.yearly_friend_flavor_waste,
         yearly_gauge_gain: game.ramen.yearly_gauge_gain,
         yearly_gauge_overflow: game.ramen.yearly_gauge_overflow,
         friend_all: game.friend.out_used.iter().all(|used| *used),
@@ -143,7 +149,7 @@ pub fn parse_region_cell(cell: &str) -> Result<[usize; 3]> {
 }
 
 /// results.csv 表头。只留逐年列，不留三年合计；合计由使用方自己加。
-pub const RESULTS_HEADER: [&str; 31] = [
+pub const RESULTS_HEADER: [&str; 38] = [
     "build",
     "seed",
     "score",
@@ -168,6 +174,13 @@ pub const RESULTS_HEADER: [&str; 31] = [
     "friend_turns_y1",
     "friend_turns_y2",
     "friend_turns_y3",
+    "friend_out_y1",
+    "friend_out_y2",
+    "friend_out_y3",
+    "friend_out_all",
+    "friend_waste_y1",
+    "friend_waste_y2",
+    "friend_waste_y3",
     "gauge_gain_y1",
     "gauge_gain_y2",
     "gauge_gain_y3",
@@ -204,6 +217,13 @@ pub fn outcome_to_row(build: &str, outcome: &GameOutcome) -> Vec<String> {
         outcome.yearly_friend_turns[0].to_string(),
         outcome.yearly_friend_turns[1].to_string(),
         outcome.yearly_friend_turns[2].to_string(),
+        outcome.yearly_friend_outings[0].to_string(),
+        outcome.yearly_friend_outings[1].to_string(),
+        outcome.yearly_friend_outings[2].to_string(),
+        u8::from(outcome.friend_all).to_string(),
+        outcome.yearly_friend_flavor_waste[0].to_string(),
+        outcome.yearly_friend_flavor_waste[1].to_string(),
+        outcome.yearly_friend_flavor_waste[2].to_string(),
         outcome.yearly_gauge_gain[0].to_string(),
         outcome.yearly_gauge_gain[1].to_string(),
         outcome.yearly_gauge_gain[2].to_string(),
@@ -757,8 +777,10 @@ average = [1, 0, 1, 1, 2]
     // 2026-09-18 三次重抓：第十二轮配对验收的组合档进入 preset（ptblend 8/capd 0/
     // hintlv 600/trd 44.25/trds 34.5/trdsh 25/gap 4.98/overflow 3.04/reserve 157/
     // rgn 1/supermode 3/out 0），同种子 70138→69219。
-    const BASELINE_SCORE: i32 = 69219;
-    const BASELINE_FIVE: [i32; 5] = [3337, 2313, 2200, 1177, 1348];
+    // 2026-09-21 四次重抓：友人出行跨年配额定档 [0,3,5]（替换 [0,2,5]），
+    // 同种子 69219→69232（单局快照会随后续 preset 改动整体重抓）。
+    const BASELINE_SCORE: i32 = 69232;
+    const BASELINE_FIVE: [i32; 5] = [3337, 2431, 2200, 1163, 1184];
 
     /// 把三个地区 id 格式化成与决策日志 `action_desc` 相同的 `地区[a,b,c]`。
     fn region_desc(regions: [usize; 3]) -> String {

@@ -158,6 +158,11 @@ impl Default for BenchConfig {
 
 /// 解析 CLI 参数（`--key value` 或 `--key=value`），覆盖 bench 配置
 fn apply_cli(mut cfg: BenchConfig) -> Result<BenchConfig> {
+    // 可选覆盖：`BENCH_UMA` 环境变量指定马娘 ID（多马娘扫批免去反复改
+    // bench_config.toml；缺省不生效，与 mcts_profiler 的 `MCTS_PROFILER_*` 同类入口）
+    if let Ok(uma) = std::env::var("BENCH_UMA") {
+        cfg.uma = uma.parse().context("BENCH_UMA 解析失败")?;
+    }
     let mut parser = lexopt::Parser::from_env();
     while let Some(arg) = parser.next()? {
         match arg {
@@ -366,9 +371,23 @@ fn main() -> Result<()> {
                             log_seed
                         )
                     } else if cfg.tokens.is_empty() {
-                        LoggingTrainer::new(RecommendedRamenTrainer::new(), log_seed)
+                        // 与生产同口径：`friend_complete_required` 决定是否对友人出行
+                        // 施加"5 次必须走完"的完成硬门限（token 里可用 freq/freqoff 覆盖）。
+                        LoggingTrainer::new(
+                            RecommendedRamenTrainer::new()
+                                .with_friend_complete_required(game_config.friend_complete_required),
+                            log_seed
+                        )
                     } else {
-                        LoggingTrainer::new(RecommendedRamenTrainer::with_tokens(&cfg.tokens)?, log_seed)
+                        // token 里显式给了 freq/freqoff 就尊重 token（供对照实验），
+                        // 否则与生产同口径取 game_config。
+                        let tok = RecommendedRamenTrainer::with_tokens(&cfg.tokens)?;
+                        let tok = if cfg.tokens.contains("freq") {
+                            tok
+                        } else {
+                            tok.with_friend_complete_required(game_config.friend_complete_required)
+                        };
+                        LoggingTrainer::new(tok, log_seed)
                     };
                     let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())

@@ -198,6 +198,8 @@ fn main() -> Result<()> {
         yearly_eat_count: game.ramen.yearly_eat_count,
         yearly_selected_regions: game.ramen.yearly_selected_regions,
         yearly_friend_turns: game.ramen.yearly_friend_turns,
+        yearly_friend_outings: game.ramen.yearly_friend_outings,
+        yearly_friend_flavor_waste: game.ramen.yearly_friend_flavor_waste,
         yearly_gauge_gain: game.ramen.yearly_gauge_gain,
         yearly_gauge_overflow: game.ramen.yearly_gauge_overflow,
         friend_all: game.friend.out_used.iter().all(|used| *used),

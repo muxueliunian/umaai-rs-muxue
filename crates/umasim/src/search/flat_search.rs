@@ -199,6 +199,15 @@ where
         self
     }
 
+    /// 替换 rollout 基策（默认 `G::default_rollout_trainer()`）。
+    ///
+    /// 用于把生产配置（如友出行完成硬门限）同步到搜索 rollout，保证搜索评估的
+    /// 未来与正式策略一致。
+    pub fn with_rollout_trainer(mut self, trainer: G::RolloutTrainer) -> Self {
+        self.rollout_trainer = trainer;
+        self
+    }
+
     /// 设置 leaf eval 微批大小（仅 nn leaf 生效）
     pub fn with_rollout_batch_size(mut self, batch_size: usize) -> Self {
         self.rollout_batch_size = batch_size.max(1).min(1024);
@@ -1447,14 +1456,15 @@ mod tests {
         // 2026-09-17 重抓：合宿训练诀窍全 MAX 修复（d9374e8）后 rollout 数值上移，基准重抓。
         // 2026-09-17 二次重抓：GA 方向 9 旋钮组合档进入 preset 后 rollout 数值再移，基准重抓。
         // 2026-09-18 重抓：第十二轮组合档进入 preset，rollout 数值再移，基准重抓。
+        // 2026-09-21 重抓：友人出行跨年配额定档 [0,3,5]（原 [0,2,5]），rollout 数值再移。
         let expected: [(u32, f64); 7] = [
-            (16, 65998.062500),
-            (16, 65578.500000),
-            (16, 66090.125000),
-            (16, 65708.937500),
-            (16, 66607.062500),
-            (16, 65944.937500),
-            (16, 65892.312500)
+            (16, 65861.812500),
+            (16, 65548.750000),
+            (16, 65564.062500),
+            (16, 65588.937500),
+            (16, 66068.875000),
+            (16, 65513.187500),
+            (16, 65934.250000)
         ];
         for (i, ((x, y), (en, em))) in a.iter().zip(b.iter()).zip(expected).enumerate() {
             println!(

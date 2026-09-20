@@ -192,6 +192,7 @@ async fn main_guard() -> Result<()> {
     let reason_slot = LastReasonSink::new();
     let ramen_trainer = RamenMctsTrainer::new(ramen_mcts_config)
         .with_stages(ramen_stages)
+        .with_friend_complete_required(game_config.friend_complete_required)
         .verbose(true)
         .with_reason_sink(reason_slot.clone());
 

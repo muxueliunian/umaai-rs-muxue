@@ -29,6 +29,12 @@ trainer = "mcts"
 # 关闭则取消下行注释：
 # luck_record = false
 
+# 拉面杯：5 次友人出行是否必须走完（默认开）
+# 开：剩余出行次数达到"剩余可出行回合数"时强制出行，保证 5 次走完
+#     （代价：末盘会挤掉部分训练回合，第三年必赛多的马娘代价更高）
+# 关闭则取消下行注释：
+# friend_complete_required = false
+
 # 温泉选择是否允许蒙特卡洛自由发挥（安卓马建议 false 减少世界线；须写在本段内才生效）
 mcts_selected_onsen = true
 

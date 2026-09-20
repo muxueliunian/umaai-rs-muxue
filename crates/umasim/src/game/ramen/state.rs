@@ -85,6 +85,20 @@ pub struct RamenState {
     /// 写入点在 `fill_feeling_gauge`（`is_shining` 时累加）。**纯观测**。
     #[serde(default)]
     pub yearly_friend_turns: [i32; 3],
+    /// 观测用：逐年友人出行次数（下标 0/1/2 = 第 1/2/3 年）。
+    ///
+    /// 写入点在 [`super::action::RamenAction::do_friend_outing`] 实际落地出行时。
+    /// **纯观测**，用于诊断友人跨年配额（`friend_outing_cumulative_caps`）是否被
+    /// 赛程挤掉——第三年必赛多时自由回合少，配额用不完即损失隐藏风味补给。
+    #[serde(default)]
+    pub yearly_friend_outings: [i32; 3],
+    /// 观测用：逐年友人出行时**浪费**的隐藏风味数（出行固定 +2，上限 4）。
+    ///
+    /// 出行前库存为 `s` 时浪费 `max(0, s + 2 - 4)`。库存越高浪费越多：第 3 年夏合宿
+    /// （turn 60 +2 / 61-63 各 +1）后库存易满，此时出行只补到上限、实际补给打折。
+    /// **纯观测**。
+    #[serde(default)]
+    pub yearly_friend_flavor_waste: [i32; 3],
     /// 观测用：逐年诀窍获得数（槽满 [`GAUGE_LIMIT`] 清零 +1 的次数）。
     ///
     /// 写入点在 `add_gauge` 清零分支。**纯观测**。
