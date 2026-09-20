@@ -101,6 +101,9 @@ struct BenchConfig {
     /// 用于配卡对照实验（如"默认卡组 vs GA 通解"同种子配对）。
     #[serde(default)]
     deck: Option<String>,
+    /// build 名过滤（None = bench_config.toml 全部 player_builds；与 --deck 互斥）
+    #[serde(default)]
+    builds: Option<Vec<String>>,
     /// mcts 专用：激进度上限
     ///
     /// 缺省 **0.0**（取普通均值）而非 `SearchConfig::default()` 的 50.0：
@@ -151,6 +154,7 @@ impl Default for BenchConfig {
             tokens: String::new(),
             region_weak_cover: None,
             deck: None,
+            builds: None,
             radical_factor_max: 0.0
         }
     }
@@ -182,11 +186,22 @@ fn apply_cli(mut cfg: BenchConfig) -> Result<BenchConfig> {
                 cfg.region_weak_cover = Some(bench::parse_value(&mut parser, "region-weak-cover")?)
             }
             Arg::Long("deck") => cfg.deck = Some(bench::parse_value(&mut parser, "deck")?),
+            Arg::Long("builds") => {
+                let text: String = bench::parse_value(&mut parser, "builds")?;
+                cfg.builds = Some(
+                    text.split(',')
+                        .map(str::trim)
+                        .filter(|p| !p.is_empty())
+                        .map(str::to_string)
+                        .collect()
+                );
+            }
             Arg::Long("help") | Arg::Short('h') => {
                 println!(
                     "用法: bench_base [--runs N] [--seed S] [--log] [--out DIR]
 \n                     	[--trainer random|handwritten|mcts]
 \n                     	[--deck 「id1,id2,id3,id4,id5[,friend]」]（覆盖卡组，跳过 preset builds）
+\n                     	[--builds b1,b2,...]（build 名过滤，与 --deck 互斥）
 \n                     	handwritten 专用: [--tokens TOKEN串]（如 --tokens rgn1 / rgn2 / reserve20）
 \n                     	                  [--region-weak-cover F]（覆盖地区弱位加分权重，与 --tokens 互斥）
 \n                     	mcts 专用: [--search-n N] [--search-stages train,ramen,...] [--search-ucb]
@@ -321,11 +336,28 @@ fn main() -> Result<()> {
     }
 
     let pick = CardPickOpts::default();
+    // --builds 与 --deck 互斥（一个选 preset build、一个显式卡组）
+    if cfg.builds.is_some() && cfg.deck.is_some() {
+        anyhow::bail!("--builds 与 --deck 互斥，不能同时指定");
+    }
     // --deck 覆盖模式：只跑一组自定义卡组；否则按 preset builds 自动拉卡
+    // （--builds 过滤只作用于 preset 路径）
     let deck_jobs: Vec<(String, [u32; 6])> = if let Some(ds) = &cfg.deck {
         vec![("custom_deck".to_string(), parse_deck_override(ds, cfg.friend)?)]
     } else {
-        builds
+        let filtered: Vec<_> = match &cfg.builds {
+            Some(names) => builds
+                .iter()
+                .filter(|b| names.iter().any(|n| *n == b.name()))
+                .collect(),
+            None => builds.iter().collect()
+        };
+        anyhow::ensure!(
+            !filtered.is_empty(),
+            "--builds 过滤后没有可跑的 build（可用: {}）",
+            builds.iter().map(|b| b.name()).collect::<Vec<_>>().join(", ")
+        );
+        filtered
             .iter()
             .map(|b| Ok((b.name(), b.make_deck(&pick, cfg.friend)?)))
             .collect::<Result<Vec<_>>>()?
@@ -393,8 +425,11 @@ fn main() -> Result<()> {
                     (outcome, trainer.take_records())
                 }
                 "mcts" => {
+                    // 与生产 main.rs 同口径：friend_complete_required 同时作用于
+                    // fallback 手写策略与搜索 rollout 基策
                     let mcts = RamenMctsTrainer::new(search_config.clone())
-                        .with_stages(search_stages);
+                        .with_stages(search_stages)
+                        .with_friend_complete_required(game_config.friend_complete_required);
                     let trainer = LoggingTrainer::new(mcts, log_seed);
                     let outcome = bench::run_seeded(cfg.uma, &deck, &inherit, cfg.seed, run_idx, &trainer)?;
                     (outcome, trainer.take_records())

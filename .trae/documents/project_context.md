@@ -1,6 +1,6 @@
 # UmaAI-RS 项目特定上下文
 
-最后核对于主线重构完成后（2026-09-17，工作树 04c739c）；与 `crates/umasim` / `crates/umaai` 当前代码对齐。
+最后核对于 2026-09-21（合宿休息审计工具提交后）；与 `crates/umasim` / `crates/umaai` 当前代码对齐。
 
 ## 项目结构
 
@@ -29,7 +29,7 @@
   - `explain.rs` / `utils.rs`：可读说明与工具
 - **bins**（均按项目惯例用 lexopt 解析参数）：
   - `umasim`（`src/main.rs`，需 `cli`）：命令行单局模拟入口，按配置 trainer/scenario 跑局
-  - `bench_base`：固定种子批量跑批（`--runs` / `--seed` / `--log` / `--out` / `--trainer` / `--deck` 覆盖卡组 / `--tokens` 手写变体 / `--region-weak-cover`，mcts 另有 `--search-*` 簇）
+  - `bench_base`：固定种子批量跑批（`--runs` / `--seed` / `--log` / `--out` / `--trainer` / `--deck` 覆盖卡组 / `--builds` build 过滤 / `--tokens` 手写变体 / `--region-weak-cover`，mcts 另有 `--search-*` 簇）
   - `bench_compositions`：遍历 101 种卡构成（`--runs` / `--seed` / `--friend` / `--trainer random|handwritten|recommended` / `--min-panel` / `--pool-size` / `--pick`，recommended 加 `--region-*` 覆盖）
   - `ramen_manual`（需 `cli`+`diag`）：玩家手动拉面局（inquire 交互，强制 `scenario="ramen"` + `trainer="manual"`）
   - `ramen_player`（需 `cli`+`diag`）：手动决策记录器，从 `bench_config.toml [player_builds]` 取 build 跑局，产出 GameOutcome CSV + 决策 CSV
@@ -59,6 +59,7 @@
 ### 脚本工具（`scripts/`）
 - `export_support_card/`：支援卡数据导出
 - 绘图与扫参：`plot_luck_trend.py`（运气分趋势图，与 `plot/` Rust 版样式对齐）、`plot_ptfavor_scan.py` / `summarize_ptfavor_scan.py`（pt_favor_rate 扫参汇总）
+- `analyze_rest_picks.py`：合宿/满体力「一选休息」审计——按 `is_xiahesu` 回合与体力分桶统计决策日志休息率（配 bench_base 决策日志 `vital` 列，见 issues.md 对应条目）
 - `deck_crn_compare.py`：卡组 CRN 对比
 - `friend_pacing_compare.py`：友人出行配额（`fcap` 等 token）配对对比——同 build 同 seed 配对差 + 走完率 / 逐年出行次数 / 风味浪费等结构指标
 - `bench_commit_compare.py`：跨 commit CPU 耗时对比编排（配合 `perf_probe` bin，见下「性能监测」节）

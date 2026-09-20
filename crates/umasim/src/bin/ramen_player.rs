@@ -257,7 +257,9 @@ fn main() -> Result<()> {
                 action_index: d.selected,
                 action_desc: format!("{}{}", d.selected_desc, detail_tail),
                 elapsed_us: 0,
-                score_breakdown: Some(candidates_desc)
+                // 手动录制路径无决策时状态快照：体力列填 0 占位（bench 决策日志才真实记录）
+                score_breakdown: Some(candidates_desc),
+                vital: 0
             });
         }
         let log_path = out_dir_path.join(format!(
