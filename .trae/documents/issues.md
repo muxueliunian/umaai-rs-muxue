@@ -17,6 +17,29 @@
 - **解决方案**：无策略改动；观测工具入库（决策日志 vital 列、`--builds`、审计脚本），审计口径与规则层同源，后续同类排查直接复用。
 - **备注**：高体力偶发休息（4 次）属搜索估值边界而非系统性「一选」，如需收紧可对具体决策点 dump「休息 vs 最优训练」候选分差；两 build 在 turn≈18 出现多局休息扎堆（6/20 局、体力各异）起因待查；`policy_pair_bench` 测试目标编译失败（`include_str!` 指向 9-19 已迁移的 `experiments/validated_policy/final-check.json`）为既有问题，与本次无关。
 
+## 协议层 `failureRateBias` 语义反（game421 turn 25+ 反复推「不吃面+休息」的根因）
+
+- **日期**：2026-09-21
+- **状态**：已解决（协议层两处反向 + 补回归）
+- **问题描述**：game421 在线 MCTS 在 turn 25 拿到「擅长训练」buff 后（`failureRateBias = -2`，表示失败率降低 2%），turn 38/60/62/63 反复推荐「不吃面+休息」——回合 61 vital 108/108 仍推休息，玩家直观不合理。9-21 复测时 bench 数据未复现（仅 4/20 局高体力偶发），怀疑真实玩家局与 bench 数据有差异，但根因不明。
+- **排查过程**：
+  1. **排除状态还原错**：`ramen_turn_inspect` 对 turn 61 重建的 RamenGame 与在线逐字段一致（vital=108/108、scenario_pt=3750、regions=[10,11,17]、persons 羁绊全 100），重跑选"不吃面" mean=63045 vs 在线 63055（搜索均值正常噪声）；
+  2. **新增 `rest_pair_probe` 单回合 CRN 配对探针**（22 候选完整组 / 21 候选屏蔽"不吃面"组，4096 rollout）：turn 61 "不吃面"领先任何吃面 **+351 分**、turn 62 领先 **+645 分**——稳定的估值偏差，非噪声；
+  3. **排除"回合空转换后续高均值"估值假说**——该假说不能解释 fix 后 449/223 的反向；
+  4. **顺藤摸瓜**：`game421_turn25.json` 起 `failureRateBias = -2` 恒定（buff 来源正确），[protocol/mod.rs:148-149](file:///f:/UmaAI_Active/umaai-rs/crates/umaai/src/protocol/mod.rs#L148-L149) 解析侧 `failure_rate_bias < 0 → bad_trainer=true`——与 `traits.rs:509-515` 内部 `good_trainer → bias=-2.0`（降低失败率）相反，**buff 被读成"不擅长训练"**；
+  5. **连锁影响**：`calc_training_failure_rate` 看到 `bad_trainer=true` → 加 +2 失败率 bias → MCTS 在 turn 25+ 任何回合的 Train 阶段估值都把训练失败率人为抬高 → 高体力回合（vital 88~108）选训练 → 失败代价（腰斩体力 + 没五维）显著 → 期望收益比"休息"低 → 推休息；
+  6. **同时发现导出方向也反**（[protocol/mod.rs:278-284](file:///f:/UmaAI_Active/umaai-rs/crates/umaai/src/protocol/mod.rs#L278-L284)）：`good_trainer → failure_rate_bias=2`（写出 +2），与内部语义反向——会让 AI 模拟结果回传到游戏 UI 时再反向一次。
+- **解决方案**：
+  1. 解析侧 `< 0 → good_trainer=true`、`< 0 → bad_trainer=false`（两条件同步反向）；
+  2. 导出侧 `good_trainer → -2`、`bad_trainer → 2`（与解析对称）；
+  3. 新增回归 `test_failure_rate_bias_parse`（三组 frb=-2/+2/0 × 期望 good/bad）；
+  4. 注释明确：上游约定 `>0`=不擅长训练、`<0`=擅长训练，与 `traits.rs:calc_training_failure_rate` 同源。
+- **验证**：turn 61 `rest_pair_probe` 修复后「不吃面」63457 落后最佳吃面 63906 **−449 分**（原 +351）；turn 62「不吃面」63395 落后 63618 **−223 分**（原 +645）。MCTS 在 turn 61 改选"吃面/札幌-速"、turn 62 改选"吃面/函馆-耐"，完全符合玩家直觉。`cargo test --release -p umaai --lib` 41 passed / 0 failed（含新增回归）。
+- **备注**：
+  - **改变拉面 MCTS 估值口径**：turn 25 起的所有 Train 决策点估值都会重排（之前被 buff 反向误导），预期 bench 配对基线、sampler 根局面、教师数据需重抓；但**实际数值走向是好的**——训练失败率估值从人为偏高变正确，MCTS 选训练概率应当上升；
+  - 9-21 合宿复测的 4/20 局高体力休息属搜索估值边界（非本次 bug），仍保留观察；
+  - game421 在线原汁记录保留 `logs/game421/`（包含修复前错的决策 + `rest_pair_turn{61,62}_after.log` 修复后搜索对比）。
+
 ## ga_lab 最优策略合并（2026-09-17）：组合交互 / weakboost 反模式 / 年度前瞻参数被支配
 
 - **日期**：2026-09-17

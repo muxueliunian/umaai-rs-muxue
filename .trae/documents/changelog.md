@@ -3,6 +3,9 @@
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
 ## 2026-09-21
+- **修复协议层 `failureRateBias` 语义反问题**：解析侧 `failureRateBias < 0 → good_trainer=true`（曾与上游相反，buff 被读成"不擅长训练"，MCTS 估值时 `calc_training_failure_rate` 加 +2 失败率人为偏高）、导出侧 `good_trainer → -2` 同步反向——与 `traits.rs:calc_training_failure_rate` 内部 `good_trainer → bias=-2` 同源；game421 turn 25+ 反复推「不吃面+休息」（vital 88~108 全休息）的根因，实测 turn 61 `rest_pair_probe` 不吃面领先 +351 → 落后 −449，turn 62 +645 → 落后 −223。补回归 `test_failure_rate_bias_parse`（三组 frb/-2/+2/0 钉解析方向）
+- **新增在线单局决策日志的高体力休息审计脚本**：`scripts/analyze_rest_picks_online.py`（与 `scripts/analyze_rest_picks.py` 互补：前者跑批决策日志、本工具吃 `logs/game{id}/decisions.csv` + 回合 thisTurn.json 还原 vital），决策时体力从快照反查；与 `rest_pair_probe` 共同补齐「高体力休息」类排查链路
+- **新增 `rest_pair_probe` 单回合诊断 bin**：对单回合 thisTurn.json 跑两遍 FlatSearch——A) 完整合并候选（含「不吃面」），B) 仅吃面候选（屏蔽不吃面）——CRN 共享种子 4096 rollout，输出两组的每候选 mean / n / 选中，用于隔离"不吃面 vs 吃面"在终局估值上的真实差距（game421 turn 61 修复前 +351、修复后 −449）
 - **合宿/满体力「一选休息」回归复测（未复现）**：spd2_sta0 / speed_wisdom ×10 局（search_n=4096 生产口径、同种子）：合宿期 MCTS 无整局全休息、高体力（>休息目标线）休息仅约 0.35% 决策点、手写对照零次——9-17 合宿诀窍修复后未复现；新增 `scripts/analyze_rest_picks.py` 审计入口（合宿回合/体力分桶休息率，与规则层判定同口径）
 - **决策日志/跑批观测增强**：决策日志追加「决策时体力」列（开发格式列尾演进，手动录制路径占位）；bench_base 新增 `--builds` 过滤（与 `--deck` 互斥）；bench mcts 档补接友人完成硬门限（与在线生产同口径，原漏接）
 - **友人出行跨年配额定档 `[0,3,5]` + 新增「5 次必须走完」配置项**：preset 由 `[0,2,5]` 改为 `[0,3,5]`（第 1 年不启用、第 2 年放宽到 3 以消化提前的休息替代、第 3 年补满）；新增 `friend_complete_required`（`game_config.toml` / `gamedata/default_config.toml`，默认开）＝完成硬门限，开启时隐藏风味闸门不再阻断出行、剩余次数达到剩余可出行回合数即强制出行，保证 5 次走完；该开关经 `main.rs` 同时作用于 MCTS 的 fallback 手写策略与搜索 rollout 基策，`bench_base` 同口径读取。实测（700 局/单元同种子配对）：走完率 77%/92%→99.6%/100%，相对旧 `[0,2,5]` 配对差 −114/−86（不显著），硬门限项自身净代价 −159/−35

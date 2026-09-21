@@ -10,13 +10,22 @@ ramen_region_strategy = "all"   # "all"（默认）/"fixed"（仅第3年，跳�
 [config_override]
 # 种马额外属性 [速度, 耐力, 力量, 根性, 智力, 技能点]
 extra_count = [0, 10, 20, 40, 40, 40]
+
 # PT 重视程度 (1.0-8.0), 1.0为最重视评分, 8.0会用~3000评分换~400pt
 # 默认为2.0(2-3速最优配置), 速卡少时需回调到1.0
 pt_favor_rate = 2.0
+
 # 线程数（建议 = CPU 核心数；特定处理器如 Intel 14900k 若崩溃/蓝屏可改为 8）
 num_threads = 16
+
+# 拉面杯：5 次友人出行是否必须走完（默认开）关闭则取消注释：
+# 开：保证 5 次走完，但第三年会挤掉部分训练回合，第三年比赛多的马娘代价更高
+# friend_complete_required = false
+
+# 日志等级
 log_level = "info"
 
+# umaai不使用这些设置
 uma = 106402
 cards = [303174, 303124, 303044, 302894, 303064, 303054]
 blue_count = [15, 0, 0, 0, 3]
@@ -28,12 +37,6 @@ trainer = "mcts"
 # 在线决策记录开关（默认开：每局一目录 logs/game{id}/，含原始快照 + decisions.csv + meta.json）
 # 关闭则取消下行注释：
 # luck_record = false
-
-# 拉面杯：5 次友人出行是否必须走完（默认开）
-# 开：剩余出行次数达到"剩余可出行回合数"时强制出行，保证 5 次走完
-#     （代价：末盘会挤掉部分训练回合，第三年必赛多的马娘代价更高）
-# 关闭则取消下行注释：
-# friend_complete_required = false
 
 # 温泉选择是否允许蒙特卡洛自由发挥（安卓马建议 false 减少世界线；须写在本段内才生效）
 mcts_selected_onsen = true
