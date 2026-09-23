@@ -54,10 +54,13 @@ Python 不可用再考虑其他脚本（`node -e` / PowerShell / Bash）。两�
    - **`--gamedata` 必须显式传**：局包可能在任意位置（拖入的文件常在临时目录），
      「从局包向上找 gamedata」不可靠，所以 gamedata 只按 **umaai 目录**解析：
      ```
-     <umaai_root>/gamedata        ← umaai_root 读自本 skill 目录的 local_paths.json
+     <umaai_root>/gamedata          ← umaai_root 读自本 skill 目录的 local_paths.json
        ↓ 没有 umaai_root / 该目录不存在
-     本 skill 自带的 gamedata/     ← 会被 bin 标为「旧版数据」（context.criteria 出注记）
+     <skill>/data/gamedata/         ← skill 自带，bin 会标「旧版数据」（context.criteria 出注记）
      ```
+     **自带那份放在 `data/` 下**：bin 要求目录名必须是 `gamedata`（umasim 硬编码相对路径读文件），
+     但位置任意——放 `data/` 这层就与用户自己放的 `<skill>/gamedata/` 分开，
+     升级覆盖解压时不会互相动到。
      没有 `local_paths.json` 时**询问用户一次**「umaai 目录在哪」，确认后写入
      `local_paths.json`（`{"umaai_root": "..."}`），下次先读它。**不使用环境变量**（面向初级用户）。
    - `--out` 显式指向当前工作区；bin 默认落在局包同级，拖入的局包会让产物散落到临时目录。

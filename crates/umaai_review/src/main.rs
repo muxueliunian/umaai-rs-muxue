@@ -124,6 +124,8 @@ fn run() -> Result<()> {
 
     // ② gamedata 解析与初始化（§9.2；命中后 set_current_dir）
     let gd = gdata::resolve(args.gamedata.as_deref(), &zip_abs);
+    // 自带标记必须在 init 之前读：init 会 chdir，之后相对路径的 --gamedata 就失效了
+    let gamedata_bundled = gd.as_ref().and_then(|d| gdata::bundled_note(d));
     let gamedata_ok = match &gd {
         Some(dir) => {
             gdata::init(dir)?;
@@ -131,8 +133,6 @@ fn run() -> Result<()> {
         }
         None => false,
     };
-
-    let gamedata_bundled = gd.as_ref().and_then(|d| gdata::bundled_note(d));
 
     // ③ timeline / decisions（§11 步骤 2）
     let tl = timeline::build(&p.snaps);
