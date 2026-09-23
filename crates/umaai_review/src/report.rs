@@ -82,7 +82,8 @@ pub fn render_with_template(digest: &Digest, out_dir: &Path, tpl_path: &Path) ->
         if comparable == 0 { 0.0 } else { matched as f64 / comparable as f64 * 100.0 }
     };
     let overview = context! {
-        five_status => last.map(|r| r.five_status).unwrap_or([0; 5]),
+        // 小黑板口径显示值（真实值 > 1200 部分减半）；成长曲线仍用真实值
+        five_status => last.map(|r| r.five_status_display).unwrap_or([0; 5]),
         vital => last.map(|r| r.vital).unwrap_or(0),
         motivation => last.map(|r| r.motivation).unwrap_or(0),
         match_rate => format!("{match_rate:.1}")
@@ -579,6 +580,7 @@ mod tests {
             max_vital: 108,
             motivation: 5,
             five_status: five,
+            five_status_display: five,
             five_status_limit: limit,
             skill_pt: 100,
             train_level_count: [1; 5],
@@ -628,9 +630,14 @@ mod tests {
         assert!(html.contains("<svg"), "三图 SVG 应经 |safe 注入");
         assert!(html.contains("图1") && html.contains("图3"));
         assert!(!html.contains("图4"), "行动图已改为总计环形（原图4 删除）");
-        assert!(html.contains("表1") && html.contains("mandatory_race_not_won"));
-        assert!(html.contains("表3") && html.contains("速训练"));
-        assert!(html.contains("测试口径"), "context.criteria 应渲染");
+        // 4 个叙述占位标记（skill 层回填）；检查项表与决策明细表已移除
+        for marker in ["NARRATIVE:overview", "NARRATIVE:luck_trend", "NARRATIVE:findings", "NARRATIVE:summary"] {
+            assert!(html.contains(marker), "占位标记 {marker} 应存在");
+        }
+        assert!(!html.contains("mandatory_race_not_won"), "检查项表已换叙述占位");
+        assert!(!html.contains("决策明细"), "决策明细表已移除（明细见 decisions.csv）");
+        assert!(html.contains("口径速览"), "口径说明已简化为速览");
+        assert!(!html.contains("测试口径"), "context.criteria 全文不再渲染");
         assert!(html.contains("100.0%") || html.contains("100%"), "执行一致率");
         let _ = fs::remove_dir_all(&out_dir);
         Ok(())

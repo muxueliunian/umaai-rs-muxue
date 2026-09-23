@@ -61,11 +61,12 @@ pub fn build(tl: &[TimelineRow], exec: &ExecutionResult, reference_value: Option
         m
     };
     // 窗口内含的是 **turn t-1 的行动**（剥离其训练目标属性增量）
+    // 兼容「·继承混合」后缀（execution 对 29/53 锚点的标注）——用前缀匹配
     let trained_attr: BTreeMap<u32, usize> = {
         let mut m: BTreeMap<u32, usize> = BTreeMap::new();
         for r in &exec.rows {
             for (i, name) in ["速", "耐", "力", "根", "智"].iter().enumerate() {
-                if r.actual_action == format!("{name}训练") {
+                if r.actual_action.starts_with(&format!("{name}训练")) {
                     m.insert(r.turn, i);
                 }
             }
@@ -116,6 +117,7 @@ mod tests {
             max_vital: 100,
             motivation: 4,
             five_status: five,
+            five_status_display: five,
             five_status_limit: [3000; 5],
             skill_pt: 0,
             train_level_count: [1; 5],

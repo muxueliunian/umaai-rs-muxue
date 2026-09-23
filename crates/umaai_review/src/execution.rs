@@ -7,13 +7,18 @@
 //!   Train 阶段行在 RamenSelect 行之后（吃面路径），不吃面路径的
 //!   RamenSelect 行即该回合最终项；地区选择是回合内子决策（kind≠train），
 //!   自动排除（§5.3）
-//! - **分类口径**（§12.5 修正方向 + game6234 实测校准）：
+//! - **分类口径**（§12.5 修正方向 + 实测校准）：
 //!   1. 比赛 = `raceHistory` +1（跑赢）**或锚点回合 ∈ 必赛回合**——输掉的比赛
 //!      `raceHistory` 不记（§6.1），用赛程表兜底（URA 决赛 73/75/77 剧本固定赛）
-//!   2. 训练 = **主增量属性 ≥ 13**（成功训练 +13~+134，§6.1）——智训练**不耗
-//!      体力甚至小回复**（实测 +5~+20），不能以体力负增量为必要条件；事件
-//!      增益通常 <13，不与训练/休息混淆
-//!   3. 休息 = 体力 +20 以上（事件给的小额属性不影响）
+//!   2. 训练 = **主增量 ≥ 训练基础值表最低主维**（等级 1 裸值 + 0 加成空人头，
+//!      运行时从 `scenario_ramen.json` 推导，实测 7——智位等级 1；开局低加成
+//!      训练可低至 +12，文档实测 +13~+134 覆盖不到）**且非大回复**（体力 < +25
+//!      ——表值休息 ≥ +30，智训练表值 +5 叠事件最多实测 +20；防止「休息+事件
+//!      属性」被误判训练）——智训练**不耗体力甚至小回复**（表值 +5）
+//!   3. 休息 = 体力 ≥ +25（容忍事件小额属性）
+//!   4. **继承窗口混合**：锚点 29/53 的窗口（t 末 → t+1 首）含 t+1 的继承落地
+//!      全维加成，行动与继承无法从数据剥离 → 实际动作标注「继承混合」、
+//!      `matches` 置 None（不参与一致率、不产偏离 finding），证据照留
 //! - **粒度限制**：只能识别「动作类别 + 目标属性」；事件给属性会混入训练
 //!   判读（证据全量输出供 LLM 复核）
 //! - **AI 自动执行局**（AIRedirector）本块仅作校验、不产生结论（§6.9）——
@@ -24,17 +29,44 @@ use std::collections::{BTreeMap, HashMap};
 use serde::Serialize;
 use umasim::utils::Array5;
 
-use crate::{decisions::DecRow, timeline::TimelineRow};
+use crate::{checks::INHERIT_TURNS, decisions::DecRow, timeline::TimelineRow};
 
 /// 五维属性名（训练动作的目标属性）
 const ATTR_NAMES: [&str; 5] = ["速", "耐", "力", "根", "智"];
 
-/// 训练判定的主增量下限（成功训练 +13~+134，§6.1 实测；开局低等级训练会低于
-/// 13——game1444 turn 0 智训练实测 +12，故取 12；事件增益通常更小）
-const TRAIN_MIN_DELTA: i32 = 12;
+/// 休息判定的体力下限（表值休息 +30/+50/+70；智训练 +5 叠事件实测最多 +20，
+/// 分界取 25——「休息 + 事件小额属性」不被误判训练、「智训练大回复」不误判休息）
+const REST_MIN_VITAL: i32 = 25;
 
-/// 休息判定的体力下限（休息 +25~+50；事件小额属性不影响）
-const REST_MIN_VITAL: i32 = 20;
+/// 训练判定的主增量下限（分年分段，用户拍板）：
+/// - 第 1 年（turn < 24）：训练等级低、加成少 → **训练基础值表最低主维**
+///   （等级 1 裸值 + 0 加成空人头，运行时从 `scenario_ramen.json` 推导，
+///   实测表值 7 为智位等级 1；开局低加成训练实测低至 +12，文档 +13~+134
+///   覆盖不到）
+/// - 第 2 年起（turn ≥ 24）：训练等级与加成上来了 → 固定 **12**（事件增益
+///   通常 < 12，与其他动作区分）
+/// gamedata 未初始化时第 1 年退回表实测值 7
+fn min_train_delta(turn: u32) -> i32 {
+    const AFTER_Y1: i32 = 12;
+    if turn >= crate::checks::YEAR_BOUNDARIES[0] {
+        return AFTER_Y1;
+    }
+    const FALLBACK: i32 = 7;
+    let Some(data) = umasim::gamedata::ramen::RAMENDATA.get() else {
+        return FALLBACK;
+    };
+    let mut min = i32::MAX;
+    for (pos, levels) in data.training_basic_value.iter().enumerate() {
+        for row in levels {
+            if let Some(&v) = row.get(pos) {
+                if v > 0 {
+                    min = min.min(v);
+                }
+            }
+        }
+    }
+    if min == i32::MAX { FALLBACK } else { min }
+}
 
 /// AI 建议 vs 实际执行对照行（digest execution 块）
 #[derive(Debug, Clone, Serialize)]
@@ -130,9 +162,18 @@ pub fn build(tl: &[TimelineRow], dec: &[DecRow], race_turns: &[i32]) -> Executio
         let a = &tl[ai];
 
         let ev = evidence(a, next);
-        let actual = classify(&ev, *turn, race_turns);
-        let ai_mapped = map_choice(&anchor.chosen.desc);
-        let matches = ai_mapped.map(|m| m == actual.as_str());
+        let min_train = min_train_delta(*turn);
+        let actual = classify(&ev, *turn, race_turns, min_train);
+        // 继承窗口混合：锚点 29/53 的窗口含 t+1 继承落地，行动与继承无法剥离
+        // → 标注「继承混合」、不参与一致率（数据与证据照留）
+        let inherit_mixed = INHERIT_TURNS.contains(&(*turn + 1));
+        let (actual, matches) = if inherit_mixed {
+            (format!("{actual}·继承混合"), None)
+        } else {
+            let ai_mapped = map_choice(&anchor.chosen.desc);
+            let m = ai_mapped.map(|m| m == actual.as_str());
+            (actual, m)
+        };
         if matches.is_some() {
             comparable += 1;
         }
@@ -189,7 +230,7 @@ fn evidence(a: &TimelineRow, n: &TimelineRow) -> Evidence {
 }
 
 /// 实际动作分类（优先级见模块头「分类口径」）
-fn classify(ev: &Evidence, turn: u32, race_turns: &[i32]) -> String {
+fn classify(ev: &Evidence, turn: u32, race_turns: &[i32], min_train: i32) -> String {
     let five_total: i32 = ev.five_status_delta.iter().sum();
     // ① 比赛：跑赢（raceHistory +1）或必赛回合（输掉的比赛赛程表兜底）
     if ev.race_count_delta > 0 || race_turns.contains(&(turn as i32)) {
@@ -201,7 +242,7 @@ fn classify(ev: &Evidence, turn: u32, race_turns: &[i32]) -> String {
     if ev.is_ill_cured {
         return "治病".to_string();
     }
-    // ② 训练：主增量属性达训练量级（智训练不耗体力甚至小回复）
+    // ② 训练：主增量达当前年份阈值，且非大回复形态（防「休息+事件属性」误判）
     let mut dom = 0usize;
     let mut dom_v = i32::MIN;
     for (i, &d) in ev.five_status_delta.iter().enumerate() {
@@ -210,10 +251,10 @@ fn classify(ev: &Evidence, turn: u32, race_turns: &[i32]) -> String {
             dom = i;
         }
     }
-    if dom_v >= TRAIN_MIN_DELTA {
+    if dom_v >= min_train && ev.vital_delta < REST_MIN_VITAL {
         return format!("{}训练", ATTR_NAMES[dom]);
     }
-    // ③ 休息：体力大幅回复（事件小额属性不影响）
+    // ③ 休息：体力大幅回复（容忍事件小额属性）
     if ev.vital_delta >= REST_MIN_VITAL {
         return "休息".to_string();
     }
@@ -283,6 +324,7 @@ mod tests {
             max_vital: 100,
             motivation,
             five_status: five,
+            five_status_display: five,
             five_status_limit: [3000; 5],
             skill_pt: 0,
             train_level_count: [1; 5],
@@ -344,6 +386,9 @@ mod tests {
             // turn 15 → 16：智训练（智 +32、体力 +10 —— 智训练不耗体力）
             tl_row(15, 0, [127, 100, 100, 100, 107], 70, 4, 2, 3, false),
             tl_row(16, 0, [135, 100, 100, 100, 139], 80, 4, 2, 3, false),
+            // turn 17 → 18：休息 + 事件小额属性（速 +8 达第 1 年阈值但体力大增 → 休息）
+            tl_row(17, 0, [135, 100, 100, 100, 139], 40, 4, 2, 3, false),
+            tl_row(18, 0, [143, 100, 100, 100, 139], 90, 4, 2, 3, false),
         ];
         let dec = vec![
             dec_row(5, 0, "速训练"),   // 一致
@@ -352,6 +397,7 @@ mod tests {
             dec_row(11, 0, "速训练"),  // 实际比赛 → 偏离
             dec_row(13, 0, "比赛"),    // 必赛兜底 → 一致
             dec_row(15, 0, "智训练"),  // 智训练不耗体力 → 一致
+            dec_row(17, 0, "休息"),    // 休息+事件属性 → 休息（防误判训练）
         ];
         let r = build(&tl, &dec, &[13]);
         for row in &r.rows {
@@ -361,7 +407,7 @@ mod tests {
             );
         }
         println!("findings: {:#?}", r.findings);
-        assert_eq!(r.rows.len(), 6);
+        assert_eq!(r.rows.len(), 7);
         assert_eq!(r.rows[0].actual_action, "速训练");
         assert_eq!(r.rows[0].matches, Some(true));
         assert_eq!(r.rows[1].actual_action, "休息");
@@ -374,8 +420,13 @@ mod tests {
         assert_eq!(r.rows[4].matches, Some(true));
         assert_eq!(r.rows[5].actual_action, "智训练", "智训练不耗体力（vital +10）仍判训练");
         assert_eq!(r.rows[5].matches, Some(true));
-        assert_eq!(r.comparable, 6);
-        assert_eq!(r.matched, 4);
+        assert_eq!(
+            r.rows[6].actual_action, "休息",
+            "休息+事件属性（速 +8 达第 1 年阈值但体力 +50）应判休息"
+        );
+        assert_eq!(r.rows[6].matches, Some(true));
+        assert_eq!(r.comparable, 7);
+        assert_eq!(r.matched, 5);
         assert_eq!(r.findings.len(), 2);
         assert!(r.findings.iter().all(|f| f.kind == "execution_mismatch"));
     }
@@ -428,5 +479,43 @@ mod tests {
         println!("开局小训练: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
         assert_eq!(r.rows[0].actual_action, "智训练", "智+12 应判训练（阈值 12）");
         assert_eq!(r.rows[0].matches, Some(true));
+    }
+
+    /// 继承窗口混合：锚点 29/53 的窗口含继承落地 → 标注「继承混合」、
+    /// 不参与一致率、不产偏离 finding
+    #[test]
+    fn test_inherit_mixed_window() {
+        // turn 29 → 30：全维大涨（行动 + 继承落地混合形态）
+        let tl = vec![
+            tl_row(29, 0, [1000, 1000, 1000, 1000, 1000], 80, 4, 0, 0, false),
+            tl_row(30, 0, [1108, 1010, 1126, 1081, 1049], 80, 4, 0, 0, false),
+            tl_row(31, 0, [1108, 1010, 1126, 1081, 1049], 80, 4, 0, 0, false),
+        ];
+        let dec = vec![dec_row(29, 0, "智训练")];
+        let r = build(&tl, &dec, &[]);
+        println!("继承窗口: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
+        assert!(
+            r.rows[0].actual_action.ends_with("·继承混合"),
+            "锚点 29 应标继承混合，实为 {}",
+            r.rows[0].actual_action
+        );
+        assert_eq!(r.rows[0].matches, None, "继承混合不参与一致率");
+        assert_eq!(r.comparable, 0);
+        assert_eq!(r.matched, 0);
+        assert!(r.findings.is_empty(), "继承混合不产偏离 finding");
+    }
+
+    /// 第 2 年起阈值提高到 12：事件级增益（速 +8）不再判训练
+    #[test]
+    fn test_after_y1_threshold() {
+        let tl = vec![
+            tl_row(25, 0, [100, 100, 100, 100, 100], 80, 4, 0, 0, false),
+            tl_row(26, 0, [108, 100, 100, 100, 100], 80, 4, 0, 0, false),
+        ];
+        let dec = vec![dec_row(25, 0, "速训练")];
+        let r = build(&tl, &dec, &[]);
+        println!("第 2 年事件级: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
+        assert_ne!(r.rows[0].actual_action, "速训练", "速+8 < 12 不应判训练");
+        assert_eq!(r.rows[0].matches, Some(false));
     }
 }

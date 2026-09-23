@@ -82,7 +82,11 @@ pub struct CloneCard {
     /// `luck` = 随机有效增加（吃面前本体在场 → 好运气）；
     /// `strategy` = 规则有效增加（吃面前本体缺席 → 好策略）
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub origin: Option<String>
+    pub origin: Option<String>,
+    /// 彩圈是否吃到（仅彩圈命中时有值）：新增回合的当回合实际训练命中彩圈位
+    /// （速位彩圈 + 速训练 = 吃到；用户口径，未考虑分身存续期的后续训练）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub used: Option<bool>
 }
 
 /// 组装分身观测块
@@ -120,12 +124,14 @@ pub fn build(snaps: &[SnapEntry], card_types: Option<&[i32]>, exec: &ExecutionRe
                     .copied()
                     .filter(|&p| (p as i32) == ct)
                     .collect();
-                // 被训练：彩圈落位被当回合实际动作训练
+                // 被训练：彩圈落位被当回合实际动作训练（前缀匹配——继承窗口
+                // 的 actual_action 带「·继承混合」后缀，精确匹配会漏判）
                 let trained = exec.rows.iter().any(|r| {
                     r.turn == turn
-                        && rainbow_positions
-                            .iter()
-                            .any(|&p| r.actual_action == format!("{}训练", ATTR_NAMES[p as usize]))
+                        && rainbow_positions.iter().any(|&p| {
+                            r.actual_action
+                                .starts_with(&format!("{}训练", ATTR_NAMES[p as usize]))
+                        })
                 });
                 // 有效增加彩圈的来源：本体在场 → 随机（好运气）；
                 // 本体缺席 → 规则带入（好策略）
@@ -145,6 +151,7 @@ pub fn build(snaps: &[SnapEntry], card_types: Option<&[i32]>, exec: &ExecutionRe
                 };
                 if turn < SUPER_RAMEN_START {
                     // A 类：判据待定义，全量观测（实测无友人卡分身，与文档 31 同口径）
+                    let used = if rainbow_positions.is_empty() { None } else { Some(trained) };
                     block.a_region.add(&entry);
                     block.a_per_turn.push(CloneTurn {
                         turn,
@@ -152,7 +159,8 @@ pub fn build(snaps: &[SnapEntry], card_types: Option<&[i32]>, exec: &ExecutionRe
                             card,
                             positions,
                             rainbow_positions,
-                            origin
+                            origin,
+                            used
                         }]
                     });
                 } else if (0..=4).contains(&ct) {
@@ -304,8 +312,9 @@ mod tests {
                 turn: 10,
                 stage: "Train".to_string(),
                 ai_choice: "耐训练".to_string(),
-                actual_action: "耐训练".to_string(),
-                matches: Some(true),
+                // 继承窗口的 actual_action 带「·继承混合」后缀（matches 不参与一致率）
+                actual_action: "耐训练·继承混合".to_string(),
+                matches: None,
                 evidence: Default::default()
             }],
             ..Default::default()
@@ -324,13 +333,16 @@ mod tests {
         assert_eq!(block.a_per_turn[0].cards[0].positions, vec![1], "分身落位 = 末位 − 本体位");
         assert_eq!(block.a_per_turn[0].cards[0].rainbow_positions, vec![1]);
         assert_eq!(block.a_per_turn[0].cards[0].origin.as_deref(), Some("luck"));
+        assert_eq!(block.a_per_turn[0].cards[0].used, Some(true), "turn10 耐位彩圈被当回合耐训练（含·继承混合后缀）→ 吃到");
         assert_eq!(block.a_per_turn[1].turn, 12);
         assert_eq!(block.a_per_turn[1].cards[0].positions, vec![2], "本体位1 被剔除");
         assert!(block.a_per_turn[1].cards[0].rainbow_positions.is_empty(), "分身落力位非彩圈");
         assert_eq!(block.a_per_turn[1].cards[0].origin, None, "非彩圈命中无来源");
+        assert_eq!(block.a_per_turn[1].cards[0].used, None, "非彩圈无 used");
         assert_eq!(block.a_per_turn[2].turn, 14);
         assert_eq!(block.a_per_turn[2].cards[0].rainbow_positions, vec![0]);
         assert_eq!(block.a_per_turn[2].cards[0].origin.as_deref(), Some("strategy"));
+        assert_eq!(block.a_per_turn[2].cards[0].used, Some(false), "turn14 无当回合速训练 → 没吃到");
         // B 类：卡2 落智位彩圈（本体在场 → luck）；友人卡不计；turn 74 无 exec 行
         assert_eq!(block.b_super.new_clones, 1);
         assert_eq!(block.b_super.rainbow_clones, 1);

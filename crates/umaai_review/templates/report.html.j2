@@ -25,6 +25,8 @@
   section { background:var(--card); border:1px solid var(--line); border-radius:10px;
             padding:14px 18px; margin-bottom:16px; }
   h2 { font-size:15px; margin:0 0 10px; color:#111827; }
+  summary { cursor:pointer; font-size:15px; margin:0 0 10px; color:#111827;
+            font-weight:600; user-select:none; }
   svg { max-width:100%; height:auto; display:block; }
   table { border-collapse:collapse; width:100%; font-size:12.5px; }
   th, td { border:1px solid var(--line); padding:4px 8px; text-align:left;
@@ -34,7 +36,6 @@
   .num { text-align:right; font-variant-numeric:tabular-nums; }
   .sev-warn { color:#b45309; font-weight:600; }
   .sev-info { color:#2563eb; }
-  .tbl-scroll { max-height:520px; overflow:auto; }
   footer { color:var(--muted); font-size:12px; line-height:1.7; margin-top:8px; }
   .note { color:var(--muted); font-size:12px; margin:6px 0; }
 </style>
@@ -56,7 +57,7 @@
     <div class="v">{{ digest.meta.rank or "—" }}</div></div>
   <div class="card"><div class="k">终局运气分</div>
     <div class="v">{% if digest.meta.total_luck_end is not none %}{{ digest.meta.total_luck_end | round(1) }}{% else %}—{% endif %}</div></div>
-  <div class="card"><div class="k">五维终值（速/耐/力/根/智）</div>
+  <div class="card"><div class="k">五维终值（速/耐/力/根/智，显示值）</div>
     <div class="v" style="font-size:13px">{{ overview.five_status | join(" / ") or "—" }}</div></div>
   <div class="card"><div class="k">体力 / 干劲</div>
     <div class="v">{{ overview.vital or "—" }} / {{ overview.motivation or "—" }}</div></div>
@@ -68,26 +69,21 @@
   {% for c in digest.meta.deck %}<span class="chip">{{ c.name }} · {{ c.limit_break }}破</span>{% endfor %}
 </div>
 
-<section><h2>图1 · 属性成长曲线</h2>{{ chart_status | safe }}</section>
-<section><h2>图2 · 运气分双轴</h2>{{ chart_luck | safe }}</section>
-<section><h2>图3 · 实际执行行动总计</h2>{{ chart_actions | safe }}</section>
+<!-- NARRATIVE:overview -->
 
-<section>
-<h2>表1 · 检查项命中清单（{{ digest.findings | length }} 条）</h2>
-{% if digest.findings %}
-<table>
-  <tr><th>回合</th><th>类型</th><th>证据</th><th>严重度</th></tr>
-  {% for f in digest.findings %}
-  <tr><td class="num">{{ f.turn }}</td><td>{{ f.type }}</td><td>{{ f.evidence }}</td>
-      <td class="sev-{{ f.severity }}">{{ f.severity }}</td></tr>
-  {% endfor %}
-</table>
-{% else %}<div class="note">无命中</div>{% endif %}
-</section>
+<section><details open><summary>图1 · 属性成长曲线</summary>{{ chart_status | safe }}</details></section>
+<section><details open><summary>图2 · 运气分双轴</summary>{{ chart_luck | safe }}</details></section>
+
+<!-- NARRATIVE:luck_trend -->
+
+<section><details open><summary>图3 · 实际执行行动总计</summary>{{ chart_actions | safe }}</details></section>
+
+<!-- NARRATIVE:findings -->
 
 {% if digest.inherit %}
 <section>
-<h2>表2 · 继承质量（参考值 {{ digest.inherit.reference_value or "—" }}）</h2>
+<details open>
+<summary>继承质量（参考值 {{ digest.inherit.reference_value or "—" }}）</summary>
 <table>
   <tr><th>回合</th><th>继承贡献（五维）</th><th>偏差</th></tr>
   {% for c in digest.inherit.contributions %}
@@ -96,12 +92,14 @@
   {% endfor %}
 </table>
 <div class="note">{{ digest.inherit.dev_note }}</div>
+</details>
 </section>
 {% endif %}
 
 {% if digest.clones %}
 <section>
-<h2>分身彩圈观测</h2>
+<details open>
+<summary>分身彩圈观测</summary>
 <table>
   <tr><th>类别</th><th>新增分身</th><th>落得意位</th><th>被训练</th>
       <th>随机（好运气）</th><th>规则（好策略）</th></tr>
@@ -118,36 +116,23 @@
       <td class="num">{{ digest.clones.b_super.rainbow_luck }}</td>
       <td class="num">{{ digest.clones.b_super.rainbow_strategy }}</td></tr>
 </table>
-<div class="note">A 类逐回合明细（本体位 → 分身落位 → 彩圈位 → 来源）见 digest.json 的 clones.a_per_turn</div>
+<div class="note">A 类逐回合明细（含彩圈 used 吃到判定）见 digest.json 的 clones.a_per_turn</div>
+</details>
 </section>
 {% endif %}
 
-<section>
-<h2>表3 · 决策明细（calc 行 {{ digest.decisions | length }} 条）</h2>
-{% if digest.decisions %}
-<div class="tbl-scroll">
-<table>
-  <tr><th>回合</th><th>seq</th><th>阶段</th><th>类型</th><th>AI 选中</th>
-      <th class="num">期望分</th><th class="num">回合Δ</th><th class="num">链长</th></tr>
-  {% for r in digest.decisions %}
-  <tr><td class="num">{{ r.turn }}</td><td class="num">{{ r.seq }}</td>
-      <td>{{ r.stage }}</td><td>{{ r.kind }}</td><td>{{ r.chosen.desc or "—" }}</td>
-      <td class="num">{% if r.t_n_display is not none %}{{ r.t_n_display | round(0) | int }}{% endif %}</td>
-      <td class="num">{% if r.turn_delta is not none %}{{ r.turn_delta | round(1) }}{% endif %}</td>
-      <td class="num">{{ r.chain_len }}</td></tr>
-  {% endfor %}
-</table>
-</div>
-{% else %}<div class="note">无决策数据</div>{% endif %}
-</section>
+<!-- NARRATIVE:summary -->
 
 <section>
-<h2>口径说明</h2>
+<details open>
+<summary>口径速览</summary>
 <footer>
-{% for c in digest.context.criteria %}<div>· {{ c }}</div>{% endfor %}
+  <div>· 评分 = 五维加权 + PT 折算：略低于小黑板实际分数，未计「努力家」等新状态</div>
+  <div>· 运气分 = 期望终局分累计变化：支援卡事件进度未统计，系统性略低于实际运气，&lt; -2000 才判「运气差」</div>
+  <div>· 年界 / 继承 / RMJ / 开局地区选择为程序性波动回合，读数降级</div>
+  <div>· 完整判据与赛程 / 覆盖数据块见 digest.json（context / schedule / coverage）；逐条决策见 decisions.csv</div>
 </footer>
-<div class="note">赛程 / 自由比赛 / 覆盖等数据块见 digest.json，由归因层（SKILL）
-处理成描述性文字后再考虑显示形式。</div>
+</details>
 </section>
 
 </div></body></html>

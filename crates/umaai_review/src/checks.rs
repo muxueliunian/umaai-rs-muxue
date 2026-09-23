@@ -270,6 +270,7 @@ mod tests {
             max_vital: 100,
             motivation,
             five_status: [0; 5],
+            five_status_display: [0; 5],
             five_status_limit: [3000; 5],
             skill_pt: 0,
             train_level_count: [1; 5],

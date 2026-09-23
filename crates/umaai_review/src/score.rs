@@ -10,7 +10,7 @@
 //! 该前提写进 digest.context。
 
 use umaai::protocol::GameStatusBase;
-use umasim::{game::Uma, global, gamedata::GAMECONSTANTS};
+use umasim::{game::Uma, global, gamedata::GAMECONSTANTS, utils::Array5};
 
 /// 终局评分（`Uma::calc_score` 同源口径；需已 `gdata::init`）
 pub fn final_score(base: &GameStatusBase) -> i32 {
@@ -30,9 +30,50 @@ pub fn rank_name(score: i32) -> String {
     global!(GAMECONSTANTS).get_rank_name(score)
 }
 
+/// 显示值减半阈值（小黑板口径：真实值超过该值的部分减半显示）
+const DISPLAY_STATUS_THRESHOLD: i32 = 1200;
+
+/// 单维显示值换算（小黑板口径）：真实值 > 1200 时超出部分减半
+///
+/// `display = (real - 1200) / 2 + 1200` iff real > 1200，否则 display = real；
+/// 整除向下取整。评分与运气分不受此换算影响。
+pub fn display_status(real: i32) -> i32 {
+    if real > DISPLAY_STATUS_THRESHOLD {
+        (real - DISPLAY_STATUS_THRESHOLD) / 2 + DISPLAY_STATUS_THRESHOLD
+    } else {
+        real
+    }
+}
+
+/// 五维数组显示值换算（逐维 [`display_status`]）
+pub fn display_status_array(five: Array5) -> Array5 {
+    let mut out = five;
+    for v in out.iter_mut() {
+        *v = display_status(*v);
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 显示值换算：阈值内原值、超阈值减半、数组分维独立换算
+    #[test]
+    fn test_display_status() {
+        println!("1200 → {}", display_status(1200));
+        assert_eq!(display_status(1199), 1199, "阈值内原值");
+        assert_eq!(display_status(1200), 1200, "恰好阈值不减半");
+        println!("3276 → {}", display_status(3276));
+        assert_eq!(display_status(3276), 2238);
+        assert_eq!(display_status(2326), 1763);
+        assert_eq!(display_status(1702), 1451);
+        assert_eq!(display_status(2084), 1642);
+        let five: Array5 = [3276, 2326, 1702, 1194, 2084];
+        let disp = display_status_array(five);
+        println!("array {five:?} → {disp:?}");
+        assert_eq!(disp, [2238, 1763, 1451, 1194, 1642], "分维独立换算");
+    }
 
     /// 需要真实 gamedata（GAMECONSTANTS 查表口径），与项目测试同法：
     /// cwd 切到 workspace 根 + init_global

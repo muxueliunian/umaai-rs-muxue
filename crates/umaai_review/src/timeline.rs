@@ -33,6 +33,8 @@ pub struct TimelineRow {
     /// 干劲 [1, 5]
     pub motivation: i32,
     pub five_status: Array5,
+    /// 五维显示值（小黑板口径；真实值 > 1200 的部分减半，见 `score::display_status_array`）
+    pub five_status_display: Array5,
     pub five_status_limit: Array5,
     pub skill_pt: i32,
     pub train_level_count: Array5,
@@ -158,6 +160,7 @@ pub fn build(snaps: &[SnapEntry]) -> TimelineResult {
                     max_vital: base.max_vital,
                     motivation: base.motivation,
                     five_status: base.five_status,
+                    five_status_display: crate::score::display_status_array(base.five_status),
                     five_status_limit: base.five_status_limit,
                     skill_pt: base.skill_pt,
                     train_level_count: base.train_level_count,
@@ -280,6 +283,7 @@ mod tests {
         assert_eq!(r.rows[0].turn, 0);
         assert_eq!(r.rows[0].race_count, 2, "raceHistory=[11,28]");
         assert_eq!(r.rows[0].stage, "Train");
+        assert_eq!(r.rows[0].five_status_display, [100, 200, 300, 400, 500], "阈值内显示值 = 真实值");
         assert_eq!(r.rows[1].selected_regions, vec![1, 2, 3]);
         assert_eq!(r.rows[1].scenario_pt, 0);
         assert!(r.first_status.is_some() && r.last_status.is_some());

@@ -374,9 +374,9 @@ mod tests {
         fs::write(path, &buf).unwrap();
     }
 
-    /// 测试根目录（每进程独立，避免并行测试互踩）
-    fn test_root() -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("umaai_review_test_{}", std::process::id()));
+    /// 测试根目录（按调用方命名，并行测试互不共享、互不互删）
+    fn test_root(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("umaai_review_test_{}_{tag}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         dir
@@ -385,7 +385,7 @@ mod tests {
     /// 两种布局（带/不带外壳）的角色识别应一致
     #[test]
     fn test_open_zip_roles() {
-        let root = test_root();
+        let root = test_root("roles");
         for with_shell in [false, true] {
             let zip_path = root.join(format!("t{shell}.zip", shell = with_shell as i32));
             make_zip(&zip_path, with_shell);
@@ -407,7 +407,7 @@ mod tests {
     /// `game_unknown` 前缀归局号 0，全 unknown 时 Pack.game = 0
     #[test]
     fn test_open_zip_unknown_game() {
-        let root = test_root();
+        let root = test_root("unknown");
         let zip_path = root.join("unknown.zip");
         let mut buf = Vec::new();
         {
