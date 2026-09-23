@@ -20,7 +20,7 @@ use std::{path::PathBuf, process::ExitCode};
 use anyhow::{Result, anyhow};
 use lexopt::{Arg, ValueExt};
 
-use umaai_review::{checks, clones, decisions, digest, execution, gdata, inherit, pack, report, schedule, timeline};
+use umaai_review::{brief, checks, clones, decisions, digest, execution, gdata, inherit, pack, report, schedule, timeline};
 use umasim::{game::SupportCard, gamedata::GAMEDATA, utils::load_game_config};
 
 /// CLI 参数（lexopt，与项目主 bin 惯例一致）
@@ -194,6 +194,8 @@ fn run() -> Result<()> {
     };
     let d = digest::build(&inputs);
     let digest_path = digest::write_json(&d, &out_dir)?;
+    // brief.md（LLM 复盘简报：六问事实预答，SKILL 层一次 Read 即可动笔）
+    let brief_path = brief::render(&d, &out_dir)?;
     // report.html（§11 步骤 7：minijinja 模板 + plot::svg 四图）
     let report_path = report::render(&d, &out_dir)?;
 
@@ -267,6 +269,7 @@ fn run() -> Result<()> {
         );
     }
     println!("digest: {}", digest_path.display());
+    println!("简报: {}", brief_path.display());
     println!("报告: {}", report_path.display());
     println!("（当前实现：文档 §11 步骤 1-7；SKILL.md / 发布打包于后续里程碑落盘）");
     Ok(())

@@ -1,0 +1,127 @@
+# 复盘简报 · game{{ v.game }}
+
+> umaai_review 生成，与 digest.json / report.html 同源；只给事实与预格式化表格，不下叙事结论。
+
+## 0 口径（读数前必读）
+
+- {{ v.luck_formula }}
+{% for c in v.criteria -%}
+- {{ c }}
+{% endfor %}
+## 1 总体（Q1）
+
+- {{ v.uma_line }}
+- 卡组：{{ v.deck_line }}
+- {{ v.score_line }}
+- {{ v.match_line }}
+- {{ v.luck_line }}
+- {{ v.health_line }}
+
+### 1.1 五维（显示值；小黑板口径，真实值 > 1200 部分减半）
+
+| 节点 | 速 | 耐 | 力 | 根 | 智 |
+|---|---|---|---|---|---|
+{% for r in v.five_rows -%}
+| {{ r.label }} | {{ r.v | join(" | ") }} |
+{% endfor -%}
+| 上限 | {{ v.five_limit }} |
+
+- {{ v.five_capped }}
+
+## 2 运气走势（Q2）
+
+序列 {{ v.series_count }} 点；分段按年份边界 {{ v.year_boundaries }} 切分（末段 = 超级拉面期 turn >= {{ v.super_ramen_start }}）。
+
+| 段 | 回合 | 段前 | 段末 | 净变 | 段内最低 / 最高 |
+|---|---|---|---|---|---|
+{% for r in v.segments -%}
+| {{ r.name }} | {{ r.turns }} | {{ r.before }} | {{ r.after }} | {{ r.net }} | {{ r.minmax }} |
+{% endfor -%}
+| 终局 | — | — | {{ v.luck_last }} | — | — |
+
+注：「段前」取该段起点之前的最后一个决策点（首段无前点则取段内首点），因此相邻两段首尾相接；超拉期净变与 §7 的 super_ramen_luck 同源。
+
+## 3 极值回合（Q3）
+
+回合合计 Δ（同回合多段已合并）；flagged = 程序性波动（年界 / 继承 / RMJ / 开局地区选择），归因降级或跳过。
+
+{% for e in v.extremes -%}
+### {{ e.label }} · 回合 {{ e.turn }} · 合计 {{ e.total }}
+
+- {{ e.seg_note }}
+- 程序性波动：{{ e.flagged }}
+{% for d in e.decisions -%}
+- {{ d }}
+{% endfor -%}
+- 该回合彩圈：{{ e.rainbow }}
+
+{% endfor -%}
+## 4 继承质量（Q4）
+
+{% if v.inherit_available -%}
+参考值：{{ v.inherit_ref }}
+
+| 回合 | 贡献 | 偏差 | 判断 |
+|---|---|---|---|
+{% for r in v.inherit_rows -%}
+| {{ r.turn }} | {{ r.contrib }} | {{ r.deviation }} | {{ r.verdict }} |
+{% endfor %}
+口径：{{ v.inherit_note }}
+{% else -%}
+继承块不可用（配置不可用或继承回合缺快照）。
+{% endif %}
+## 5 其他波动来源（Q5）
+
+### 5.1 体力低点（回合末口径）
+
+- {{ v.vital_lows }}
+- {{ v.vital_min }}
+
+### 5.2 干劲掉落与恢复（观察窗口 3 回合）
+
+{% for r in v.motivation_rows -%}
+- {{ r }}
+{% endfor %}
+### 5.3 分身彩圈观测
+
+{% if v.clones_available -%}
+- {{ v.clone_a }}
+- {{ v.clone_b }}
+{% for r in v.clone_rainbow_rows -%}
+- A 类彩圈：{{ r }}
+{% endfor -%}
+- B 类只报汇总：机制保证落得意位，没吃到不算亏，盈亏只看该期运气分（§6.6）
+{% else -%}
+- 分身块不可用（gamedata 缺失）
+{% endif %}
+### 5.4 赛程
+
+- 必赛回合：{{ v.mandatory }}
+{% for r in v.free_race_rows -%}
+- 自由比赛区间：{{ r }}
+{% endfor -%}
+{% for n in v.schedule_notes -%}
+- 赛程注记：{{ n }}
+{% endfor %}
+## 6 建议执行（Q6）
+
+偏离 = ai_choice ≠ 推断实际动作（推断口径：状态差）。**存疑** = 建议维已触顶 / 推断维与建议维相邻 / 体力卡在休息判定线——这些情形判读会失准，不硬下结论。
+
+{% if v.deviations | length > 0 -%}
+| 回合 | 阶段 | 建议 | 推断实际 | 五维增量 | 体力 | 存疑 |
+|---|---|---|---|---|---|---|
+{% for r in v.deviations -%}
+| {{ r.turn }} | {{ r.stage }} | {{ r.ai }} | {{ r.actual }} | [{{ r.five }}] | {{ r.vital }} | {{ r.doubt }} |
+{% endfor -%}
+{% else -%}
+无偏离。
+{% endif %}
+## 7 检查项（findings）
+
+{% if v.findings | length > 0 -%}
+{% for f in v.findings -%}
+- [{{ f.severity }}] {{ f.kind }} t{{ f.turn }}：{{ f.evidence }}
+{% endfor -%}
+{% else -%}
+无命中。
+{% endif %}

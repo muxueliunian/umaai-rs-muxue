@@ -15,6 +15,7 @@
 //! - [`schedule`]：赛程与自由比赛（§6.3）
 //! - [`score`]：终局评分与等级换算（§11 步骤 3、§3.4）
 //! - [`digest`]：digest.json 组装与落盘
+//! - [`brief`]：brief.md 渲染——六问事实预答，SKILL 层一次 Read 即可动笔
 //! - [`execution`]：实际执行动作推断 + findings 偏离清单（§11 步骤 4、§5.4、§6.9）
 //! - [`checks`]：检查项引擎——伪波动标记 / 超级拉面期 / 坏手法 findings（§6.1、§6.6、§6.7）
 //! - [`inherit`]：继承质量分析（§7）
@@ -25,6 +26,7 @@
 //! 代码常量（§10）：`YEAR_BOUNDARIES` / `INHERIT_TURNS` / `SUPER_RAMEN_START`
 //! 定义在 [`checks`]。
 
+pub mod brief;
 pub mod checks;
 pub mod clones;
 pub mod decisions;

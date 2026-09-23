@@ -32,9 +32,9 @@ const FRIEND_OUTING_CAP: i32 = 5;
 /// 友人次数用完距结束的「仍远」阈值（初判，待标定；game6234：turn 58 用完剩 19）
 const FRIEND_EARLY_REMAINING: u32 = 6;
 /// 体力低点阈值（与 §6.1「体力长期低」同档；实测 turn 69 跌至 27）
-const LOW_VITAL: i32 = 35;
+pub const LOW_VITAL: i32 = 35;
 /// 心情掉落后未及时恢复的观察窗口 N（§6.1 建议 N=3）
-const MOTIVATION_WINDOW: u32 = 3;
+pub const MOTIVATION_WINDOW: u32 = 3;
 
 /// 伪波动标记（§6.7）：年界 / 继承 / RMJ 结算 / 开局第 1 年地区选择回合
 ///

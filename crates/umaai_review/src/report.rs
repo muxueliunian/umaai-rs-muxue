@@ -59,7 +59,7 @@ pub fn build_charts(digest: &Digest) -> Charts {
 ///
 /// 模板按默认查找顺序定位（见模块头）；找不到报错并列出查找位置。
 pub fn render(digest: &Digest, out_dir: &Path) -> Result<PathBuf> {
-    let tpl = find_template().ok_or_else(|| {
+    let tpl = find_template("report.html.j2").ok_or_else(|| {
         anyhow!(
             "找不到 templates/report.html.j2（查找顺序：exe 同级/上级 templates、\
              cwd 及其祖先的 templates 与 crates/umaai_review/templates）"
@@ -111,19 +111,22 @@ pub fn render_with_template(digest: &Digest, out_dir: &Path, tpl_path: &Path) ->
 }
 
 /// 模板查找（无编译期嵌入路径，规避绝对路径泄漏）
-fn find_template() -> Option<PathBuf> {
-    const NAME: &str = "report.html.j2";
+///
+/// `name` 如 `report.html.j2` / `brief.md.j2`；查找顺序：exe 同级 `templates/` →
+/// exe 上级（skill 布局 `bin/` + `templates/`）→ cwd 及其祖先的 `templates/` 与
+/// `crates/umaai_review/templates/`（开发期）。brief 复用本函数。
+pub(crate) fn find_template(name: &str) -> Option<PathBuf> {
     let mut cands: Vec<PathBuf> = Vec::new();
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
-            cands.push(dir.join("templates").join(NAME));
-            cands.push(dir.join("..").join("templates").join(NAME));
+            cands.push(dir.join("templates").join(name));
+            cands.push(dir.join("..").join("templates").join(name));
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
         for anc in cwd.ancestors() {
-            cands.push(anc.join("templates").join(NAME));
-            cands.push(anc.join("crates/umaai_review/templates").join(NAME));
+            cands.push(anc.join("templates").join(name));
+            cands.push(anc.join("crates/umaai_review/templates").join(name));
         }
     }
     cands.into_iter().find(|p| p.is_file())
@@ -615,7 +618,7 @@ mod tests {
     #[test]
     fn test_render_report() -> Result<()> {
         let d = test_digest();
-        let tpl = find_template()
+        let tpl = find_template("report.html.j2")
             .ok_or_else(|| anyhow!("测试环境找不到模板（cwd 应为 workspace 根）"))?;
         println!("模板: {}", tpl.display());
         let out_dir = std::env::temp_dir().join(format!("report_test_{}", std::process::id()));
