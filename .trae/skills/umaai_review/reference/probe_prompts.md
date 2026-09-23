@@ -34,7 +34,7 @@
      `[bool]0 = False`**——过滤彩圈**必须**写 `@($_.rainbow_positions).Count -gt 0`，
      写成 `$_.rainbow_positions -and ...` 会**静默漏掉速位彩圈**（game3101 t63 实测：
      汇总 1 个、明细 0 条，正是此坑）。Python 无此问题，直接判 list 非空。
-   - `clones.a_per_turn` 先按彩圈位非空过滤再取字段，勿全量 dump
+   - `clones.region_per_turn` 先按彩圈位非空过滤再取字段，勿全量 dump
    - `race_count` / `raceHistory` 在开局快照（t0-t2）可能残留上一局数据，t3 起清零，
      比赛计数从年界稳定后读
 3. 机制口径（叙事用，勿当成 bug）：
@@ -295,11 +295,11 @@ cl = d.get('clones')
 if not cl:
     print('clones 块缺失（gamedata 不可用）')
 else:
-    # 顶层只有 a_region / b_super / a_per_turn，汇总数字在前两个上
-    print('A 类汇总:', json.dumps(cl['a_region'], ensure_ascii=False))
-    print('B 类汇总:', json.dumps(cl['b_super'], ensure_ascii=False))
-    # A 类逐回合：只取有彩圈的回合（card 是卡序号，不是 card_id）
-    for ct in cl.get('a_per_turn', []):
+    # 顶层只有 region / super_ramen_clones / region_per_turn，汇总数字在前两个上
+    print('地区分身汇总:', json.dumps(cl['region'], ensure_ascii=False))
+    print('超级拉面分身汇总:', json.dumps(cl['super_ramen_clones'], ensure_ascii=False))
+    # 地区分身逐回合：只取有彩圈的回合（card 是卡序号，不是 card_id）
+    for ct in cl.get('region_per_turn', []):
         hits = [c for c in ct.get('cards', []) if c.get('rainbow_positions')]
         if hits:
             print(f"t{ct['turn']}: " + ' ; '.join(
@@ -308,23 +308,23 @@ else:
 
 取数（PowerShell · 备选）：
 $d = Get-Content '<DIGEST>' -Raw -Encoding UTF8 | ConvertFrom-Json
-$d.clones | Select-Object -Property a_region,b_super | ConvertTo-Json -Compress -Depth 4
+$d.clones | Select-Object -Property region,super_ramen_clones | ConvertTo-Json -Compress -Depth 4
 # ⚠ 必须用 @(...).Count -gt 0：写成 $_.rainbow_positions -and ... 会漏掉速位（position 0）
-$d.clones.a_per_turn | ForEach-Object {
+$d.clones.region_per_turn | ForEach-Object {
   $rc=@($_.cards | Where-Object { @($_.rainbow_positions).Count -gt 0 })
   if ($rc.Count -gt 0) { "t$($_.turn): " + (($rc | ForEach-Object { "card$($_.card) rainbow=[$($_.rainbow_positions -join ',')] used=$($_.used) origin=$($_.origin)" }) -join ' ; ') } }
 
-坑位：`a_per_turn[].cards[]` 是 `{card, positions, rainbow_positions[, origin, used]}`，
+坑位：`region_per_turn[].cards[]` 是 `{card, positions, rainbow_positions[, origin, used]}`，
 其中 **`origin` 与 `used` 只在彩圈项上出现**，非彩圈卡只有 card / positions；
 `origin` 取值 `luck`（随机有效增加）或规则来源，`used` 为是否被当回合训练吃到。
 **明细条数必须与汇总的「落得意位」数一致**；对不上就是取数漏了（PS 的 position 0 坑最典型），
 不要当成数据缺口。
 
-回答：A 类地区分身（turn<72）新增几个、落得意位（真彩圈）几个、被训练几个、来源
-随机 / 规则各几个 / B 类超拉分身（turn>=72，只统计训练卡）同样一组数 / A 类彩圈分别落在
-哪些回合、有没有吃到（used 字段）/ B 类只报汇总（机制保证落位，没吃到不算亏）。
+回答：地区分身（turn<72）新增几个、落得意位（真彩圈）几个、被训练几个、来源
+随机 / 规则各几个 / 超级拉面分身（turn>=72，只统计训练卡）同样一组数 / 地区分身彩圈分别落在
+哪些回合、有没有吃到（used 字段）/ 超级拉面分身只报汇总（机制保证落位，没吃到不算亏）。
 
-返回：A / B 各一行汇总、A 类逐回合彩圈分条（回合 + 卡 + 位 + used）。
+返回：地区分身 / 超级拉面分身各一行汇总、地区分身逐次彩圈分条（回合 + 卡 + 位 + used）。
 ```
 
 ## 组 9 · `findings`

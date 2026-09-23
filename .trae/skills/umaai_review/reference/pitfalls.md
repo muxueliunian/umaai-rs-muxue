@@ -9,12 +9,12 @@
 2. **`timeline` 与 `execution` 块直接是行数组**，不是带 `rows` 字段的对象（game1458 实测）：Python `d['execution']['rows']` / PS `$d.execution.rows` 都取到空，取行要用 `d['execution']` / `$d.execution` 本身。
 3. `luck.series` 每项字段是 `{turn, seq, total_luck}`，没有 `value` 字段。
 4. `luck.flagged_turns` 是对象数组（`{turn, reason}`），不是数字数组，别用 join 类方式直接拼接。
-5. `clones.a_per_turn` 大结构勿全量 dump：先按 `cards[].rainbow_positions` 非空过滤，再取 `used` / `origin`。
+5. `clones.region_per_turn` 大结构勿全量 dump：先按 `cards[].rainbow_positions` 非空过滤，再取 `used` / `origin`。
 6. **digest.json 顶层没有 `raceHistory` 键**（game3098 实测，顶层仅 meta/timeline/decisions/execution/luck/schedule/inherit/clones/coverage/findings/context）：比赛要用 `timeline[].race_count` 的增量定位，胜负用 findings 有无「目标赛未跑赢」兜底。
 7. **`ConvertFrom-Json` 可能在中途报解析失败**（多字节处）：读文件时显式指定 UTF-8（`Get-Content <path> -Raw -Encoding UTF8`），否则字段名可能变 mojibake 并破坏结构。
 8. **会话级环境差异**：部分会话的 PowerShell 工具执行成功但不回显 stdout（取数全为空）。**这正是不用 PowerShell 取数、统一走 Python 的首要理由**；已遇到时直接换 `python`（临时 `.py` 或 `-c`）按同一字段口径取数，字段名与方法不变；子代理同样适用。
-9. **A 类彩圈取数必须按 `rainbow_positions` 非空过滤，且同一回合可能有多张卡同时带彩圈**（game3098 t37 实测：`card0 pos=[0] used=False` 与 `card4 pos=[4] used=True` 同时存在，正好对上汇总的「彩圈 2 / 被训练 1」）。**汇总数与明细条数必须一致；对不上说明取数漏了**，不要当成数据缺口、更不要反推回合或宣称「明细无记录」。
-   - **PowerShell 特有坑（game3101 t63 实测）**：`rainbow_positions` 只有 `[0]`（速位）时，PS 会把单元素数组**解包成标量 `0`**，而 `[bool]0 = False`——写成 `Where-Object { $_.rainbow_positions -and ... }` 会**静默漏掉速位彩圈**（该局唯一一个 A 类彩圈正好在速位，旧写法输出「无」而真相是「1 个且吃到」）。必须写 `@($_.rainbow_positions).Count -gt 0`。**Python 无此问题**，直接判 list 非空即可——这也是优先 Python 的理由之一。
+9. **地区分身彩圈取数必须按 `rainbow_positions` 非空过滤，且同一回合可能有多张卡同时带彩圈**（game3098 t37 实测：`card0 pos=[0] used=False` 与 `card4 pos=[4] used=True` 同时存在，正好对上汇总的「彩圈 2 / 被训练 1」）。**汇总数与明细条数必须一致；对不上说明取数漏了**，不要当成数据缺口、更不要反推回合或宣称「明细无记录」。
+   - **PowerShell 特有坑（game3101 t63 实测）**：`rainbow_positions` 只有 `[0]`（速位）时，PS 会把单元素数组**解包成标量 `0`**，而 `[bool]0 = False`——写成 `Where-Object { $_.rainbow_positions -and ... }` 会**静默漏掉速位彩圈**（该局唯一一个 地区分身彩圈正好在速位，旧写法输出「无」而真相是「1 个且吃到」）。必须写 `@($_.rainbow_positions).Count -gt 0`。**Python 无此问题**，直接判 list 非空即可——这也是优先 Python 的理由之一。
 
 ## 产物与回填
 
@@ -55,3 +55,23 @@
     - **归因要点**：叙事必须点出「**自选比赛极限达标**」这个操作，**不能读成坏运气**，也不影响最终运气。
     - **坑**：年界窗口会同时命中且**归因有误**——game3099 t22/t23 既被标 `year_boundary(24)`，真实原因却是自选期限（幅度 12000 远超年界波动量级）。brief §3 会同时列出两个 reason，以 `free_race_deadline_swing` 为准；`schedule.notes` 里有一行完整注记可引用。
     - 判据常量：幅度 8000 / 配对窗口 3 回合 / 净变容差 25%（`checks.rs` 的 `FREE_RACE_SWING_*`）。
+
+## 学技能标记（技能点只减不增）
+
+26. **「无来由运气下降」先查技能点**：**技能点只减不增，减少就一定是玩家学了技能**（没有别的减少途径）——逐回合查技能点（回合末口径）、减少即标 `skill_learned(-Npt)`，**不设运气分门槛**。
+    - **为什么重要**：花掉技能点后 AI 的期望终局分把「未花掉的技能点」计入价值 → 运气分下降，**不是真实运气下降**；不查技能点就会把它读成倒霉。
+    - **实测（game1429）**：t33 技能点 2492 → t34 1462（**花掉 1030 点**），同回合运气分 **−2678**，正是用户描述的「无来由运气下降」——标记准确命中 `t34: skill_learned(-1030pt)`。
+    - 与马娘专属判据常同时出现：game1429 是**神威启示**，t33 必赛未跑赢 → 归因**对手很强**（与学不学技能无关），见 `uma_specific.md`。
+
+## 必赛胜负：t0 快照残留局是头号陷阱（game3103 实测）
+
+26. **结论先行：game3103 的 t26 跑赢了，必赛全胜。** 我（Agent）在第一轮复盘里误判成「t26 未跑赢」，根因是踩了残留快照，特此记下，勿再犯。
+
+    - **残局快照**：`game3103_turn0.json` 的 `raceHistory` = `[11,16,22,28,33,35,41,52,53,58,65,73,75,77]`（14 条，**上一局的战绩**）。它长得极像「本局全胜表」，但按 t0 的时刻本局一场没跑。
+    - **本局真实 raceHistory**（t3 清零后逐回合累积）终值 = `[11,26,33,35,43,54,55,69,71,73,75]`；对照 umaDB 必赛 `[11,26,33,43,55,69,71]` → **一个不缺，全胜**。
+    - 我错在哪：脚本断言的最长 raceHistory 恰好是**残留的 t0**（14 条 > 真实 11 条），拿它去对必赛表，于是 t43/55/69/71 也被判成「未跑赢」，我却只挑了 t26 写进叙事——**同一份错数据自相矛盾的产物**，本该立刻警觉。**必须用「最大 turn 的快照」，不是「raceHistory 最长的快照」。**
+    - **旁证核对法（本次真正识别出错误的关键）**：`scenario_pt` 在赛前赛后若未变动，说明该回合没吃到比赛加成。game3103 实测 t43 前后 4800 未变、t55 前 1650 未变，而两者都在 raceHistory 里 → **跑赢也可能不加 PT**，故 PT 只能当弱旁证，不能单独定论；反之**千万别**用它去反证输赛。
+    - 输赛的可靠判据只有一条：**该回合号出现在必赛表、且不在「最大 turn 快照」的 raceHistory 里**。
+    - `timeline.race_count` 是**跨回合快照**，t27/s0 已变 2 反映的是 t26 赛果，数字本身证明不了 t26 的胜负。
+    - **bin 侧其实已经算好了**：`schedule::build` 有 `not_won = mandatory_turns − race_history`，非空会写进 `schedule.notes`「未跑赢的必赛回合: [...]」。本局该注记**不存在**，这本身就是「必赛全胜」的正面证据 —— **读 §5.4 的 notes 有无这一行，比任何手算都可靠**。另注：`schedule.notes` 需带 `--narrative` 重跑时才刷新，别把生成顺序问题误读成数据缺口。
+    - 「三冠」也不是可以直接说的词：umaDB / gamedata 里**没有赛次与赛名的对照表**（`text_data_dict` 只有赛名表，无 turn→赛名映射），所以「t26 是XX赛」这类断言无从取证，叙事里不要写具体赛名与「三冠」等赛制归类。

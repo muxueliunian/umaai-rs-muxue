@@ -107,31 +107,28 @@
 <table>
   <tr><th>类别</th><th>新增分身</th><th>落得意位</th><th>被训练</th>
       <th>随机（好运气）</th><th>规则（好策略）</th></tr>
-  <tr><td>A 地区（turn&lt;72）</td>
-      <td class="num">{{ digest.clones.a_region.new_clones }}</td>
-      <td class="num">{{ digest.clones.a_region.rainbow_clones }}</td>
-      <td class="num">{{ digest.clones.a_region.trained_clones }}</td>
-      <td class="num">{{ digest.clones.a_region.rainbow_luck }}</td>
-      <td class="num">{{ digest.clones.a_region.rainbow_strategy }}</td></tr>
-  <tr><td>B 超拉（turn≥72，训练卡）</td>
-      <td class="num">{{ digest.clones.b_super.new_clones }}</td>
-      <td class="num">{{ digest.clones.b_super.rainbow_clones }}</td>
-      <td class="num">{{ digest.clones.b_super.trained_clones }}</td>
-      <td class="num">{{ digest.clones.b_super.rainbow_luck }}</td>
-      <td class="num">{{ digest.clones.b_super.rainbow_strategy }}</td></tr>
+  <tr><td>地区分身（turn&lt;72）</td>
+      <td class="num">{{ digest.clones.region.new_clones }}</td>
+      <td class="num">{{ digest.clones.region.rainbow_clones }}</td>
+      <td class="num">{{ digest.clones.region.trained_clones }}</td>
+      <td class="num">{{ digest.clones.region.rainbow_luck }}</td>
+      <td class="num">{{ digest.clones.region.rainbow_strategy }}</td></tr>
+  <tr><td>超级拉面分身（turn≥72，训练卡）</td>
+      <td class="num">{{ digest.clones.super_ramen_clones.new_clones }}</td>
+      <td class="num">{{ digest.clones.super_ramen_clones.rainbow_clones }}</td>
+      <td class="num">{{ digest.clones.super_ramen_clones.trained_clones }}</td>
+      <td class="num">{{ digest.clones.super_ramen_clones.rainbow_luck }}</td>
+      <td class="num">{{ digest.clones.super_ramen_clones.rainbow_strategy }}</td></tr>
 </table>
-<div class="note">A 类逐回合明细（全部新增分身；来源 luck=随机好运气 / strategy=规则好策略；吃到=当回合训练命中彩圈位）</div>
-{% if clone_rows | length > 0 %}
-<table>
-  <tr><th>回合</th><th>卡</th><th>落位</th><th>彩圈位</th><th>来源</th><th>吃到</th></tr>
-  {% for r in clone_rows %}
-  <tr><td class="num">{{ r.turn }}</td><td class="num">card{{ r.card }}</td>
-      <td class="num">{{ r.positions }}</td><td class="num">{{ r.rainbow }}</td>
-      <td>{{ r.origin }}</td><td>{{ r.used }}</td></tr>
+<div class="note">地区分身逐次彩圈明细（只列产生了彩圈的；来源「运气好」= 随机有效增加，「规则性增加」= 规则把缺席卡带入得意位）</div>
+{% if region_rows | length > 0 %}
+<ul>
+  {% for r in region_rows %}
+  <li>{{ r.text }}</li>
   {% endfor %}
-</table>
+</ul>
 {% else %}
-<div class="note">本局无 A 类新增分身</div>
+<div class="note">本局地区分身未产生彩圈</div>
 {% endif %}
 </details>
 </section>

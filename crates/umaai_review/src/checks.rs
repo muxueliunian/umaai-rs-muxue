@@ -263,6 +263,30 @@ pub fn free_race_swing_note(s: &FreeRaceSwing) -> String {
     )
 }
 
+/// 学技能标记（用户口径）
+///
+/// **技能点只减不增——减少就一定是玩家学了技能**（没有别的减少途径），故不设运气分门槛，
+/// 逐回合检查技能点（回合末口径）、减少即标。
+///
+/// **为什么重要**：花掉技能点后 AI 的期望终局分把「未花掉的技能点」计入价值 → 运气分下降，
+/// 但这**不是真实运气下降**。标记 reason = `skill_learned(-Npt)`，供叙事识别为程序性波动。
+pub fn skill_learned_flags(tl: &[TimelineRow]) -> Vec<FlaggedTurn> {
+    let mut pt: BTreeMap<u32, i32> = BTreeMap::new();
+    for r in tl {
+        pt.insert(r.turn, r.skill_pt); // 升序 → 后写覆盖 = 回合末
+    }
+    let turns: Vec<u32> = pt.keys().copied().collect();
+    let mut out = Vec::new();
+    for pair in turns.windows(2) {
+        let (t0, t1) = (pair[0], pair[1]);
+        let spent = pt[&t0] - pt[&t1]; // >0 = 技能点变少（学了技能）
+        if spent > 0 {
+            out.push(FlaggedTurn { turn: t1, reason: format!("skill_learned(-{spent}pt)") });
+        }
+    }
+    out
+}
+
 /// 坏手法检查项（§6.1 已验证判据 + 训练失败候选清单）
 ///
 /// 覆盖：
@@ -531,6 +555,28 @@ mod tests {
         assert_eq!(kind("friend_quota_exhausted_early"), 1, "58 耗尽 + 69 体力 27");
         assert_eq!(kind("motivation_drop_unrecovered"), 1, "45 掉心情 3 回合未恢复");
         assert_eq!(kind("train_failure_candidate"), 1, "速训练五维零增长体力 -20");
+    }
+
+    /// 学技能标记：技能点减少即标（不设运气分门槛——技能点只减不增）
+    #[test]
+    fn test_skill_learned_flags() {
+        let mut tl = vec![];
+        // 技能点：t10=100 → t11=60（学了）→ t12=60（未学）→ t13=55（又学）
+        for (t, pt) in [(10u32, 100), (11, 60), (12, 60), (13, 55)] {
+            let mut r = row(t, 80, 4, 0, None);
+            r.skill_pt = pt;
+            tl.push(r);
+        }
+        let flags = skill_learned_flags(&tl);
+        println!("{flags:?}");
+        assert_eq!(flags.len(), 2, "两次技能点减少 → 两个标记");
+        assert_eq!(flags[0].turn, 11);
+        assert_eq!(flags[0].reason, "skill_learned(-40pt)");
+        assert_eq!(flags[1].turn, 13);
+        assert_eq!(flags[1].reason, "skill_learned(-5pt)");
+        // 技能点不减少 → 无标记
+        let flat = vec![row(1, 80, 4, 0, None), row(2, 80, 4, 0, None)];
+        assert!(skill_learned_flags(&flat).is_empty());
     }
 
     /// 测试用自由比赛窗口

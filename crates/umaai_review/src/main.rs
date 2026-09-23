@@ -176,6 +176,7 @@ fn run() -> Result<()> {
     // ⑥ 检查项引擎（§11 步骤 5-6）：伪波动标记 / 超级拉面期 / 坏手法 / 继承 / 分身
     let mut flags = checks::flagged_turns(&tl.rows);
     flags.extend(checks::free_race_swing_flags(&swings));
+    flags.extend(checks::skill_learned_flags(&tl.rows));
     flags.sort_by_key(|f| f.turn);
     flags.dedup();
     let mut extra_findings: Vec<execution::Finding> = Vec::new();
@@ -282,16 +283,16 @@ fn run() -> Result<()> {
     }
     if let Some(cl) = &clones_block {
         println!(
-            "分身观测: A 地区 新增 {} 彩圈 {}（随机{}/规则{}）训练 {} / B 超拉 新增 {} 彩圈 {}（随机{}/规则{}）",
-            cl.a_region.new_clones,
-            cl.a_region.rainbow_clones,
-            cl.a_region.rainbow_luck,
-            cl.a_region.rainbow_strategy,
-            cl.a_region.trained_clones,
-            cl.b_super.new_clones,
-            cl.b_super.rainbow_clones,
-            cl.b_super.rainbow_luck,
-            cl.b_super.rainbow_strategy
+            "分身观测: 地区分身 新增 {} 彩圈 {}（随机{}/规则{}）训练 {} / 超级拉面分身 新增 {} 彩圈 {}（随机{}/规则{}）",
+            cl.region.new_clones,
+            cl.region.rainbow_clones,
+            cl.region.rainbow_luck,
+            cl.region.rainbow_strategy,
+            cl.region.trained_clones,
+            cl.super_ramen_clones.new_clones,
+            cl.super_ramen_clones.rainbow_clones,
+            cl.super_ramen_clones.rainbow_luck,
+            cl.super_ramen_clones.rainbow_strategy
         );
     }
     println!("digest: {}", digest_path.display());

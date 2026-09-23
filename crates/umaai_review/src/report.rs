@@ -148,11 +148,12 @@ pub fn render_with_template(
         motivation => last.map(|r| r.motivation).unwrap_or(0),
         match_rate => format!("{match_rate:.1}")
     };
-    // A 类逐回合明细（构造在 clones.rs，brief.md 共用同一份，避免两处格式化分叉）
-    let clone_rows = digest
+    // 地区分身逐次彩圈明细（构造在 clones.rs，brief.md 共用同一份，避免两处格式化分叉）
+    let deck_names: Vec<String> = digest.meta.deck.iter().map(|c| c.name.clone()).collect();
+    let region_rows = digest
         .clones
         .as_ref()
-        .map(|c| c.a_detail_rows())
+        .map(|c| c.region_detail_rows(&deck_names))
         .unwrap_or_default();
     // 背景装饰开关：输出目录里有 yayoi.png 才加背景 CSS（skill 只需复制图片，不必改 HTML）
     let has_bg = out_dir.join("yayoi.png").is_file();
@@ -166,7 +167,7 @@ pub fn render_with_template(
         .render(context! {
             digest => digest,
             overview => overview,
-            clone_rows => clone_rows,
+            region_rows => region_rows,
             narrative => narrative,
             has_bg => has_bg,
             chart_status => charts.status,

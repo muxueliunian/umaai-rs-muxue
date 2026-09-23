@@ -19,9 +19,9 @@
 //!   ≥2 次」的（§6.5.1 末段）
 //!
 //! A / B 两类**必须分开统计**（§6.5.2，机制与预期完全不同，混算双重失真）：
-//! - **A 地区分身**（turn < 72）：真正的随机运气；评判判据**待精确定义**
+//! - **地区分身**（turn < 72）：真正的随机运气；评判判据**待精确定义**
 //!   （§6.5.4），本块只出观测数据
-//! - **B 超级拉面分身**（turn ≥ 72）：`finals_effect` 的 `clone_count`，
+//! - **超级拉面分身**（turn ≥ 72）：`finals_effect` 的 `clone_count`，
 //!   机制保证落得意位命中率 100%——**只统计训练卡（cardType 0-4）**：
 //!   友人卡 cardType=5 无得意位可落，该保证对它不成立（game6234 实测排除
 //!   友人卡后 14/14 落得意位，对齐文档 §6.5.5）；「没吃到」不算亏，只能用
@@ -39,12 +39,12 @@ const ATTR_NAMES: [&str; 5] = ["速", "耐", "力", "根", "智"];
 /// 分身观测块（digest clones）
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct ClonesBlock {
-    /// A 类（turn < 72 地区分身）——判据待定义，观测数据
-    pub a_region: CloneClass,
-    /// B 类（turn ≥ 72 超级拉面分身）——机制保证落得意位
-    pub b_super: CloneClass,
-    /// A 类逐回合明细（供判据标定与 LLM 复核）
-    pub a_per_turn: Vec<CloneTurn>
+    /// A 类（turn < 72，地区分身）——判据待定义，观测数据
+    pub region: CloneClass,
+    /// B 类（turn ≥ 72，超级拉面分身）——机制保证落得意位
+    pub super_ramen_clones: CloneClass,
+    /// 地区分身逐次彩圈明细（供判据标定与 LLM 复核）
+    pub region_per_turn: Vec<CloneTurn>
 }
 
 /// 一类分身的汇总统计
@@ -62,7 +62,7 @@ pub struct CloneClass {
     pub rainbow_strategy: u32
 }
 
-/// 单回合的新增分身明细（A 类）
+/// 单回合的新增分身明细（地区分身）
 #[derive(Debug, Default, Clone, Serialize)]
 pub struct CloneTurn {
     pub turn: u32,
@@ -89,50 +89,71 @@ pub struct CloneCard {
     pub used: Option<bool>
 }
 
-/// A 类逐回合明细行（**已预格式化**；report.html 与 brief.md 共用，避免两处重复）
+/// 地区分身「产生了彩圈」的逐次明细（**已预格式化**；report.html 与 brief.md 共用）
+///
+/// 只收彩圈事件（`rainbow_positions` 非空），逐 (回合, 卡) 一行 + 一句文字说明。
 #[derive(Debug, Clone, Serialize)]
 pub struct CloneDetailRow {
     pub turn: u32,
-    /// 支援卡索引 0-5（展示为 card{N}）
-    pub card: u32,
-    /// 分身落位（逗号分隔；无则「—」）
-    pub positions: String,
-    /// 彩圈位（无则「—」）
-    pub rainbow: String,
-    /// 有效增加彩圈来源：`luck` / `strategy`（非彩圈「—」）
+    /// 支援卡名（来自卡组；缺名时回退 `card{N}`）
+    pub card: String,
+    /// 彩圈所在训练位（速 / 耐 / 力 / 根 / 智；多命中用 `/` 连）
+    pub train: String,
+    /// 来源：运气好（随机有效增加）/ 规则性增加（好策略）
     pub origin: String,
-    /// 是否吃到：是 / 否（非彩圈「—」）
+    /// 玩家当回合是否选了该训练：是 / 否
     pub used: String,
+    /// 一句文字说明：哪张卡去了哪个训练产生彩圈、来源、玩家选了没有
+    pub text: String,
 }
 
+/// 五维训练位名（索引同序）
+const TRAIN_POS: [&str; 5] = ["速", "耐", "力", "根", "智"];
+
 impl ClonesBlock {
-    /// A 类逐回合明细（**全部新增分身**，不只彩圈；逐 (回合, 卡) 一行）
+    /// 地区分身逐次彩圈明细（**只收产生了彩圈的**；逐 (回合, 卡) 一行 + 文字说明）
     ///
-    /// 明细条数 = `a_region.new_clones`；其中 `rainbow != "—"` 的条数应等于
-    /// `a_region.rainbow_clones`，对不上说明取数漏了（见 pitfalls 第 9 条）。
-    pub fn a_detail_rows(&self) -> Vec<CloneDetailRow> {
-        // 位置列表 → `[0,2]`（空则「—」）
-        let fmt_list = |v: &[u32]| {
-            if v.is_empty() {
-                "—".to_string()
-            } else {
-                format!("[{}]", v.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","))
-            }
-        };
+    /// 行数应等于 `region.rainbow_clones`，对不上说明取数漏了（见 pitfalls 第 9 条）。
+    /// `deck_names`：卡组卡名（`meta.deck[].name`，按卡索引取；缺则回退 `card{N}`）。
+    pub fn region_detail_rows(&self, deck_names: &[String]) -> Vec<CloneDetailRow> {
         let mut out = Vec::new();
-        for ct in &self.a_per_turn {
+        for ct in &self.region_per_turn {
             for c in &ct.cards {
+                if c.rainbow_positions.is_empty() {
+                    continue;
+                }
+                let name = deck_names
+                    .get(c.card as usize)
+                    .cloned()
+                    .unwrap_or_else(|| format!("card{}", c.card));
+                let train = c
+                    .rainbow_positions
+                    .iter()
+                    .map(|p| TRAIN_POS.get(*p as usize).copied().unwrap_or("?"))
+                    .collect::<Vec<_>>()
+                    .join("/");
+                // origin 缺省按「运气好」处理（彩圈项才有 origin，非彩圈已被过滤）
+                let by_luck = c.origin.as_deref() != Some("strategy");
+                let (origin, cause) = if by_luck {
+                    ("运气好", "分身随机落到了该卡的得意位")
+                } else {
+                    ("规则性增加", "地区/超拉规则把缺席的卡带入了得意位")
+                };
+                let (used, pick) = match c.used {
+                    Some(true) => ("是", format!("玩家当回合选了{train}训练，吃到了这个彩圈")),
+                    Some(false) => ("否", format!("玩家当回合没选{train}训练，没吃到")),
+                    None => ("—", "当回合训练无法判定".to_string()),
+                };
                 out.push(CloneDetailRow {
                     turn: ct.turn,
-                    card: c.card,
-                    positions: fmt_list(&c.positions),
-                    rainbow: fmt_list(&c.rainbow_positions),
-                    origin: c.origin.clone().unwrap_or_else(|| "—".to_string()),
-                    used: match c.used {
-                        Some(true) => "是".to_string(),
-                        Some(false) => "否".to_string(),
-                        None => "—".to_string(),
-                    },
+                    card: name.clone(),
+                    train: train.clone(),
+                    origin: origin.to_string(),
+                    used: used.to_string(),
+                    text: format!(
+                        "t{}：「{}」的分身落到{}位（得意位），{}，属{}；{}",
+                        ct.turn, name, train, cause, origin, pick
+                    ),
                 });
             }
         }
@@ -203,8 +224,8 @@ pub fn build(snaps: &[SnapEntry], card_types: Option<&[i32]>, exec: &ExecutionRe
                 if turn < SUPER_RAMEN_START {
                     // A 类：判据待定义，全量观测（实测无友人卡分身，与文档 31 同口径）
                     let used = if rainbow_positions.is_empty() { None } else { Some(trained) };
-                    block.a_region.add(&entry);
-                    block.a_per_turn.push(CloneTurn {
+                    block.region.add(&entry);
+                    block.region_per_turn.push(CloneTurn {
                         turn,
                         cards: vec![CloneCard {
                             card,
@@ -219,12 +240,12 @@ pub fn build(snaps: &[SnapEntry], card_types: Option<&[i32]>, exec: &ExecutionRe
                     // 可落（game6234 实测：排除友人卡后新增 14，对齐文档 §6.5.5；
                     // 彩圈按分身落位口径实测 1/14——「机制保证 100% 落得意位」的
                     // 旧说法基于任意位口径，不成立）
-                    block.b_super.add(&entry);
+                    block.super_ramen_clones.add(&entry);
                 }
             }
         }
     }
-    // A 类逐回合明细按回合合并（同回合多张卡）
+    // 地区分身逐次彩圈明细按回合合并（同回合多张卡）
     merge_per_turn(&mut block);
     Some(block)
 }
@@ -284,13 +305,13 @@ impl CloneClass {
 /// 同回合多张卡的明细合并为一行
 fn merge_per_turn(block: &mut ClonesBlock) {
     let mut merged: Vec<CloneTurn> = Vec::new();
-    for t in std::mem::take(&mut block.a_per_turn) {
+    for t in std::mem::take(&mut block.region_per_turn) {
         match merged.last_mut() {
             Some(last) if last.turn == t.turn => last.cards.extend(t.cards),
             _ => merged.push(t)
         }
     }
-    block.a_per_turn = merged;
+    block.region_per_turn = merged;
 }
 
 #[cfg(test)]
@@ -336,7 +357,7 @@ mod tests {
         }
     }
 
-    /// A 类（真实彩圈 + 本体占位假象反例）+ B 类分离统计（排除友人卡）
+    /// 地区分身（真实彩圈 + 本体占位假象反例）+ B 类分离统计（排除友人卡）
     #[test]
     fn test_clones_ab_split() {
         // turn 10（A 类）：卡1(t1 耐) 本体位0 → 分身落位1（耐位 = 彩圈）；
@@ -374,32 +395,32 @@ mod tests {
         println!("clones: {block:#?}");
         // A 类：3 个新增分身，彩圈命中 2（卡1@turn10 luck / 卡4@turn14 strategy），
         // 卡1@turn12 的命中位是本体位 → 不算彩圈
-        assert_eq!(block.a_region.new_clones, 3);
-        assert_eq!(block.a_region.rainbow_clones, 2, "本体占的得意位不算彩圈");
-        assert_eq!(block.a_region.trained_clones, 1, "耐位彩圈被当回合耐训练");
-        assert_eq!(block.a_region.rainbow_luck, 1, "turn10 本体在场 → 随机（好运气）");
-        assert_eq!(block.a_region.rainbow_strategy, 1, "turn14 本体缺席 → 规则（好策略）");
-        assert_eq!(block.a_per_turn.len(), 3);
-        assert_eq!(block.a_per_turn[0].turn, 10);
-        assert_eq!(block.a_per_turn[0].cards[0].positions, vec![1], "分身落位 = 末位 − 本体位");
-        assert_eq!(block.a_per_turn[0].cards[0].rainbow_positions, vec![1]);
-        assert_eq!(block.a_per_turn[0].cards[0].origin.as_deref(), Some("luck"));
-        assert_eq!(block.a_per_turn[0].cards[0].used, Some(true), "turn10 耐位彩圈被当回合耐训练（含·继承混合后缀）→ 吃到");
-        assert_eq!(block.a_per_turn[1].turn, 12);
-        assert_eq!(block.a_per_turn[1].cards[0].positions, vec![2], "本体位1 被剔除");
-        assert!(block.a_per_turn[1].cards[0].rainbow_positions.is_empty(), "分身落力位非彩圈");
-        assert_eq!(block.a_per_turn[1].cards[0].origin, None, "非彩圈命中无来源");
-        assert_eq!(block.a_per_turn[1].cards[0].used, None, "非彩圈无 used");
-        assert_eq!(block.a_per_turn[2].turn, 14);
-        assert_eq!(block.a_per_turn[2].cards[0].rainbow_positions, vec![0]);
-        assert_eq!(block.a_per_turn[2].cards[0].origin.as_deref(), Some("strategy"));
-        assert_eq!(block.a_per_turn[2].cards[0].used, Some(false), "turn14 无当回合速训练 → 没吃到");
+        assert_eq!(block.region.new_clones, 3);
+        assert_eq!(block.region.rainbow_clones, 2, "本体占的得意位不算彩圈");
+        assert_eq!(block.region.trained_clones, 1, "耐位彩圈被当回合耐训练");
+        assert_eq!(block.region.rainbow_luck, 1, "turn10 本体在场 → 随机（好运气）");
+        assert_eq!(block.region.rainbow_strategy, 1, "turn14 本体缺席 → 规则（好策略）");
+        assert_eq!(block.region_per_turn.len(), 3);
+        assert_eq!(block.region_per_turn[0].turn, 10);
+        assert_eq!(block.region_per_turn[0].cards[0].positions, vec![1], "分身落位 = 末位 − 本体位");
+        assert_eq!(block.region_per_turn[0].cards[0].rainbow_positions, vec![1]);
+        assert_eq!(block.region_per_turn[0].cards[0].origin.as_deref(), Some("luck"));
+        assert_eq!(block.region_per_turn[0].cards[0].used, Some(true), "turn10 耐位彩圈被当回合耐训练（含·继承混合后缀）→ 吃到");
+        assert_eq!(block.region_per_turn[1].turn, 12);
+        assert_eq!(block.region_per_turn[1].cards[0].positions, vec![2], "本体位1 被剔除");
+        assert!(block.region_per_turn[1].cards[0].rainbow_positions.is_empty(), "分身落力位非彩圈");
+        assert_eq!(block.region_per_turn[1].cards[0].origin, None, "非彩圈命中无来源");
+        assert_eq!(block.region_per_turn[1].cards[0].used, None, "非彩圈无 used");
+        assert_eq!(block.region_per_turn[2].turn, 14);
+        assert_eq!(block.region_per_turn[2].cards[0].rainbow_positions, vec![0]);
+        assert_eq!(block.region_per_turn[2].cards[0].origin.as_deref(), Some("strategy"));
+        assert_eq!(block.region_per_turn[2].cards[0].used, Some(false), "turn14 无当回合速训练 → 没吃到");
         // B 类：卡2 落智位彩圈（本体在场 → luck）；友人卡不计；turn 74 无 exec 行
-        assert_eq!(block.b_super.new_clones, 1);
-        assert_eq!(block.b_super.rainbow_clones, 1);
-        assert_eq!(block.b_super.rainbow_luck, 1);
-        assert_eq!(block.b_super.rainbow_strategy, 0);
-        assert_eq!(block.b_super.trained_clones, 0);
+        assert_eq!(block.super_ramen_clones.new_clones, 1);
+        assert_eq!(block.super_ramen_clones.rainbow_clones, 1);
+        assert_eq!(block.super_ramen_clones.rainbow_luck, 1);
+        assert_eq!(block.super_ramen_clones.rainbow_strategy, 0);
+        assert_eq!(block.super_ramen_clones.trained_clones, 0);
     }
 
     /// 无变化（同回合首末相同）→ 无新增；gamedata 缺失 → None
@@ -412,7 +433,7 @@ mod tests {
         let block = build(&snaps, Some(&[0, 1, 2, 3, 4, 5]), &Default::default());
         let b = block.expect("应产出");
         println!("无变化: {b:?}");
-        assert_eq!(b.a_region.new_clones, 0);
+        assert_eq!(b.region.new_clones, 0);
         let none = build(&snaps, None, &Default::default());
         assert!(none.is_none(), "card_types 缺失 → 整块跳过");
     }

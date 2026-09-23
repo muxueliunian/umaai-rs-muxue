@@ -88,18 +88,16 @@
 - {{ v.clone_a }}
 - {{ v.clone_b }}
 
-A 类逐回合明细（全部新增分身；`来源`：luck=随机好运气 / strategy=规则好策略；`吃到`=当回合训练命中彩圈位）：
+地区分身逐次彩圈明细（只列产生了彩圈的；`来源` 运气好 = 随机有效增加，规则性增加 = 规则把缺席卡带入得意位）：
 
-{% if v.clone_a_rows | length > 0 -%}
-| 回合 | 卡 | 落位 | 彩圈位 | 来源 | 吃到 |
-|---|---|---|---|---|---|
-{% for r in v.clone_a_rows -%}
-| {{ r.turn }} | card{{ r.card }} | {{ r.positions }} | {{ r.rainbow }} | {{ r.origin }} | {{ r.used }} |
+{% if v.region_rows | length > 0 -%}
+{% for r in v.region_rows -%}
+- {{ r.text }}
 {% endfor -%}
 {% else -%}
-（本局无 A 类新增分身）
+（本局地区分身未产生彩圈）
 {% endif -%}
-- B 类只报汇总：机制保证落得意位，没吃到不算亏，盈亏只看该期运气分（§6.6）
+- 超级拉面分身只报汇总：机制保证落得意位，没吃到不算亏，盈亏只看该期运气分（§6.6）
 {% else -%}
 - 分身块不可用（gamedata 缺失）
 {% endif %}

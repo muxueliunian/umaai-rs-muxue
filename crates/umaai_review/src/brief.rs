@@ -118,8 +118,8 @@ pub struct BriefView {
     pub clones_available: bool,
     pub clone_a: String,
     pub clone_b: String,
-    /// A 类逐回合明细（全部新增分身；report.html 共用同一构造）
-    pub clone_a_rows: Vec<CloneDetailRow>,
+    /// 地区分身逐次彩圈明细（只含产生了彩圈的；report.html 共用同一构造）
+    pub region_rows: Vec<CloneDetailRow>,
     pub mandatory: String,
     pub free_race_rows: Vec<String>,
     pub schedule_notes: Vec<String>,
@@ -509,18 +509,19 @@ fn fill_other_sources(v: &mut BriefView, d: &Digest, states: &BTreeMap<u32, Turn
 
     // 5.3 分身彩圈
     if let Some(cl) = &d.clones {
-        let a = &cl.a_region;
+        let a = &cl.region;
         v.clone_a = format!(
-            "A 类地区（turn < {}）：新增 {} / 落得意位 {} / 被训练 {} / 随机 {} / 规则 {}",
+            "地区分身（turn < {}）：新增 {} / 落得意位 {} / 被训练 {} / 随机 {} / 规则 {}",
             SUPER_RAMEN_START, a.new_clones, a.rainbow_clones, a.trained_clones, a.rainbow_luck, a.rainbow_strategy
         );
-        let b = &cl.b_super;
+        let b = &cl.super_ramen_clones;
         v.clone_b = format!(
-            "B 类超拉（turn >= {}）：新增 {} / 落得意位 {} / 被训练 {} / 随机 {} / 规则 {}",
+            "超级拉面分身（turn >= {}）：新增 {} / 落得意位 {} / 被训练 {} / 随机 {} / 规则 {}",
             SUPER_RAMEN_START, b.new_clones, b.rainbow_clones, b.trained_clones, b.rainbow_luck, b.rainbow_strategy
         );
-        // A 类逐回合明细（全部新增分身；构造在 clones.rs，report.html 共用）
-        v.clone_a_rows = cl.a_detail_rows();
+        // 地区分身逐次彩圈明细（只含彩圈；构造在 clones.rs，report.html 共用）
+        let deck_names: Vec<String> = d.meta.deck.iter().map(|c| c.name.clone()).collect();
+        v.region_rows = cl.region_detail_rows(&deck_names);
     }
 
     // 5.4 赛程
@@ -645,7 +646,7 @@ fn rainbow_at(d: &Digest, turn: u32) -> Vec<String> {
     let Some(cl) = &d.clones else {
         return Vec::new();
     };
-    cl.a_per_turn
+    cl.region_per_turn
         .iter()
         .filter(|ct| ct.turn == turn)
         .flat_map(|ct| {
