@@ -1,0 +1,16 @@
+[package]
+name = "umaai_review"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow.workspace = true
+csv.workspace = true
+dunce = "1.0.5"
+lexopt.workspace = true
+minijinja = { version = "2.24.0", features = ["json"] }
+serde.workspace = true
+serde_json.workspace = true
+umaai.workspace = true
+umasim.workspace = true
+zip.workspace = true

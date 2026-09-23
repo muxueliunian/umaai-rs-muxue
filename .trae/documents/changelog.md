@@ -2,6 +2,16 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-23
+- **新增单局复盘分析引擎 `umaai_review`（crate + bin）**：对局包解包与角色识别（两种布局通吃）、快照只反序列化取字段、决策 CSV 按表头解析与链推断、gamedata 多级解析与降级，产出 digest.json（紧凑强类型 schema）与 report.html（minijinja 外置模板 + 自绘 SVG 三图三表，零 JS）
+- **实际执行动作推断**：AI 建议与实际执行逐回合对照，分类口径经实测校准（必赛回合兜底判比赛、主增量阈值判训练以覆盖智训练不耗体力、体力回升判休息），game6234 一致率与文档校准吻合，偏离全部为真实偏离
+- **检查项引擎**：伪波动标记（年界 / 继承 / RMJ 自动检测 / 开局第 1 年地区选择；turn 72 双属性既标记也计入超拉统计）、超级拉面期盈亏判定、坏手法已验证三项与训练失败候选清单；运气分读法口径写入 digest（已知 bug 与固定波动区）
+- **继承质量分析**：窗口取前一回合末至继承回合首并剥离前一回合行动贡献，game6234 两次继承实测与文档逐位一致
+- **分身彩圈观测口径修正**：彩圈判定改为分身新增落位（剔除本体占位假象）、A/B 两类分开统计、B 类只统计训练卡，有效彩圈按随机（好运气）/ 规则（好策略）二分来源
+- **新增 Trae skill `umaai_review`**：六问通俗化叙事框架、马娘玩家术语优先、归因口径（输赛掉干劲与超拉连亏归运气）、语气基调（LG 档鼓励、坏局减负、继承根因点到为止）、篇幅纪律；附口径速查与可选秋川理事长人设（删除即回退默认口吻）
+- **文档同步**：replay_review.md 更名与口径对齐实现现状（CLI、彩圈、伪波动、报告结构、进度）；project_context 补 crate 与 skill 结构
+- **决策理由显示新增「候选高于首选」颜色档（用户）**：候选均值高于中选策略时红底亮黄高亮提示估值不一致，首选行样式同步调整，附 colored 输出临时验证脚本；text_data_dict 数据更新（用户）
+
 ## 2026-09-21
 - **修复协议层 `failureRateBias` 语义反问题**：解析侧 `failureRateBias < 0 → good_trainer=true`（曾与上游相反，buff 被读成"不擅长训练"，MCTS 估值时 `calc_training_failure_rate` 加 +2 失败率人为偏高）、导出侧 `good_trainer → -2` 同步反向——与 `traits.rs:calc_training_failure_rate` 内部 `good_trainer → bias=-2` 同源；game421 turn 25+ 反复推「不吃面+休息」（vital 88~108 全休息）的根因，实测 turn 61 `rest_pair_probe` 不吃面领先 +351 → 落后 −449，turn 62 +645 → 落后 −223。补回归 `test_failure_rate_bias_parse`（三组 frb/-2/+2/0 钉解析方向）
 - **新增在线单局决策日志的高体力休息审计脚本**：`scripts/analyze_rest_picks_online.py`（与 `scripts/analyze_rest_picks.py` 互补：前者跑批决策日志、本工具吃 `logs/game{id}/decisions.csv` + 回合 thisTurn.json 还原 vital），决策时体力从快照反查；与 `rest_pair_probe` 共同补齐「高体力休息」类排查链路

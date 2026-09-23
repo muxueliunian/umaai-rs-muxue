@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>单局复盘 game{{ digest.meta.game }} · umaai_review</title>
+<style>
+  :root { --fg:#1f2937; --muted:#6b7280; --line:#e5e7eb; --bg:#f6f8fb; --card:#ffffff; }
+  * { box-sizing:border-box; }
+  body { margin:0; padding:24px; font-family:"Segoe UI","Microsoft YaHei",sans-serif;
+         color:var(--fg); background:var(--bg); }
+  .wrap { max-width:960px; margin:0 auto; }
+  h1 { font-size:22px; margin:0 0 4px; }
+  .sub { color:var(--muted); font-size:12.5px; margin-bottom:18px; }
+  .cards { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+           gap:10px; margin-bottom:12px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:10px 14px; }
+  .card .k { font-size:11.5px; color:var(--muted); }
+  .card .v { font-size:17px; font-weight:600; margin-top:2px; word-break:break-all; }
+  .deck { background:var(--card); border:1px solid var(--line); border-radius:10px;
+          padding:10px 14px; margin-bottom:18px; font-size:13px; }
+  .chip { display:inline-block; background:#eef2ff; border-radius:999px;
+          padding:2px 10px; margin:2px 4px 2px 0; white-space:nowrap; }
+  section { background:var(--card); border:1px solid var(--line); border-radius:10px;
+            padding:14px 18px; margin-bottom:16px; }
+  h2 { font-size:15px; margin:0 0 10px; color:#111827; }
+  svg { max-width:100%; height:auto; display:block; }
+  table { border-collapse:collapse; width:100%; font-size:12.5px; }
+  th, td { border:1px solid var(--line); padding:4px 8px; text-align:left;
+           vertical-align:top; }
+  th { background:#f1f5f9; }
+  tr:nth-child(even) td { background:#fafafa; }
+  .num { text-align:right; font-variant-numeric:tabular-nums; }
+  .sev-warn { color:#b45309; font-weight:600; }
+  .sev-info { color:#2563eb; }
+  .tbl-scroll { max-height:520px; overflow:auto; }
+  footer { color:var(--muted); font-size:12px; line-height:1.7; margin-top:8px; }
+  .note { color:var(--muted); font-size:12px; margin:6px 0; }
+</style>
+</head>
+<body><div class="wrap">
+
+<h1>单局复盘 · game{{ digest.meta.game }}</h1>
+<div class="sub">
+  umaai_review 生成 · 马娘 {{ digest.meta.uma_name }}（{{ digest.meta.uma_id }}）·
+  结束方式 {{ digest.meta.end_reason }}{% if digest.meta.start_turn > 0 %} ·
+  中途接管（起始回合 {{ digest.meta.start_turn }}）{% endif %} ·
+  执行推断一致率 {{ overview.match_rate }}%
+</div>
+
+<div class="cards">
+  <div class="card"><div class="k">终局评分</div>
+    <div class="v">{% if digest.meta.final_score is not none %}{{ digest.meta.final_score }}{% else %}—{% endif %}</div></div>
+  <div class="card"><div class="k">等级</div>
+    <div class="v">{{ digest.meta.rank or "—" }}</div></div>
+  <div class="card"><div class="k">终局运气分</div>
+    <div class="v">{% if digest.meta.total_luck_end is not none %}{{ digest.meta.total_luck_end | round(1) }}{% else %}—{% endif %}</div></div>
+  <div class="card"><div class="k">五维终值（速/耐/力/根/智）</div>
+    <div class="v" style="font-size:13px">{{ overview.five_status | join(" / ") or "—" }}</div></div>
+  <div class="card"><div class="k">体力 / 干劲</div>
+    <div class="v">{{ overview.vital or "—" }} / {{ overview.motivation or "—" }}</div></div>
+  <div class="card"><div class="k">快照 / 决策行</div>
+    <div class="v">{{ digest.meta.snapshots }} / {{ digest.meta.decision_rows }}</div></div>
+</div>
+
+<div class="deck"><b>卡组</b>：
+  {% for c in digest.meta.deck %}<span class="chip">{{ c.name }} · {{ c.limit_break }}破</span>{% endfor %}
+</div>
+
+<section><h2>图1 · 属性成长曲线</h2>{{ chart_status | safe }}</section>
+<section><h2>图2 · 运气分双轴</h2>{{ chart_luck | safe }}</section>
+<section><h2>图3 · 实际执行行动总计</h2>{{ chart_actions | safe }}</section>
+
+<section>
+<h2>表1 · 检查项命中清单（{{ digest.findings | length }} 条）</h2>
+{% if digest.findings %}
+<table>
+  <tr><th>回合</th><th>类型</th><th>证据</th><th>严重度</th></tr>
+  {% for f in digest.findings %}
+  <tr><td class="num">{{ f.turn }}</td><td>{{ f.type }}</td><td>{{ f.evidence }}</td>
+      <td class="sev-{{ f.severity }}">{{ f.severity }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}<div class="note">无命中</div>{% endif %}
+</section>
+
+{% if digest.inherit %}
+<section>
+<h2>表2 · 继承质量（参考值 {{ digest.inherit.reference_value or "—" }}）</h2>
+<table>
+  <tr><th>回合</th><th>继承贡献（五维）</th><th>偏差</th></tr>
+  {% for c in digest.inherit.contributions %}
+  <tr><td class="num">{{ c.turn }}</td><td class="num">{{ c.five_status_sum }}</td>
+      <td class="num">{% if c.deviation is not none %}{{ c.deviation }}{% else %}—{% endif %}</td></tr>
+  {% endfor %}
+</table>
+<div class="note">{{ digest.inherit.dev_note }}</div>
+</section>
+{% endif %}
+
+{% if digest.clones %}
+<section>
+<h2>分身彩圈观测</h2>
+<table>
+  <tr><th>类别</th><th>新增分身</th><th>落得意位</th><th>被训练</th>
+      <th>随机（好运气）</th><th>规则（好策略）</th></tr>
+  <tr><td>A 地区（turn&lt;72）</td>
+      <td class="num">{{ digest.clones.a_region.new_clones }}</td>
+      <td class="num">{{ digest.clones.a_region.rainbow_clones }}</td>
+      <td class="num">{{ digest.clones.a_region.trained_clones }}</td>
+      <td class="num">{{ digest.clones.a_region.rainbow_luck }}</td>
+      <td class="num">{{ digest.clones.a_region.rainbow_strategy }}</td></tr>
+  <tr><td>B 超拉（turn≥72，训练卡）</td>
+      <td class="num">{{ digest.clones.b_super.new_clones }}</td>
+      <td class="num">{{ digest.clones.b_super.rainbow_clones }}</td>
+      <td class="num">{{ digest.clones.b_super.trained_clones }}</td>
+      <td class="num">{{ digest.clones.b_super.rainbow_luck }}</td>
+      <td class="num">{{ digest.clones.b_super.rainbow_strategy }}</td></tr>
+</table>
+<div class="note">A 类逐回合明细（本体位 → 分身落位 → 彩圈位 → 来源）见 digest.json 的 clones.a_per_turn</div>
+</section>
+{% endif %}
+
+<section>
+<h2>表3 · 决策明细（calc 行 {{ digest.decisions | length }} 条）</h2>
+{% if digest.decisions %}
+<div class="tbl-scroll">
+<table>
+  <tr><th>回合</th><th>seq</th><th>阶段</th><th>类型</th><th>AI 选中</th>
+      <th class="num">期望分</th><th class="num">回合Δ</th><th class="num">链长</th></tr>
+  {% for r in digest.decisions %}
+  <tr><td class="num">{{ r.turn }}</td><td class="num">{{ r.seq }}</td>
+      <td>{{ r.stage }}</td><td>{{ r.kind }}</td><td>{{ r.chosen.desc or "—" }}</td>
+      <td class="num">{% if r.t_n_display is not none %}{{ r.t_n_display | round(0) | int }}{% endif %}</td>
+      <td class="num">{% if r.turn_delta is not none %}{{ r.turn_delta | round(1) }}{% endif %}</td>
+      <td class="num">{{ r.chain_len }}</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% else %}<div class="note">无决策数据</div>{% endif %}
+</section>
+
+<section>
+<h2>口径说明</h2>
+<footer>
+{% for c in digest.context.criteria %}<div>· {{ c }}</div>{% endfor %}
+</footer>
+<div class="note">赛程 / 自由比赛 / 覆盖等数据块见 digest.json，由归因层（SKILL）
+处理成描述性文字后再考虑显示形式。</div>
+</section>
+
+</div></body></html>

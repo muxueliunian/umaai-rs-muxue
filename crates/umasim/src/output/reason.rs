@@ -93,6 +93,8 @@ pub struct DimDelta {
 /// 决策理由候选显示样式
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ReasonColor {
+    /// 候选均值高于首选——搜索估值与中选策略不一致，红底亮黄字高亮提示
+    HigherThanChosen,
     /// 与首选差距绝对值小于 30
     BrightGreen,
     /// 与首选差距绝对值小于 100
@@ -105,6 +107,12 @@ enum ReasonColor {
 
 /// 为候选分差选择终端显示颜色。
 fn reason_color(gap: f64) -> ReasonColor {
+    // `gap > 0` 表示候选均值高于中选策略——出现这种情况通常是搜索估值与
+    // 推荐策略不一致（PT 偏好 / radical 加权 / 终局维度差口径偏移），值得用
+    // 红底亮黄字高亮，让玩家一眼发现"AI 没选评分最高的"。
+    if gap > 0.0 {
+        return ReasonColor::HigherThanChosen;
+    }
     if gap.abs() < 30.0 {
         ReasonColor::BrightGreen
     } else if gap.abs() < 100.0 {
@@ -123,6 +131,7 @@ fn reason_color(gap: f64) -> ReasonColor {
 /// 对首选（中选者）的差——保持颜色与字段同源，扫视与解读一致。
 fn format_reason_line(text: String, gap: f64) -> String {
     match reason_color(gap) {
+        ReasonColor::HigherThanChosen => text.bright_yellow().on_red().to_string(),
         ReasonColor::BrightGreen => text.bright_green().to_string(),
         ReasonColor::Green => text.green().to_string(),
         ReasonColor::Yellow => text.yellow().to_string(),
@@ -393,17 +402,17 @@ fn render_gap(gap: f64) -> String {
 
 /// 渲染可读文字（数据驱动，每行一条，直接供 `info!` 上屏）
 ///
-/// 行 1 = 首选（中选者，固定亮绿色，方便一眼定位）；
+/// 行 1 = 首选（中选者，红色底亮黄色字，方便一眼定位）；
 /// 行 2.. = 评分前 N 中的未中选候选：`±分差 （优势子项, ✗劣势子项）`，按
 /// 评分降序编号 `#2`, `#3`, ...；颜色按与首选的差距分档（即文本里展示的
-/// `±分差` 字段同源，便于扫视与解读一致）——`首选` 永远亮绿色，其余按
+/// `±分差` 字段同源，便于扫视与解读一致）——`首选` 永远红底亮黄字，其余按
 /// `|gap|` `<30` / `<100` / `<300` / 其余 → 亮绿 / 绿 / 黄 / 灰。置信度
 /// 只在原始数据里，不上屏。
 pub fn render_reason_lines(d: &DecisionReasonData) -> Vec<String> {
     let prefix = format!("[回合 {}]", d.turn + 1);
     let mut lines = Vec::new();
-    // 行 1：首选（中选者），固定亮绿色——即使它不是评分最高者，也优先定位
-    lines.push(format!("{prefix} 首选: {}", d.chosen_desc).bright_green().to_string());
+    // 行 1：首选（中选者），红色底亮黄色字——即使它不是评分最高者，也优先定位
+    lines.push(format!("{prefix} 首选: {}", d.chosen_desc).bright_yellow().on_red().to_string());
     for (i, r) in d.rivals.iter().enumerate() {
         let rank = format!("#{}", i + 2);
         let mut dims: Vec<String> = r.pros.iter().map(render_dim).collect();
@@ -599,11 +608,12 @@ mod tests {
         assert!(!lines.iter().any(|l| l.contains("置信")), "置信度不再上屏（只在原始数据）");
     }
 
-    /// 着色档位：与首选差距 `<30`/`<100`/`<300`/其余 → 亮绿/绿/黄/灰
+    /// 着色档位：候选高于首选 → 红底亮黄字 / 与首选差距 `<30`/`<100`/`<300`/其余 → 亮绿/绿/黄/灰
     ///
-    /// 测文本内是否嵌入对应 ANSI 真彩色码：`bright_green`=`\e[92m`，
-    /// `green`=`\e[32m`，`yellow`=`\e[33m`，自定义灰=`\e[38;2;128;128;128m`。
-    /// `no-color` feature 下 colored 编译期禁用颜色，无法覆盖，测试跳过。
+    /// 测文本内是否嵌入对应 ANSI 真彩色码：`bright_yellow on red`=`\e[93;41m`、
+    /// `bright_green`=`\e[92m`，`green`=`\e[32m`，`yellow`=`\e[33m`，
+    /// 自定义灰=`\e[38;2;128;128;128m`。`no-color` feature 下 colored 编译期
+    /// 禁用颜色，无法覆盖，测试跳过。
     #[test]
     fn test_color_thresholds() {
         if cfg!(feature = "no-color") {
@@ -617,7 +627,8 @@ mod tests {
             (30.0, "\u{1b}[32m"),    // 边界外侧（|gap| 恰为 30）：绿
             (50.0, "\u{1b}[32m"),    // |gap|<100：绿
             (200.0, "\u{1b}[33m"),   // |gap|<300：黄
-            (500.0, "\u{1b}[38;2;128;128;128m") // |gap|>=300：真彩色灰
+            (500.0, "\u{1b}[38;2;128;128;128m"), // |gap|>=300：真彩色灰
+            (50.0, "\u{1b}[93;41m"), // gap>0：红底亮黄字（高于首选）
         ];
         for (gap, want_ansi) in cases {
             let line = format_reason_line(format!("rival {gap}"), gap);

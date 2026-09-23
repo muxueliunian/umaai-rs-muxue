@@ -5,7 +5,7 @@
 ## 项目结构
 
 ### 工作空间
-- Cargo 工作空间，成员仅两个 crate：`crates/umasim`（核心模拟库）+ `crates/umaai`（PC 通道层）
+- Cargo 工作空间，成员三个 crate：`crates/umasim`（核心模拟库）+ `crates/umaai`（PC 通道层）+ `crates/umaai_review`（单局复盘分析，见「umaai_review 复盘分析层」节）
 - `crates/unused/` 是遗留 bin 脚本（无 Cargo.toml，不参与构建），仅作历史参考
 - workspace 根目录即项目根（AGENTS.md 所在目录）；`.portable` 为符号链接（勿跨盘操作）
 
@@ -373,7 +373,35 @@ umaai 实时监听时把「接收到的游戏数据」与「策略计算结果�
 - 基线：151 份样本（chara 6204 全 78 回合）驱动 `test_turn_import_v2_full_samples` roundtrip 校验
 - 已废止假设清单在文档 §5（last_ramen 每回合更新 / 不需要反推 / playing_state 44/45 不是地区选择 / next_scenario_pt 术语）
 
+## umaai_review 复盘分析层（`crates/umaai_review`）
+
+- **职责**：对在线记录器产出的局包 `logs/game{id}.zip` 做离线复盘——解包解析 →
+  `digest.json`（强类型 schema：meta / timeline / decisions / execution / luck /
+  schedule / inherit / clones / coverage / findings / context）+ `report.html`
+  （minijinja 外置模板 `templates/report.html.j2` + `umaai::plot::svg` 自绘三图
+  三表，零 JS；digest 紧凑序列化）。方案与口径见 `replay_review.md`（已实施）
+- **bin**：`umaai_review`（`--zip` 必需；`--out` 默认局包同级同名目录
+  `logs/game{id}/`；`--gamedata` 多级解析：显式 > `UMAI_DATA_DIR` > 局包向上找
+  > cwd，全缺时降级纯 ID 展示并写进 digest 注记）
+- **模块**（`src/`）：`pack`（解包 + 文件角色识别，两种布局通吃）、`gdata`、
+  `timeline`（快照只反序列化 `GameStatusRamen` 取字段，**不调 `into_game`**）、
+  `decisions`（CSV 按表头名取值 + 链推断 + luck 回合合计聚合）、`schedule`、
+  `score`（`Uma::calc_score` 同源口径 + `get_rank_name`）、`execution`（实际
+  动作推断：必赛回合兜底 + 主增量阈值判训练——智训练不耗体力、体力回升判
+  休息）、`checks`（伪波动标记：年界 / 继承 / RMJ / 开局第 1 年地区选择，
+  turn 72 双属性；超级拉面期盈亏；坏手法已验证三项 + 训练失败候选）、
+  `inherit`（窗口 = 前回合末 → 继承回合首，剥离前回合行动）、`clones`
+  （彩圈 = 分身新增落位，A/B 分开统计，B 只统计训练卡，luck/strategy 来源
+  二分）、`digest`、`report`
+- **依赖**：`umaai` + `umasim`（复用协议结构与口径函数）；`minijinja`（含
+  `json` feature）；其余走 workspace 依赖
+- **skill**：`.trae/skills/umaai_review/`（SKILL.md 六问叙事框架 + 通俗玩家
+  术语 + 归因口径 + 语气基调；`reference/metrics_glossary.md` 口径速查；
+  `reference/persona.md` 可选秋川理事长人设，删除即回退默认口吻）
+- 测试 25 个：`cargo test --release -p umaai_review`（模板端到端、分身口径、
+  继承校准等含 game6234 实测钉死值）
+
 ## 相关文档导航
 
-- `.trae/documents/` 现行目录：changelog / issues / glossary / project_context / ramen_memo(×2) / ramen_story_flow / ramen_protocol_v2 / ramen_pt_tradeoff_tuning / perf_profiling / tests_overview / master_mdb_data
+- `.trae/documents/` 现行目录：changelog / issues / glossary / project_context / ramen_memo(×2) / ramen_story_flow / ramen_protocol_v2 / ramen_pt_tradeoff_tuning / replay_review / perf_profiling / tests_overview / master_mdb_data
 - `.trae/documents/archive/`：已完成的方案与草案（config_refactor_plan / rng_refactor_plan(×2) / ramen_refactor_development_plan / umaai-main-refactor / umaai_air_redirector_integration / ramen_online_integration_plan / adapter_spec / 上游三层架构建议 / 性能与 GPU 方案 / handwritten_policy / 旧 issues 等）
