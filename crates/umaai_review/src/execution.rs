@@ -29,8 +29,9 @@ use crate::{decisions::DecRow, timeline::TimelineRow};
 /// 五维属性名（训练动作的目标属性）
 const ATTR_NAMES: [&str; 5] = ["速", "耐", "力", "根", "智"];
 
-/// 训练判定的主增量下限（成功训练 +13~+134，§6.1 实测；事件增益通常更小）
-const TRAIN_MIN_DELTA: i32 = 13;
+/// 训练判定的主增量下限（成功训练 +13~+134，§6.1 实测；开局低等级训练会低于
+/// 13——game1444 turn 0 智训练实测 +12，故取 12；事件增益通常更小）
+const TRAIN_MIN_DELTA: i32 = 12;
 
 /// 休息判定的体力下限（休息 +25~+50；事件小额属性不影响）
 const REST_MIN_VITAL: i32 = 20;
@@ -412,5 +413,20 @@ mod tests {
         assert_eq!(r.comparable, 0);
         assert_eq!(r.matched, 0);
         assert!(r.findings.is_empty(), "未映射不产生 findings");
+    }
+
+    /// 开局低加成训练（智 +12，低于文档 +13~+134 下限）仍判训练
+    /// （game1444 turn 0 实测形态，阈值取 12 的依据）
+    #[test]
+    fn test_opening_small_train() {
+        let tl = vec![
+            tl_row(0, 0, [3, 0, 0, 0, 0], 30, 4, 0, 0, false),
+            tl_row(1, 0, [6, 0, 0, 0, 12], 30, 4, 0, 0, false),
+        ];
+        let dec = vec![dec_row(0, 0, "智训练")];
+        let r = build(&tl, &dec, &[]);
+        println!("开局小训练: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
+        assert_eq!(r.rows[0].actual_action, "智训练", "智+12 应判训练（阈值 12）");
+        assert_eq!(r.rows[0].matches, Some(true));
     }
 }
