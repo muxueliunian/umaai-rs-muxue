@@ -2,6 +2,12 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-23
+- **新增拉面地区网络可选项**：`ramen_region_policy` 可选 `handwritten`（默认，行为不变）/ `region_nn_hint`（执行不变，另显示网络的地区推荐）/ `region_nn`（外层三次地区选择交给网络，其余决策仍走搜索）；umaai 新增 `onnx` feature，未开 feature 或缺模型时启动报错
+- **地区网络模型加载加固**：加载时校验 ONNX 图输出契约，并按固定 batch 编译（更快，输出逐位不变）
+- **无搜索评分决策的来源标注**：网络做出的地区选择显示为「神经网络地区策略」而非「手写逻辑」；luck 挂载改为合并决策自带的附加信息而不是覆盖
+- **测试**：新增生成式 ONNX 测试模型，地区网络与客户端输出流程测试不再依赖未入库的权重；依赖真实权重的测试改为默认忽略、显式运行缺模型即报错
+
 ## 2026-09-21
 - **修复协议层 `failureRateBias` 语义反问题**：解析侧 `failureRateBias < 0 → good_trainer=true`（曾与上游相反，buff 被读成"不擅长训练"，MCTS 估值时 `calc_training_failure_rate` 加 +2 失败率人为偏高）、导出侧 `good_trainer → -2` 同步反向——与 `traits.rs:calc_training_failure_rate` 内部 `good_trainer → bias=-2` 同源；game421 turn 25+ 反复推「不吃面+休息」（vital 88~108 全休息）的根因，实测 turn 61 `rest_pair_probe` 不吃面领先 +351 → 落后 −449，turn 62 +645 → 落后 −223。补回归 `test_failure_rate_bias_parse`（三组 frb/-2/+2/0 钉解析方向）
 - **新增在线单局决策日志的高体力休息审计脚本**：`scripts/analyze_rest_picks_online.py`（与 `scripts/analyze_rest_picks.py` 互补：前者跑批决策日志、本工具吃 `logs/game{id}/decisions.csv` + 回合 thisTurn.json 还原 vital），决策时体力从快照反查；与 `rest_pair_probe` 共同补齐「高体力休息」类排查链路

@@ -63,6 +63,17 @@ ramen_region_strategy = "all"
 # 仅当 ramen_region_strategy="fixed" 时生效
 ramen_region_fixed = [[11, 14, 15]]
 
+# 外层地区选择（每年一次，共 3 次）由谁负责：
+#   "handwritten"（默认）：既有逻辑。[mcts] ramen_search_stages 含 region 时走搜索，否则走手写策略
+#   "region_nn_hint"：执行与 handwritten 相同，另外显示一行神经网络的地区推荐作参考
+#   "region_nn"：地区由神经网络选择，不再做地区搜索；训练、吃面等其余决策不变
+# 后两项需要 onnx feature 构建（cargo build --release --features onnx -p umaai）
+# 以及 ramen_region_model_path。
+ramen_region_policy = "handwritten"
+# 地区网络模型路径，需同目录存在同名 .json 旁车（<模型>.onnx.json）。
+# 与 neuralnet_model_path 是不同的模型，不可混填。模型不随仓库发布。
+# ramen_region_model_path = "saved_models/<模型>.onnx"
+
 # 拉面手写策略：为多拿总 PT 最多愿意牺牲的总评分（评分换 PT，顶层可调）
 # 只影响"训练位主属性已满"的训练候选（终盘最常见）：属性收益为 0 时只剩 PT，
 # 本值决定策略还愿不愿意练它。0 = 评分优先（默认，实测评分峰值）；越大越偏

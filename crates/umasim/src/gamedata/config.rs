@@ -624,6 +624,18 @@ pub struct GameConfig {
     /// 例如 `[[10, 12, 14]]`：第3年固定选 [10,12,14]
     #[serde(default)]
     pub ramen_region_fixed: Option<Vec<[usize; 3]>>,
+    /// 拉面杯地区选择的决策来源（默认 `handwritten`，见 [`RamenRegionPolicy`]）
+    ///
+    /// 与 [`Self::ramen_region_strategy`] 正交：`strategy` 决定候选怎么枚举，
+    /// 本字段决定谁从候选里挑。
+    #[serde(default)]
+    pub ramen_region_policy: RamenRegionPolicy,
+    /// 地区网络模型路径（`ramen_region_policy` 不是 `handwritten` 时生效）
+    ///
+    /// 需同目录存在同名 `.json` 旁车（`<model>.onnx.json`）。与温泉的
+    /// [`Self::neuralnet_model_path`] 是两个不同的模型，不可混用。
+    #[serde(default)]
+    pub ramen_region_model_path: Option<String>,
     /// 在线决策记录开关（默认开；仅 umaai 实时运行使用，离线 sim/bench 不读）
     ///
     /// 开时按局落盘 `logs/game{id}/`：`thisTurn.json` 原文 + `decisions.csv` +
@@ -700,6 +712,8 @@ impl GameConfig {
             race_grades: default_race_grades(),
             ramen_region_strategy: RamenRegionStrategy::default(),
             ramen_region_fixed: None,
+            ramen_region_policy: RamenRegionPolicy::default(),
+            ramen_region_model_path: None,
             luck_record: default_luck_record(),
             friend_complete_required: default_friend_complete()
         }
@@ -811,6 +825,37 @@ pub enum RamenRegionStrategy {
     Fixed
 }
 
+/// 拉面杯地区选择的决策来源
+///
+/// 只作用于客户端实际对局中每年一次的地区选择（共 3 次）；训练、吃面等其余决策
+/// 仍按 `[mcts]` 配置走搜索，搜索内部模拟的地区选择也仍是手写策略。本枚举不提供
+/// 整局交给网络决策的能力。
+///
+/// - `handwritten`（默认）：地区沿用既有逻辑——`ramen_search_stages` 含 `region`
+///   时走搜索，否则走手写推荐策略。
+/// - `region_nn_hint`：执行与 `handwritten` 完全相同，另外显示一行网络的地区推荐作参考。
+/// - `region_nn`：地区由 `ramen_region_model_path` 指定的网络选择，不再做地区搜索。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum RamenRegionPolicy {
+    /// 地区沿用既有逻辑
+    #[default]
+    #[serde(rename = "handwritten")]
+    Handwritten,
+    /// 执行既有逻辑，另外显示网络推荐
+    #[serde(rename = "region_nn_hint")]
+    RegionNnHint,
+    /// 地区由网络选择
+    #[serde(rename = "region_nn")]
+    RegionNn
+}
+
+impl RamenRegionPolicy {
+    /// 是否需要加载地区网络模型（除 `handwritten` 外都需要）
+    pub fn needs_model(self) -> bool {
+        !matches!(self, Self::Handwritten)
+    }
+}
+
 /// 策略参数（手写/未来模型策略参数）
 ///
 /// 当前承载拉面杯第3年地区选择策略；后续扩展可加入超级拉面选择策略、未来模型策略参数等。
@@ -887,6 +932,17 @@ pub struct OverrideGameConfig {
     /// 要显式清空 default 的 fixed 组合可写空数组 `[]`。
     #[serde(default)]
     pub ramen_region_fixed: Option<Vec<[usize; 3]>>,
+    /// 地区决策来源（顶层覆盖；对应 `GameConfig::ramen_region_policy`）
+    ///
+    /// `None` = 不覆盖 default_config.toml（即保持 `handwritten`）。
+    #[serde(default)]
+    pub ramen_region_policy: Option<RamenRegionPolicy>,
+    /// 地区网络模型路径（顶层覆盖；对应 `GameConfig::ramen_region_model_path`）
+    ///
+    /// `None` = 不覆盖 default。模型不随仓库发布，填本机路径（绝对路径或相对
+    /// workspace 根目录）。
+    #[serde(default)]
+    pub ramen_region_model_path: Option<String>
 }
 
 /// MCTS 覆盖配置：每个字段都是可选覆盖（`None` = 不覆盖 `default_config.toml`）。
@@ -1088,6 +1144,12 @@ impl OverrideGameConfig {
         if let Some(v) = self.ramen_region_fixed {
             ret.ramen_region_fixed = Some(v);
         }
+        if let Some(v) = self.ramen_region_policy {
+            ret.ramen_region_policy = v;
+        }
+        if let Some(v) = self.ramen_region_model_path {
+            ret.ramen_region_model_path = Some(v);
+        }
         ret
     }
 }
@@ -1131,6 +1193,8 @@ mod tests {
             mcts: OverrideMctsConfig::default(),
             ramen_region_strategy: None,
             ramen_region_fixed: None,
+            ramen_region_policy: None,
+            ramen_region_model_path: None
         }
     }
 

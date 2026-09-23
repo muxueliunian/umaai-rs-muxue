@@ -38,7 +38,11 @@
 //! 和 `Arc<StdoutJsonSink>`（info/error 用），human 模式下不需要后者。
 
 use colored::Colorize;
-use crate::output::{DecisionInfo, view::GameView};
+use crate::output::{
+    DecisionInfo,
+    decision::{REGION_NN_HINT_KEY, SOURCE_REGION_NN},
+    view::GameView
+};
 
 /// AI 决策的输出契约
 ///
@@ -83,17 +87,38 @@ impl DecisionSink for EmptySink {
 /// 决定要不要打 round header）。
 pub struct HumanReadableSink;
 
-impl DecisionSink for HumanReadableSink {
-    fn emit(&self, info: &DecisionInfo, _view: &GameView) {
+impl HumanReadableSink {
+    /// 无搜索评分决策的来源文案：地区网络单独标注，其余沿用「手写逻辑」
+    fn source_text(info: &DecisionInfo) -> &'static str {
+        match info.source_label() {
+            Some(SOURCE_REGION_NN) => "神经网络地区策略",
+            _ => "手写逻辑"
+        }
+    }
+
+    /// `region_nn_hint` 模式下的参考行；决策上没挂参考时为 `None`
+    fn region_nn_hint_line(info: &DecisionInfo) -> Option<String> {
+        let hint = info.scenario_extra.as_ref()?.get(REGION_NN_HINT_KEY)?;
+        let choice = hint.get("choice")?.as_str()?;
+        let verdict = match hint.get("same_as_executed").and_then(|v| v.as_bool()) {
+            Some(true) => "与推荐相同",
+            _ => "与推荐不同"
+        };
+        Some(format!("神经网络地区参考：{choice}（{verdict}）"))
+    }
+
+    /// 渲染决策本身（首选 / luck 行）
+    fn render_decision(info: &DecisionInfo) {
         // 手写 fallback 决策（`candidate_scores` 为空）：
         // - 默认配置 `ramen_search_stages="train,ramen"` 下 region 未开启 → 地区选择走手写逻辑
         // - **比赛回合单候选**（`Train` 且 `is_race_turn`，无搜索评分）
         // - RamenSelect 合并候选 ≤ 1 / 单候选短路回落三阶段路径
         // 它们没有搜索评分，luck 行的「期望评分」只是回合加成的换算、运气恒 0，混入会误导，
         // 故统一显示所选动作并标注【手写逻辑】、跳过 luck 行（JSON 模式下全量字段照常输出）。
+        // 地区网络做出的地区选择同样无搜索评分，按来源标签标注。
         if info.candidate_scores.is_empty() {
             if let Some(desc) = info.candidate_descriptions.get(info.action_index) {
-                println!("{}", format!("选择{desc}（手写逻辑）").magenta());
+                println!("{}", format!("选择{desc}（{}）", Self::source_text(info)).magenta());
             }
             return;
         }
@@ -126,6 +151,15 @@ impl DecisionSink for HumanReadableSink {
             _ => total.bright_green()
         };
         println!("期望评分 {exp} 运气: 本局 {total_colored}, 本回合 {turn}");
+    }
+}
+
+impl DecisionSink for HumanReadableSink {
+    fn emit(&self, info: &DecisionInfo, _view: &GameView) {
+        Self::render_decision(info);
+        if let Some(line) = Self::region_nn_hint_line(info) {
+            println!("{}", line.bright_cyan());
+        }
     }
 }
 
@@ -240,7 +274,10 @@ impl StdoutJsonSink {
 
 #[cfg(test)]
 mod tests {
+    use anyhow::Result;
+
     use super::*;
+    use crate::utils::Checks;
 
     /// 构造一个最小可用的 DecisionInfo 用于测试
     ///
@@ -260,6 +297,42 @@ mod tests {
         ];
         info.candidate_n = vec![1024, 800, 256];
         info
+    }
+
+    /// 无评分决策的来源文案：地区网络单独标注，未标注时与上游一致为「手写逻辑」
+    #[test]
+    fn test_source_text() -> Result<()> {
+        let mut c = Checks::new();
+        let bare = DecisionInfo::from_index(0);
+        let nn = DecisionInfo::from_index(0).with_source(SOURCE_REGION_NN);
+        println!("未标注 → {} / region_nn → {}", HumanReadableSink::source_text(&bare), HumanReadableSink::source_text(&nn));
+        c.check(HumanReadableSink::source_text(&bare) == "手写逻辑", "未标注沿用「手写逻辑」");
+        c.check(HumanReadableSink::source_text(&nn) == "神经网络地区策略", "地区网络单独标注");
+        c.finish()
+    }
+
+    /// 地区网络参考行：挂了参考才出现，并如实给出是否与推荐相同
+    #[test]
+    fn test_region_nn_hint_line() -> Result<()> {
+        let mut c = Checks::new();
+        let with_hint = |same: bool| {
+            let mut info = sample_info();
+            info.scenario_extra = Some(serde_json::json!({
+                REGION_NN_HINT_KEY: {"choice": "地区A+B+C", "same_as_executed": same}
+            }));
+            info
+        };
+        let same = HumanReadableSink::region_nn_hint_line(&with_hint(true));
+        let diff = HumanReadableSink::region_nn_hint_line(&with_hint(false));
+        let none = HumanReadableSink::region_nn_hint_line(&sample_info());
+        println!("相同 → {same:?}
+不同 → {diff:?}
+无参考 → {none:?}");
+        c.check(same.as_deref() == Some("神经网络地区参考：地区A+B+C（与推荐相同）"), "相同时的参考行");
+        c.check(diff.as_deref() == Some("神经网络地区参考：地区A+B+C（与推荐不同）"), "不同时的参考行");
+        c.check(none.is_none(), "没挂参考时不出参考行");
+        HumanReadableSink.emit(&with_hint(false), &GameView::default());
+        c.finish()
     }
 
     /// EmptySink 不 panic 即过（静默丢弃，无副作用可断言）
