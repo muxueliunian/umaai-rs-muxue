@@ -49,6 +49,23 @@ pub fn resolve(explicit: Option<&Path>, zip_path: &Path) -> Option<PathBuf> {
     None
 }
 
+/// 自带 gamedata 的标记文件名（skill 打包时放入该文件，内容为版本/打包日期）
+pub const BUNDLED_MARKER: &str = "BUNDLED";
+
+/// 读取「自带 gamedata」的版本注记（非自带目录返回 `None`）
+///
+/// 打包给初级用户时 gamedata 可能随 skill 携带，其数据会随游戏版本过期——
+/// 命中标记时由 `digest` 在 `context.criteria` 出一条「旧版数据」注记。
+pub fn bundled_note(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(BUNDLED_MARKER)).ok()?;
+    // 容忍 Windows 记事本 / PowerShell 写入的 UTF-8 BOM
+    let line = text
+        .lines()
+        .map(|l| l.trim_start_matches('\u{feff}').trim())
+        .find(|l| !l.is_empty());
+    Some(line.unwrap_or("未标注版本").to_string())
+}
+
 /// 初始化全局游戏数据（`set_current_dir` 到 gamedata 父目录 + `init_global`）
 ///
 /// 幂等；`GameData::load` / `GameConstants::load` 均从 cwd 相对路径读取。

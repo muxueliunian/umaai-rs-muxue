@@ -90,6 +90,8 @@ pub struct Inputs<'a> {
     pub clones: Option<crate::clones::ClonesBlock>,
     /// 检查项 findings（§6.1 / §6.6）
     pub extra_findings: Vec<crate::execution::Finding>,
+    /// 自带 gamedata 的版本注记（`Some` = 用的是 skill 携带的旧版数据）
+    pub gamedata_bundled: Option<String>,
 }
 
 /// 组装 digest（meta 降级推导 + deck / uma_name / final_score / context）
@@ -202,6 +204,12 @@ pub fn build(inputs: &Inputs) -> Digest {
     ];
     if !inputs.gamedata_ok {
         criteria.push("gamedata 缺失：uma/卡名、地区名、赛程、终局评分与等级均已降级（纯 ID）".to_string());
+    }
+    if let Some(v) = &inputs.gamedata_bundled {
+        criteria.push(format!(
+            "gamedata 为 skill 自带旧版（{v}）：卡名 / 赛程 / 地区名可能与当前游戏版本不一致，\
+             结论按旧版口径读"
+        ));
     }
     if pack.meta.is_none() {
         criteria.push("meta.json 缺失：局元信息从文件名与 CSV 降级推导".to_string());
@@ -360,6 +368,7 @@ mod tests {
             inherit: None,
             clones: None,
             extra_findings: vec![],
+            gamedata_bundled: None,
         };
         let digest = build(&inputs);
         let out = std::env::temp_dir().join(format!("digest_test_{}", std::process::id()));

@@ -132,6 +132,8 @@ fn run() -> Result<()> {
         None => false,
     };
 
+    let gamedata_bundled = gd.as_ref().and_then(|d| gdata::bundled_note(d));
+
     // ③ timeline / decisions（§11 步骤 2）
     let tl = timeline::build(&p.snaps);
     let dec = decisions::parse(p.decisions_csv.as_deref())?;
@@ -218,6 +220,7 @@ fn run() -> Result<()> {
         inherit: Some(inherit_block.clone()),
         clones: clones_block.clone(),
         extra_findings: extra_findings.clone(),
+        gamedata_bundled,
     };
     let d = digest::build(&inputs);
     let digest_path = digest::write_json(&d, &out_dir)?;

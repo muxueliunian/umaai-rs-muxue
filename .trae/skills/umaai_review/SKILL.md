@@ -34,20 +34,35 @@ Python 不可用再考虑其他脚本（`node -e` / PowerShell / Bash）。两�
 
 ## 工作流程
 
-1. **定位局包**：用户给的路径（如 `logs/game6234.zip`）或会话上传的文件；没指名时取 `logs/` 下最新 `game*.zip`。
-2. **运行分析引擎**，产物落局包同级 `logs/game{id}/`：`brief.md`（六问事实预答，喂归因）
-   + `digest.json`（完整结构化指标，定向复核用）+ `report.html`（只给路径不粘贴）：
+1. **定位局包**（三级优先，逐级回退）：
+
+   | 优先 | 来源 | 说明 |
+   |---|---|---|
+   | ① | **会话中拖入 / 上传的文件** | 直接用其路径 |
+   | ② | 用户明确给的路径 | 任意位置，绝对或相对均可 |
+   | ③ | `<umaai_root>/logs/` 下最新 `game*.zip` | 日志**每局轮换**（实测 game1429→game1430 被顶掉），**每次现取、不缓存文件名** |
+
+2. **运行分析引擎**，产物落**当前工作区** `<cwd>/game{id}/`（不写沙箱外的临时目录，避免权限询问）：
+   `brief.md`（六问事实预答，喂归因）+ `digest.json`（完整结构化指标，定向复核用）
+   + `report.html`（只给路径不粘贴）：
 
    ```powershell
-   cargo run --release -p umaai_review -- --zip logs/game6234.zip
-   # 或直接调用编译产物
-   target\release\umaai_review.exe --zip logs/game6234.zip [--gamedata <path>] [--narrative <md>]
+   <skill>\bin\umaai_review.exe --zip <局包> --out <cwd>\game{id} `
+       --gamedata <gamedata 目录> [--narrative <叙述文件>]
    ```
 
+   - **`--gamedata` 必须显式传**：局包可能在任意位置（拖入的文件常在临时目录），
+     「从局包向上找 gamedata」不可靠，所以 gamedata 只按 **umaai 目录**解析：
+     ```
+     <umaai_root>/gamedata        ← umaai_root 读自本 skill 目录的 local_paths.json
+       ↓ 没有 umaai_root / 该目录不存在
+     本 skill 自带的 gamedata/     ← 会被 bin 标为「旧版数据」（context.criteria 出注记）
+     ```
+     没有 `local_paths.json` 时**询问用户一次**「umaai 目录在哪」，确认后写入
+     `local_paths.json`（`{"umaai_root": "..."}`），下次先读它。**不使用环境变量**（面向初级用户）。
+   - `--out` 显式指向当前工作区；bin 默认落在局包同级，拖入的局包会让产物散落到临时目录。
    - `--narrative <md>`：第 6 步写好的叙述文件；**首次运行不必带**（此时 report.html 留占位），
-     写完叙述后带它再跑一次即得到完整报告
-
-   - gamedata 解析顺序：`--gamedata` > `UMAI_DATA_DIR` > 局包向上找 `gamedata/` > cwd。全找不到时 bin 降级（纯 ID、无评分），**询问用户一次**，确认后写入本 skill 目录 `local_paths.json`（`{"gamedata": "..."}`），下次先读它。
+     写完叙述后带它再跑一次即得到完整报告。
    - exe 不可用降级：`Expand-Archive` 解包，直接读 `decisions.csv` + `meta.json` 做决策链路 / 运气分 / 置信度分析（丢失依赖快照时序的检查项），结论需注明降级。**此路径下 brief.md 与 digest.json 都不可得**，第 3 步改走「解包数据 + 人工判读」，不适用下方的 brief / digest 分支。
 3. **读 brief.md**（六问事实已由 bin 预答，**一次 Read** 即可动笔）：
 
@@ -158,7 +173,8 @@ bin 已自动产 findings，**读 brief §7 检查项**（已按 warn 优先排�
 - 运气阴跌口径：display 运气分含 `mcts_turn_bonus`（MCTS 预期的每回合平均运气增长），实际游戏非线性——第 1 年增长慢于预期、或第 2-3 年持续没有好训练，都会呈现为持续小亏的阴跌。一句话总口径：**运气增长慢于预期，不进则退**，叠加已知 bug 的估分偏差。不写成「小额落地差」这类含糊归因，也不读成「每一回合都在倒霉」。
 - 执行偏离是估算：actual_action 由状态差推断，判据为「**先判训练、再解释体力**」——目标维**推荐维优先**（它是最大增量，或自身增量 ≥ +20），否则取最大增量；体力只作否证（体力 ≥ +25 且目标维 < +20 → 休息）。**brief §6 偏离表已按此口径自动标「存疑」**（建议维已触顶 / 推断维与建议维相邻 / 体力卡休息判定线），标了的照抄存疑、不硬下结论。
 - 继承偏差为负 → 质量偏弱，是确实的损失，如实报数不打折（brief §4 已给「偏优 / 正常 / 偏弱」判断列）。
-- 分身：`rainbow_luck` 归好运、`rainbow_strategy` 归好策略；价值是提高训练效果（玩家已知，叙事不解释）；**地区分身彩圈吃到与否直接读 brief §5.3 的「吃到=是/否」**（当回合训练命中彩圈位 = 吃到）；超级拉面分身彩圈只报汇总数，不追具体回合。
+- 分身：`rainbow_luck` 归好运、`rainbow_strategy` 归好策略；价值是提高训练效果（玩家已知，叙事不解释）；**地区分身彩圈吃到与否直接读 brief §5.3 的「吃到=是/否」**（当回合训练命中彩圈位 = 吃到）；**地区分身一张彩圈都不落 = 明显的坏局面，须明确写出**（一般都会产生一些），定性为坏运气、且落位随机无可操作空间；超级拉面分身彩圈只报汇总数，不追具体回合。判据全文见 [reference/metrics_glossary.md](reference/metrics_glossary.md) 的「地区分身彩圈为 0」节。
+- **地区选择与属性无关**：`region_select` 带来的期望跳变是固定运气波动（与 `region_select(y1)` 同类，程序性），**不得写成「拿来补某维属性」的操作建议**。判据全文见 `reference/metrics_glossary.md` 的「地区选择」节。
 - 五维叙事报**显示值**：**brief §1.1 五维表已是显示值**（真实值 > 1200 部分减半，bin 已换算）；同表的「上限」与「触顶维」用真实值判定，两者不要混读；评分与运气分不受此换算影响。
 - total_luck_end 略低于实际运气（支援卡事件进度未统计），`< -2000` 才判「这局运气差」（brief §1 已给出定性）。
 - 判据待实测项谨慎下结论：训练与体力健康、吃面节奏、友人完成度、free_race 次数与时机、状态健康、属性溢出。
