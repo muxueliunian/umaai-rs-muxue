@@ -22,6 +22,7 @@ use minijinja::{Environment, context};
 use serde::Serialize;
 
 use crate::checks::{INHERIT_TURNS, LOW_VITAL, MOTIVATION_WINDOW, SUPER_RAMEN_START, YEAR_BOUNDARIES};
+use crate::clones::CloneDetailRow;
 use crate::decisions::LuckPoint;
 use crate::digest::Digest;
 use crate::execution::{ExecRow, REST_MIN_VITAL};
@@ -117,7 +118,8 @@ pub struct BriefView {
     pub clones_available: bool,
     pub clone_a: String,
     pub clone_b: String,
-    pub clone_rainbow_rows: Vec<String>,
+    /// A 类逐回合明细（全部新增分身；report.html 共用同一构造）
+    pub clone_a_rows: Vec<CloneDetailRow>,
     pub mandatory: String,
     pub free_race_rows: Vec<String>,
     pub schedule_notes: Vec<String>,
@@ -481,7 +483,7 @@ fn fill_other_sources(v: &mut BriefView, d: &Digest, states: &BTreeMap<u32, Turn
         .map(|(t, st)| format!("全局最低：t{} = {}/{}", t, st.vital, st.max_vital))
         .unwrap_or_else(|| "全局最低：无数据".to_string());
 
-    // 5.2 干劲掉落与恢复
+    // 5.2 干劲掉落**未及时恢复**（及时处理的不提——用户拍板）
     let turns: Vec<u32> = states.keys().copied().collect();
     for pair in turns.windows(2) {
         let (t0, t1) = (pair[0], pair[1]);
@@ -489,24 +491,20 @@ fn fill_other_sources(v: &mut BriefView, d: &Digest, states: &BTreeMap<u32, Turn
         if after >= before {
             continue;
         }
-        let acted = recovery_action(&d.execution, t1);
-        let rose = (1..=MOTIVATION_WINDOW).find_map(|k| {
-            states
-                .get(&(t1 + k))
-                .filter(|st| st.motivation > after)
-                .map(|st| (t1 + k, st.motivation))
-        });
-        let recovery = match (acted, rose) {
-            (Some(a), Some((rt, rv))) => format!("恢复：{a}，t{rt} 回升至 {rv}"),
-            (Some(a), None) => format!("恢复：{a}（窗口内干劲未回升）"),
-            (None, Some((rt, rv))) => format!("窗口内无恢复动作，t{rt} 事件回升至 {rv}"),
-            (None, None) => "窗口内既无恢复动作、干劲也未回升".to_string(),
-        };
-        v.motivation_rows
-            .push(format!("回合 {}：{}→{}；{}", t1, before, after, recovery));
+        // 判据与 checks::bad_habits 同口径：窗口内既无恢复动作、干劲也未回升
+        let acted = has_recovery_action(&d.execution, t1);
+        let rose = (1..=MOTIVATION_WINDOW)
+            .any(|k| states.get(&(t1 + k)).is_some_and(|st| st.motivation > after));
+        if acted || rose {
+            continue; // 及时处理 / 已回升 → 不提
+        }
+        v.motivation_rows.push(format!(
+            "回合 {}：{}→{}，{} 回合内既无出行/休息恢复动作、干劲也未回升",
+            t1, before, after, MOTIVATION_WINDOW
+        ));
     }
     if v.motivation_rows.is_empty() {
-        v.motivation_rows.push("无干劲掉落".to_string());
+        v.motivation_rows.push("无未及时处理的掉干劲".to_string());
     }
 
     // 5.3 分身彩圈
@@ -521,25 +519,8 @@ fn fill_other_sources(v: &mut BriefView, d: &Digest, states: &BTreeMap<u32, Turn
             "B 类超拉（turn >= {}）：新增 {} / 落得意位 {} / 被训练 {} / 随机 {} / 规则 {}",
             SUPER_RAMEN_START, b.new_clones, b.rainbow_clones, b.trained_clones, b.rainbow_luck, b.rainbow_strategy
         );
-        for ct in &cl.a_per_turn {
-            for c in ct.cards.iter().filter(|c| !c.rainbow_positions.is_empty()) {
-                v.clone_rainbow_rows.push(format!(
-                    "t{} card{} 位[{}] 来源={} 吃到={}",
-                    ct.turn,
-                    c.card,
-                    c.rainbow_positions
-                        .iter()
-                        .map(|p| p.to_string())
-                        .collect::<Vec<_>>()
-                        .join(","),
-                    c.origin.clone().unwrap_or_else(|| "—".to_string()),
-                    c.used.map(|u| if u { "是" } else { "否" }).unwrap_or("—")
-                ));
-            }
-        }
-        if v.clone_rainbow_rows.is_empty() {
-            v.clone_rainbow_rows.push("无".to_string());
-        }
+        // A 类逐回合明细（全部新增分身；构造在 clones.rs，report.html 共用）
+        v.clone_a_rows = cl.a_detail_rows();
     }
 
     // 5.4 赛程
@@ -688,12 +669,11 @@ fn rainbow_at(d: &Digest, turn: u32) -> Vec<String> {
         .collect()
 }
 
-/// 观察窗口内的恢复动作（出行 / 友人出行 / 休息）
-fn recovery_action(exec: &[ExecRow], turn: u32) -> Option<String> {
+/// 观察窗口内是否有恢复动作（出行 / 友人出行 / 休息）
+fn has_recovery_action(exec: &[ExecRow], turn: u32) -> bool {
     exec.iter()
         .filter(|r| r.turn >= turn && r.turn <= turn + MOTIVATION_WINDOW)
-        .find(|r| ["出行", "友人出行", "休息"].iter().any(|a| r.actual_action.starts_with(a)))
-        .map(|r| format!("t{} {}", r.turn, r.actual_action))
+        .any(|r| ["出行", "友人出行", "休息"].iter().any(|a| r.actual_action.starts_with(a)))
 }
 
 /// 偏离是否存疑（推断失准的已知情形）→ 返回原因

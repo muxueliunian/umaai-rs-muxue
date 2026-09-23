@@ -89,6 +89,57 @@ pub struct CloneCard {
     pub used: Option<bool>
 }
 
+/// A 类逐回合明细行（**已预格式化**；report.html 与 brief.md 共用，避免两处重复）
+#[derive(Debug, Clone, Serialize)]
+pub struct CloneDetailRow {
+    pub turn: u32,
+    /// 支援卡索引 0-5（展示为 card{N}）
+    pub card: u32,
+    /// 分身落位（逗号分隔；无则「—」）
+    pub positions: String,
+    /// 彩圈位（无则「—」）
+    pub rainbow: String,
+    /// 有效增加彩圈来源：`luck` / `strategy`（非彩圈「—」）
+    pub origin: String,
+    /// 是否吃到：是 / 否（非彩圈「—」）
+    pub used: String,
+}
+
+impl ClonesBlock {
+    /// A 类逐回合明细（**全部新增分身**，不只彩圈；逐 (回合, 卡) 一行）
+    ///
+    /// 明细条数 = `a_region.new_clones`；其中 `rainbow != "—"` 的条数应等于
+    /// `a_region.rainbow_clones`，对不上说明取数漏了（见 pitfalls 第 9 条）。
+    pub fn a_detail_rows(&self) -> Vec<CloneDetailRow> {
+        // 位置列表 → `[0,2]`（空则「—」）
+        let fmt_list = |v: &[u32]| {
+            if v.is_empty() {
+                "—".to_string()
+            } else {
+                format!("[{}]", v.iter().map(|p| p.to_string()).collect::<Vec<_>>().join(","))
+            }
+        };
+        let mut out = Vec::new();
+        for ct in &self.a_per_turn {
+            for c in &ct.cards {
+                out.push(CloneDetailRow {
+                    turn: ct.turn,
+                    card: c.card,
+                    positions: fmt_list(&c.positions),
+                    rainbow: fmt_list(&c.rainbow_positions),
+                    origin: c.origin.clone().unwrap_or_else(|| "—".to_string()),
+                    used: match c.used {
+                        Some(true) => "是".to_string(),
+                        Some(false) => "否".to_string(),
+                        None => "—".to_string(),
+                    },
+                });
+            }
+        }
+        out
+    }
+}
+
 /// 组装分身观测块
 ///
 /// - `card_types`：卡组 6 张卡的 cardType（0速/1耐/2力/3根/4智/5友人；来自

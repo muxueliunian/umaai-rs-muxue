@@ -77,7 +77,7 @@
 - {{ v.vital_lows }}
 - {{ v.vital_min }}
 
-### 5.2 干劲掉落与恢复（观察窗口 3 回合）
+### 5.2 干劲掉落未及时恢复（观察窗口 3 回合）
 
 {% for r in v.motivation_rows -%}
 - {{ r }}
@@ -87,9 +87,18 @@
 {% if v.clones_available -%}
 - {{ v.clone_a }}
 - {{ v.clone_b }}
-{% for r in v.clone_rainbow_rows -%}
-- A 类彩圈：{{ r }}
+
+A 类逐回合明细（全部新增分身；`来源`：luck=随机好运气 / strategy=规则好策略；`吃到`=当回合训练命中彩圈位）：
+
+{% if v.clone_a_rows | length > 0 -%}
+| 回合 | 卡 | 落位 | 彩圈位 | 来源 | 吃到 |
+|---|---|---|---|---|---|
+{% for r in v.clone_a_rows -%}
+| {{ r.turn }} | card{{ r.card }} | {{ r.positions }} | {{ r.rainbow }} | {{ r.origin }} | {{ r.used }} |
 {% endfor -%}
+{% else -%}
+（本局无 A 类新增分身）
+{% endif -%}
 - B 类只报汇总：机制保证落得意位，没吃到不算亏，盈亏只看该期运气分（§6.6）
 {% else -%}
 - 分身块不可用（gamedata 缺失）

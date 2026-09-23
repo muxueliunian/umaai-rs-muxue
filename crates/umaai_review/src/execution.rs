@@ -10,12 +10,16 @@
 //! - **分类口径**（§12.5 修正方向 + 实测校准）：
 //!   1. 比赛 = `raceHistory` +1（跑赢）**或锚点回合 ∈ 必赛回合**——输掉的比赛
 //!      `raceHistory` 不记（§6.1），用赛程表兜底（URA 决赛 73/75/77 剧本固定赛）
-//!   2. 训练 = **主增量 ≥ 训练基础值表最低主维**（等级 1 裸值 + 0 加成空人头，
-//!      运行时从 `scenario_ramen.json` 推导，实测 7——智位等级 1；开局低加成
-//!      训练可低至 +12，文档实测 +13~+134 覆盖不到）**且非大回复**（体力 < +25
-//!      ——表值休息 ≥ +30，智训练表值 +5 叠事件最多实测 +20；防止「休息+事件
-//!      属性」被误判训练）——智训练**不耗体力甚至小回复**（表值 +5）
-//!   3. 休息 = 体力 ≥ +25（容忍事件小额属性）
+//!   2. **训练**（先判训练、再用体力形态否证）：目标维增量 ≥ 当年阈值。
+//!      **目标维的选取**（用户拍板，替换原「纯取最大增量」——多属性齐涨时会误判）：
+//!      - **推荐维优先**：它是最大增量，**或**自身增量达 `TRAIN_ATTR_MIN`（+20）
+//!        ——事件给属性的量级通常低于此，故「推荐维 +20 以上」是练了该维的强证据
+//!      - 否则取增量最大的维
+//!      **体力形态只作否证**：体力 ≥ +25 且目标维未达 `TRAIN_ATTR_MIN` → 判休息
+//!      （休息 + 事件小额属性）；反过来，某维达 `TRAIN_ATTR_MIN` 时即使体力也回升
+//!      仍判训练（智训练本身不耗体力，且事件可同时回体）
+//!   3. 休息 = 体力 ≥ +25（容忍事件小额属性）；事件小额回体（未达 +25）不判休息，
+//!      落到出行 / 剧本 / 未知
 //!   4. **继承窗口混合**：锚点 29/53 的窗口（t 末 → t+1 首）含 t+1 的继承落地
 //!      全维加成，行动与继承无法从数据剥离 → 实际动作标注「继承混合」、
 //!      `matches` 置 None（不参与一致率、不产偏离 finding），证据照留
@@ -37,6 +41,13 @@ const ATTR_NAMES: [&str; 5] = ["速", "耐", "力", "根", "智"];
 /// 休息判定的体力下限（表值休息 +30/+50/+70；智训练 +5 叠事件实测最多 +20，
 /// 分界取 25——「休息 + 事件小额属性」不被误判训练、「智训练大回复」不误判休息）
 pub const REST_MIN_VITAL: i32 = 25;
+
+/// 属性增量达此值 → 该维「确定被训练」（用户拍板）
+///
+/// 事件给属性的量级通常低于此，故用于两处：
+/// - **推荐维优先**：推荐维增量达此值即推定练了该维（即使它不是最大增量）
+/// - **体力形态否证**：达此值时即使体力也回升仍判训练（智训练不耗体力 + 事件回体）
+const TRAIN_ATTR_MIN: i32 = 20;
 
 /// 训练判定的主增量下限（分年分段，用户拍板）：
 /// - 第 1 年（turn < 24）：训练等级低、加成少 → **训练基础值表最低主维**
@@ -163,7 +174,7 @@ pub fn build(tl: &[TimelineRow], dec: &[DecRow], race_turns: &[i32]) -> Executio
 
         let ev = evidence(a, next);
         let min_train = min_train_delta(*turn);
-        let actual = classify(&ev, *turn, race_turns, min_train);
+        let actual = classify(&ev, *turn, race_turns, min_train, choice_attr(&anchor.chosen.desc));
         // 继承窗口混合：锚点 29/53 的窗口含 t+1 继承落地，行动与继承无法剥离
         // → 标注「继承混合」、不参与一致率（数据与证据照留）
         let inherit_mixed = INHERIT_TURNS.contains(&(*turn + 1));
@@ -230,7 +241,11 @@ fn evidence(a: &TimelineRow, n: &TimelineRow) -> Evidence {
 }
 
 /// 实际动作分类（优先级见模块头「分类口径」）
-fn classify(ev: &Evidence, turn: u32, race_turns: &[i32], min_train: i32) -> String {
+///
+/// `ai_attr`：AI 建议的训练目标维（非训练建议 / 无法映射时为 `None`）——
+/// 只用于**在候选维中挑选目标维**，不直接决定 actual_action，
+/// 故「建议训练却练了别的维」仍会被判成偏离。
+fn classify(ev: &Evidence, turn: u32, race_turns: &[i32], min_train: i32, ai_attr: Option<usize>) -> String {
     let five_total: i32 = ev.five_status_delta.iter().sum();
     // ① 比赛：跑赢（raceHistory +1）或必赛回合（输掉的比赛赛程表兜底）
     if ev.race_count_delta > 0 || race_turns.contains(&(turn as i32)) {
@@ -242,19 +257,24 @@ fn classify(ev: &Evidence, turn: u32, race_turns: &[i32], min_train: i32) -> Str
     if ev.is_ill_cured {
         return "治病".to_string();
     }
-    // ② 训练：主增量达当前年份阈值，且非大回复形态（防「休息+事件属性」误判）
-    let mut dom = 0usize;
-    let mut dom_v = i32::MIN;
-    for (i, &d) in ev.five_status_delta.iter().enumerate() {
-        if d > dom_v {
-            dom_v = d;
-            dom = i;
-        }
+    // ② 先判是否训练了，再用体力形态否证
+    // 目标维：推荐维优先（它是最大增量，或自身增量达 TRAIN_ATTR_MIN），否则取最大增量
+    let dom = ev
+        .five_status_delta
+        .iter()
+        .enumerate()
+        .fold(0usize, |best, (i, &d)| if d > ev.five_status_delta[best] { i } else { best });
+    let attr = match ai_attr {
+        Some(a) if a == dom || ev.five_status_delta[a] >= TRAIN_ATTR_MIN => a,
+        _ => dom,
+    };
+    let attr_v = ev.five_status_delta[attr];
+    // 休息形态：体力大幅回升且目标维未达强证据 → 属性来自事件而非训练
+    let rest_like = ev.vital_delta >= REST_MIN_VITAL && attr_v < TRAIN_ATTR_MIN;
+    if attr_v >= min_train && !rest_like {
+        return format!("{}训练", ATTR_NAMES[attr]);
     }
-    if dom_v >= min_train && ev.vital_delta < REST_MIN_VITAL {
-        return format!("{}训练", ATTR_NAMES[dom]);
-    }
-    // ③ 休息：体力大幅回复（容忍事件小额属性）
+    // ③ 休息：体力大幅回复（容忍事件小额属性）；未达阈值的回体不判休息
     if ev.vital_delta >= REST_MIN_VITAL {
         return "休息".to_string();
     }
@@ -266,6 +286,12 @@ fn classify(ev: &Evidence, turn: u32, race_turns: &[i32], min_train: i32) -> Str
         return "剧本".to_string();
     }
     "未知".to_string()
+}
+
+/// AI 建议描述 → 训练目标维下标（非训练建议 / 无具体维时返回 `None`）
+fn choice_attr(desc: &str) -> Option<usize> {
+    let mapped = map_choice(desc)?;
+    ATTR_NAMES.iter().position(|n| mapped.starts_with(n))
 }
 
 /// AI 建议描述 → 动作类别（关键词匹配，覆盖实测 desc 词表：
@@ -516,6 +542,86 @@ mod tests {
         let r = build(&tl, &dec, &[]);
         println!("第 2 年事件级: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
         assert_ne!(r.rows[0].actual_action, "速训练", "速+8 < 12 不应判训练");
+        assert_eq!(r.rows[0].matches, Some(false));
+    }
+
+    /// 推荐维优先（规则②）：推荐维不是最大增量，但达 TRAIN_ATTR_MIN → 判推荐维
+    /// （多属性齐涨时纯 argmax 会误判成力训练，用户拍板修此）
+    #[test]
+    fn test_recommended_attr_above_threshold() {
+        let tl = vec![
+            tl_row(25, 0, [100, 100, 100, 100, 100], 80, 4, 0, 0, false),
+            // 速 +25（达 20）、力 +40（最大）——事件给力多，但玩家练的是速
+            tl_row(26, 0, [125, 100, 140, 100, 100], 60, 4, 0, 0, false),
+        ];
+        let dec = vec![dec_row(25, 0, "速训练")];
+        let r = build(&tl, &dec, &[]);
+        println!("推荐维达阈值: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
+        assert_eq!(r.rows[0].actual_action, "速训练", "速+25 ≥ 20 应判速训练（不取最大的力）");
+        assert_eq!(r.rows[0].matches, Some(true));
+        assert!(r.findings.is_empty(), "不应产生偏离");
+    }
+
+    /// 推荐维未达阈值 → 回退取最大增量维，仍判偏离（不能因「推荐过」就判一致）
+    #[test]
+    fn test_recommended_attr_below_threshold() {
+        let tl = vec![
+            tl_row(25, 0, [100, 100, 100, 100, 100], 80, 4, 0, 0, false),
+            // 速 +15（< 20）、力 +40 → 目标维取力
+            tl_row(26, 0, [115, 100, 140, 100, 100], 60, 4, 0, 0, false),
+        ];
+        let dec = vec![dec_row(25, 0, "速训练")];
+        let r = build(&tl, &dec, &[]);
+        println!("推荐维未达阈值: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
+        assert_eq!(r.rows[0].actual_action, "力训练", "速+15 < 20 不优先，取最大的力");
+        assert_eq!(r.rows[0].matches, Some(false), "建议速却练力 → 偏离");
+        assert_eq!(r.findings.len(), 1);
+    }
+
+    /// 智训练 vs 休息：智增量达 TRAIN_ATTR_MIN 时，即使体力也回升仍判智训练
+    /// （智训练本身不耗体力，且事件可同时回体）
+    #[test]
+    fn test_int_train_vs_rest() {
+        // 智 +32、体力 +30（事件回体）→ 智训练
+        let tl = vec![
+            tl_row(25, 0, [100, 100, 100, 100, 100], 40, 4, 0, 0, false),
+            tl_row(26, 0, [100, 100, 100, 100, 132], 70, 4, 0, 0, false),
+        ];
+        let dec = vec![dec_row(25, 0, "智训练")];
+        let r = build(&tl, &dec, &[]);
+        println!("智达阈值: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
+        assert_eq!(r.rows[0].actual_action, "智训练", "智+32 ≥ 20 应判智训练（体力回升不否证）");
+        assert_eq!(r.rows[0].matches, Some(true));
+    }
+
+    /// 休息 vs 事件给智：智增量未达 TRAIN_ATTR_MIN 且体力大增 → 判休息
+    #[test]
+    fn test_rest_with_small_int_event() {
+        // 智 +15（事件给的）、体力 +50 → 休息
+        let tl = vec![
+            tl_row(25, 0, [100, 100, 100, 100, 100], 40, 4, 0, 0, false),
+            tl_row(26, 0, [100, 100, 100, 100, 115], 90, 4, 0, 0, false),
+        ];
+        let dec = vec![dec_row(25, 0, "休息")];
+        let r = build(&tl, &dec, &[]);
+        println!("休息+事件给智: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
+        assert_eq!(r.rows[0].actual_action, "休息", "智+15 < 20 且体力 +50 → 休息");
+        assert_eq!(r.rows[0].matches, Some(true));
+    }
+
+    /// 休息 vs 事件回体：体力回升未达 REST_MIN_VITAL 且无训练 → 不判休息
+    /// （先判训练、再解释体力变化；小额回体落到出行 / 剧本 / 未知）
+    #[test]
+    fn test_small_vital_recovery_is_not_rest() {
+        let tl = vec![
+            tl_row(25, 0, [100, 100, 100, 100, 100], 40, 4, 0, 0, false),
+            // 体力 +15（事件级）、五维不变、干劲不变 → 非休息
+            tl_row(26, 0, [100, 100, 100, 100, 100], 55, 4, 0, 0, false),
+        ];
+        let dec = vec![dec_row(25, 0, "休息")];
+        let r = build(&tl, &dec, &[]);
+        println!("小额回体: actual={} match={:?}", r.rows[0].actual_action, r.rows[0].matches);
+        assert_ne!(r.rows[0].actual_action, "休息", "体力 +15 < 25 不判休息");
         assert_eq!(r.rows[0].matches, Some(false));
     }
 }

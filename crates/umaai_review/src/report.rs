@@ -20,6 +20,7 @@ use std::{
 
 use anyhow::{Context, Result, anyhow};
 use minijinja::{Environment, context};
+use serde::Serialize;
 use umaai::plot::svg::Svg;
 
 use crate::{
@@ -46,6 +47,59 @@ pub struct Charts {
     pub actions: String
 }
 
+/// skill 写的 4 段叙述（`--narrative <md>` 注入；缺省则模板保留 NARRATIVE 占位）
+///
+/// 文件格式：`<!-- overview -->` 等标记分隔的四段 HTML 片段，顺序不限、可只给部分。
+/// **Rust 不解析叙述内容**（原样注入 `|safe`），只负责分段与拼接——
+/// 这样 skill 无需回写 39KB 的 report.html，只写 2KB 叙述即可。
+#[derive(Debug, Default, Clone, Serialize)]
+pub struct Narrative {
+    pub overview: String,
+    pub luck_trend: String,
+    pub findings: String,
+    pub summary: String,
+}
+
+impl Narrative {
+    /// 四段是否全空（全空 → 模板保留占位）
+    pub fn is_empty(&self) -> bool {
+        self.overview.is_empty()
+            && self.luck_trend.is_empty()
+            && self.findings.is_empty()
+            && self.summary.is_empty()
+    }
+}
+
+/// 叙述段标记（与 `report.html.j2` 的占位同名）
+const NARRATIVE_KEYS: [&str; 4] = ["overview", "luck_trend", "findings", "summary"];
+
+/// 解析 narrative.md → [`Narrative`]（按 `<!-- key -->` 分段；缺失的段留空）
+pub fn parse_narrative(text: &str) -> Narrative {
+    let mut out = Narrative::default();
+    for key in NARRATIVE_KEYS.iter() {
+        let marker = format!("<!-- {key} -->");
+        let Some(start) = text.find(&marker) else { continue };
+        let body_start = start + marker.len();
+        // 段末 = 其后最近的**其它**标记起点（不依赖文件内块的书写顺序），否则文件末尾
+        let end = NARRATIVE_KEYS
+            .iter()
+            .filter(|k| **k != *key)
+            .filter_map(|k| text.find(&format!("<!-- {k} -->")))
+            .filter(|p| *p > body_start)
+            .min()
+            .unwrap_or(text.len());
+        let body = text[body_start..end].trim().to_string();
+        match *key {
+            "overview" => out.overview = body,
+            "luck_trend" => out.luck_trend = body,
+            "findings" => out.findings = body,
+            "summary" => out.summary = body,
+            _ => {}
+        }
+    }
+    out
+}
+
 /// 生成三图（纯函数，无 IO）
 pub fn build_charts(digest: &Digest) -> Charts {
     Charts {
@@ -58,18 +112,24 @@ pub fn build_charts(digest: &Digest) -> Charts {
 /// 渲染 report.html（四图 + 三表 + 概览卡 → `out_dir/report.html`）
 ///
 /// 模板按默认查找顺序定位（见模块头）；找不到报错并列出查找位置。
-pub fn render(digest: &Digest, out_dir: &Path) -> Result<PathBuf> {
+/// `narrative` 非空时注入 4 段叙述，否则模板保留 `NARRATIVE:` 占位（供 skill 二次回填）。
+pub fn render(digest: &Digest, out_dir: &Path, narrative: &Narrative) -> Result<PathBuf> {
     let tpl = find_template("report.html.j2").ok_or_else(|| {
         anyhow!(
             "找不到 templates/report.html.j2（查找顺序：exe 同级/上级 templates、\
              cwd 及其祖先的 templates 与 crates/umaai_review/templates）"
         )
     })?;
-    render_with_template(digest, out_dir, &tpl)
+    render_with_template(digest, out_dir, &tpl, narrative)
 }
 
 /// 用指定模板渲染（测试入口；正常路径走 [`render`]）
-pub fn render_with_template(digest: &Digest, out_dir: &Path, tpl_path: &Path) -> Result<PathBuf> {
+pub fn render_with_template(
+    digest: &Digest,
+    out_dir: &Path,
+    tpl_path: &Path,
+    narrative: &Narrative,
+) -> Result<PathBuf> {
     let source = fs::read_to_string(tpl_path)
         .with_context(|| format!("读取模板失败: {}", tpl_path.display()))?;
     let charts = build_charts(digest);
@@ -88,6 +148,14 @@ pub fn render_with_template(digest: &Digest, out_dir: &Path, tpl_path: &Path) ->
         motivation => last.map(|r| r.motivation).unwrap_or(0),
         match_rate => format!("{match_rate:.1}")
     };
+    // A 类逐回合明细（构造在 clones.rs，brief.md 共用同一份，避免两处格式化分叉）
+    let clone_rows = digest
+        .clones
+        .as_ref()
+        .map(|c| c.a_detail_rows())
+        .unwrap_or_default();
+    // 背景装饰开关：输出目录里有 yayoi.png 才加背景 CSS（skill 只需复制图片，不必改 HTML）
+    let has_bg = out_dir.join("yayoi.png").is_file();
 
     // 模板名以 .html 结尾 → minijinja 默认开启 HTML autoescape；
     // SVG 通过 |safe 注入（模板内 {{ chart_xxx | safe }}）
@@ -98,6 +166,9 @@ pub fn render_with_template(digest: &Digest, out_dir: &Path, tpl_path: &Path) ->
         .render(context! {
             digest => digest,
             overview => overview,
+            clone_rows => clone_rows,
+            narrative => narrative,
+            has_bg => has_bg,
             chart_status => charts.status,
             chart_luck => charts.luck,
             chart_actions => charts.actions
@@ -623,7 +694,7 @@ mod tests {
         println!("模板: {}", tpl.display());
         let out_dir = std::env::temp_dir().join(format!("report_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&out_dir);
-        let out = render_with_template(&d, &out_dir, &tpl)?;
+        let out = render_with_template(&d, &out_dir, &tpl, &Narrative::default())?;
         let html = fs::read_to_string(&out)?;
         println!("report.html {} 字节", html.len());
         assert!(html.contains("<!DOCTYPE html>"));
@@ -642,6 +713,64 @@ mod tests {
         assert!(html.contains("口径速览"), "口径说明已简化为速览");
         assert!(!html.contains("测试口径"), "context.criteria 全文不再渲染");
         assert!(html.contains("100.0%") || html.contains("100%"), "执行一致率");
+        let _ = fs::remove_dir_all(&out_dir);
+        Ok(())
+    }
+
+    /// narrative 解析：按标记分段、**不依赖块顺序**、缺段留空、末段到文件尾
+    #[test]
+    fn test_parse_narrative() {
+        // 故意乱序 + 缺 findings
+        let text = concat!(
+            "<!-- summary -->\n<section>总结段</section>\n\n",
+            "<!-- overview -->\n<section>总体段\n多行</section>\n\n",
+            "<!-- luck_trend -->\n<section>走势段</section>\n",
+        );
+        let n = parse_narrative(text);
+        println!("{n:#?}");
+        assert_eq!(n.overview, "<section>总体段\n多行</section>", "多行内容原样保留");
+        assert_eq!(n.luck_trend, "<section>走势段</section>");
+        assert_eq!(n.summary, "<section>总结段</section>", "乱序也能正确切段");
+        assert!(n.findings.is_empty(), "缺段留空");
+        assert!(!n.is_empty());
+        assert!(parse_narrative("无关内容").is_empty(), "无标记 → 全空");
+    }
+
+    /// narrative 注入端到端：给了叙述 → 占位消失、内容进文；不给 → 保留占位
+    #[test]
+    fn test_render_report_with_narrative() -> Result<()> {
+        let d = test_digest();
+        let tpl = find_template("report.html.j2")
+            .ok_or_else(|| anyhow!("测试环境找不到模板（cwd 应为 workspace 根）"))?;
+        let out_dir = std::env::temp_dir().join(format!("report_narr_{}", std::process::id()));
+        let _ = fs::remove_dir_all(&out_dir);
+
+        let narr = parse_narrative(concat!(
+            "<!-- overview -->\n<section><summary>总体</summary>终局评分 64589</section>\n\n",
+            "<!-- luck_trend -->\n<section>运气走势叙事</section>\n\n",
+            "<!-- findings -->\n<section>检查项叙事</section>\n\n",
+            "<!-- summary -->\n<section>总结叙事</section>\n",
+        ));
+        let out = render_with_template(&d, &out_dir, &tpl, &narr)?;
+        let html = fs::read_to_string(&out)?;
+        println!("注入后 {} 字节", html.len());
+        assert!(html.contains("终局评分 64589"), "overview 段应注入");
+        assert!(html.contains("运气走势叙事"), "luck_trend 段应注入");
+        assert!(html.contains("检查项叙事"), "findings 段应注入");
+        assert!(html.contains("总结叙事"), "summary 段应注入");
+        assert!(
+            !html.contains("NARRATIVE:"),
+            "四段齐全时不应残留占位标记"
+        );
+        // 只给部分段 → 其余段保留占位
+        let partial = parse_narrative("<!-- overview --><section>只有总体</section>");
+        let out2 = render_with_template(&d, &out_dir, &tpl, &partial)?;
+        let html2 = fs::read_to_string(&out2)?;
+        assert!(html2.contains("只有总体"));
+        assert!(
+            html2.contains("<!-- NARRATIVE:summary -->"),
+            "未提供的段应保留占位"
+        );
         let _ = fs::remove_dir_all(&out_dir);
         Ok(())
     }

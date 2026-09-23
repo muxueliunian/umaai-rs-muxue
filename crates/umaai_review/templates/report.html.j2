@@ -38,7 +38,11 @@
   .sev-info { color:#2563eb; }
   footer { color:var(--muted); font-size:12px; line-height:1.7; margin-top:8px; }
   .note { color:var(--muted); font-size:12px; margin:6px 0; }
-</style>
+{% if has_bg %}  /* 背景装饰：输出目录存在 yayoi.png 时自动启用（skill 只需复制图片，无需改 HTML） */
+  body::before { content:""; position:fixed; inset:0; z-index:-1;
+                 background:url("yayoi.png") center/cover no-repeat; opacity:0.2; }
+  :root { --card:rgba(255,255,255,0.7); }
+{% endif %}</style>
 </head>
 <body><div class="wrap">
 
@@ -69,16 +73,16 @@
   {% for c in digest.meta.deck %}<span class="chip">{{ c.name }} · {{ c.limit_break }}破</span>{% endfor %}
 </div>
 
-<!-- NARRATIVE:overview -->
+{% if narrative.overview %}{{ narrative.overview | safe }}{% else %}<!-- NARRATIVE:overview -->{% endif %}
 
 <section><details open><summary>图1 · 属性成长曲线</summary>{{ chart_status | safe }}</details></section>
 <section><details open><summary>图2 · 运气分双轴</summary>{{ chart_luck | safe }}</details></section>
 
-<!-- NARRATIVE:luck_trend -->
+{% if narrative.luck_trend %}{{ narrative.luck_trend | safe }}{% else %}<!-- NARRATIVE:luck_trend -->{% endif %}
 
 <section><details open><summary>图3 · 实际执行行动总计</summary>{{ chart_actions | safe }}</details></section>
 
-<!-- NARRATIVE:findings -->
+{% if narrative.findings %}{{ narrative.findings | safe }}{% else %}<!-- NARRATIVE:findings -->{% endif %}
 
 {% if digest.inherit %}
 <section>
@@ -116,12 +120,24 @@
       <td class="num">{{ digest.clones.b_super.rainbow_luck }}</td>
       <td class="num">{{ digest.clones.b_super.rainbow_strategy }}</td></tr>
 </table>
-<div class="note">A 类逐回合明细（含彩圈 used 吃到判定）见 digest.json 的 clones.a_per_turn</div>
+<div class="note">A 类逐回合明细（全部新增分身；来源 luck=随机好运气 / strategy=规则好策略；吃到=当回合训练命中彩圈位）</div>
+{% if clone_rows | length > 0 %}
+<table>
+  <tr><th>回合</th><th>卡</th><th>落位</th><th>彩圈位</th><th>来源</th><th>吃到</th></tr>
+  {% for r in clone_rows %}
+  <tr><td class="num">{{ r.turn }}</td><td class="num">card{{ r.card }}</td>
+      <td class="num">{{ r.positions }}</td><td class="num">{{ r.rainbow }}</td>
+      <td>{{ r.origin }}</td><td>{{ r.used }}</td></tr>
+  {% endfor %}
+</table>
+{% else %}
+<div class="note">本局无 A 类新增分身</div>
+{% endif %}
 </details>
 </section>
 {% endif %}
 
-<!-- NARRATIVE:summary -->
+{% if narrative.summary %}{{ narrative.summary | safe }}{% else %}<!-- NARRATIVE:summary -->{% endif %}
 
 <section>
 <details open>

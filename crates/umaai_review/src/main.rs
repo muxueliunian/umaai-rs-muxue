@@ -15,9 +15,9 @@
 //!     [--out logs/game6234] [--gamedata <path>]
 //! ```
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{fs, path::PathBuf, process::ExitCode};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context as _, Result, anyhow};
 use lexopt::{Arg, ValueExt};
 
 use umaai_review::{brief, checks, clones, decisions, digest, execution, gdata, inherit, pack, report, schedule, timeline};
@@ -32,13 +32,16 @@ struct CliArgs {
     out: Option<PathBuf>,
     /// gamedata 目录（默认按文档 §9.2 优先级解析）
     gamedata: Option<PathBuf>,
+    /// 叙述文件（skill 写的 4 段叙述；给了就注入 report.html，不给则保留占位）
+    narrative: Option<PathBuf>,
 }
 
-/// 解析 CLI（`--zip` / `--out` / `--gamedata` / `-h`）
+/// 解析 CLI（`--zip` / `--out` / `--gamedata` / `--narrative` / `-h`）
 fn parse_cli() -> Result<CliArgs> {
     let mut zip: Option<PathBuf> = None;
     let mut out: Option<PathBuf> = None;
     let mut gamedata: Option<PathBuf> = None;
+    let mut narrative: Option<PathBuf> = None;
 
     let mut parser = lexopt::Parser::from_env();
     while let Some(arg) = parser.next()? {
@@ -50,6 +53,7 @@ fn parse_cli() -> Result<CliArgs> {
             Arg::Long("zip") => zip = Some(parser.value()?.parse()?),
             Arg::Long("out") => out = Some(parser.value()?.parse()?),
             Arg::Long("gamedata") => gamedata = Some(parser.value()?.parse()?),
+            Arg::Long("narrative") => narrative = Some(parser.value()?.parse()?),
             _ => return Err(arg.unexpected().into()),
         }
     }
@@ -57,6 +61,7 @@ fn parse_cli() -> Result<CliArgs> {
         zip: zip.ok_or_else(|| anyhow!("缺少 --zip <局包路径>（如 logs/game6234.zip）"))?,
         out,
         gamedata,
+        narrative,
     })
 }
 
@@ -74,10 +79,12 @@ fn default_out_dir(zip: &std::path::Path) -> PathBuf {
 /// 用法说明
 fn print_usage() {
     println!(
-        "用法: umaai_review --zip <logs/game{{id}}.zip> [--out <dir>] [--gamedata <path>]\n\
+        "用法: umaai_review --zip <logs/game{{id}}.zip> [--out <dir>] [--gamedata <path>] [--narrative <md>]\n\
          \x20 --zip       局包路径（必需）\n\
          \x20 --out       输出目录（默认局包同级 {{game}}/）\n\
-         \x20 --gamedata gamedata 目录（默认按文档 §9.2 优先级解析）"
+         \x20 --gamedata gamedata 目录（默认按文档 §9.2 优先级解析）\n\
+         \x20 --narrative 叙述文件（4 段，`<!-- overview -->` 等标记分隔）；给了就注入 report.html，\n\
+         \x20            不给则 report.html 保留 NARRATIVE 占位（供 skill 二次回填）"
     );
 }
 
@@ -101,6 +108,16 @@ fn run() -> Result<()> {
         || default_out_dir(&zip_abs),
         |o| gdata::absolutize(o),
     );
+    // 叙述文件（skill 写的 4 段）：chdir 前先绝对化并读入
+    let narrative = match &args.narrative {
+        Some(p) => {
+            let abs = gdata::absolutize(p);
+            let text = fs::read_to_string(&abs)
+                .with_context(|| format!("读取叙述文件失败: {}", abs.display()))?;
+            report::parse_narrative(&text)
+        }
+        None => report::Narrative::default(),
+    };
 
     // ① 解包 + 角色识别（§11 步骤 1）
     let p = pack::open_zip(&zip_abs)?;
@@ -139,7 +156,13 @@ fn run() -> Result<()> {
         .as_ref()
         .map(|s| s.base_game.turn)
         .unwrap_or(0);
-    let sched = schedule::build(uma_data, &race_history, last_turn);
+    let mut sched = schedule::build(uma_data, &race_history, last_turn);
+    // 自选比赛期限波动（用户口径）：>8000 的运气波动通常是「不补赛将育成失败」的
+    // 低估 + 补赛达标后回升，净变≈0 → 进伪波动标记 + 赛程注记（供叙事点出「极限达标」）
+    let swings = checks::free_race_swings(&dec.rows, &sched);
+    for s in &swings {
+        sched.notes.push(checks::free_race_swing_note(s));
+    }
     if !sched.notes.is_empty() {
         println!("赛程注记: {}", sched.notes.join("; "));
     }
@@ -151,7 +174,10 @@ fn run() -> Result<()> {
     let exec = execution::build(&tl.rows, &dec.rows, &race_turns);
 
     // ⑥ 检查项引擎（§11 步骤 5-6）：伪波动标记 / 超级拉面期 / 坏手法 / 继承 / 分身
-    let flags = checks::flagged_turns(&tl.rows);
+    let mut flags = checks::flagged_turns(&tl.rows);
+    flags.extend(checks::free_race_swing_flags(&swings));
+    flags.sort_by_key(|f| f.turn);
+    flags.dedup();
     let mut extra_findings: Vec<execution::Finding> = Vec::new();
     if let Some(stats) = checks::super_ramen_stats(&dec.rows) {
         extra_findings.push(checks::super_ramen_finding(&stats));
@@ -197,7 +223,7 @@ fn run() -> Result<()> {
     // brief.md（LLM 复盘简报：六问事实预答，SKILL 层一次 Read 即可动笔）
     let brief_path = brief::render(&d, &out_dir)?;
     // report.html（§11 步骤 7：minijinja 模板 + plot::svg 四图）
-    let report_path = report::render(&d, &out_dir)?;
+    let report_path = report::render(&d, &out_dir, &narrative)?;
 
     // ⑥ 摘要输出
     println!("局包: {}", zip_abs.display());

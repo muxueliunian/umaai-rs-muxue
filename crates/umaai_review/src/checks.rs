@@ -121,6 +121,148 @@ pub fn super_ramen_finding(stats: &SuperRamenStats) -> Finding {
     }
 }
 
+/// 自选比赛期限波动的幅度阈值（用户口径：>8000 的运气波动通常与自选比赛期限有关）
+const FREE_RACE_SWING_MIN: f64 = 8000.0;
+/// 骤降后多少回合内出现的回升视为配对
+const FREE_RACE_SWING_WINDOW: u32 = 3;
+/// 配对容差：净变 ≤ 幅度 × 此比例（对应「补赛达标后运气分恢复到以前水平」）
+const FREE_RACE_SWING_NET_TOL: f64 = 0.25;
+
+/// 自选比赛期限波动（骤降 → 补赛达标后回升，净变≈0）
+#[derive(Debug, Clone, Serialize)]
+pub struct FreeRaceSwing {
+    pub drop_turn: u32,
+    pub drop_delta: f64,
+    pub recover_turn: u32,
+    pub recover_delta: f64,
+    /// 净变（≈0 = 回到原水平）
+    pub net: f64,
+    /// 命中的自选窗口（未匹配到则为 `None`）
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub window: Option<FreeRaceWindow>,
+}
+
+/// 命中的自选比赛窗口
+#[derive(Debug, Clone, Serialize)]
+pub struct FreeRaceWindow {
+    pub start_turn: u32,
+    pub end_turn: u32,
+    pub required: u32,
+    pub picked_turns: Vec<i32>,
+    /// 是否在截止回合（或前 1 回合）才补赛 → 「自选比赛极限达标」
+    pub last_minute: bool,
+}
+
+/// 自选比赛期限波动（用户口径）
+///
+/// **机制**：自选比赛窗口截止前若仍未达标，MCTS 对「将育成失败」的状态给出大幅
+/// 低估 → 运气分骤降；随后补赛达标 → 回升。净变≈0，故**不影响最终运气**，
+/// 但「自选比赛极限达标」是值得关注的操作（叙事要点出，不当坏运气）。
+///
+/// **判据**：回合合计 Δ 出现 ≤ −8000 的骤降，且其后 3 回合内出现 ≥ +8000 的回升、
+/// 净变 ≤ 幅度的 25%（= 回到原水平）。命中后骤降/回升两回合都进伪波动标记
+/// （原有年界标记可能同时命中且归因有误，见 `free_race_swing_note`）。
+pub fn free_race_swings(dec: &[DecRow], sched: &Schedule) -> Vec<FreeRaceSwing> {
+    // 逐回合合计 Δ（与 super_ramen_stats 同口径）
+    let mut by_turn: BTreeMap<u32, f64> = BTreeMap::new();
+    for r in dec {
+        if let Some(d) = r.turn_delta {
+            *by_turn.entry(r.turn).or_default() += d;
+        }
+    }
+    let turns: Vec<(u32, f64)> = by_turn.into_iter().collect();
+
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < turns.len() {
+        let (drop_turn, drop_delta) = turns[i];
+        if drop_delta > -FREE_RACE_SWING_MIN {
+            i += 1;
+            continue;
+        }
+        // 往后 SWING_WINDOW 回合内找配对回升
+        let mut paired: Option<(usize, u32, f64)> = None;
+        for (j, &(rt, rd)) in turns.iter().enumerate().skip(i + 1) {
+            if rt > drop_turn + FREE_RACE_SWING_WINDOW {
+                break;
+            }
+            if rd >= FREE_RACE_SWING_MIN {
+                let mag = drop_delta.abs().max(rd.abs());
+                if (drop_delta + rd).abs() <= mag * FREE_RACE_SWING_NET_TOL {
+                    paired = Some((j, rt, rd));
+                }
+                break;
+            }
+        }
+        match paired {
+            Some((j, recover_turn, recover_delta)) => {
+                out.push(FreeRaceSwing {
+                    drop_turn,
+                    drop_delta,
+                    recover_turn,
+                    recover_delta,
+                    net: drop_delta + recover_delta,
+                    window: match_free_race_window(sched, drop_turn),
+                });
+                i = j + 1; // 跳过已配对的回升回合
+            }
+            None => i += 1,
+        }
+    }
+    out
+}
+
+/// 匹配该骤降回合所属的自选窗口（截止回合后留 SWING_WINDOW 容差，容纳迟到的回升）
+fn match_free_race_window(sched: &Schedule, drop_turn: u32) -> Option<FreeRaceWindow> {
+    sched.free_races.iter().find_map(|f| {
+        if drop_turn < f.start_turn || drop_turn > f.end_turn + FREE_RACE_SWING_WINDOW {
+            return None;
+        }
+        let last_minute = f.picked_turns.iter().any(|t| {
+            let t = *t as u32;
+            t == f.end_turn || t + 1 == f.end_turn
+        });
+        Some(FreeRaceWindow {
+            start_turn: f.start_turn,
+            end_turn: f.end_turn,
+            required: f.required,
+            picked_turns: f.picked_turns.clone(),
+            last_minute,
+        })
+    })
+}
+
+/// 自选比赛期限波动 → 伪波动标记（骤降与回升两回合都标）
+pub fn free_race_swing_flags(swings: &[FreeRaceSwing]) -> Vec<FlaggedTurn> {
+    let mut out = Vec::new();
+    for s in swings {
+        for turn in [s.drop_turn, s.recover_turn] {
+            out.push(FlaggedTurn { turn, reason: "free_race_deadline_swing".to_string() });
+        }
+    }
+    out
+}
+
+/// 自选比赛期限波动 → 赛程注记（供叙事引用「极限达标」，并纠正年界标记的误归因）
+pub fn free_race_swing_note(s: &FreeRaceSwing) -> String {
+    let where_ = match &s.window {
+        Some(w) if w.last_minute => format!(
+            "t{} 是自选窗口 {}..={}（要求 {} 次，实跑 {:?}）的截止回合，属「自选比赛极限达标」",
+            s.drop_turn, w.start_turn, w.end_turn, w.required, w.picked_turns
+        ),
+        Some(w) => format!(
+            "t{} 落在自选窗口 {}..={}（要求 {} 次，实跑 {:?}）",
+            s.drop_turn, w.start_turn, w.end_turn, w.required, w.picked_turns
+        ),
+        None => format!("t{} 未匹配到自选窗口（按同形态波动处理）", s.drop_turn),
+    };
+    format!(
+        "自选比赛期限波动：{where_}；运气分 t{} 骤降 {:+.0} → t{} 补赛达标后回升 {:+.0}\
+         （净变 {:+.0}，属程序性波动、不影响最终运气）",
+        s.drop_turn, s.drop_delta, s.recover_turn, s.recover_delta, s.net
+    )
+}
+
 /// 坏手法检查项（§6.1 已验证判据 + 训练失败候选清单）
 ///
 /// 覆盖：
@@ -389,6 +531,91 @@ mod tests {
         assert_eq!(kind("friend_quota_exhausted_early"), 1, "58 耗尽 + 69 体力 27");
         assert_eq!(kind("motivation_drop_unrecovered"), 1, "45 掉心情 3 回合未恢复");
         assert_eq!(kind("train_failure_candidate"), 1, "速训练五维零增长体力 -20");
+    }
+
+    /// 测试用自由比赛窗口
+    fn free_window(start: u32, end: u32, required: u32, picked: Vec<i32>) -> crate::schedule::FreeRaceInfo {
+        crate::schedule::FreeRaceInfo {
+            start_turn: start,
+            end_turn: end,
+            required,
+            grade: None,
+            picked_turns: picked,
+        }
+    }
+
+    /// 自选比赛期限波动（game3099 实测形态）：
+    /// 窗口 12..=22 要求 1 次、实跑 [22]（截止回合才补赛）→ t22 −12003 / t23 +13383
+    #[test]
+    fn test_free_race_swing_game3099() {
+        let dec = vec![
+            dec_row(21, Some(-178.0)),
+            dec_row(22, Some(-12003.0)),
+            dec_row(23, Some(13383.0)),
+            dec_row(24, Some(-773.0)),
+        ];
+        let sched = Schedule {
+            mandatory_turns: vec![11, 41],
+            free_races: vec![free_window(12, 22, 1, vec![22])],
+            notes: vec![],
+        };
+        let sw = free_race_swings(&dec, &sched);
+        println!("swings: {sw:#?}");
+        assert_eq!(sw.len(), 1, "应检出 1 条自选期限波动");
+        let s = &sw[0];
+        assert_eq!((s.drop_turn, s.recover_turn), (22, 23));
+        assert!((s.net - 1380.0).abs() < 1e-6, "净变 ≈ +1380");
+        let w = s.window.as_ref().expect("应匹配到自选窗口");
+        assert_eq!((w.start_turn, w.end_turn, w.required), (12, 22, 1));
+        assert!(w.last_minute, "实跑 [22] == 截止回合 → 极限达标");
+        // 注记要点出「极限达标」且说明不影响最终运气
+        let note = free_race_swing_note(s);
+        println!("note: {note}");
+        assert!(note.contains("自选比赛极限达标"));
+        assert!(note.contains("不影响最终运气"));
+        // 两回合都进伪波动标记
+        let flags = free_race_swing_flags(&sw);
+        assert_eq!(flags.len(), 2);
+        assert!(flags.iter().all(|f| f.reason == "free_race_deadline_swing"));
+        assert!(flags.iter().any(|f| f.turn == 22) && flags.iter().any(|f| f.turn == 23));
+    }
+
+    /// 非截止回合补赛 → 命中窗口但不标「极限达标」
+    #[test]
+    fn test_free_race_swing_not_last_minute() {
+        let dec = vec![dec_row(20, Some(-9000.0)), dec_row(21, Some(9100.0))];
+        let sched = Schedule {
+            mandatory_turns: vec![],
+            free_races: vec![free_window(12, 22, 1, vec![20])],
+            notes: vec![],
+        };
+        let sw = free_race_swings(&dec, &sched);
+        assert_eq!(sw.len(), 1);
+        let w = sw[0].window.as_ref().unwrap();
+        assert!(!w.last_minute, "实跑 [20] 距截止 22 还有余量 → 非极限达标");
+        assert!(free_race_swing_note(&sw[0]).contains("落在自选窗口"));
+    }
+
+    /// 未配对的骤降 / 净变过大 / 幅度不足 → 均不检出
+    #[test]
+    fn test_free_race_swing_negative_cases() {
+        let sched = Schedule {
+            mandatory_turns: vec![],
+            free_races: vec![free_window(12, 22, 1, vec![22])],
+            notes: vec![],
+        };
+        // ① 骤降后无回升
+        let no_recover = vec![dec_row(22, Some(-12003.0)), dec_row(23, Some(-500.0))];
+        assert!(free_race_swings(&no_recover, &sched).is_empty(), "无回升不配对");
+        // ② 回升远不足以回到原水平（净变 -9000，超 25% 容差）
+        let not_recovered = vec![dec_row(22, Some(-12003.0)), dec_row(23, Some(3003.0))];
+        assert!(free_race_swings(&not_recovered, &sched).is_empty(), "未回到原水平不配对");
+        // ③ 幅度不足阈值
+        let small = vec![dec_row(22, Some(-5000.0)), dec_row(23, Some(5100.0))];
+        assert!(free_race_swings(&small, &sched).is_empty(), "幅度 < 8000 不判");
+        // ④ 回升超出配对窗口（>3 回合）
+        let late = vec![dec_row(22, Some(-12003.0)), dec_row(27, Some(12000.0))];
+        assert!(free_race_swings(&late, &sched).is_empty(), "回升超出窗口不配对");
     }
 
     /// 测试用决策行（只填 turn / turn_delta）

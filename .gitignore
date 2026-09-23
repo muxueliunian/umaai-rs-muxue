@@ -12,6 +12,7 @@ scripts/export_support_card/*.json
 master.mdb
 .claude
 .portable
+.workbuddy
 
 # Generated benchmark and training reports
 /benchmark-results/
