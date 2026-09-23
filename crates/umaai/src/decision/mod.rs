@@ -148,8 +148,8 @@ pub fn emit_with_luck_decision<G: Game>(
     // 挂载 scenario_extra：snapshot + action_luck（必挂）+ reason（仅拉面 MCTS）+
     // ramen_action（仅 ramen 路径）
     //
-    // 合并而不是覆盖：决策本身可能已带信息（地区网络的 `decision_source`、
-    // `region_nn_hint`），以它为底再盖上 luck 相关键，键名冲突时以 luck 为准。
+    // 合并而不是覆盖：决策本身可能已带信息（网络模式的 `decision_source`、
+    // `mcts_nn_hint` 的参考推荐），以它为底再盖上 luck 相关键，键名冲突时以 luck 为准。
     let mut merged = match info.scenario_extra.take() {
         Some(Value::Object(map)) => map,
         _ => Map::new()

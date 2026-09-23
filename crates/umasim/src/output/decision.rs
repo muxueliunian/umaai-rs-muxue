@@ -84,13 +84,19 @@ pub struct DecisionInfo {
     pub scenario_extra: Option<serde_json::Value>
 }
 
-/// 决策来源标签：地区网络做出的地区选择（见 `umaai::region`）
-pub const SOURCE_REGION_NN: &str = "region_nn";
+/// 决策来源标签：网络推理选出的动作（`ramen_trainer_policy = "nn"`，见 `umaai::ramen_nn`）
+pub const SOURCE_RAMEN_NN: &str = "ramen_nn";
 
-/// [`DecisionInfo::scenario_extra`] 里承载地区网络参考推荐的键名（`region_nn_hint` 模式）
+/// 决策来源标签：网络模式下自选比赛硬守门命中，直接选「比赛」，没有推理
+pub const SOURCE_RAMEN_RACE_GATE: &str = "ramen_race_gate";
+
+/// 决策来源标签：网络模式下该阶段转交手写策略，没有推理
+pub const SOURCE_RAMEN_HANDWRITTEN_STAGE: &str = "ramen_handwritten_stage";
+
+/// [`DecisionInfo::scenario_extra`] 里承载网络参考推荐的键名（`mcts_nn_hint` 模式）
 ///
-/// 值为 `{"choice": 网络推荐的地区组合文本, "same_as_executed": 是否与执行推荐相同}`。
-pub const REGION_NN_HINT_KEY: &str = "region_nn_hint";
+/// 值为 `{"choice": 网络推荐的动作文本, "same_as_executed": 是否与执行推荐相同}`。
+pub const NN_HINT_KEY: &str = "nn_hint";
 
 impl DecisionInfo {
     /// [`Self::scenario_extra`] 里承载决策来源的键名
@@ -176,16 +182,16 @@ mod tests {
             candidate_descriptions: vec!["a".into(), "b".into(), "c".into(), "d".into()],
             ..DecisionInfo::default()
         }
-        .with_source(SOURCE_REGION_NN);
+        .with_source(SOURCE_RAMEN_NN);
         println!("标注后 → {:?}", tagged.source_label());
-        c.check(tagged.source_label() == Some(SOURCE_REGION_NN), "标注后读回同一标签");
+        c.check(tagged.source_label() == Some(SOURCE_RAMEN_NN), "标注后读回同一标签");
         c.check(tagged.candidate_scores.is_empty() && tagged.score == 0.0, "标注来源不改评分字段");
 
         let merged = DecisionInfo {
             scenario_extra: Some(serde_json::json!({"ramen_action": "吃面/札幌"})),
             ..DecisionInfo::default()
         }
-        .with_source(SOURCE_REGION_NN);
+        .with_source(SOURCE_RAMEN_NN);
         let kept = merged
             .scenario_extra
             .as_ref()
@@ -193,7 +199,7 @@ mod tests {
             .and_then(|v| v.as_str());
         println!("已有键 → {kept:?}");
         c.check(kept == Some("吃面/札幌"), "已有 scenario_extra 的键不丢");
-        c.check(merged.source_label() == Some(SOURCE_REGION_NN), "已有对象上也能读回标签");
+        c.check(merged.source_label() == Some(SOURCE_RAMEN_NN), "已有对象上也能读回标签");
         c.finish()
     }
 

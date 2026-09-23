@@ -20,7 +20,7 @@ use serde::Serialize;
 use text_to_ascii_art::to_art;
 use umasim::{
     game::{Game, ramen::RamenStage},
-    gamedata::{init_global_with_config, RamenRegionPolicy},
+    gamedata::{init_global_with_config, RamenTrainerPolicy},
     neural::Evaluator,
     output::{DecisionSink, HumanReadableSink, StdoutJsonSink},
     search::SearchConfig,
@@ -31,14 +31,14 @@ use umasim::{
 use crate::{
     decision::{record, LastReasonSink, LuckScoreTracker, RecordingSink},
     protocol::urafile::UraFileWatcher,
-    region::build_client_trainer,
+    ramen_nn::build_client_trainer,
     scenario::{onsen, ramen}
 };
 
 pub mod decision;
 pub mod plot;
 pub mod protocol;
-pub mod region;
+pub mod ramen_nn;
 pub mod scenario;
 pub mod utils;
 
@@ -197,15 +197,15 @@ async fn main_guard() -> Result<()> {
         .with_friend_complete_required(game_config.friend_complete_required)
         .verbose(true)
         .with_reason_sink(reason_slot.clone());
-    // 外层地区选择由 `ramen_region_policy` 决定（默认 handwritten，与既有逻辑相同）。
-    // 地区模型在此加载一次；未开 onnx feature 或模型缺失时报错退出。
+    // 动作决策由 `ramen_trainer_policy` 决定（默认 mcts，与既有逻辑相同）。
+    // 网络模型在此加载一次；未开 onnx feature 或模型缺失时报错退出。
     let ramen_trainer = build_client_trainer(&game_config, ramen_mcts)?;
     info!(
         "{}",
-        format!("拉面地区决策: {}", ramen_trainer.label()).bright_yellow()
+        format!("拉面决策: {}", ramen_trainer.label()).bright_yellow()
     );
-    if game_config.ramen_region_policy == RamenRegionPolicy::RegionNn && ramen_stages.region_select {
-        info!("ramen_region_policy = \"region_nn\"：地区由网络选择，ramen_search_stages 中的 region 不再生效");
+    if game_config.ramen_trainer_policy == RamenTrainerPolicy::Nn {
+        info!("ramen_trainer_policy = \"nn\"：动作决策由网络直接给出，[mcts] 搜索配置不再生效");
     }
 
     // Phase 4 feature 拆分后，onnx 评估器路径已 cfg gate 到 `onnx` feature。

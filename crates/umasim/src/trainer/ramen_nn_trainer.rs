@@ -135,6 +135,26 @@ pub struct ActionLogit {
     pub logit: f32
 }
 
+/// 一次动作决策由谁定案
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NnVia {
+    /// 跑了一次网络推理，按 policy argmax 选出
+    Network,
+    /// 自选比赛硬守门命中，无视 policy 直接选「比赛」，没有推理
+    RaceGate,
+    /// `SpecialSelect` 按 [`SpecialSelectMode::Handwritten`] 转交手写策略，没有推理
+    Handwritten
+}
+
+/// [`RamenNnTrainer::select_action_labeled`] 的结果：选中的下标与定案来源
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnPick {
+    /// 选中候选在 `actions` 切片中的下标
+    pub index: usize,
+    /// 这一步由谁定案
+    pub via: NnVia
+}
+
 /// `SpecialSelect` 阶段的推理口径
 ///
 /// 教师在 `RamenSelect` 根上搜的是联合动作（面 × 隐藏风味用法），policy 格位
@@ -345,6 +365,47 @@ impl RamenNnTrainer {
         self
     }
 
+    /// 选动作，并照实给出这一步由谁定案
+    ///
+    /// [`Trainer::select_action`] 只是本函数取下标：判定逻辑只有一份，客户端标注来源时
+    /// 不必拿下标反推、也不必再跑一遍守门判定。
+    ///
+    /// # 错误
+    ///
+    /// 推理失败、任一候选无法落格、候选为空，或 [`SpecialSelectMode::Canonical`] 下
+    /// 联合决策根还原失败（阶段不对 / `pending_ramen` 为空）时报错。
+    pub fn select_action_labeled(
+        &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
+    ) -> Result<NnPick> {
+        ensure!(!actions.is_empty(), "候选动作为空");
+        let stage = ramen_effective_stage(game, actions);
+        // 自选比赛硬守门优先于网络输出：不达标直接育成失败，不是可权衡的价值项
+        if self.race_shield && stage == RamenStage::Train {
+            if let Some(index) = free_race_gate_index(game, actions, race_gate_slack()) {
+                return Ok(NnPick { index, via: NnVia::RaceGate });
+            }
+        }
+        // SpecialSelect 是联合决策的第二拍，推理状态由 special_mode 决定；
+        // 候选合法性与打分一律基于**原局面**，只有喂给模型的那一份被还原
+        let out = if stage == RamenStage::SpecialSelect {
+            match self.special_mode {
+                SpecialSelectMode::Handwritten => {
+                    let index = self.fallback.select_action(game, actions, rng)?;
+                    return Ok(NnPick { index, via: NnVia::Handwritten });
+                }
+                SpecialSelectMode::Canonical => self.infer(&canonical_ramen_select_root(game)?)?,
+                SpecialSelectMode::Raw => self.infer(game)?
+            }
+        } else {
+            self.infer(game)?
+        };
+        let scores = self.score_actions(game, actions, &out.policy)?;
+        Ok(NnPick {
+            index: argmax_logit(&scores)?,
+            via: NnVia::Network
+        })
+    }
+
     /// 按当前阶段把每个候选映射到 policy logit
     ///
     /// # 错误
@@ -476,27 +537,7 @@ impl Trainer<RamenGame> for RamenNnTrainer {
     /// 推理失败、任一候选无法落格、候选为空，或 [`SpecialSelectMode::Canonical`] 下
     /// 联合决策根还原失败（阶段不对 / `pending_ramen` 为空）时报错。
     fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
-        ensure!(!actions.is_empty(), "候选动作为空");
-        let stage = ramen_effective_stage(game, actions);
-        // 自选比赛硬守门优先于网络输出：不达标直接育成失败，不是可权衡的价值项
-        if self.race_shield && stage == RamenStage::Train {
-            if let Some(idx) = free_race_gate_index(game, actions, race_gate_slack()) {
-                return Ok(idx);
-            }
-        }
-        // SpecialSelect 是联合决策的第二拍，推理状态由 special_mode 决定；
-        // 候选合法性与打分一律基于**原局面**，只有喂给模型的那一份被还原
-        let out = if stage == RamenStage::SpecialSelect {
-            match self.special_mode {
-                SpecialSelectMode::Handwritten => return self.fallback.select_action(game, actions, rng),
-                SpecialSelectMode::Canonical => self.infer(&canonical_ramen_select_root(game)?)?,
-                SpecialSelectMode::Raw => self.infer(game)?
-            }
-        } else {
-            self.infer(game)?
-        };
-        let scores = self.score_actions(game, actions, &out.policy)?;
-        argmax_logit(&scores)
+        Ok(self.select_action_labeled(game, actions, rng)?.index)
     }
 
     /// 事件选项委托给手写策略（choice 头未训练）
