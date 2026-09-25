@@ -109,7 +109,10 @@ impl RamenClientTrainer {
             #[cfg(feature = "onnx")]
             Self::RegionNn(t) => t.mode_label(),
             #[cfg(feature = "onnx")]
-            Self::WholeNn(_) => "whole_game_nn"
+            Self::WholeNn(t) => match t.is_compare() {
+                true => "whole_game_nn_compare",
+                false => "whole_game_nn"
+            }
         }
     }
 
@@ -123,7 +126,7 @@ impl RamenClientTrainer {
             #[cfg(feature = "onnx")]
             Self::RegionNn(_) => false,
             #[cfg(feature = "onnx")]
-            Self::WholeNn(_) => true
+            Self::WholeNn(t) => !t.is_compare()
         }
     }
 }
@@ -337,9 +340,9 @@ pub fn validate_whole_nn_policy(cfg: &GameConfig) -> Result<()> {
 pub fn build_client_trainer(
     cfg: &GameConfig, stages: RamenSearchStages, parts: ClientTrainerParts
 ) -> Result<RamenClientTrainer> {
-    if cfg.ramen_trainer_policy == RamenTrainerPolicy::Nn {
+    if cfg.ramen_trainer_policy.is_whole_nn() {
         validate_whole_nn_policy(cfg)?;
-        return build_whole_nn(cfg);
+        return build_whole_nn(cfg, parts);
     }
     validate_region_policy(cfg, stages)?;
     match cfg.ramen_region_policy {
@@ -356,11 +359,16 @@ pub fn build_client_trainer(
 /// # 错误
 ///
 /// 模型或旁车缺失、维度与冻结契约不符、ONNX 图无法转为可运行图时报错。
+///
+/// `nn_compare` 下把 `parts.mcts` 挂成对照侧（每个多候选决策多跑一次搜索，只显示不执行）；
+/// `nn` 下 `parts.mcts` 构造完随即丢弃。
 #[cfg(feature = "onnx")]
-fn build_whole_nn(cfg: &GameConfig) -> Result<RamenClientTrainer> {
+fn build_whole_nn(cfg: &GameConfig, parts: ClientTrainerParts) -> Result<RamenClientTrainer> {
     use std::path::Path;
 
     use umasim::trainer::{RamenNnTrainer, SpecialSelectMode};
+
+    use crate::ramen_nn::WholeCompare;
 
     let path = cfg
         .ramen_region_model_path
@@ -369,7 +377,15 @@ fn build_whole_nn(cfg: &GameConfig) -> Result<RamenClientTrainer> {
     let nn = RamenNnTrainer::load(Path::new(path))?
         .with_race_shield(true)
         .with_special_mode(SpecialSelectMode::Canonical);
-    Ok(RamenClientTrainer::WholeNn(Box::new(WholeGameNnTrainer::new(nn))))
+    let mut trainer = WholeGameNnTrainer::new(nn);
+    if cfg.ramen_trainer_policy == RamenTrainerPolicy::NnCompare {
+        trainer = trainer.with_compare(WholeCompare {
+            mcts: parts.mcts,
+            print: parts.human_mode,
+            reason_gate: parts.reason_gate
+        });
+    }
+    Ok(RamenClientTrainer::WholeNn(Box::new(trainer)))
 }
 
 /// 未开 `onnx` feature 时的整局网络分支：直接报错
@@ -378,7 +394,7 @@ fn build_whole_nn(cfg: &GameConfig) -> Result<RamenClientTrainer> {
 ///
 /// 恒报错——这个构建里根本没有推理后端，静默回退成搜索会让用户以为整局网络已生效。
 #[cfg(not(feature = "onnx"))]
-fn build_whole_nn(_cfg: &GameConfig) -> Result<RamenClientTrainer> {
+fn build_whole_nn(_cfg: &GameConfig, _parts: ClientTrainerParts) -> Result<RamenClientTrainer> {
     bail!(
         "ramen_trainer_policy=\"nn\" 需要启用 onnx feature 的构建：\
          cargo build --release --features onnx -p umaai。\
@@ -783,7 +799,11 @@ mod tests {
         let def = merge_fixture("")?;
         println!("默认 → {:?}", def.ramen_trainer_policy);
         c.check(def.ramen_trainer_policy == RamenTrainerPolicy::Mcts, "配置文件默认是 mcts");
-        for (text, want) in [("mcts", RamenTrainerPolicy::Mcts), ("nn", RamenTrainerPolicy::Nn)] {
+        for (text, want) in [
+            ("mcts", RamenTrainerPolicy::Mcts),
+            ("nn", RamenTrainerPolicy::Nn),
+            ("nn_compare", RamenTrainerPolicy::NnCompare)
+        ] {
             let cfg = merge_fixture(&format!("ramen_trainer_policy = {Q}{text}{Q}", Q = '"'))?;
             println!("{text} → {:?}", cfg.ramen_trainer_policy);
             c.check(cfg.ramen_trainer_policy == want, &format!("{text} 解析为 {want:?}"));

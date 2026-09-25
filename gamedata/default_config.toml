@@ -89,7 +89,9 @@ ramen_region_policy = "handwritten"
 # ramen_region_model_path = "saved_models/arms/ens_G2mix_g123.onnx"
 
 # ---------- 整局决策来源（比上面的地区来源高一层）----------
-# ramen_trainer_policy: "mcts"（默认）| "nn"
+# ramen_trainer_policy: "mcts"（默认）| "nn" | "nn_compare"
+#   nn_compare：执行推荐同 nn；每个多候选动作决策另用 MCTS（[mcts] 参数）算一遍，
+#       两条推荐都打印，MCTS 那条只显示不执行。配置约束与 nn 相同。
 #   mcts：训练 / 吃面 / 隐藏风味走 MCTS 搜索，地区那一步再由 ramen_region_policy 决定。
 #   nn：**本地实验用**。整局所有动作决策（含地区）直接由网络 argmax 给出，完全不跑搜索。
 #       ❗模型复用 ramen_region_model_path，此模式下它是**整局动作模型**。

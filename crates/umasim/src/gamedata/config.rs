@@ -877,13 +877,24 @@ impl RamenRegionPolicy {
 ///   「纯网络」指的是**动作决策**这条线，不是把手写代码全部拿掉。
 ///   ❗闭环实测：同族模型（R4 g123）直接决策相对 `search_n=8192` 的 MCTS 基线
 ///   配对差 **−8947 分**（95% CI [−10208, −7686]，10/10 全负）。这是**实验用**取值。
+/// - `NnCompare`：执行推荐与 `Nn` 完全相同（整局网络），另在每个多候选动作决策上
+///   用 MCTS 在随机流副本上再算一遍，屏幕上两条推荐都打印，供实战对照。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum RamenTrainerPolicy {
     #[default]
     #[serde(rename = "mcts")]
     Mcts,
     #[serde(rename = "nn")]
-    Nn
+    Nn,
+    #[serde(rename = "nn_compare")]
+    NnCompare
+}
+
+impl RamenTrainerPolicy {
+    /// 是否由整局网络执行全部动作决策（`nn` 与 `nn_compare`）
+    pub fn is_whole_nn(self) -> bool {
+        matches!(self, Self::Nn | Self::NnCompare)
+    }
 }
 
 /// 策略参数（手写/未来模型策略参数）

@@ -483,6 +483,15 @@ impl RamenMctsTrainer {
         self.verbose && !self.quiet.load(Ordering::Relaxed)
     }
 
+    /// 丢弃合并搜索缓存的 `SpecialSelect` targets
+    ///
+    /// 供「本训练员只做对照、实际执行的是别人的选择」的宿主使用：`RamenSelect` 上
+    /// 实际执行的吃面与本训练员选的不同时，缓存的 targets 属于一条没走的分支，
+    /// 留着会让下一步 `SpecialSelect` 报「缓存未命中」。丢弃后下一步照常重新搜索。
+    pub fn discard_pending_combined(&self) {
+        self.store_pending_combined_targets(None);
+    }
+
     /// `SpecialSelect` 直接命中合并搜索缓存的次数
     pub fn combined_cache_hits(&self) -> usize {
         self.combined_cache_hits.load(Ordering::Relaxed)

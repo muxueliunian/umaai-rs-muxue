@@ -231,6 +231,17 @@ async fn main_guard() -> Result<()> {
         )
         .bright_yellow()
     );
+    if ramen_trainer.label() == "whole_game_nn_compare" {
+        info!(
+            "{}",
+            format!(
+                "整局网络对照模式：执行推荐由 {} 给出；每个多候选动作决策另用 MCTS（[mcts] 参数）\
+                 在随机流副本上算一遍，两条推荐都打印，MCTS 那条只显示不执行",
+                game_config.ramen_region_model_path.as_deref().unwrap_or("<未配置>")
+            )
+            .bright_yellow()
+        );
+    }
     if ramen_trainer.skips_search() {
         // 模型路径这一项在本模式下被复用成**整局动作模型**，必须说清楚，
         // 免得用户以为它只管地区。
