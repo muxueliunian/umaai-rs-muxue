@@ -32,12 +32,10 @@
 //! 地区阶段候选数恒 >1（第 1/2 年 10，第 3 年 `all` 下 120），因此
 //! **每局推理数恰好 = 3**——这就是「搜索内部没有推理」的直接证据。
 //!
-//! ❗**决策逻辑与主程序同源**：`mcts+region_nn` 用的就是主程序
-//! （`game_config.toml` 里 `ramen_region_policy = "nn"`）那一份共享实现
-//! [`umaai::region::RegionNnTrainer`]，本工具只额外挂一个观测钩子
-//! （[`RegionObsRecorder`]）记录 `regions.csv`。两边**不存在**两份会逐渐分叉的接管逻辑。
-//! 区别只在模型来源：本工具走 `--model` 命令行参数（保留一次跑多个模型的能力），
-//! 主程序走配置项 `ramen_region_model_path`。
+//! `mcts+region_nn` 用的是研究模块 [`umaai::region::RegionNnTrainer`] 那一份实现，
+//! 本工具只额外挂一个观测钩子（[`RegionObsRecorder`]）记录 `regions.csv`。
+//! 模型走 `--model` 命令行参数（保留一次跑多个模型的能力）。
+//! 客户端主程序已不再提供「只接管地区」的配置项（见 `umaai::ramen_nn`）。
 //!
 //! `regions.csv` 逐次记录实际地区选择；`mcts+region_nn` 还用一个**独立的**
 //! `RecommendedRamenTrainer` 在同一局面上算出「手写本来会选什么」作为观测，
@@ -203,8 +201,7 @@ impl Policy {
 /// 与地区接管无关，一律放行。
 ///
 /// 模型路径**不在**这里检查：benchmark 的模型来自 `--model`（保留一次跑多个模型的
-/// 能力），不要求用户去配 `ramen_region_model_path`；这正是本函数调
-/// [`check_region_nn_applicable`] 而不是 `validate_region_policy` 的原因。
+/// 能力），[`check_region_nn_applicable`] 只看适用性。
 ///
 /// ❗`cfg` / `stages` 必须是**命令行覆盖之后**的生效值。
 ///
@@ -1439,11 +1436,7 @@ mod tests {
         println!("fixed 候选 → {:?}", e2.as_ref().err().map(ToString::to_string));
         note(e2.is_err(), "mcts+region_nn：ramen_region_strategy=fixed 时拒绝");
 
-        // 3) 合法配置 → 通过（且**不要求** ramen_region_model_path，模型走 --model）
-        note(
-            base.ramen_region_model_path.is_none(),
-            "fixture 未设 ramen_region_model_path（benchmark 的模型来自 --model）"
-        );
+        // 3) 合法配置 → 通过（模型走 --model，不读配置里的模型路径）
         let ok = check_arm_config(Policy::MctsRegionNn, &base, legal);
         println!("合法配置 → {:?}", ok.as_ref().err().map(ToString::to_string));
         note(ok.is_ok(), "mcts+region_nn：合法地区面板配置照常通过");

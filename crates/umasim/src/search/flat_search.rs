@@ -371,6 +371,17 @@ where
         self
     }
 
+    /// 就地改写当前 rollout 基策（不整体替换）
+    ///
+    /// 多个配置项都要作用到 rollout 基策上（友人出行完成硬门限、网络 rollout），
+    /// 用 [`Self::with_rollout_trainer`] 整体替换会把先设的那一项冲掉；本方法把现有
+    /// 基策交给 `f` 改写后放回，调用顺序因此无关。
+    pub fn map_rollout_trainer(mut self, f: impl FnOnce(G::RolloutTrainer) -> G::RolloutTrainer) -> Self {
+        let old = std::mem::replace(&mut self.rollout_trainer, G::default_rollout_trainer());
+        self.rollout_trainer = f(old);
+        self
+    }
+
     /// 设置 leaf eval 微批大小（仅 nn leaf 生效）
     pub fn with_rollout_batch_size(mut self, batch_size: usize) -> Self {
         self.rollout_batch_size = batch_size.max(1).min(1024);
@@ -1684,14 +1695,15 @@ mod tests {
         // 2026-09-17 重抓：合宿训练诀窍全 MAX 修复（d9374e8）后 rollout 数值上移，基准重抓。
         // 2026-09-17 二次重抓：GA 方向 9 旋钮组合档进入 preset 后 rollout 数值再移，基准重抓。
         // 2026-09-18 重抓：第十二轮组合档进入 preset，rollout 数值再移，基准重抓。
+        // 2026-09-21 重抓：友人出行跨年配额定档 [0,3,5]（原 [0,2,5]），rollout 数值再移。
         let expected: [(u32, f64); 7] = [
-            (16, 65998.062500),
-            (16, 65578.500000),
-            (16, 66090.125000),
-            (16, 65708.937500),
-            (16, 66607.062500),
-            (16, 65944.937500),
-            (16, 65892.312500)
+            (16, 65861.812500),
+            (16, 65548.750000),
+            (16, 65564.062500),
+            (16, 65588.937500),
+            (16, 66068.875000),
+            (16, 65513.187500),
+            (16, 65934.250000)
         ];
         for (i, ((x, y), (en, em))) in a.iter().zip(b.iter()).zip(expected).enumerate() {
             println!(

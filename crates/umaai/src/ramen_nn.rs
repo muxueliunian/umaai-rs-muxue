@@ -1,241 +1,372 @@
-//! 客户端「整局无搜索 NN」的最小包装层（`ramen_trainer_policy = "nn"`，`onnx` feature）
+//! 客户端拉面决策器的装配：按 `ramen_trainer_policy` 决定动作决策由谁负责
 //!
-//! [`RamenNnTrainer`] 本身**不实现** [`Trainer::last_decision`]：它是给批量采集与
-//! benchmark 用的，那些入口不需要协议摘要。客户端需要——没有摘要，
-//! `calc_ramen_training` 里除地区 / 比赛回合 / `RamenSelect` 之外的阶段
-//! （最常见的就是普通训练回合）会一条结果都不输出，屏幕全空。
+//! | `ramen_trainer_policy` | 执行 | 额外显示 | 速度 |
+//! |---|---|---|---|
+//! | `mcts`（默认） | 既有搜索逻辑 | 无 | 与上游相同 |
+//! | `mcts_nn_hint` | 既有搜索逻辑（与 `mcts` 完全一致） | 每个动作决策下一行网络推荐 | 与 `mcts` 基本相同 |
+//! | `nn` | 网络直接决策，不做任何搜索 | 无 | 远快于搜索，分数更低；只适用于训练覆盖的卡组构成 |
 //!
-//! 本模块只补这一件事：把一次动作决策的**下标、完整候选描述、阶段、真实来源**记下来，
-//! 由 [`Trainer::last_decision`] 交给既有输出链路。
+//! 事件选项在三种取值下都走手写策略。网络不进搜索：搜索内部模拟仍是手写 rollout。
 //!
-//! # 不伪造评分
-//!
-//! `candidate_scores` / `candidate_n` 恒空、`score` 恒 0。policy logits 是「教师在这个
-//! 局面上更可能选谁」的相对量，**不是终局分**，把它填进评分字段会让下游的
-//! luck baseline、「期望评分」行、`action_luck` 全部读出一个没有量纲的数。上层按
-//! `candidate_scores` 是否为空路由，因此这一路天然不挂 luck。
-//!
-//! # 来源照实标注
-//!
-//! 一次动作决策有四个出口，[`LabeledPrep`] 把它们分开，本层原样翻译成来源标签，
-//! **不另做一遍判定**、也不为了标来源再跑一次推理：
-//!
-//! | 出口 | 来源标签 | 跑推理？ |
-//! |---|---|---|
-//! | 网络 argmax | `ramen_nn` | 是 |
-//! | 自选比赛硬守门 | `ramen_race_gate` | 否 |
-//! | 唯一候选 | `ramen_single_candidate` | 否 |
-//! | `SpecialSelect` 整阶段转手写 | `ramen_handwritten_stage` | 否 |
-//!
-//! ❗**不是「完全没有手写逻辑」**：事件选项与友人事件仍由 [`RamenNnTrainer`] 内部的
-//! 手写策略处理（choice 头没训练），自选比赛硬守门也是手写规则。「纯 NN」指的是
-//! **动作决策**这条线。
+//! 未开 `onnx` feature 却选了网络、模型或旁车缺失、维度不符时启动即报错，
+//! 不会降级成搜索继续跑。
 
-use std::sync::Mutex;
-
-use anyhow::{Result, anyhow};
+use anyhow::{Result, bail};
 use rand::prelude::StdRng;
 use umasim::{
     game::{
         Trainer,
         ramen::{RamenAction, RamenGame}
     },
-    gamedata::{EventChoice, EventData},
-    output::{
-        DecisionInfo,
-        decision::{
-            SOURCE_RAMEN_HANDWRITTEN_STAGE, SOURCE_RAMEN_NN, SOURCE_RAMEN_RACE_GATE,
-            SOURCE_RAMEN_SINGLE_CANDIDATE
-        }
-    },
-    trainer::{LabeledPrep, RamenNnTrainer, ramen_handwritten_trainer::ramen_effective_stage}
+    gamedata::{EventChoice, EventData, GameConfig, RamenTrainerPolicy},
+    output::DecisionInfo,
+    trainer::RamenMctsTrainer
 };
 
-use crate::scenario::ramen::ramen_stage_kind;
+#[cfg(feature = "onnx")]
+mod hint;
+#[cfg(feature = "onnx")]
+mod whole;
+#[cfg(feature = "onnx")]
+pub use hint::NnHintTrainer;
+#[cfg(feature = "onnx")]
+pub use whole::WholeNnTrainer;
 
-/// 整局直接走网络的客户端决策器（**不跑任何搜索**）
-///
-/// 除了记录 [`Trainer::last_decision`] 所需的摘要，本层不改变 [`RamenNnTrainer`]
-/// 的任何行为：动作走同一条 `prepare → infer → resolve`，事件选项原样转发。
-pub struct WholeGameNnTrainer {
-    /// 真正做决策的网络训练员
-    nn: RamenNnTrainer,
-    /// 最近一次**动作决策**的协议摘要
-    ///
-    /// 每次动作决策开头先清空：这样任何早退（推理失败、候选落格失败）都不会把上一步的
-    /// 摘要留在槽里被当成本次结果。事件选项转发同样清空——事件不是动作决策，
-    /// 把上一步的动作摘要挂在它后面就是串了来源。
-    last: Mutex<Option<DecisionInfo>>
+/// 客户端实际对局使用的拉面决策器
+pub enum RamenClientTrainer {
+    /// 默认装配：与上游搜索训练员完全相同
+    Mcts(RamenMctsTrainer),
+    /// 搜索执行，网络给参考
+    #[cfg(feature = "onnx")]
+    MctsNnHint(Box<NnHintTrainer>),
+    /// 网络直接决策
+    #[cfg(feature = "onnx")]
+    Nn(Box<WholeNnTrainer>)
 }
 
-impl WholeGameNnTrainer {
-    /// 包装一个已加载好的网络训练员
-    pub fn new(nn: RamenNnTrainer) -> Self {
-        Self {
-            nn,
-            last: Mutex::new(None)
+/// 对每个变体调用同一个 [`Trainer`] 方法
+macro_rules! dispatch {
+    ($self:ident, $t:ident => $call:expr) => {
+        match $self {
+            Self::Mcts($t) => $call,
+            #[cfg(feature = "onnx")]
+            Self::MctsNnHint($t) => $call,
+            #[cfg(feature = "onnx")]
+            Self::Nn($t) => $call
         }
-    }
+    };
+}
 
-    /// 清空动作摘要槽
-    ///
-    /// 锁被毒化时也照清（取 `into_inner`）：这里写的是「没有结果」，比留着旧结果安全。
-    fn clear_last(&self) {
-        let mut slot = match self.last.lock() {
-            Ok(g) => g,
-            Err(poisoned) => poisoned.into_inner()
-        };
-        *slot = None;
-    }
-
-    /// 写入本次动作决策的摘要
-    ///
-    /// # 错误
-    ///
-    /// 摘要锁被毒化时报错——宁可让这一局停下，也不要把上一条摘要当成本次结果发出去。
-    fn store_last(&self, info: DecisionInfo) -> Result<()> {
-        *self
-            .last
-            .lock()
-            .map_err(|_| anyhow!("整局网络决策摘要锁被毒化"))? = Some(info);
-        Ok(())
-    }
-
-    /// 为一次无搜索的动作决策合成协议摘要
-    ///
-    /// 形状与 `scenario::ramen::fallback_decision` 合成的那条对齐（候选描述完整、
-    /// 评分为空），额外带上来源标签与正确的 `decision_kind`。
-    fn decision_info(
-        game: &RamenGame, actions: &[RamenAction], picked: usize, source: &str
-    ) -> DecisionInfo {
-        let stage = ramen_effective_stage(game, actions);
-        DecisionInfo {
-            action_index: picked,
-            score: 0.0,
-            decision_kind: ramen_stage_kind(stage).to_string(),
-            candidate_scores: Vec::new(),
-            candidate_descriptions: actions.iter().map(ToString::to_string).collect(),
-            candidate_n: Vec::new(),
-            scenario_extra: None
+impl RamenClientTrainer {
+    /// 与配置取值一致的策略标签（启动时打印）
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Mcts(_) => "mcts",
+            #[cfg(feature = "onnx")]
+            Self::MctsNnHint(_) => "mcts_nn_hint",
+            #[cfg(feature = "onnx")]
+            Self::Nn(_) => "nn"
         }
-        .with_source(source)
     }
 }
 
-impl Trainer<RamenGame> for WholeGameNnTrainer {
-    /// 直接走网络（或守门 / 单候选短路），**不跑搜索**，并记下本次决策的摘要
+impl Trainer<RamenGame> for RamenClientTrainer {
+    /// 按变体分派
     ///
     /// # 错误
     ///
-    /// 候选为空、特征编码失败、推理失败、任一候选无法落格，或摘要锁被毒化时报错
-    /// ——**任何一种都不会静默回退成手写或搜索**。
+    /// 内部训练员报错时原样返回。
     fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
-        // 先清空：本次若中途报错，上一步的摘要不得留在槽里
-        self.clear_last();
-        let (picked, source) = match self.nn.prepare_decision_labeled(game, actions, rng)? {
-            LabeledPrep::RaceGate(i) => (i, SOURCE_RAMEN_RACE_GATE),
-            LabeledPrep::HandwrittenStage(i) => (i, SOURCE_RAMEN_HANDWRITTEN_STAGE),
-            LabeledPrep::SingleCandidate(i) => (i, SOURCE_RAMEN_SINGLE_CANDIDATE),
-            LabeledPrep::NeedsInference(features) => {
-                let out = self.nn.infer_features(features)?;
-                (self.nn.resolve_decision(game, actions, &out.policy)?, SOURCE_RAMEN_NN)
-            }
-        };
-        self.store_last(Self::decision_info(game, actions, picked, source))?;
-        Ok(picked)
+        dispatch!(self, t => t.select_action(game, actions, rng))
     }
 
-    /// 事件选项（旧接口）原样转发给网络训练员内部的手写策略
-    ///
-    /// 转发前清空动作摘要：事件不是动作决策，留着上一步的摘要会让它被当成本回合的结果。
+    /// 事件选项（旧接口），按变体分派
     ///
     /// # 错误
     ///
-    /// 内部策略报错时原样返回。
+    /// 内部训练员报错时原样返回。
     fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
-        self.clear_last();
-        self.nn.select_choice(game, choices, rng)
+        dispatch!(self, t => t.select_choice(game, choices, rng))
     }
 
-    /// 事件选项（新接口）——同 [`Self::select_choice`]
+    /// 事件选项（新接口），按变体分派
     ///
     /// # 错误
     ///
-    /// 内部策略报错时原样返回。
+    /// 内部训练员报错时原样返回。
     fn select_event_choice(
         &self, game: &RamenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
     ) -> Result<usize> {
-        self.clear_last();
-        self.nn.select_event_choice(game, event, choices, rng)
+        dispatch!(self, t => t.select_event_choice(game, event, choices, rng))
     }
 
-    /// 本次动作决策自己的摘要；没有动作决策（或刚转发过事件）时为 `None`
+    /// 上一次决策的协议摘要
     fn last_decision(&self) -> Option<DecisionInfo> {
-        self.last.lock().ok()?.clone()
+        dispatch!(self, t => t.last_decision())
     }
 
-    /// 恒为 `None`：无搜索就没有候选评分分解，透传手写策略的分解会挂错理由
+    /// 上一次决策的评分分解
     fn last_breakdown(&self) -> Option<String> {
-        None
+        dispatch!(self, t => t.last_breakdown())
     }
+}
+
+/// 校验决策策略配置：需要网络的取值必须给出非空的模型路径
+///
+/// # 错误
+///
+/// `nn` / `mcts_nn_hint` 下缺模型路径（或路径为空白）时报错。
+pub fn validate_trainer_policy(cfg: &GameConfig) -> Result<()> {
+    if !cfg.ramen_trainer_policy.needs_model() {
+        return Ok(());
+    }
+    match cfg.ramen_nn_model_path.as_deref() {
+        Some(p) if !p.trim().is_empty() => Ok(()),
+        _ => bail!(
+            "配置缺失：ramen_trainer_policy={policy:?} 需要 ramen_nn_model_path（含同名 .json 旁车）。             不要填 neuralnet_model_path 的温泉模型，两者结构不同",
+            policy = cfg.ramen_trainer_policy
+        )
+    }
+}
+
+/// 按配置装配客户端拉面决策器
+///
+/// `mcts` 由调用方按既有路径构造好（阶段门控、reason sink、verbose 都已设好）。
+/// `mcts` 取值下原样返回它；其余取值加载一次网络模型。
+///
+/// # 错误
+///
+/// 配置校验不过（见 [`validate_trainer_policy`]）、未开 `onnx` feature 却选了网络、
+/// 模型或旁车缺失、维度不符时报错。
+pub fn build_client_trainer(cfg: &GameConfig, mcts: RamenMctsTrainer) -> Result<RamenClientTrainer> {
+    validate_trainer_policy(cfg)?;
+    match cfg.ramen_trainer_policy {
+        RamenTrainerPolicy::Mcts => Ok(RamenClientTrainer::Mcts(mcts)),
+        _ => build_nn(cfg, mcts)
+    }
+}
+
+/// 网络取值的实际装配（开了 `onnx` feature）
+///
+/// # 错误
+///
+/// 模型或旁车缺失、维度与契约不符、ONNX 图无法转为可运行图时报错。
+#[cfg(feature = "onnx")]
+fn build_nn(cfg: &GameConfig, mcts: RamenMctsTrainer) -> Result<RamenClientTrainer> {
+    use std::path::Path;
+
+    use umasim::trainer::{RamenNnTrainer, SpecialSelectMode};
+
+    let path = cfg.ramen_nn_model_path.as_deref().unwrap_or_default();
+    // 与训练评测时相同的口径：自选比赛硬守门开、SpecialSelect 还原到联合决策根
+    let nn = RamenNnTrainer::load(Path::new(path))?
+        .with_race_shield(true)
+        .with_special_mode(SpecialSelectMode::Canonical);
+    Ok(match cfg.ramen_trainer_policy {
+        RamenTrainerPolicy::MctsNnHint => RamenClientTrainer::MctsNnHint(Box::new(NnHintTrainer::new(mcts, nn))),
+        _ => RamenClientTrainer::Nn(Box::new(WholeNnTrainer::new(nn)))
+    })
+}
+
+/// 未开 `onnx` feature 时选了网络：直接报错
+///
+/// # 错误
+///
+/// 恒报错：当前构建没有推理后端。
+#[cfg(not(feature = "onnx"))]
+fn build_nn(cfg: &GameConfig, _mcts: RamenMctsTrainer) -> Result<RamenClientTrainer> {
+    bail!(
+        "ramen_trainer_policy={policy:?} 需要启用 onnx feature 的构建：         cargo build --release --features onnx -p umaai",
+        policy = cfg.ramen_trainer_policy
+    )
 }
 
 #[cfg(test)]
 mod tests {
-    use umasim::game::ramen::RamenStage;
+    use std::env;
+
+    use umasim::{
+        gamedata::{GameConfig, OverrideGameConfig},
+        search::SearchConfig,
+        utils::get_workspace_root
+    };
 
     use super::*;
     use crate::utils::Checks;
 
-    /// 四个来源标签互不相同、都不为空
+    /// 需要网络的两个取值
+    const NN_POLICIES: [RamenTrainerPolicy; 2] = [RamenTrainerPolicy::MctsNnHint, RamenTrainerPolicy::Nn];
+
+    /// 取校验错误文本（通过时为空串）
+    fn validate_err(cfg: &GameConfig) -> String {
+        validate_trainer_policy(cfg)
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_default()
+    }
+
+    /// 把一段 `game_config.toml` 文本合进仓库的 `default_config.toml`
     ///
-    /// 这是「来源必须真实」的最小守门：`select_action` 的 match 一旦把两个出口写成同一个
-    /// 标签，屏幕上就分不出「网络算的」和「守门顶上的」。
+    /// 不读用户自己的 `game_config.toml`，合并走与 `load_game_config` 相同的
+    /// `OverrideGameConfig::merge`。
     ///
     /// # 错误
     ///
-    /// 任一观测未通过时返回错误。
+    /// 定位工作区、读默认配置、解析任一侧 TOML 失败时报错（非法取值即由此返回）。
+    fn merge_fixture(override_toml: &str) -> Result<GameConfig> {
+        let def_path = get_workspace_root()?.join("gamedata").join("default_config.toml");
+        let default_config: GameConfig = toml::from_str(&fs_err::read_to_string(&def_path)?)?;
+        // 顶层字段必须排在任何 `[表]` 之前；`[config_override]` 是必填表，补一个空表
+        let text = format!("{override_toml}\n[config_override]\n");
+        let ov: OverrideGameConfig = toml::from_str(&text)?;
+        Ok(ov.merge(&default_config))
+    }
+
+    /// `mcts` 不要求模型；另外两个取值缺模型路径或路径为空白时报错
     #[test]
-    fn test_source_labels_are_distinct() -> Result<()> {
+    fn test_validate_trainer_policy() -> Result<()> {
         let mut c = Checks::new();
-        let labels = [
-            SOURCE_RAMEN_NN,
-            SOURCE_RAMEN_RACE_GATE,
-            SOURCE_RAMEN_SINGLE_CANDIDATE,
-            SOURCE_RAMEN_HANDWRITTEN_STAGE
-        ];
-        for l in labels {
-            println!("  来源标签 {l}");
-            c.check(!l.is_empty(), &format!("{l} 非空"));
+        let base = GameConfig::default_for_init();
+        c.check(base.ramen_trainer_policy == RamenTrainerPolicy::Mcts, "代码内默认是 mcts");
+        c.check(validate_err(&base).is_empty(), "mcts 不要求模型路径");
+
+        for policy in NN_POLICIES {
+            let mut cfg = base.clone();
+            cfg.ramen_trainer_policy = policy;
+            let e = validate_err(&cfg);
+            println!("{policy:?} 缺模型 → {e}");
+            c.check(e.contains("ramen_nn_model_path"), &format!("{policy:?} 缺模型时错误指名该字段"));
+
+            cfg.ramen_nn_model_path = Some("   ".to_string());
+            c.check(!validate_err(&cfg).is_empty(), &format!("{policy:?} 空白路径等同缺失"));
+
+            cfg.ramen_nn_model_path = Some("saved_models/x.onnx".to_string());
+            c.check(validate_err(&cfg).is_empty(), &format!("{policy:?} 有模型路径时通过"));
         }
-        let mut sorted = labels.to_vec();
-        sorted.sort_unstable();
-        sorted.dedup();
-        c.check(sorted.len() == labels.len(), "四个来源标签互不相同");
         c.finish()
     }
 
-    /// 客户端会真实派发的四个阶段都能映射出非空 `decision_kind`
-    ///
-    /// `decision_kind` 是 AIRedirector 分发 partial decision 的依据；映射漏一个，
-    /// 下游就收到空串。❗`SuperRamenSelect` **不在此列**——客户端根本不派发它
-    /// （`calc_ramen_training` 把该阶段的候选直接置空），见模块 §阶段边界。
-    ///
-    /// # 错误
-    ///
-    /// 任一观测未通过时返回错误。
+    /// 仓库默认配置是 `mcts` 且不指定模型
     #[test]
-    fn test_client_stage_kinds_are_named() -> Result<()> {
+    fn test_default_config_file_is_mcts() -> Result<()> {
         let mut c = Checks::new();
-        for (stage, want) in [
-            (RamenStage::Train, "train"),
-            (RamenStage::RamenSelect, "ramen_select"),
-            (RamenStage::SpecialSelect, "special_select"),
-            (RamenStage::RegionSelect, "region_select")
+        let cfg = merge_fixture("")?;
+        println!(
+            "default_config.toml：ramen_trainer_policy={:?} ramen_nn_model_path={:?}",
+            cfg.ramen_trainer_policy, cfg.ramen_nn_model_path
+        );
+        c.check(cfg.ramen_trainer_policy == RamenTrainerPolicy::Mcts, "默认决策策略是 mcts");
+        c.check(cfg.ramen_nn_model_path.is_none(), "默认不指定网络模型路径");
+        c.check(validate_err(&cfg).is_empty(), "默认配置通过校验");
+        c.finish()
+    }
+
+    /// 覆盖层能解析三个合法取值，未知取值在解析阶段被拒绝
+    #[test]
+    fn test_override_parses_trainer_policy() -> Result<()> {
+        let mut c = Checks::new();
+        for (text, want) in [
+            ("mcts", RamenTrainerPolicy::Mcts),
+            ("mcts_nn_hint", RamenTrainerPolicy::MctsNnHint),
+            ("nn", RamenTrainerPolicy::Nn)
         ] {
-            let got = ramen_stage_kind(stage.clone());
-            println!("  {stage:?} → {got}");
-            c.check(got == want, &format!("{stage:?} 的 decision_kind 是 {want}"));
+            let cfg = merge_fixture(&format!("ramen_trainer_policy = \"{text}\""))?;
+            println!("{text} → {:?}", cfg.ramen_trainer_policy);
+            c.check(cfg.ramen_trainer_policy == want, &format!("{text} 解析为 {want:?}"));
+        }
+
+        let only_path = merge_fixture("ramen_nn_model_path = \"saved_models/x.onnx\"")?;
+        c.check(
+            only_path.ramen_trainer_policy == RamenTrainerPolicy::Mcts,
+            "只写模型路径不会切换决策策略"
+        );
+
+        for bad in ["handwritten", "nn_compare", "neural"] {
+            let r = merge_fixture(&format!("ramen_trainer_policy = \"{bad}\""));
+            println!("{bad} → {:?}", r.as_ref().err().map(ToString::to_string));
+            c.check(r.is_err(), &format!("未知取值 {bad} 被拒绝"));
+        }
+        c.finish()
+    }
+
+    /// 模型加载的错误路径：文件缺失 / 旁车缺失 / 旁车维度不符 / 不是合法 ONNX
+    ///
+    /// 全部必须在装配时报错。前三条在解析 ONNX 之前命中，占位文件即可覆盖。
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn test_model_error_paths() -> Result<()> {
+        use crate::utils::{cleanup_test_dir, unique_test_dir};
+
+        env::set_current_dir(get_workspace_root()?)?;
+        let mut c = Checks::new();
+        let mut cfg = GameConfig::default_for_init();
+        cfg.ramen_trainer_policy = RamenTrainerPolicy::Nn;
+        let err_of = |cfg: &GameConfig| {
+            let mcts = RamenMctsTrainer::new(SearchConfig::new_game_config(&GameConfig::default_for_init()));
+            build_client_trainer(cfg, mcts)
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default()
+        };
+
+        cfg.ramen_nn_model_path = Some("saved_models/__definitely_missing__.onnx".to_string());
+        let e1 = err_of(&cfg);
+        println!("模型缺失 → {e1}");
+        c.check(e1.contains("不存在"), "模型缺失时报错");
+
+        let dir = unique_test_dir("ramen_nn_model_error_paths")?;
+        let placeholder = b"not-a-real-onnx";
+        let meta = |input_dim: usize| {
+            format!(
+                r#"{{"input_dim":{input_dim},"output_dim":245,"value_normalization":{{"center":[0.0,0.0,0.0],"scale":[1.0,1.0,1.0]}}}}"#
+            )
+        };
+
+        let no_meta = dir.join("no_meta.onnx");
+        fs_err::write(&no_meta, placeholder)?;
+        cfg.ramen_nn_model_path = Some(no_meta.to_string_lossy().into_owned());
+        let e2 = err_of(&cfg);
+        println!("旁车缺失 → {e2}");
+        c.check(e2.contains("元数据"), "旁车缺失时错误指明模型元数据");
+
+        let bad_dim = dir.join("bad_dim.onnx");
+        fs_err::write(&bad_dim, placeholder)?;
+        fs_err::write(dir.join("bad_dim.onnx.json"), meta(7))?;
+        cfg.ramen_nn_model_path = Some(bad_dim.to_string_lossy().into_owned());
+        let e3 = err_of(&cfg);
+        println!("维度不符 → {e3}");
+        c.check(e3.contains("input_dim"), "维度不符时错误指明 input_dim");
+
+        let not_onnx = dir.join("not_onnx.onnx");
+        fs_err::write(&not_onnx, placeholder)?;
+        fs_err::write(dir.join("not_onnx.onnx.json"), meta(754))?;
+        cfg.ramen_nn_model_path = Some(not_onnx.to_string_lossy().into_owned());
+        let e4 = err_of(&cfg);
+        println!("非法 ONNX → {e4}");
+        c.check(!e4.is_empty(), "文件不是合法 ONNX 时报错");
+
+        cleanup_test_dir(&dir)?;
+        c.check(!dir.exists(), "fixture 目录已清理");
+        c.finish()
+    }
+
+    /// 未开 `onnx` feature 时，需要网络的取值装配即报错
+    #[cfg(not(feature = "onnx"))]
+    #[test]
+    fn test_nn_without_onnx_feature_errors() -> Result<()> {
+        env::set_current_dir(get_workspace_root()?)?;
+        let mut c = Checks::new();
+        for policy in NN_POLICIES {
+            let mut cfg = GameConfig::default_for_init();
+            cfg.ramen_trainer_policy = policy;
+            cfg.ramen_nn_model_path = Some("saved_models/x.onnx".to_string());
+            let mcts = RamenMctsTrainer::new(SearchConfig::new_game_config(&cfg));
+            let msg = build_client_trainer(&cfg, mcts)
+                .err()
+                .map(|e| e.to_string())
+                .unwrap_or_default();
+            println!("{policy:?} 未开 onnx → {msg}");
+            c.check(msg.contains("onnx"), &format!("{policy:?}：错误信息指出需要 onnx feature"));
         }
         c.finish()
     }

@@ -5,18 +5,30 @@
 # ---------- 拉面杯第3年地区选择策略（**顶层覆盖**；fixed 仅第3年生效）----------
 ramen_region_strategy = "all"   # "all"（默认）/"fixed"（仅第3年，跳过 120 组合枚举）
 # ramen_region_fixed = [[10, 12, 14]]   # 仅当 fixed 时生效，长度必须 = 1
+# 拉面杯神经网络（需 onnx 构建，说明见 default_config.toml）："mcts"（默认）/"mcts_nn_hint"/"nn"
+# ramen_trainer_policy = "mcts_nn_hint"
+# ramen_nn_model_path = "saved_models/<模型>.onnx"
 
 # ---------- 常用区：[config_override] 段 ----------
 [config_override]
 # 种马额外属性 [速度, 耐力, 力量, 根性, 智力, 技能点]
 extra_count = [0, 10, 20, 40, 40, 40]
+
 # PT 重视程度 (1.0-8.0), 1.0为最重视评分, 8.0会用~3000评分换~400pt
 # 默认为2.0(2-3速最优配置), 速卡少时需回调到1.0
 pt_favor_rate = 2.0
+
 # 线程数（建议 = CPU 核心数；特定处理器如 Intel 14900k 若崩溃/蓝屏可改为 8）
 num_threads = 16
+
+# 拉面杯：5 次友人出行是否必须走完（默认开）关闭则取消注释：
+# 开：保证 5 次走完，但第三年会挤掉部分训练回合，第三年比赛多的马娘代价更高
+# friend_complete_required = false
+
+# 日志等级
 log_level = "info"
 
+# umaai不使用这些设置
 uma = 106402
 cards = [303174, 303124, 303044, 302894, 303064, 303054]
 blue_count = [15, 0, 0, 0, 3]

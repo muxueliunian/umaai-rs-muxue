@@ -33,11 +33,13 @@ pub struct DecisionLogRow {
     /// 决策耗时（微秒）
     pub elapsed_us: u64,
     /// 各候选评分分解（手写策略填充；随机基线为空）
-    pub score_breakdown: Option<String>
+    pub score_breakdown: Option<String>,
+    /// 决策时体力（`game.uma.vital`；手动录制路径无实时状态，填 0 占位）
+    pub vital: i32
 }
 
 /// CSV 列名（与 [`DecisionLogRow`] 字段一一对应）
-const CSV_HEADER: &str = "seed,turn,stage,candidates,action_index,action_desc,elapsed_us,score_breakdown";
+const CSV_HEADER: &str = "seed,turn,stage,candidates,action_index,action_desc,elapsed_us,score_breakdown,vital";
 
 /// 决策日志集合（每次决策追加一行）
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -91,6 +93,7 @@ impl DecisionLogRow {
         ];
         let breakdown = self.score_breakdown.as_deref().map(csv_escape).unwrap_or_default();
         cols.push(breakdown);
+        cols.push(self.vital.to_string());
         cols.join(",")
     }
 }
@@ -138,11 +141,12 @@ mod tests {
             action_index: 2,
             action_desc: "吃面/新潟, 速度".into(),
             elapsed_us: 123,
-            score_breakdown: None
+            score_breakdown: None,
+            vital: 55
         };
         let line = row.to_csv_row();
         println!("单行 CSV: {line}");
-        assert_eq!(line, "42,5,RamenSelect,4,2,\"吃面/新潟, 速度\",123,");
+        assert_eq!(line, "42,5,RamenSelect,4,2,\"吃面/新潟, 速度\",123,,55");
 
         let mut log = DecisionLog::new();
         log.record(row);
@@ -175,7 +179,8 @@ mod tests {
             action_index: 0,
             action_desc: "速度训练".into(),
             elapsed_us: 5,
-            score_breakdown: Some("speed=100".into())
+            score_breakdown: Some("speed=100".into()),
+            vital: 42
         });
         log.save_to(&path)?;
 

@@ -172,6 +172,14 @@ impl RamenRolloutTrainer {
         }
     }
 
+    /// 设置手写基策的「友人出行必须走完 5 次」完成硬门限
+    ///
+    /// 只改手写那一份：它既是默认路径，也是网络窗口外的回退与事件选项出口。
+    pub fn with_friend_complete_required(mut self, required: bool) -> Self {
+        self.handwritten = self.handwritten.with_friend_complete_required(required);
+        self
+    }
+
     /// 装载网络 rollout
     ///
     /// `max_turn` 为网络生效的回合上限（含），`None` 表示整局都用网络。

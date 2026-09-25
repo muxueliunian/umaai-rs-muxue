@@ -101,15 +101,13 @@ pub fn process_ramen<T: Trainer<RamenGame>>(
             .get(last_info.action_index)
             .cloned();
 
-        // **无搜索评分**的决策（`candidate_scores` 为空）。这一类比原先以为的多：
-        // 默认配置下 region 未开时的地区选择、**比赛回合单候选**、RamenSelect 单候选短路，
-        // 以及网络接管的地区决策与整局网络模式下的**每一步**动作决策。
-        // 它们没有真正的搜索评分，走 luck 挂载只会以 baseline=0 污染 luck tracker
+        // 无搜索评分的决策（`candidate_scores` 为空，如 region 未开搜索时的地区选择、
+        // **比赛回合单候选**、RamenSelect 单候选短路、网络做出的地区选择）：
+        // 没有真正的搜索评分，走 luck 挂载只会以 baseline=0 污染 luck tracker
         // （后续回合运气全被算错），且 sink 打印的「期望评分」只是回合加成换算、
-        // 运气恒 0 会误导。故直接 emit（不触 luck）；`HumanReadableSink` 会为带来源标签
-        // 的决策打印「选择…（<来源>）」，**照实说**是谁做的，不再一律印成手写。
-        // 搜索决策（常见 train/ramen_select，以及 mcts_compare 下真搜过的地区）仍走
-        // 完整 luck 挂载。
+        // 运气恒 0 会误导。故直接 emit（不触 luck）；
+        // HumanReadableSink 会为该决策打印「选择...（手写逻辑）」，网络做出的地区选择
+        // 按来源标签另行标注。搜索决策（常见 train/ramen_select）仍走完整 luck 挂载。
         if last_info.candidate_scores.is_empty() {
             sink.emit(&last_info, &game.view());
         } else {
@@ -198,12 +196,7 @@ pub fn calc_ramen_training<T: Trainer<RamenGame>>(
                 //    其余 None 阶段保持旧行为（决策仍返回但**不**合成、不 emit）。
                 let mut info = match trainer.last_decision() {
                     Some(info) => Some(info),
-                    None if before_stage == RamenStage::RegionSelect
-                        || (before_stage == RamenStage::Train && g.is_race_turn())
-                        || before_stage == RamenStage::RamenSelect =>
-                    {
-                        Some(fallback_decision(&actions, idx, &before_stage))
-                    }
+                    None if synthesizes_fallback(g) => Some(fallback_decision(&actions, idx, &before_stage)),
                     None => None,
                 };
                 if let Some(mut info) = info.take() {
@@ -284,6 +277,16 @@ pub fn calc_ramen_training<T: Trainer<RamenGame>>(
     Ok(out)
 }
 
+/// `last_decision()` 为 `None` 时，本决策点是否仍要合成一条 [`fallback_decision`]
+///
+/// `game` 是做决策时（应用动作之前）的局面。三种场景见 [`calc_ramen_training`] 内的注释：
+/// 地区选择、比赛回合、`RamenSelect` 兜底。
+pub(crate) fn synthesizes_fallback(game: &RamenGame) -> bool {
+    game.stage == RamenStage::RegionSelect
+        || (game.stage == RamenStage::Train && game.is_race_turn())
+        || game.stage == RamenStage::RamenSelect
+}
+
 /// RamenStage → decision_kind 字符串映射
 ///
 /// 拉面模块在 calc_ramen_training 内部 snapshot stage 填这个字段——trainer 不关心，
@@ -316,7 +319,9 @@ pub(crate) fn ramen_stage_kind(stage: RamenStage) -> &'static str {
 /// 决策结果输出。这里按本次候选列表与选中下标合成一条无搜索评分的决策信息，保证
 /// region_select / ramen_select 等阶段也有结果可 emit（candidate_scores 为空，
 /// luck baseline 退化按等权）。
-fn fallback_decision(actions: &[RamenAction], chosen_idx: usize, before_stage: &RamenStage) -> DecisionInfo {
+pub(crate) fn fallback_decision(
+    actions: &[RamenAction], chosen_idx: usize, before_stage: &RamenStage
+) -> DecisionInfo {
     DecisionInfo {
         action_index: chosen_idx,
         score: 0.0,
@@ -327,7 +332,6 @@ fn fallback_decision(actions: &[RamenAction], chosen_idx: usize, before_stage: &
         scenario_extra: None
     }
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -343,7 +347,71 @@ mod tests {
     };
 
     use super::*;
+    #[cfg(feature = "onnx")]
+    use crate::utils::unique_test_dir;
     use crate::{decision::LuckScoreTracker, utils::Checks};
+
+    /// 最小 ONNX 模型生成器（workspace 根的 `testsupport/onnx_fixture.rs`，与 `umasim` 侧共用）
+    #[cfg(feature = "onnx")]
+    #[path = "../../../../../../testsupport/onnx_fixture.rs"]
+    mod onnx_fixture;
+
+    /// 临时 fixture 目录的 RAII 清理（测试中途早退也会删）
+    #[cfg(feature = "onnx")]
+    struct FixtureDir(std::path::PathBuf);
+
+    #[cfg(feature = "onnx")]
+    impl Drop for FixtureDir {
+        fn drop(&mut self) {
+            if let Err(e) = crate::utils::cleanup_test_dir(&self.0) {
+                println!("fixture 目录清理失败: {e:#}");
+            }
+        }
+    }
+
+    /// 让 fixture 模型偏好的地区组合
+    ///
+    /// `RegionSelect` 的候选打分是三格之和，抬高某个合法组合的三个地区，网络的推荐
+    /// 就被钉在该组合上（其他组合最多共享 2 个地区）。
+    #[cfg(feature = "onnx")]
+    #[derive(Debug, Clone, Copy)]
+    enum FixturePref {
+        /// 把这组地区 ID 对应的 policy 格位抬高
+        Regions([usize; 3])
+    }
+
+    /// 当场生成一个可加载的 fixture 模型（含旁车），返回 `(清理守卫, 模型路径)`
+    ///
+    /// # 错误
+    ///
+    /// 地区 ID 越界、临时目录创建或文件写入失败时返回。
+    #[cfg(feature = "onnx")]
+    fn fixture_model(tag: &str, pref: FixturePref) -> Result<(FixtureDir, std::path::PathBuf)> {
+        use umasim::{
+            game::ramen::{
+                features::INPUT_DIM,
+                policy_schema::{POLICY_DIM, region_index}
+            },
+            training_sample::{CHOICE_DIM, VALUE_DIM}
+        };
+
+        let dir = unique_test_dir(tag)?;
+        let model = dir.join("fixture.onnx");
+        let out_dim = POLICY_DIM + CHOICE_DIM + VALUE_DIM;
+        let FixturePref::Regions(ids) = pref;
+        let mut logits = vec![0.0f32; out_dim];
+        for rid in ids {
+            logits[region_index(rid)?] = 10.0;
+        }
+        fs_err::write(&model, onnx_fixture::const_logits_model(INPUT_DIM, &logits)?)?;
+        fs_err::write(
+            dir.join("fixture.onnx.json"),
+            format!(
+                r#"{{"input_dim":{INPUT_DIM},"output_dim":{out_dim},"value_normalization":{{"center":[0.0,0.0,0.0],"scale":[1.0,1.0,1.0]}}}}"#
+            )
+        )?;
+        Ok((FixtureDir(dir), model))
+    }
 
     /// 把 `decision` / `info` 两路输出按发生顺序记进一个流，用来核对 JSON 流次序
     ///
@@ -351,11 +419,7 @@ mod tests {
     #[derive(Default)]
     struct EventLog {
         events: Mutex<Vec<String>>,
-        /// **真正 emit 出去**的决策原件（按顺序）
-        ///
-        /// 与标签流并存：标签流看次序，原件看内容。挂在 sink 上而不是读
-        /// `trainer.last_decision()`——后者没经过 `process_ramen` 的 luck 挂载，
-        /// 「luck 挂载会不会把 `scenario_extra` 里的东西冲掉」这类问题只有原件能回答。
+        /// 真正 emit 出去的决策原件（按顺序；经过了 luck 挂载，内容以它为准）
         infos: Mutex<Vec<DecisionInfo>>
     }
 
@@ -376,6 +440,7 @@ mod tests {
         }
 
         /// 按发生顺序取出 emit 出去的决策原件
+        #[cfg_attr(not(feature = "onnx"), allow(dead_code))]
         fn decisions(&self) -> Vec<DecisionInfo> {
             self.infos.lock().expect("决策原件锁").clone()
         }
@@ -406,11 +471,7 @@ mod tests {
 
     /// 把搜索压到最小的训练员（本测试只看输出次序，不看棋力）
     fn small_trainer() -> Result<RamenMctsTrainer> {
-        Ok(
-            RamenMctsTrainer::new(SearchConfig::default().with_search_n(2).with_ucb(false))
-                .with_stages(RamenSearchStages::parse("train,ramen")?)
-                .verbose(false)
-        )
+        staged_trainer("train,ramen")
     }
 
     /// 建一局标准拉面（卡组含新友人卡，`newgame` 会校验）
@@ -580,420 +641,229 @@ mod tests {
         c.finish()
     }
 
-    /// **网络接管**的地区回合：走真实 `process_ramen` 与真实输出路径
-    ///
-    /// review#1 的回归：地区决策没有搜索评分，旧实现的渲染分支因此把它印成
-    /// 「（手写逻辑）」。本测试用**真正的** [`RegionNnTrainer`] 跑一遍
-    /// `process_ramen`，核对经过实际输出逻辑之后：
-    ///
-    /// 1. 恰好一条 `region_select` 决策，`compute_done` 完整收尾；
-    /// 2. 该决策的来源标签是 `region_nn`（**不会**被渲染成手写）；
-    /// 3. 没有搜索评分、也没有挂上一步搜索的理由；
-    /// 4. 选中的候选解码成合法的三地区组合。
-    ///
-    /// 上面那条手写路径的测试用的是 `RamenMctsTrainer`，**不能**当作本路径已覆盖。
-    ///
-    /// 模型不在版本库里；缺模型时跳过并显式声明零覆盖。
+    /// 按指定搜索阶段构造一个最小搜索训练员
+    fn staged_trainer(stages: &str) -> Result<RamenMctsTrainer> {
+        Ok(
+            RamenMctsTrainer::new(SearchConfig::default().with_search_n(2).with_ucb(false))
+                .with_stages(RamenSearchStages::parse(stages)?)
+                .verbose(false)
+        )
+    }
+
+    /// 加载 fixture 地区网络
     #[cfg(feature = "onnx")]
-    #[test]
-    fn test_region_nn_turn_is_not_labelled_handwritten() -> Result<()> {
-        use std::path::Path;
+    fn load_fixture_nn(path: &std::path::Path) -> Result<umasim::trainer::RamenNnTrainer> {
+        use umasim::trainer::{RamenNnTrainer, SpecialSelectMode};
 
-        use crate::region::RegionNnTrainer;
-        use umasim::{
-            game::ramen::{Operation, rules::validate_region_selection},
-            output::decision::SOURCE_REGION_NN,
-            trainer::{RamenNnTrainer, SpecialSelectMode}
-        };
+        Ok(RamenNnTrainer::load(path)?
+            .with_race_shield(true)
+            .with_special_mode(SpecialSelectMode::Canonical))
+    }
 
-        env::set_current_dir(get_workspace_root()?)?;
-        init_global()?;
-        let mut c = Checks::new();
-        let model = Path::new("saved_models/arms/ens_G2mix_g123.onnx");
-        if !model.is_file() {
-            println!("❗❗ 本测试被跳过：模型不存在 {}", model.display());
-            println!("❗❗ 「NN 地区决策不被误标手写」这条本次**零覆盖**，绿色不代表它还正确。");
-            return c.finish();
-        }
-
+    /// 在第 1 年地区回合跑一次 `process_ramen`，返回 (事件标签流, emit 出去的决策, 之后的随机流)
+    ///
+    /// # 错误
+    ///
+    /// 建局或 `process_ramen` 报错时返回。
+    #[cfg(feature = "onnx")]
+    fn run_region_turn<T: Trainer<RamenGame>>(
+        trainer: &T, seed: u64
+    ) -> Result<(Vec<String>, Vec<DecisionInfo>, StdRng)> {
         let log = Arc::new(EventLog::default());
         let sink: Arc<dyn DecisionSink> = Arc::new(RecordingSink(Arc::clone(&log)));
         let log_info = Arc::clone(&log);
         let emit_info = move |e: &str| log_info.push(format!("info:{e}"));
-
         let mut game = new_game()?;
         game.base.turn = 2;
         game.stage = RamenStage::RegionSelect;
-        let actions = game.list_actions()?;
-        let trainer = RegionNnTrainer::new(
-            small_trainer()?,
-            RamenNnTrainer::load(model)?
-                .with_race_shield(true)
-                .with_special_mode(SpecialSelectMode::Canonical)
-        );
         let reason_slot = LastReasonSink::new();
         let mut tracker = LuckScoreTracker::new();
-        let mut rng = StdRng::seed_from_u64(20260914);
-
-        process_ramen(game, Some(3), &trainer, &reason_slot, &sink, &mut tracker, &mut rng, true, &emit_info)?;
-
+        let mut rng = StdRng::seed_from_u64(seed);
+        process_ramen(game, Some(3), trainer, &reason_slot, &sink, &mut tracker, &mut rng, true, &emit_info)?;
         let ev = log.take();
         for e in &ev {
             println!("  {e}");
         }
+        Ok((ev, log.decisions(), rng))
+    }
+
+    /// 取出候选 `i` 的三个地区下标（候选不是地区组合时为 `None`）
+    #[cfg(feature = "onnx")]
+    fn region_of(actions: &[RamenAction], i: usize) -> Option<[usize; 3]> {
+        match actions.get(i)?.operation {
+            umasim::game::ramen::Operation::RegionSelect(r) => Some(r),
+            _ => None
+        }
+    }
+
+    /// `nn`：地区回合由网络选，来源标为 ramen_nn，没有搜索评分
+    ///
+    /// 走真实 `process_ramen`，核对 emit 出去的决策：恰好一条 `region_select`、
+    /// 来源标签是 `ramen_nn`（不会被渲染成手写）、没有搜索评分与理由、选中候选
+    /// 就是 fixture 钉住的地区组合。
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn test_whole_nn_executes_network_pick() -> Result<()> {
+        use umasim::output::decision::SOURCE_RAMEN_NN;
+
+        use crate::ramen_nn::WholeNnTrainer;
+
+        env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let mut c = Checks::new();
+        let pinned = [0, 2, 4];
+        let (_fixture_dir, model_path) = fixture_model("whole_nn_exec", FixturePref::Regions(pinned))?;
+        let mut probe = new_game()?;
+        probe.base.turn = 2;
+        probe.stage = RamenStage::RegionSelect;
+        let actions = probe.list_actions()?;
+
+        let trainer = WholeNnTrainer::new(load_fixture_nn(&model_path)?);
+        let (ev, infos, _) = run_region_turn(&trainer, 20260914)?;
         let decisions: Vec<_> = ev.iter().filter(|e| e.starts_with("decision:")).collect();
         c.check(decisions.len() == 1, &format!("恰好 1 条决策（实际 {}）", decisions.len()));
         let first = decisions.first().map(|s| s.as_str()).unwrap_or_default();
         c.check(first.starts_with("decision:region_select"), "decision_kind 是 region_select");
-        c.check(
-            first.contains(&format!("src={SOURCE_REGION_NN}")),
-            "来源标签是 region_nn（渲染端不会印成「手写逻辑」）"
-        );
-        c.check(first.contains("scores=0"), "不伪造搜索评分");
-        c.check(first.contains("cands=10"), "第 1 年 10 个候选全部进 candidate_descriptions");
-        c.check(first.contains("reason=false"), "没有把上一步搜索的理由挂到这次地区决策上");
-        c.check(
-            ev.iter().filter(|e| *e == "info:compute_done").count() == 1,
-            "恰好一条 compute_done 收尾"
-        );
-        c.check(ev.last().is_some_and(|e| e == "info:compute_done"), "compute_done 是最后一条");
-
-        // 选中的候选必须解码成合法地区组合
-        let idx = first
-            .split("idx=")
-            .nth(1)
-            .and_then(|t| t.split(',').next())
-            .and_then(|t| t.parse::<usize>().ok());
-        match idx.and_then(|i| actions.get(i)).map(|a| a.operation) {
-            Some(Operation::RegionSelect(r)) => {
-                println!("选中地区组合 {r:?}");
-                c.check(validate_region_selection(0, &r), "选中的三地区组合合法（第 1 年区间、互不相同）");
-            }
-            other => c.check(false, &format!("选中候选不是 RegionSelect：{other:?}"))
-        }
+        c.check(first.contains(&format!("src={SOURCE_RAMEN_NN}")), "来源标签是 ramen_nn");
+        c.check(first.contains("scores=0"), "没有搜索评分");
+        c.check(first.contains("reason=false"), "没有挂搜索理由");
+        c.check(ev.last().is_some_and(|e| e == "info:compute_done"), "compute_done 收尾");
+        let picked = infos.first().and_then(|i| region_of(&actions, i.action_index));
+        println!("选中地区组合 {picked:?}");
+        c.check(picked == Some(pinned), &format!("执行的是网络钉住的 {pinned:?}"));
         c.finish()
     }
 
-    /// **对照模式**：两条推荐都算出来，执行哪条由模式决定，对照结果不丢
+    /// `mcts_nn_hint`：地区回合的执行与 `mcts` 完全一致，只多挂一条网络参考
     ///
-    /// 四种装配各跑一遍真实 `process_ramen`（含 luck 挂载那一段），核对**真正 emit
-    /// 出去的那条决策**：
-    ///
-    /// | 装配 | 执行侧 | 来源 | 候选评分 |
-    /// |---|---|---|---|
-    /// | `nn_compare` + 不搜 region | 网络 | `region_nn` | 无 |
-    /// | `nn_compare` + **搜** region | 网络 | `region_nn` | 无 |
-    /// | `mcts_compare` + 不搜 region | 手写基策 | `region_handwritten` | 无 |
-    /// | `mcts_compare` + **搜** region | 那次真搜索本身 | `region_search` | **有** |
-    ///
-    /// 四条都必须带上 `scenario_extra.region_compare`——最后一条是 review 点：它走
-    /// luck 挂载，旧实现在那里整个重建 `scenario_extra`，对照结果与来源标签会凭空消失。
-    ///
-    /// ❗本用例用的是**与主程序一致**的理由接线：`LastReasonSink` 外套 `ReasonGate`，
-    /// 门同时交给搜索训练员与接管器。
-    ///
-    /// 模型不在版本库里；缺模型时跳过并显式声明零覆盖。
-    ///
-    /// # 错误
-    ///
-    /// 任一观测未通过时返回错误。
+    /// 同一种子下分别跑纯搜索训练员与 hint 装配，地区走手写与走搜索两种阶段集各一遍，
+    /// 核对：事件流、执行的候选、候选评分、来源标签、之后的随机流都一致；hint 装配的
+    /// 决策上挂着 `nn_hint`，且与 luck 快照同时存在。
     #[cfg(feature = "onnx")]
     #[test]
-    fn test_region_compare_modes_execute_the_declared_side() -> Result<()> {
-        use std::path::Path;
+    fn test_nn_hint_matches_mcts_on_region_turn() -> Result<()> {
+        use rand::RngCore;
+        use umasim::output::decision::NN_HINT_KEY;
 
-        use serde_json::Value;
-
-        use crate::{
-            decision::ReasonGate,
-            region::{CompareMode, RegionNnTrainer}
-        };
-        use umasim::{
-            output::decision::{SOURCE_REGION_HANDWRITTEN, SOURCE_REGION_NN, SOURCE_REGION_SEARCH},
-            trainer::{RamenNnTrainer, SpecialSelectMode}
-        };
-
-        /// 一次对照跑留下的全部可观测物
-        struct CompareRun {
-            /// 决策标签行（次序 / 形状）
-            line: String,
-            /// **真正 emit 出去**的那条决策原件
-            info: Option<DecisionInfo>,
-            /// 跑完之后理由槽里是否还留着理由
-            reason_left: bool
-        }
-
-        /// 从 emit 出去的原件里取 `scenario_extra.region_compare`
-        fn compare_of(info: &Option<DecisionInfo>) -> Option<Value> {
-            info.as_ref()?
-                .scenario_extra
-                .as_ref()?
-                .get("region_compare")
-                .cloned()
-        }
-
-        /// 取对照载荷里的一个字符串字段（缺失时为空串）
-        fn field(v: &Option<Value>, key: &str) -> String {
-            v.as_ref()
-                .and_then(|x| x.get(key))
-                .and_then(|x| x.as_str())
-                .unwrap_or_default()
-                .to_string()
-        }
+        use crate::ramen_nn::NnHintTrainer;
 
         env::set_current_dir(get_workspace_root()?)?;
         init_global()?;
         let mut c = Checks::new();
-        let model = Path::new("saved_models/arms/ens_G2mix_g123.onnx");
-        if !model.is_file() {
-            println!("❗❗ 本测试被跳过：模型不存在 {}", model.display());
-            println!("❗❗ 「对照模式执行声明的那一侧」这条本次**零覆盖**，绿色不代表它还正确。");
-            return c.finish();
-        }
-        let load_nn = || -> Result<RamenNnTrainer> {
-            Ok(RamenNnTrainer::load(model)?
-                .with_race_shield(true)
-                .with_special_mode(SpecialSelectMode::Canonical))
-        };
-        // `gated=false` 复现「没接理由门」的旧行为，用来证明理由隔离那条观测不是空跑
-        let run = |nn_primary: bool, stages: &str, gated: bool| -> Result<CompareRun> {
-            let log = Arc::new(EventLog::default());
-            let sink: Arc<dyn DecisionSink> = Arc::new(RecordingSink(Arc::clone(&log)));
-            let log_info = Arc::clone(&log);
-            let emit_info = move |e: &str| log_info.push(format!("info:{e}"));
-            // ❗与 main.rs 同一条接线：LastReasonSink 外套 ReasonGate
-            let reason_slot = LastReasonSink::new();
-            let gate = ReasonGate::new(reason_slot.clone());
-            let mcts = RamenMctsTrainer::new(SearchConfig::default().with_search_n(2).with_ucb(false))
-                .with_stages(RamenSearchStages::parse(stages)?)
-                .verbose(false)
-                .with_reason_sink(gate.clone());
-            let mut trainer = RegionNnTrainer::new(mcts, load_nn()?).with_compare(CompareMode {
-                nn_primary,
-                // 本用例按 json_mode=true 跑：对照行**不得**上 stdout（那是严格 JSON 流）
-                print: false
-            });
-            if gated {
-                trainer = trainer.with_reason_gate(gate.clone());
-            }
-            let mut game = new_game()?;
-            game.base.turn = 2;
-            game.stage = RamenStage::RegionSelect;
-            let mut tracker = LuckScoreTracker::new();
-            let mut rng = StdRng::seed_from_u64(20260915);
-            process_ramen(game, Some(7), &trainer, &reason_slot, &sink, &mut tracker, &mut rng, true, &emit_info)?;
-            let ev = log.take();
-            for e in &ev {
-                println!("  {e}");
-            }
-            Ok(CompareRun {
-                line: ev
-                    .iter()
-                    .find(|e| e.starts_with("decision:"))
-                    .cloned()
-                    .unwrap_or_default(),
-                info: log.decisions().into_iter().next(),
-                reason_left: reason_slot.take().is_some()
-            })
-        };
+        let pinned = [0, 1, 2];
+        let (_fixture_dir, model_path) = fixture_model("nn_hint_region", FixturePref::Regions(pinned))?;
+        let mut probe = new_game()?;
+        probe.base.turn = 2;
+        probe.stage = RamenStage::RegionSelect;
+        let actions = probe.list_actions()?;
+        let pinned_text = (0..actions.len())
+            .find(|&i| region_of(&actions, i) == Some(pinned))
+            .map(|i| actions[i].to_string());
 
-        // 1) nn_compare + 不搜 region：执行网络，参照侧是手写基策
-        println!("-- nn_compare / stages=train,ramen --");
-        let r1 = run(true, "train,ramen", true)?;
-        c.check(r1.line.contains(&format!("src={SOURCE_REGION_NN}")), "nn_compare 执行网络那条");
-        c.check(r1.line.contains("scores=0"), "nn_compare：网络那条不伪造搜索评分");
-        let cmp1 = compare_of(&r1.info);
-        println!("region_compare = {cmp1:?}");
-        c.check(cmp1.is_some(), "对照结果挂在 emit 出去的 scenario_extra.region_compare 上");
-        c.check(field(&cmp1, "baseline_kind") == "handwritten", "不搜 region 时对照侧记为 handwritten");
-        c.check(field(&cmp1, "executed") == "nn", "executed 记为 nn");
-        c.check(
-            cmp1.as_ref()
-                .and_then(|v| v.get("nn_index"))
-                .and_then(|x| x.as_u64())
-                .map(|x| x as usize)
-                == r1.info.as_ref().map(|i| i.action_index),
-            "执行下标就是网络那条"
-        );
+        for stages in ["train,ramen", "train,ramen,region"] {
+            println!("-- mcts / stages={stages} --");
+            let (ev_base, base, mut rng_base) = run_region_turn(&staged_trainer(stages)?, 20260915)?;
+            println!("-- mcts_nn_hint / stages={stages} --");
+            let hint_trainer = NnHintTrainer::new(staged_trainer(stages)?, load_fixture_nn(&model_path)?);
+            let (ev_hint, hint, mut rng_hint) = run_region_turn(&hint_trainer, 20260915)?;
 
-        // 2) nn_compare + **搜** region：参照侧是真搜索，它的理由不得落到执行推荐上
-        println!("-- nn_compare / stages=train,ramen,region（理由隔离）--");
-        let r2 = run(true, "train,ramen,region", true)?;
-        let cmp2 = compare_of(&r2.info);
-        println!("region_compare = {cmp2:?}");
-        c.check(
-            r2.line.contains(&format!("src={SOURCE_REGION_NN}")),
-            "nn_compare + 搜 region：仍执行网络那条"
-        );
-        c.check(r2.line.contains("scores=0"), "网络那条不借用参照搜索的评分");
-        c.check(r2.line.contains("reason=false"), "网络那条不挂参照搜索的理由");
-        c.check(field(&cmp2, "baseline_kind") == "search", "参照侧照实记为 search（它确实搜了）");
-        c.check(!r2.reason_left, "跑完后理由槽是空的：参照搜索的理由被挡在门外");
-        // 对照组：拆掉理由门，同一配置应当**留下**理由——否则上面那条观测是空跑
-        let ungated = run(true, "train,ramen,region", false)?;
-        println!("拆掉理由门后理由槽非空 = {}", ungated.reason_left);
-        match ungated.reason_left {
-            true => c.check(!r2.reason_left, "理由隔离确实起了作用（有门 → 空，无门 → 非空）"),
-            false => {
-                println!("❗❗ 本次搜索没有产出理由（search_n=2 下 analyze_narrow_win 可能返回 None）");
-                println!("❗❗ 「理由隔离」这条本次**零覆盖**，绿色不代表它还正确。");
+            c.check(ev_base == ev_hint, &format!("[{stages}] 事件流与 mcts 完全相同"));
+            let (Some(b), Some(h)) = (base.first(), hint.first()) else {
+                c.check(false, &format!("[{stages}] 两边都应 emit 一条决策"));
+                continue;
+            };
+            c.check(b.action_index == h.action_index, &format!("[{stages}] 执行的候选相同"));
+            c.check(b.candidate_scores == h.candidate_scores, &format!("[{stages}] 候选评分相同"));
+            c.check(h.source_label().is_none(), &format!("[{stages}] 不带网络来源标签"));
+            c.check(rng_base.next_u64() == rng_hint.next_u64(), &format!("[{stages}] 之后的随机流相同"));
+
+            let hint_val = h.scenario_extra.as_ref().and_then(|v| v.get(NN_HINT_KEY));
+            println!("nn_hint = {hint_val:?}");
+            let choice = hint_val.and_then(|v| v.get("choice")).and_then(|v| v.as_str());
+            let same = hint_val.and_then(|v| v.get("same_as_executed")).and_then(|v| v.as_bool());
+            let executed = h.candidate_descriptions.get(h.action_index).map(String::as_str);
+            c.check(choice == pinned_text.as_deref(), &format!("[{stages}] 参考推荐是网络钉住的组合"));
+            c.check(same == Some(choice == executed), &format!("[{stages}] same_as_executed 与实际一致"));
+            if stages.contains("region") {
+                c.check(!h.candidate_scores.is_empty(), "[region] 执行侧确实走了地区搜索");
+                c.check(
+                    h.scenario_extra.as_ref().and_then(|v| v.get("total_luck_score")).is_some(),
+                    "[region] luck 快照与参考推荐同时存在（合并而非覆盖）"
+                );
             }
         }
-
-        // 3) mcts_compare + 不搜 region：执行手写基策，来源必须照实说是手写
-        println!("-- mcts_compare / stages=train,ramen --");
-        let r3 = run(false, "train,ramen", true)?;
-        c.check(
-            r3.line.contains(&format!("src={SOURCE_REGION_HANDWRITTEN}")),
-            "mcts_compare + 不搜 region：来源标为 region_handwritten"
-        );
-        c.check(r3.line.contains("scores=0"), "手写基策那条没有搜索评分");
-        let cmp3 = compare_of(&r3.info);
-        println!("region_compare = {cmp3:?}");
-        c.check(field(&cmp3, "executed") == "baseline", "executed 记为 baseline");
-
-        // 4) mcts_compare + **搜** region：执行的就是那条搜索，对照结果必须扛过 luck 挂载
-        println!("-- mcts_compare / stages=train,ramen,region --");
-        let r4 = run(false, "train,ramen,region", true)?;
-        println!("{}", r4.line);
-        c.check(!r4.line.contains("scores=0"), "开了 region 搜索时执行的那条带候选评分");
-        c.check(r4.line.starts_with("decision:region_select"), "仍然是一条 region_select 决策");
-        c.check(
-            r4.line.contains(&format!("src={SOURCE_REGION_SEARCH}")),
-            "来源标为 region_search（既不是手写也不是网络）"
-        );
-        let cmp4 = compare_of(&r4.info);
-        println!("region_compare = {cmp4:?}");
-        c.check(cmp4.is_some(), "❗对照结果扛过了 luck 挂载（旧实现会在这里整个丢掉）");
-        c.check(field(&cmp4, "baseline_kind") == "search", "执行侧照实记为 search");
-        c.check(field(&cmp4, "executed") == "baseline", "executed 记为 baseline");
-        c.check(field(&cmp4, "index_space") == "actions", "载荷写明下标空间是候选全表");
-        c.check(
-            r4.info
-                .as_ref()
-                .and_then(|i| i.scenario_extra.as_ref())
-                .and_then(|v| v.get("total_luck_score"))
-                .is_some(),
-            "luck 快照照样挂上了（合并而不是二选一）"
-        );
         c.finish()
     }
 
-    /// **整局无搜索 NN**：链式的两步都出结果、都标了真实来源、都不伪造评分
-    ///
-    /// 走 turn 1 的 `Train`——它会链式带出第 1 年的地区决策，一次覆盖两个阶段：
-    ///
-    /// 1. 恰好 2 条决策（`train` + `region_select`），`compute_next_step` 夹在中间；
-    /// 2. 两条都**没有**候选评分，也没有挂任何搜索理由（本模式一次搜索都不跑）；
-    /// 3. 两条都带来源标签，且标签落在本模式的已知集合内；
-    /// 4. 候选描述完整（下游靠它把 `action_index` 映射成动作名）。
-    ///
-    /// 模型不在版本库里；缺模型时跳过并显式声明零覆盖。
+    /// 用 [`umasim::bench::run_seeded`] 跑一整局（关掉逐步日志）
     ///
     /// # 错误
     ///
-    /// 任一观测未通过时返回错误。
+    /// 建局或对局中任一步报错时返回。
     #[cfg(feature = "onnx")]
-    #[test]
-    fn test_whole_game_nn_labels_every_step() -> Result<()> {
-        use std::path::Path;
-
-        use crate::ramen_nn::WholeGameNnTrainer;
-        use umasim::{
-            output::decision::{
-                SOURCE_RAMEN_HANDWRITTEN_STAGE, SOURCE_RAMEN_NN, SOURCE_RAMEN_RACE_GATE,
-                SOURCE_RAMEN_SINGLE_CANDIDATE
+    fn play_full<T: Trainer<RamenGame>>(trainer: T, run_idx: u64) -> Result<umasim::bench::GameOutcome> {
+        let mut lt = umasim::trainer::LoggingTrainer::new(trainer, run_idx);
+        lt.set_logging(false);
+        umasim::bench::run_seeded(
+            101901,
+            &[303124, 303114, 303084, 303094, 303064, 303054],
+            &InheritInfo {
+                blue_count: [15, 0, 3, 0, 0],
+                extra_count: [0, 40, 40, 20, 20, 40]
             },
-            trainer::{RamenNnTrainer, SpecialSelectMode}
-        };
+            20260923,
+            run_idx,
+            &lt
+        )
+    }
+
+    /// 整局：`mcts_nn_hint` 与 `mcts` 同种子终局逐项相同；`nn` 能完整跑完一局
+    ///
+    /// 覆盖地区回合之外的全部阶段（训练、吃面、SpecialSelect、比赛回合）：hint 装配
+    /// 只要在任一阶段动了随机流或执行结果，终局就会分叉。`nn` 用钉住地区的 fixture，
+    /// 核对整局不报错、第 1 年地区是网络钉住的那一组（钉住的是第 1 年的地区，后两年候选不含它们）。
+    #[cfg(feature = "onnx")]
+    #[test]
+    fn test_full_game_hint_identical_and_nn_completes() -> Result<()> {
+        use crate::ramen_nn::{NnHintTrainer, WholeNnTrainer};
 
         env::set_current_dir(get_workspace_root()?)?;
         init_global()?;
         let mut c = Checks::new();
-        let model = Path::new("saved_models/arms/ens_G2mix_g123.onnx");
-        if !model.is_file() {
-            println!("❗❗ 本测试被跳过：模型不存在 {}", model.display());
-            println!("❗❗ 「整局 NN 每一步都有结果且来源真实」这条本次**零覆盖**，绿色不代表它还正确。");
-            return c.finish();
-        }
-
-        let log = Arc::new(EventLog::default());
-        let sink: Arc<dyn DecisionSink> = Arc::new(RecordingSink(Arc::clone(&log)));
-        let log_info = Arc::clone(&log);
-        let emit_info = move |e: &str| log_info.push(format!("info:{e}"));
-
-        let trainer = WholeGameNnTrainer::new(
-            RamenNnTrainer::load(model)?
-                .with_race_shield(true)
-                .with_special_mode(SpecialSelectMode::Canonical)
-        );
-        let reason_slot = LastReasonSink::new();
-        let mut tracker = LuckScoreTracker::new();
-        let mut rng = StdRng::seed_from_u64(20260915);
-        // ❗必须**自然推进**到 turn 1 的 Train（直接摆 stage 会留下空的训练分布）。
-        // 推进用小搜索训练员，只是把局面走到那一帧，与本用例要观测的决策无关。
-        let game = advance_to_turn1_train(new_game()?, &small_trainer()?, &mut rng)?;
-
-        process_ramen(game, Some(11), &trainer, &reason_slot, &sink, &mut tracker, &mut rng, true, &emit_info)?;
-
-        let ev = log.take();
-        for e in &ev {
-            println!("  {e}");
-        }
-        let decisions: Vec<_> = ev.iter().filter(|e| e.starts_with("decision:")).collect();
-        c.check(decisions.len() == 2, &format!("链式共 2 条决策（实际 {}）", decisions.len()));
-        c.check(
-            decisions.first().is_some_and(|d| d.starts_with("decision:train")),
-            "第 1 条是 train（普通训练回合也有结果，不再是空屏）"
-        );
-        c.check(
-            decisions.get(1).is_some_and(|d| d.starts_with("decision:region_select")),
-            "第 2 条是链式带出的第 1 年地区决策"
-        );
-        c.check(
-            ev.iter().any(|e| e == "info:compute_next_step"),
-            "链式通知照常发出（链式决策没被本模式破坏）"
-        );
-        c.check(
-            ev.iter().filter(|e| *e == "info:compute_done").count() == 1,
-            "恰好一条 compute_done 收尾"
-        );
-
-        let known = [
-            SOURCE_RAMEN_NN,
-            SOURCE_RAMEN_RACE_GATE,
-            SOURCE_RAMEN_SINGLE_CANDIDATE,
-            SOURCE_RAMEN_HANDWRITTEN_STAGE
-        ];
-        for (i, info) in log.decisions().iter().enumerate() {
-            let src = info.source_label().unwrap_or("-").to_string();
+        let pinned = [0, 2, 4];
+        let (_fixture_dir, model_path) = fixture_model("full_game", FixturePref::Regions(pinned))?;
+        for idx in [0u64, 1] {
+            let mcts = play_full(staged_trainer("train,ramen,region")?, idx)?;
+            let hint = play_full(
+                NnHintTrainer::new(staged_trainer("train,ramen,region")?, load_fixture_nn(&model_path)?),
+                idx
+            )?;
             println!(
-                "  #{i} kind={} src={src} scores={} cands={} idx={}",
-                info.decision_kind,
-                info.candidate_scores.len(),
-                info.candidate_descriptions.len(),
-                info.action_index
+                "[{idx}] mcts {} {:?} / hint {} {:?}",
+                mcts.score, mcts.yearly_selected_regions, hint.score, hint.yearly_selected_regions
             );
-            c.check(info.candidate_scores.is_empty(), &format!("#{i} 不伪造搜索评分"));
-            c.check(info.candidate_n.is_empty(), &format!("#{i} 不伪造 rollout 局数"));
+            c.check(mcts.score == hint.score, &format!("[{idx}] 终局分相同"));
+            c.check(mcts.five_status == hint.five_status, &format!("[{idx}] 五维相同"));
             c.check(
-                (info.score - 0.0f32).abs() < f32::EPSILON,
-                &format!("#{i} score 保持 0（policy logits 不是终局分）")
+                mcts.yearly_selected_regions == hint.yearly_selected_regions,
+                &format!("[{idx}] 三年地区相同")
             );
-            c.check(known.contains(&src.as_str()), &format!("#{i} 来源 {src} 在本模式的已知集合内"));
-            c.check(
-                info.action_index < info.candidate_descriptions.len(),
-                &format!("#{i} 选中下标落在候选描述表内（下游能映射出动作名）")
+
+            let nn = play_full(WholeNnTrainer::new(load_fixture_nn(&model_path)?), idx);
+            println!(
+                "[{idx}] nn → {:?}",
+                nn.as_ref()
+                    .map(|o| (o.score, o.yearly_selected_regions))
+                    .map_err(|e| format!("{e:#}"))
             );
-            c.check(
-                info.scenario_extra
-                    .as_ref()
-                    .and_then(|v| v.get("reason"))
-                    .is_none(),
-                &format!("#{i} 没有挂任何搜索理由（本模式一次搜索都不跑）")
-            );
+            c.check(nn.is_ok(), &format!("[{idx}] nn 整局跑完不报错"));
+            if let Ok(o) = &nn {
+                c.check(
+                    o.yearly_selected_regions[0] == pinned,
+                    &format!("[{idx}] nn 第 1 年地区是网络钉住的 {pinned:?}")
+                );
+            }
         }
-        c.check(reason_slot.take().is_none(), "理由槽自始至终是空的");
         c.finish()
     }
 

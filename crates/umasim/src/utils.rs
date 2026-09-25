@@ -186,7 +186,7 @@ pub fn get_workspace_root() -> Result<std::path::PathBuf> {
 
 /// 本次测试专属的临时目录（工作区 `target/test-tmp/` 下，每次调用唯一）
 ///
-/// ❗**不用系统临时目录的固定名字**：`std::env::temp_dir()` 下写死名字时，
+/// 不用系统临时目录的固定名字：`std::env::temp_dir()` 下写死名字时，
 /// 同机并行跑的多个测试进程（`cargo test` 的多 target、或两个终端同时跑）会写到
 /// 同一个路径上互相覆盖模型与旁车，出现「A 进程刚写完 B 进程就删掉」的假失败；
 /// 而且清理时容易越界删到工作区以外。
@@ -518,14 +518,14 @@ pub(crate) fn fallback_override_game_config() -> OverrideGameConfig {
             mcts_turn_bonus: None,
             pt_favor_rate: None,
             race_grades: None,
-            luck_record: None
+            luck_record: None,
+            friend_complete_required: None
         },
         mcts: OverrideMctsConfig::default(),
         ramen_region_strategy: None,
         ramen_region_fixed: None,
-        ramen_region_policy: None,
-        ramen_region_model_path: None,
-        ramen_trainer_policy: None
+        ramen_trainer_policy: None,
+        ramen_nn_model_path: None
     }
 }
 

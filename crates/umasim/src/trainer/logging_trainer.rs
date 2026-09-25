@@ -91,7 +91,8 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for LoggingTrainer<T> {
                 action_index: idx,
                 action_desc: actions.get(idx).map(|a| a.to_string()).unwrap_or_default(),
                 elapsed_us,
-                score_breakdown: self.inner.last_breakdown()
+                score_breakdown: self.inner.last_breakdown(),
+                vital: game.uma.vital
             };
             self.log.borrow_mut().record(row);
         }
@@ -121,7 +122,8 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for LoggingTrainer<T> {
                 action_index: idx,
                 action_desc: explain,
                 elapsed_us,
-                score_breakdown: None
+                score_breakdown: None,
+                vital: game.uma.vital
             };
             self.log.borrow_mut().record(row);
         }
@@ -153,7 +155,8 @@ impl<T: Trainer<RamenGame>> Trainer<RamenGame> for LoggingTrainer<T> {
                 action_index: idx,
                 action_desc: format!("事件#{} {}: {}", event.id, event.name, explain),
                 elapsed_us,
-                score_breakdown: None
+                score_breakdown: None,
+                vital: game.uma.vital
             };
             self.log.borrow_mut().record(row);
         }

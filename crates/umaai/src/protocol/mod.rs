@@ -145,8 +145,13 @@ impl GameStatusBase {
             lucky: self.is_lucky,
             qiezhe: self.is_qiezhe,
             aijiao: self.is_aijiao,
-            good_trainer: self.failure_rate_bias > 0,
-            bad_trainer: self.failure_rate_bias < 0,
+            // failureRateBias 语义：正值=训练更易失败（不擅长训练），负值=训练更不易失败
+            // （擅长训练）。与 umasim 内部 traits.rs:calc_training_failure_rate 的
+            // good_trainer → bias=-2 / bad_trainer → bias=+2 同源——曾与协议反着解读，
+            // 导致 game421 turn 25 起 buff 被误标为 bad_trainer，MCTS 估值时失败率
+            // 人为升高 +2，高体力回合推「休息」（见 issues.md 修复条目）。
+            good_trainer: self.failure_rate_bias < 0,
+            bad_trainer: self.failure_rate_bias > 0,
             positive_thinking: self.is_positive_thinking,
             refresh_mind: self.is_refresh_mind as i32,
             ..Default::default()
@@ -275,10 +280,12 @@ impl From<&BasePerson> for BasePersonStatus {
 /// 反向转回GameStatusBase, persons和friend_没有设置
 impl From<&BaseGame> for GameStatusBase {
     fn from(game: &BaseGame) -> Self {
+        // 与解析方向对称：good_trainer → 失败率-2（降低），bad_trainer → 失败率+2（升高）。
+        // 解析侧若不一起反向，这里写出的字段会让 UI 仍显示「擅长训练」= +2（错误）。
         let failure_rate_bias = if game.uma.flags.good_trainer {
-            2
-        } else if game.uma.flags.bad_trainer {
             -2
+        } else if game.uma.flags.bad_trainer {
+            2
         } else {
             0
         };
@@ -564,4 +571,74 @@ mod tests {
         println!("scenarioId=999: is_err={}", r.is_err());
         assert!(r.is_err());
     }
+
+    /// `failureRateBias` 语义解析方向
+    ///
+    /// 上游约定：`>0` = 训练更易失败（不擅长训练），`<0` = 训练更不易失败（擅长训练）。
+    /// 历史上解析侧反过，buff 被读成相反语义 → MCTS 在 turn 25+ 把玩家 buff 视作「不擅长」，
+    /// 高体力回合推「休息」。本测试钉住解析方向，导出方向由 `From<&BaseGame>` 实现覆盖。
+    #[test]
+    fn test_failure_rate_bias_parse() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        for (raw, expect_good, expect_bad, label) in [
+            (-2_i32, true, false, "擅长训练 buff"),
+            (2_i32, false, true, "不擅长训练 buff"),
+            (0_i32, false, false, "无 buff")
+        ] {
+            let base = status_base_with_frb(raw)?;
+            let uma = base.parse_uma()?;
+            ensure!(
+                uma.flags.good_trainer == expect_good && uma.flags.bad_trainer == expect_bad,
+                "{label}（frb={raw}）解析后 good/bad 应为 ({expect_good}, {expect_bad})，实为 ({}, {})",
+                uma.flags.good_trainer,
+                uma.flags.bad_trainer
+            );
+        }
+        Ok(())
+    }
+}
+
+/// 工具函数，仅供测试使用——为上面的 roundtrip 测试构造带 `failureRateBias` 的 fixture。
+fn status_base_with_frb(frb: i32) -> Result<GameStatusBase> {
+    use serde_json::from_str;
+    let json = format!(
+        r#"{{
+            "scenarioId": 14,
+            "umaId": 100201,
+            "umaStar": 5,
+            "turn": 30,
+            "vital": 80,
+            "maxVital": 108,
+            "motivation": 4,
+            "fiveStatus": [1000, 800, 800, 800, 800],
+            "fiveStatusLimit": [2400, 2400, 2400, 2400, 2400],
+            "skillPt": 1000,
+            "skillScore": 0,
+            "totalHints": 0,
+            "trainLevelCount": [3, 3, 3, 3, 3],
+            "ptScoreRate": 2.0,
+            "failureRateBias": {frb},
+            "isIll": false,
+            "isQieZhe": false,
+            "isAiJiao": false,
+            "isPositiveThinking": false,
+            "isRefreshMind": false,
+            "isLucky": false,
+            "zhongMaBlueCount": [15, 0, 0, 0, 3],
+            "saihou": 0,
+            "isRacing": false,
+            "playing_state": 1,
+            "cardId": [303040, 303114, 302894, 303050, 302824, 303004],
+            "persons": [],
+            "personDistribution": [[-1,-1,-1,-1,-1],[-1,-1,-1,-1,-1],[-1,-1,-1,-1,-1],[-1,-1,-1,-1,-1],[-1,-1,-1,-1,-1]],
+            "lockedTrainingId": -1,
+            "friendship_noncard_yayoi": 0,
+            "friendship_noncard_reporter": 0,
+            "friend_stage": 0,
+            "friend_outgoingUsed": 0,
+            "single_mode_chara_id": 421
+        }}"#
+    );
+    Ok(from_str(&json)?)
 }

@@ -63,45 +63,20 @@ ramen_region_strategy = "all"
 # 仅当 ramen_region_strategy="fixed" 时生效
 ramen_region_fixed = [[11, 14, 15]]
 
-# ---------- 地区选择的决策来源（与上面的候选枚举策略正交）----------
-# ramen_region_policy: "handwritten"（默认）| "nn" | "nn_compare" | "mcts_compare"
-#   handwritten：沿用既有装配——[mcts] ramen_search_stages 打开 region 时走搜索，
-#                否则落手写推荐策略。默认行为与本项引入前逐字一致。
-#   nn：客户端实际对局的三次 RegionSelect（turn 2 / 23 / 47）交给 ONNX 网络决策。
-#       ❗搜索内部 rollout 的地区选择仍是手写基策，模型不进 rollout evaluator。
-#       ❗需要 onnx feature 构建；且与 ramen_search_stages 含 region、
-#         ramen_region_strategy="fixed" 互斥（启动时直接报错，不静默回退）。
-#   nn_compare / mcts_compare：**对照模式**，同一个地区局面算两次（既有装配一次、
-#       网络一次），屏幕上两条推荐都打印，区别只在哪条算本次的执行推荐——
-#       nn_compare 执行网络那条，mcts_compare 执行既有装配那条。
-#       对照那一侧跑在随机流副本上，不改变网络这一侧看到的随机状态。
-#       ❗对照模式**允许** ramen_search_stages 含 region：开着时对照侧是真搜索
-#         （第 3 年 all 下 120 个候选，很贵），不开时是手写基策（成本可忽略）。
-#       ❗成本别按「候选数 × search_n」估，那只适用于 use_ucb = false（均匀分配）。
-#         use_ucb = true（本文件默认）下：先给每个候选跑满一组，再按 UCB 追加，直到
-#         **被搜得最多的那个候选**达到 search_n 才停——总次数随局面变化，下界是
-#         「候选数 × 首组大小」。首组大小是 min(search_group_size, search_n) 且至少为 1，
-#         不是 search_group_size 本身。
-ramen_region_policy = "handwritten"
-# 地区网络模型路径（ramen_region_policy 非 handwritten 时生效），需同名 .json 旁车。
-# ❗与 neuralnet_model_path（温泉 leaf evaluator 模型）是两回事，不要混填。
-# 模型不随仓库发布，请自行填写本机路径，例如：
-# ramen_region_model_path = "saved_models/arms/ens_G2mix_g123.onnx"
-
-# ---------- 整局决策来源（比上面的地区来源高一层）----------
-# ramen_trainer_policy: "mcts"（默认）| "nn"
-#   mcts：训练 / 吃面 / 隐藏风味走 MCTS 搜索，地区那一步再由 ramen_region_policy 决定。
-#   nn：**本地实验用**。整局所有动作决策（含地区）直接由网络 argmax 给出，完全不跑搜索。
-#       ❗模型复用 ramen_region_model_path，此模式下它是**整局动作模型**。
-#       ❗要求 ramen_region_policy = "handwritten"（中性默认值）、
-#         ramen_region_strategy = "all"；写成 nn / *_compare 会在启动时报配置冲突。
-#       ❗[mcts] 的搜索参数**不参与 NN 动作决策**（启动时会提示），保留即可，不必删。
-#         注意是「不参与决策」而不是「不读取」：ramen_search_stages 写错照样会在启动时报错。
-#       ❗事件选项与友人事件仍走手写策略（choice 头没训练），自选比赛硬守门保留，
-#         单候选局面不跑推理——「纯 NN」指的是动作决策这条线，不是没有手写逻辑。
-#       ❗闭环实测：同族模型直接决策相对 search_n=8192 的 MCTS 基线配对差 −8947 分
-#         （95% CI [−10208, −7686]，10/10 全负）。别拿它当更强的配置用。
+# 拉面杯客户端的动作决策由谁负责（事件选项始终走手写策略）：
+#   "mcts"（默认）：既有逻辑，按 [mcts] 配置搜索
+#   "mcts_nn_hint"：执行与 mcts 相同，另外在每个动作决策下显示一行神经网络的推荐作参考
+#   "nn"：全部动作决策由神经网络直接给出，不做搜索，以分数换速度（模型仍在迭代中）
+#         仅适用于训练覆盖的卡组构成（各带 1 张友人卡）：2速2耐1智 / 2速1耐1力1智 / 3速1耐1智 /
+#         2速1耐2智 / 2速1力1根1智；训练卡池外的卡在数值足够强时表现良好，其他构成效果未知
+#         对照 MCTS（search_n=1024）实测：快约 90 倍，分数低约 1.1k~2.1k（95% 区间）
+# 后两项需要 onnx feature 构建（cargo build --release --features onnx -p umaai）
+# 以及 ramen_nn_model_path。
 ramen_trainer_policy = "mcts"
+# 拉面杯网络模型路径，需同目录存在同名 .json 旁车（<模型>.onnx.json）。
+# 与 neuralnet_model_path 是不同的模型，不可混填。模型不随仓库发布。
+# ramen_nn_model_path = "saved_models/<模型>.onnx"
+
 # 拉面手写策略：为多拿总 PT 最多愿意牺牲的总评分（评分换 PT，顶层可调）
 # 只影响"训练位主属性已满"的训练候选（终盘最常见）：属性收益为 0 时只剩 PT，
 # 本值决定策略还愿不愿意练它。0 = 评分优先（默认，实测评分峰值）；越大越偏
@@ -116,6 +91,15 @@ log_level = "info"
 # 每局一目录 logs/game{id}/：thisTurn.json 原文 + decisions.csv + meta.json
 # （开关在 game_config.toml 的 [config_override] 段可覆盖为 false）
 luck_record = true
+
+# ---------- 拉面杯：友人出行完成要求（仅 umaai 实时运行读取；离线 sim/bench 不读） ----------
+# 是否要求 5 次友人出行**必须走完**（默认开）。
+# 开：手写策略（及以手写为基策的 MCTS）施加完成硬门限——剩余出行次数达到
+#     "剩余可出行回合数"时强制出行（不再受隐藏风味闸门约束），保证 5 次走完。
+#     代价：末盘会挤掉部分训练回合，赛程越差（第三年必赛多）代价越高。
+# 关：回到纯动态估值口径，允许主动跳过价值不足的第 5 次。
+# 开关在 game_config.toml 的 [config_override] 段可覆盖为 false。
+friend_complete_required = true
 
 
 [mcts]
@@ -139,7 +123,7 @@ policy_delta = 100.0
 
 # 拉面杯搜哪些阶段（逗号分隔：train / ramen / special / region / event / super）
 # 实测补上 ramen 后 42 局配对 +2306 分；同算力加到 train 的 search_n 上只值 +39 分
-ramen_search_stages = "train,ramen"
+ramen_search_stages = "train,ramen,region"
 
 # UCB 搜索分配
 use_ucb = true

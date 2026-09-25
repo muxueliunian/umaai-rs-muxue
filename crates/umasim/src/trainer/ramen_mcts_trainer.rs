@@ -435,7 +435,7 @@ impl RamenMctsTrainer {
     pub fn with_nn_rollout(mut self, nn: Arc<super::RamenNnTrainer>, max_turn: Option<i32>) -> Self {
         self.search = self
             .search
-            .with_rollout_trainer(super::RamenRolloutTrainer::handwritten().with_neural_net(nn, max_turn))
+            .map_rollout_trainer(|r| r.with_neural_net(nn, max_turn))
             .with_strict_rollout(true);
         self
     }
@@ -454,6 +454,19 @@ impl RamenMctsTrainer {
     /// 设置取分口径（`Score` 默认 / `Pt` 计入 `pt_favor_rate`）
     pub fn with_selection(mut self, selection: RamenSelection) -> Self {
         self.selection = selection;
+        self
+    }
+
+    /// 设置"友人出行必须走完 5 次"的完成硬门限（对应 `game_config.toml` 的
+    /// `friend_complete_required`）：同时作用于 fallback 手写策略与搜索 rollout 基策。
+    pub fn with_friend_complete_required(mut self, required: bool) -> Self {
+        self.fallback = self.fallback.with_friend_complete_required(required);
+        // rollout 基策同步：搜索内部评估的未来必须与正式策略同一口径，
+        // 否则 MCTS 会按"可以不走完"的世界线打分，与实际执行不一致。
+        // 就地改写而非整体替换：已装载的网络 rollout 不能被这一步冲掉（调用顺序无关）。
+        self.search = self
+            .search
+            .map_rollout_trainer(|r| r.with_friend_complete_required(required));
         self
     }
 
@@ -1204,7 +1217,8 @@ mod tests {
         c.check(game_rec.ramen.super_ramen == game_mcts.ramen.super_ramen, "super_ramen 一致");
         // 2026-09-18：preset 起 super_choice_mode=3（按终盘缺口与卡型数选范围），本局不是平局，
         // 不再固定落在选项二；钉具体值以防选择来源被悄悄换掉。
-        c.check(game_rec.ramen.super_ramen == Some(0), "门控关时与推荐策略同为选项一");
+        // 2026-09-21：配额定档 [0,3,5] 后本局超级拉面落入选项二（sup=1）。
+        c.check(game_rec.ramen.super_ramen == Some(1), "门控关时与推荐策略同选（选项二）");
         c.check(trainer.searched_count() == 0, "门控全关时一次搜索都没发生");
         c.finish()
     }
@@ -1394,14 +1408,16 @@ mod tests {
         // 基准重抓。
         // 2026-09-18 重抓：上游新 preset + **本地 Score 选择轴**下的实测值。
         // 上游同用例写 64151 / [3337,2238,1820,1184,1217] / 8253，那是 PT 轴的数字。
-        c.check(score == 61516, "评分与改动前逐位相同");
+        // 2026-09-25 重抓：合入上游友人出行配额 [0,3,5] + 完成硬门限，本地 Score 轴实测
+        // （rayon 4 / 8 线程逐位相同）。
+        c.check(score == 65605, "评分与改动前逐位相同");
         c.check(
-            game.uma.five_status == [3337, 2014, 1946, 1026, 1236],
+            game.uma.five_status == [3337, 2294, 2121, 1110, 1220],
             "五维与改动前逐位相同"
         );
-        c.check(game.uma.skill_pt == 7956, "技能点与改动前逐位相同");
+        c.check(game.uma.skill_pt == 8394, "技能点与改动前逐位相同");
         c.check(game.ramen.scenario_pt == 0, "剧本 PT 与改动前逐位相同");
-        c.check(searched == 58, "searched_count 与改动前逐位相同");
+        c.check(searched == 57, "searched_count 与改动前逐位相同");
         c.finish()
     }
 
@@ -1549,7 +1565,8 @@ mod tests {
         // 整局搜索路径微小变化，SpecialSelect 调用 / 重搜数基线重抓。
         // 2026-09-18 重抓：上游新 preset + **本地 Score 选择轴**下的实测值。
         // 上游同用例写 28，那是它把选动作硬切 PT 轴之后的数字，本地不适用。
-        c.check(special_calls == 30, "SpecialSelect 调用数与改动前逐位相同");
+        // 2026-09-25 重抓：合入上游友人出行配额 [0,3,5] 后 30→29（与上游新值恰好相同）。
+        c.check(special_calls == 29, "SpecialSelect 调用数与改动前逐位相同");
         c.check(special_searches == 0, "SpecialSelect 重搜数与改动前逐位相同");
         // 再留一条与具体数字解耦的语义上界，防止将来重抓快照时把比例抬上去
         c.check(
@@ -1632,7 +1649,7 @@ mod tests {
         c.check(searched_on == 1, "门控 super 整局恰好搜索一次");
         c.check(searched_off == 0, "门控关时一次搜索都没有");
         // 2026-09-18：preset 起 super_choice_mode=3，本局落在选项一（同 test_stages_none_matches_recommended）。
-        c.check(game_off.ramen.super_ramen == Some(0), "门控关与推荐策略同选选项一");
+        c.check(game_off.ramen.super_ramen == Some(1), "门控关与推荐策略同选（选项二）");
         c.finish()
     }
 

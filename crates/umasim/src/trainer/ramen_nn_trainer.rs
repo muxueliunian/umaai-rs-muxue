@@ -156,6 +156,26 @@ pub struct ActionLogit {
     pub logit: f32
 }
 
+/// 一次动作决策由谁定案
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NnVia {
+    /// 跑了一次网络推理，按 policy argmax 选出
+    Network,
+    /// 自选比赛硬守门命中，无视 policy 直接选「比赛」，没有推理
+    RaceGate,
+    /// `SpecialSelect` 按 [`SpecialSelectMode::Handwritten`] 转交手写策略，没有推理
+    Handwritten
+}
+
+/// [`RamenNnTrainer::select_action_labeled`] 的结果：选中的下标与定案来源
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct NnPick {
+    /// 选中候选在 `actions` 切片中的下标
+    pub index: usize,
+    /// 这一步由谁定案
+    pub via: NnVia
+}
+
 /// `SpecialSelect` 阶段的推理口径
 ///
 /// 教师在 `RamenSelect` 根上搜的是联合动作（面 × 隐藏风味用法），policy 格位
@@ -174,15 +194,8 @@ pub enum SpecialSelectMode {
 
 /// 把 ONNX 文件编译成**固定 batch** 的可运行图
 ///
-/// 导出的模型第 0 维是符号 `batch`，tract 在维度未知时拿不到形状特化，
-/// 优化后的图明显更慢。实测（`ens_d3`，本机单线程）：
-///
-/// | 输入形状 | µs/次 |
-/// |---|---|
-/// | 符号 `['batch', 754]` | 2647 |
-/// | 固定 `[1, 754]` | 1447 |
-///
-/// 白拿 1.83×，且**输出逐位不变**（见 `test_fixed_shape_matches_symbolic`）。
+/// 导出的模型第 0 维是符号 `batch`，tract 在维度未知时拿不到形状特化，优化后的图
+/// 明显更慢。固定后输出逐位不变（见 `test_fixed_shape_matches_symbolic`）。
 ///
 /// # 错误
 ///
@@ -496,6 +509,37 @@ impl RamenNnTrainer {
         argmax_logit(&scores)
     }
 
+    /// 选动作，并照实给出这一步由谁定案
+    ///
+    /// [`Trainer::select_action`] 只是本函数取下标：判定逻辑只有一份（在
+    /// [`Self::prepare_decision_labeled`] 里），客户端标注来源时不必拿下标反推、
+    /// 也不必再跑一遍守门判定。
+    ///
+    /// 唯一候选（[`LabeledPrep::SingleCandidate`]）记为 [`NnVia::Network`]：本地省掉了
+    /// 那次推理，但结果与推理后 argmax 相同，来源标注与上游一致。
+    ///
+    /// # 错误
+    ///
+    /// 推理失败、任一候选无法落格、候选为空，或 [`SpecialSelectMode::Canonical`] 下
+    /// 联合决策根还原失败（阶段不对 / `pending_ramen` 为空）时报错。
+    pub fn select_action_labeled(
+        &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
+    ) -> Result<NnPick> {
+        let pick = match self.prepare_decision_labeled(game, actions, rng)? {
+            LabeledPrep::RaceGate(index) => NnPick { index, via: NnVia::RaceGate },
+            LabeledPrep::HandwrittenStage(index) => NnPick { index, via: NnVia::Handwritten },
+            LabeledPrep::SingleCandidate(index) => NnPick { index, via: NnVia::Network },
+            LabeledPrep::NeedsInference(features) => {
+                let out = self.infer_features(features)?;
+                NnPick {
+                    index: self.resolve_decision(game, actions, &out.policy)?,
+                    via: NnVia::Network
+                }
+            }
+        };
+        Ok(pick)
+    }
+
     /// 按当前阶段把每个候选映射到 policy logit
     ///
     /// # 错误
@@ -675,13 +719,7 @@ impl Trainer<RamenGame> for RamenNnTrainer {
     /// 推理失败、任一候选无法落格、候选为空，或 [`SpecialSelectMode::Canonical`] 下
     /// 联合决策根还原失败（阶段不对 / `pending_ramen` 为空）时报错。
     fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
-        match self.prepare_decision(game, actions, rng)? {
-            DecisionPrep::Resolved(idx) => Ok(idx),
-            DecisionPrep::NeedsInference(features) => {
-                let out = self.infer_features(features)?;
-                self.resolve_decision(game, actions, &out.policy)
-            }
-        }
+        Ok(self.select_action_labeled(game, actions, rng)?.index)
     }
 
     /// 事件选项委托给手写策略（choice 头未训练）
@@ -724,155 +762,13 @@ mod tests {
         utils::{Checks, cleanup_test_dir, get_workspace_root, init_test_logger, unique_test_dir}
     };
 
-    /// 最小 ONNX fixture 构造器（只够表达「输入 → 一两个输出」的图）
+    /// 最小 ONNX 模型生成器：workspace 根的 `testsupport/onnx_fixture.rs`
     ///
-    /// 用途是覆盖**负向**契约：旁车 JSON 声明正确、但图本身导错。这类模型不可能
-    /// 从正式权重里改出来（改 JSON 只能模拟旁车错，模拟不了图错），也不该往仓库里
-    /// 塞二进制；所以按 ONNX 的 protobuf 线格式**当场生成**，完全可复现。
-    ///
-    /// 只用到 protobuf 的两种 wire type：varint（0）与 length-delimited（2）。
-    /// 字段号取自 ONNX 的 `onnx.proto`：
-    /// `ModelProto{1:ir_version, 2:producer_name, 7:graph, 8:opset_import}`、
-    /// `GraphProto{1:node, 2:name, 5:initializer, 11:input, 12:output}`、
-    /// `NodeProto{1:input, 2:output, 3:name, 4:op_type}`、
-    /// `ValueInfoProto{1:name, 2:type}`、`TypeProto{1:tensor_type}`、
-    /// `TypeProto.Tensor{1:elem_type, 2:shape}`、`TensorShapeProto{1:dim}`、
-    /// `Dimension{1:dim_value}`、`TensorProto{1:dims, 2:data_type, 8:name, 9:raw_data}`、
-    /// `OperatorSetIdProto{1:domain, 2:version}`。
-    mod onnx_fixture {
-        /// 追加一个 protobuf varint
-        fn varint(mut v: u64, out: &mut Vec<u8>) {
-            loop {
-                let b = (v & 0x7f) as u8;
-                v >>= 7;
-                if v == 0 {
-                    out.push(b);
-                    return;
-                }
-                out.push(b | 0x80);
-            }
-        }
+    /// `umasim` 与 `umaai` 两侧**共用同一份**生成器，靠 `#[path]` 各自引入一次：
+    /// 不复制代码、不新增依赖、不做成生产公开 API，也不进入正式构建。
+    #[path = "../../../../../../testsupport/onnx_fixture.rs"]
+    mod onnx_fixture;
 
-        /// 追加一个 `字段号 + wire type` 标签
-        fn tag(field: u32, wire: u32, out: &mut Vec<u8>) {
-            varint(u64::from((field << 3) | wire), out);
-        }
-
-        /// 追加一个 varint 字段
-        fn put_varint(field: u32, v: u64, out: &mut Vec<u8>) {
-            tag(field, 0, out);
-            varint(v, out);
-        }
-
-        /// 追加一个 length-delimited 字段（字符串 / 字节串 / 嵌套消息）
-        fn put_bytes(field: u32, v: &[u8], out: &mut Vec<u8>) {
-            tag(field, 2, out);
-            varint(v.len() as u64, out);
-            out.extend_from_slice(v);
-        }
-
-        /// `TypeProto`：元素类型恒为 FLOAT(1)，形状为给定的具体维度
-        fn type_proto(dims: &[usize]) -> Vec<u8> {
-            let mut shape = Vec::new();
-            for &d in dims {
-                let mut dim = Vec::new();
-                put_varint(1, d as u64, &mut dim);
-                put_bytes(1, &dim, &mut shape);
-            }
-            let mut tensor = Vec::new();
-            put_varint(1, 1, &mut tensor);
-            put_bytes(2, &shape, &mut tensor);
-            let mut ty = Vec::new();
-            put_bytes(1, &tensor, &mut ty);
-            ty
-        }
-
-        /// `ValueInfoProto`
-        fn value_info(name: &str, dims: &[usize]) -> Vec<u8> {
-            let mut v = Vec::new();
-            put_bytes(1, name.as_bytes(), &mut v);
-            put_bytes(2, &type_proto(dims), &mut v);
-            v
-        }
-
-        /// 单输入单输出的 `NodeProto`
-        fn node(op: &str, name: &str, input: &str, output: &str) -> Vec<u8> {
-            let mut n = Vec::new();
-            put_bytes(1, input.as_bytes(), &mut n);
-            put_bytes(2, output.as_bytes(), &mut n);
-            put_bytes(3, name.as_bytes(), &mut n);
-            put_bytes(4, op.as_bytes(), &mut n);
-            n
-        }
-
-        /// 双输入单输出的 `NodeProto`（MatMul 用）
-        fn node2(op: &str, name: &str, a: &str, b: &str, output: &str) -> Vec<u8> {
-            let mut n = Vec::new();
-            put_bytes(1, a.as_bytes(), &mut n);
-            put_bytes(1, b.as_bytes(), &mut n);
-            put_bytes(2, output.as_bytes(), &mut n);
-            put_bytes(3, name.as_bytes(), &mut n);
-            put_bytes(4, op.as_bytes(), &mut n);
-            n
-        }
-
-        /// 全 0 的 f32 `TensorProto` initializer
-        fn zero_initializer(name: &str, rows: usize, cols: usize) -> Vec<u8> {
-            let mut t = Vec::new();
-            put_varint(1, rows as u64, &mut t);
-            put_varint(1, cols as u64, &mut t);
-            put_varint(2, 1, &mut t);
-            put_bytes(8, name.as_bytes(), &mut t);
-            put_bytes(9, &vec![0u8; rows * cols * 4], &mut t);
-            t
-        }
-
-        /// 把 `GraphProto` 包成完整 `ModelProto`
-        fn wrap_model(graph: Vec<u8>) -> Vec<u8> {
-            let mut opset = Vec::new();
-            put_bytes(1, b"", &mut opset);
-            put_varint(2, 13, &mut opset);
-            let mut m = Vec::new();
-            put_varint(1, 7, &mut m);
-            put_bytes(2, b"umaai-test-fixture", &mut m);
-            put_bytes(7, &graph, &mut m);
-            put_bytes(8, &opset, &mut m);
-            m
-        }
-
-        /// 输出形状 = 输入形状的图（`Identity`）：输出维度**错**的负向 fixture
-        pub fn identity_model(dim: usize) -> Vec<u8> {
-            let mut g = Vec::new();
-            put_bytes(1, &node("Identity", "n0", "X", "Y"), &mut g);
-            put_bytes(2, b"identity", &mut g);
-            put_bytes(11, &value_info("X", &[1, dim]), &mut g);
-            put_bytes(12, &value_info("Y", &[1, dim]), &mut g);
-            wrap_model(g)
-        }
-
-        /// 两个输出的图：输出**个数**错的负向 fixture
-        pub fn two_output_model(dim: usize) -> Vec<u8> {
-            let mut g = Vec::new();
-            put_bytes(1, &node("Identity", "n0", "X", "Y"), &mut g);
-            put_bytes(1, &node("Identity", "n1", "X", "Z"), &mut g);
-            put_bytes(2, b"two_outputs", &mut g);
-            put_bytes(11, &value_info("X", &[1, dim]), &mut g);
-            put_bytes(12, &value_info("Y", &[1, dim]), &mut g);
-            put_bytes(12, &value_info("Z", &[1, dim]), &mut g);
-            wrap_model(g)
-        }
-
-        /// `X[1,in] @ W[in,out]` 的图，W 全 0：输出契约**正确**的正向 fixture
-        pub fn matmul_model(input_dim: usize, output_dim: usize) -> Vec<u8> {
-            let mut g = Vec::new();
-            put_bytes(1, &node2("MatMul", "n0", "X", "W", "Y"), &mut g);
-            put_bytes(2, b"matmul", &mut g);
-            put_bytes(5, &zero_initializer("W", input_dim, output_dim), &mut g);
-            put_bytes(11, &value_info("X", &[1, input_dim]), &mut g);
-            put_bytes(12, &value_info("Y", &[1, output_dim]), &mut g);
-            wrap_model(g)
-        }
-    }
 
     /// 与冻结契约一致的旁车 JSON 文本（`input_dim` / `output_dim` 都**声明正确**）
     fn valid_sidecar_json() -> String {
@@ -1040,12 +936,17 @@ mod tests {
         bail!("开局推进 16 步仍未到达决策阶段，当前 {:?}", game.stage)
     }
 
-    /// 加载 pilot 模型，在开局第一决策点跑一次 select_action
+    /// 加载真实 pilot 模型，在开局第一决策点跑一次 select_action
     ///
-    /// `saved_models/` 在 `.gitignore` 里，模型不随仓库分发。缺模型时本测试
-    /// **跳过而不是失败**——否则任何没跑过训练管线的机器上
-    /// `cargo test --features onnx` 都会红，而红的原因与代码无关。
+    /// 真实模型集成测试，默认 `#[ignore]`：`value.mean` 落在分数量纲是训练出来的权重
+    /// 才有的性质，生成式 fixture 替代不了。显式运行：
+    /// `cargo test -p umasim --release --lib --features onnx -- --ignored select_action_opening`
+    ///
+    /// # 错误
+    ///
+    /// 显式运行而模型不存在时报错。
     #[test]
+    #[ignore = "需要真实 pilot 模型（saved_models 不入库）；显式 --ignored 运行"]
     fn test_ramen_nn_select_action_opening() -> Result<()> {
         let root = get_workspace_root()?;
         std::env::set_current_dir(&root)?;
@@ -1054,10 +955,11 @@ mod tests {
 
         let model_path = root.join("saved_models").join("ramen_pilot").join("model.onnx");
         println!("模型路径: {}", model_path.display());
-        if !model_path.is_file() {
-            println!("跳过：模型不存在（saved_models 不入库，需先跑 scripts/ramen_nn 导出）");
-            return Ok(());
-        }
+        ensure!(
+            model_path.is_file(),
+            "本测试需要真实模型 {}，但它不存在；本测试是显式运行的，不会静默跳过",
+            model_path.display()
+        );
         let trainer = RamenNnTrainer::load(&model_path)?;
 
         let (mut rng, rule_master) = crate::bench::seeded_rngs(42, 0);
@@ -1181,14 +1083,20 @@ mod tests {
 
     /// 固定输入形状后，输出必须与符号 batch 图**逐位一致**
     ///
-    /// [`build_runnable`] 把第 0 维从符号 `batch` 钉成 1 换来 1.83× 提速，
-    /// 但 tract 的形状特化会改变算子选择与融合方式。若输出哪怕只差一个 ulp，
-    /// argmax 就可能在打平处翻面，**此前记录的全部网络闭环分静默作废**，
-    /// 而分数上只表现为「好像有点飘」。因此这里逐位比对，不设容差。
+    /// [`build_runnable`] 把第 0 维从符号 `batch` 钉成 1，而 tract 的形状特化会改变
+    /// 算子选择与融合方式；输出差一个 ulp 就可能让 argmax 在打平处翻面，因此逐位比对。
     ///
     /// 覆盖真实轨迹上的多个局面，而不是零输入：形状特化的差异往往只在特定
     /// 数值区间显形。
+    /// 真实模型集成测试，默认 `#[ignore]`：生成式 fixture 的输出恒为 0，逐位相等恒成立，
+    /// 没有区分度。显式运行：
+    /// `cargo test -p umasim --release --lib --features onnx -- --ignored fixed_shape`
+    ///
+    /// # 错误
+    ///
+    /// 显式运行而模型不存在时报错。
     #[test]
+    #[ignore = "需要真实模型 saved_models/dagger/ens_d3.onnx；显式 --ignored 运行"]
     fn test_fixed_shape_matches_symbolic() -> Result<()> {
         use tract_ndarray::Array2;
 
@@ -1199,10 +1107,11 @@ mod tests {
 
         let mut c = Checks::new();
         let path = std::path::Path::new("saved_models/dagger/ens_d3.onnx");
-        if !path.is_file() {
-            println!("跳过：本机没有 {}", path.display());
-            return c.finish();
-        }
+        ensure!(
+            path.is_file(),
+            "本测试需要真实模型 {}，但它不存在；本测试是显式运行的，不会静默跳过",
+            path.display()
+        );
 
         let symbolic = tract_onnx::onnx()
             .model_for_path(path)?

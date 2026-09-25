@@ -39,7 +39,8 @@ pub use ramen_mcts_trainer::{
 };
 #[cfg(feature = "onnx")]
 pub use ramen_nn_trainer::{
-    DecisionPrep, LabeledPrep, RamenNnTrainer, RamenNnValue, RamenValueNorm, SpecialSelectMode, infer_request_count
+    DecisionPrep, LabeledPrep, NnPick, NnVia, RamenNnTrainer, RamenNnValue, RamenValueNorm, SpecialSelectMode,
+    infer_request_count
 };
 pub use ramen_rollout_trainer::RamenRolloutTrainer;
 #[cfg(feature = "onnx")]

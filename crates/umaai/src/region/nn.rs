@@ -50,7 +50,7 @@ pub trait RegionDecisionObserver: Send + Sync {
     ) -> Result<()>;
 }
 
-/// 对照显示的装配（`ramen_region_policy` 的两种 `*_compare` 取值）
+/// 对照显示的装配（地区网络与既有装配两条推荐都算）
 ///
 /// 对照模式下同一个 `RegionSelect` 局面会被**算两次**：既有装配一次、网络一次，
 /// 屏幕上两条推荐都打印，玩家自己比。两个取值只差在「哪条算执行推荐」。

@@ -334,6 +334,36 @@ pub struct LocalRamenConfig {
     /// 原策略主动选择友人外出不受此门控，只受总次数配额约束。`4` 表示关闭。
     pub friend_rest_max_special: i32,
 
+    /// 实验：**第三年**替代休息路径允许的最高隐藏风味（现行口径 = 2）。
+    ///
+    /// 第三年夏合宿（turn 60 +2 / 61-63 各 +1）会把风味顶到 4，之后要等吃面把风味
+    /// 吃到 ≤2 才打开替代路径，晚回合窗口被闸门吃掉，第 5 次出行常走不完。
+    /// 调到 `3` 可提早约 1 次吃面的窗口；代价是该次出行 +2 中有 1 点溢出、且饥饿
+    /// 加成（库存 ≥3 时已为 0）不参与，出行只剩体力/干劲/属性/完链价值。
+    pub friend_y3_overflow_cap: i32,
+
+    /// 实验：第三年剩余配额走不完时，是否强制补足出行次数。
+    ///
+    /// `false` = 现行口径（只受 [`Self::friend_outing_cumulative_caps`] 硬上限约束，
+    /// 用不用得完完全交给动态估值）。`true` 时若"剩余出行次数 > 剩余可出行回合数"
+    /// 且本次出行不溢出（受 [`Self::friend_y3_overflow_cap`] 限制），则该回合直接
+    /// 判定出行胜利，保证 5 次走完。
+    pub friend_y3_urgency_force: bool,
+
+    /// 实验：第三年**必须走完的次数**（`0` = 按配额自动取 `caps[2] - caps[1]`）。
+    ///
+    /// 与 [`Self::friend_y3_urgency_force`] 配合：当"第三年还该走的次数 ≥ 剩余可出行
+    /// 回合数"时强制让出行赢，保证当年配额走完（如 `[0,2,5]` 第三年必须走 3 次）。
+    pub friend_y3_force_remaining: i32,
+
+    /// 友人出行是否**必须走完 5 次**（完成硬门限）。
+    ///
+    /// 由 `game_config.toml` / `default_config.toml` 的 `friend_complete_required`
+    /// 落到此开关（默认开）。开时隐藏风味闸门不再阻断出行（完成优先于风味利用），
+    /// 且"剩余出行次数 ≥ 剩余可出行回合数"时强制出行，保证 5 次走完；
+    /// 关时回到纯动态估值口径（可能主动跳过第 5 次）。
+    pub friend_complete_required: bool,
+
     /// RMJ/第三年5000目标在截止前的可达性紧迫度。
     pub deadline_urgency_scale: f32,
 
@@ -397,6 +427,10 @@ impl Default for LocalRamenConfig {
             friend_outing3_recovery_vital: 0,
             friend_outing_cumulative_caps: [5, 5, 5],
             friend_rest_max_special: 4,
+            friend_y3_overflow_cap: 2,
+            friend_y3_urgency_force: false,
+            friend_y3_force_remaining: 0,
+            friend_complete_required: false,
             deadline_urgency_scale: 0.0,
             dynamic_special_targets: false,
             hint_card_aware: 0.0
@@ -488,6 +522,12 @@ impl LocalRamenTrainer {
                 }
             } else if let Some(v) = token.strip_prefix("friendspecial") {
                 local.friend_rest_max_special = v.parse()?
+            } else if let Some(v) = token.strip_prefix("fov3") {
+                // 第三年替代休息路径的隐藏风味上限（fov33 → 3；fov34 → 4 基本关闸）
+                local.friend_y3_overflow_cap = v.parse()?
+            } else if token == "furg3" {
+                // 第三年配额紧迫度强制补足（配合 fcap 使用，如 fcap035-furg3）
+                local.friend_y3_urgency_force = true
             } else if let Some(v) = token.strip_prefix("deadline") {
                 local.deadline_urgency_scale = v.parse::<f32>()? / 100.0
             } else if token == "specialdynamic" {
@@ -729,7 +769,23 @@ impl LocalRamenTrainer {
     /// 价值，与休息无本质区别；友人次数有限（[0,2,5]），应留给"不溢出 + 低体力"
     /// 的完整价值回合，溢出回合退回休息。
     fn friend_hidden_not_overflow(&self, g: &RamenGame) -> bool {
-        g.ramen.special_feeling <= 2
+        // 完成硬门限开启时，出行完成优先于隐藏风味利用：风味溢出不再是阻断条件
+        // （否则晚回合窗口被闸门吃掉，5 次走不完）。
+        if self.config.friend_complete_required {
+            return true;
+        }
+        let cap = if g.current_year() >= 3 { self.config.friend_y3_overflow_cap } else { 2 };
+        g.ramen.special_feeling <= cap
+    }
+
+    /// 第三年还剩几个**可出行回合**（不含必赛、夏合宿、超级拉面回合）。
+    ///
+    /// 只用于第三年的配额紧迫度判断（[`Self::friend_y3_urgency_force`]）；
+    /// 统一按拉面剧本的固定回合结构（夏合宿 60-63、超级拉面 72-77）与本人赛程计算。
+    fn friend_outing_turns_left(&self, g: &RamenGame) -> i32 {
+        (g.turn()..=71)
+            .filter(|&t| !g.uma.is_race_turn(t) && !(60..64).contains(&t))
+            .count() as i32
     }
 
 
@@ -1197,6 +1253,89 @@ impl LocalRamenTrainer {
                 .max_by(|(li, l), (ri, r)| l.score.total_cmp(&r.score).then_with(|| ri.cmp(li)))
                 .map(|(i, _)| i)
                 .ok_or_else(|| anyhow::anyhow!("友人外出达到跨年总配额后没有其他合法动作"))?;
+        }
+        // 实验：第三年配额紧迫度强制补足（`friend_y3_urgency_force`）。
+        //
+        // 第三年可出行回合有限（必赛 + 夏合宿占掉大半），而动态估值只按"这一次值不值"
+        // 定价，没有任何"不补就作废"的紧迫项——实测第 5 次出行常因风味闸门/估值不敌
+        // 训练而走不完。这里在"剩余次数 > 剩余可出行回合数"时直接让出行赢，
+        // 且仍要求本次不溢出（受 `friend_y3_overflow_cap` 约束）。
+        if self.config.friend_y3_urgency_force
+            && g.current_year() >= 3
+            && a.get(c).is_some_and(|x| x.operation != Operation::FriendOuting)
+        {
+            let out_done = g.friend.out_used.iter().filter(|&&x| x).count() as i32;
+            let left = 5 - out_done;
+            // 第三年必须走完的次数：显式目标（`friend_y3_force_remaining`）优先，
+            // 否则用"第三年配额允许的剩余次数"= caps[2] - caps[1]。
+            let caps = self.config.friend_outing_cumulative_caps;
+            let y3_target = if self.config.friend_y3_force_remaining > 0 {
+                self.config.friend_y3_force_remaining
+            } else {
+                (caps[2].saturating_sub(caps[1])) as i32
+            };
+            let must_do = y3_target.min(left).max(0);
+            if must_do > 0 && must_do >= self.friend_outing_turns_left(g) && self.friend_hidden_not_overflow(g) {
+                if let Some(fi) = a.iter().position(|x| x.operation == Operation::FriendOuting) {
+                    if self.friend_outing_within_pacing(g) {
+                        c = fi;
+                    }
+                }
+            }
+        }
+        // 完成硬门限（`friend_complete_required`，默认开）：保证 5 次走完。
+        //
+        // 触发条件：剩余出行次数 ≥ 剩余可出行回合数 ⇒ 本回合不走就来不及了，直接
+        // 让出行赢（含第一年的下限检查：若剩余次数已超过后续全部可出行回合数，
+        // 则第一年也必须补）。不接受"来不及"的极端局面——该分支每回合都会重新
+        // 检查，故只要"剩余次数 ≤ 剩余可出行回合数"成立，就一定能在某个回合补足。
+        if self.config.friend_complete_required
+            && a.get(c).is_some_and(|x| x.operation != Operation::FriendOuting)
+            && self.friend_outing_within_pacing(g)
+        {
+            let out_done = g.friend.out_used.iter().filter(|&&x| x).count() as i32;
+            let left = 5 - out_done;
+            let turns_left = self.friend_outing_turns_left(g);
+            if left > 0 && left >= turns_left {
+                if let Some(fi) = a.iter().position(|x| x.operation == Operation::FriendOuting) {
+                    c = fi;
+                }
+            }
+        }
+        // 诊断：给最终中选的友人出行候选标注决策路径与次优对照。
+        //
+        // 用于区分两种性质完全不同的友人出行：
+        // - `恢复`（低体力守门内与休息二选一）：替换的是**休息**，体力缺口本来就要补，
+        //   机会成本最低；三年皆可承担。
+        // - `常规`（自由打分胜出）：替换的是**训练/比赛**，真实机会成本，
+        //   第三年自由回合少时最伤。
+        // `次优=` 给出不出行时本会选的动作及其分数，`Δ` 为友人分减次优分（负数表示
+        // 该回合友人是被守门路径选中、并非打分胜出）。纯日志，不参与打分。
+        if self.policy.collect_details && a.get(c).is_some_and(|x| x.operation == Operation::FriendOuting) {
+            let path = if recovery_guard { "恢复" } else { "常规" };
+            let best_alt = out
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| *i != c)
+                .max_by(|(li, l), (ri, r)| l.score.total_cmp(&r.score).then_with(|| ri.cmp(li)));
+            if let Some((ai, alt)) = best_alt {
+                let tag = match a[ai].operation {
+                    Operation::Train(t) => format!("{:?}训练", t),
+                    Operation::Race => "比赛".to_string(),
+                    Operation::Rest => "休息".to_string(),
+                    Operation::NormalOuting => "普通出行".to_string(),
+                    Operation::Clinic => "治病".to_string(),
+                    _ => "其他".to_string()
+                };
+                out[c].reason = format!(
+                    "{} | 路径={} 次优={}({:.0}) Δ={:+.0}",
+                    out[c].reason,
+                    path,
+                    tag,
+                    alt.score,
+                    out[c].score - alt.score
+                );
+            }
         }
         Ok(c)
     }
@@ -1852,6 +1991,15 @@ impl RecommendedRamenTrainer {
     /// - `hintlvN`：逐卡 Hint 精确估值倍率 = N/100，0 关闭（实验；见 [`LocalRamenConfig::hint_card_aware`]）。
     ///
     /// 未识别 token 直接报错，防止实验名拼错静默跑成 base。
+    /// 设置"友人出行必须走完 5 次"的完成硬门限（对应 `game_config.toml` 的
+    /// `friend_complete_required`）。返回 `self` 便于链式构造。
+    pub fn with_friend_complete_required(mut self, required: bool) -> Self {
+        for year in self.years.iter_mut() {
+            year.config.friend_complete_required = required;
+        }
+        self
+    }
+
     pub fn with_tokens(tokens: &str) -> Result<Self> {
         let mut trainer = Self::new();
         for token in tokens.split('-') {
@@ -1961,6 +2109,50 @@ impl RecommendedRamenTrainer {
                 for year in trainer.years.iter_mut() {
                     year.config.reserve_gain_mode = mode;
                 }
+            } else if let Some(v) = token.strip_prefix("fcap") {
+                // 友人出行累计配额（三位数按年编码，如 fcap135 → [1, 3, 5]）
+                anyhow::ensure!(v.len() == 3, "fcap 必须是三个数字，如 135: {v}");
+                let mut caps = [0usize; 3];
+                for (i, ch) in v.chars().enumerate() {
+                    caps[i] = ch
+                        .to_digit(10)
+                        .ok_or_else(|| anyhow::anyhow!("fcap 含非数字字符: {v}"))?
+                        as usize;
+                }
+                anyhow::ensure!(
+                    caps.windows(2).all(|w| w[0] <= w[1]) && caps[2] <= 5,
+                    "fcap 必须单调且不超过5: {v}"
+                );
+                for year in trainer.years.iter_mut() {
+                    year.config.friend_outing_cumulative_caps = caps;
+                }
+            } else if let Some(v) = token.strip_prefix("fov3") {
+                // 第三年替代休息路径的隐藏风味上限（fov33 → 3；fov34 → 4 基本关闸）
+                let cap: i32 = v.parse()?;
+                for year in trainer.years.iter_mut() {
+                    year.config.friend_y3_overflow_cap = cap;
+                }
+            } else if token == "freq" {
+                // 友人完成硬门限（默认由 config 决定；此 token 显式打开）
+                for year in trainer.years.iter_mut() {
+                    year.config.friend_complete_required = true;
+                }
+            } else if token == "freqoff" {
+                // 显式关闭完成硬门限（对照实验）
+                for year in trainer.years.iter_mut() {
+                    year.config.friend_complete_required = false;
+                }
+            } else if let Some(v) = token.strip_prefix("frem3") {
+                // 第三年必须走完的次数（frem33 → 必须走 3 次；配合 furg3 使用）
+                let n: i32 = v.parse()?;
+                for year in trainer.years.iter_mut() {
+                    year.config.friend_y3_force_remaining = n;
+                }
+            } else if token == "furg3" {
+                // 第三年配额紧迫度强制补足（配合 fcap/frem3 使用，如 fcap025-furg3）
+                for year in trainer.years.iter_mut() {
+                    year.config.friend_y3_urgency_force = true;
+                }
             } else if let Some(v) = token.strip_prefix("hintlv") {
                 let weight = v.parse::<f32>()? / 100.0;
                 anyhow::ensure!(weight.is_finite() && (0.0..=10.0).contains(&weight), "hintlv 必须在 0..=1000");
@@ -2038,7 +2230,11 @@ impl RecommendedRamenTrainer {
             local.y3_recovery_horizon = true;
             local.friend_outing_replaces_rest = true;
             local.friend_outing3_recovery_vital = 0;
-            local.friend_outing_cumulative_caps = [0, 2, 5];
+            // 友人出行跨年配额定档 [0,3,5]（2026-09-21 用户拍板）：第 1 年不启用
+            // （第一年出行实测在葛城王牌上硬亏 -628，t=-8.6）、第 2 年放宽到 3
+            // 以消化"提前的休息替代"、第 3 年补满 5。实测：第 2 年配额 2→3 两马娘
+            // 均在噪声内（+44 / -51），用满率 77%→80%；第 1 年开配额为纯亏。
+            local.friend_outing_cumulative_caps = [0, 3, 5];
             local.friend_rest_max_special = 4;
             local.deadline_urgency_scale = 0.0;
             local.dynamic_special_targets = true;
@@ -2466,16 +2662,16 @@ mod tests {
         c.finish()
     }
 
-    /// 正式 preset 必须使用 v44 同种子回归胜出的友人跨年节奏。
+    /// 正式 preset 必须使用定档的友人跨年节奏 [0,3,5]（2026-09-21 拍板替换旧 [0,2,5]）。
     #[test]
     #[allow(clippy::panic)]
-    fn recommended_ramen_uses_025_friend_pacing() {
+    fn recommended_ramen_uses_035_friend_pacing() {
         let trainer = RecommendedRamenTrainer::new();
         let actual = trainer
             .years
             .each_ref()
             .map(|year| year.config.friend_outing_cumulative_caps);
-        let expected = [[0, 2, 5]; 3];
+        let expected = [[0, 3, 5]; 3];
         println!("正式友人累计出门配额: {actual:?}");
         if actual != expected {
             panic!("正式 preset 应使用 {expected:?}，实际为 {actual:?}");

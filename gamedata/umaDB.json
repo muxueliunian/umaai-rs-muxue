@@ -9795,6 +9795,41 @@
     ],
     "star": 5
   },
+  "114401": {
+    "bonusData": [],
+    "fiveStatusBonus": [
+      0,
+      0,
+      10,
+      10,
+      10
+    ],
+    "fiveStatusInitial": [
+      114,
+      108,
+      108,
+      105,
+      115
+    ],
+    "freeRaces": [],
+    "gameId": 114401,
+    "name": "[Éclat de Roseraie]玫瑰帝国",
+    "preferRaces": [],
+    "preferReds": [],
+    "races": [
+      11,
+      22,
+      30,
+      33,
+      43,
+      45,
+      59,
+      67,
+      69,
+      71
+    ],
+    "star": 5
+  },
   "114501": {
     "bonusData": [],
     "fiveStatusBonus": [

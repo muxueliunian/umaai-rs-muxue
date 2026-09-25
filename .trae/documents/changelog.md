@@ -2,6 +2,41 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-09-24
+- **新增拉面杯神经网络可选项**：`ramen_trainer_policy` 可选 `mcts`（默认，行为不变）/ `mcts_nn_hint`（执行不变，每步另显示网络的推荐）/ `nn`（整局动作决策交给网络、不搜索，以分数换速度）；umaai 新增 `onnx` feature，未开 feature 或缺模型时启动报错
+- **网络模型加载加固**：加载时校验 ONNX 图输出契约，并按固定 batch 编译（更快，输出逐位不变）
+- **无搜索评分决策的来源标注**：网络模式下的决策照实显示为「神经网络」或「自选比赛守门」而非「手写逻辑」；luck 挂载改为合并决策自带的附加信息而不是覆盖
+- **测试**：新增生成式 ONNX 测试模型，网络装配与客户端输出流程测试不再依赖未入库的权重；依赖真实权重的测试改为默认忽略、显式运行缺模型即报错
+
+## 2026-09-23
+- **persona 约束微调（用户）**：执行偏离一律只作校验说明、不数落部下（不再限于 AIRedirector 自动局）
+- **执行推断训练阈值下修 13→12**：新局数据（game1444）验证发现开局低等级训练的属性增量可低于文档实测下限（turn 0 智训练 +12 被误判未知），下修后该局一致率回升且原校准局不受影响；另将「继承回合前一回合的执行窗口受继承落地污染」记入口径速查的已知限制
+- **新增单局复盘分析引擎 `umaai_review`（crate + bin）**：对局包解包与角色识别（两种布局通吃）、快照只反序列化取字段、决策 CSV 按表头解析与链推断、gamedata 多级解析与降级，产出 digest.json（紧凑强类型 schema）与 report.html（minijinja 外置模板 + 自绘 SVG 三图三表，零 JS）
+- **实际执行动作推断**：AI 建议与实际执行逐回合对照，分类口径经实测校准（必赛回合兜底判比赛、主增量阈值判训练以覆盖智训练不耗体力、体力回升判休息），game6234 一致率与文档校准吻合，偏离全部为真实偏离
+- **检查项引擎**：伪波动标记（年界 / 继承 / RMJ 自动检测 / 开局第 1 年地区选择；turn 72 双属性既标记也计入超拉统计）、超级拉面期盈亏判定、坏手法已验证三项与训练失败候选清单；运气分读法口径写入 digest（已知 bug 与固定波动区）
+- **继承质量分析**：窗口取前一回合末至继承回合首并剥离前一回合行动贡献，game6234 两次继承实测与文档逐位一致
+- **分身彩圈观测口径修正**：彩圈判定改为分身新增落位（剔除本体占位假象）、A/B 两类分开统计、B 类只统计训练卡，有效彩圈按随机（好运气）/ 规则（好策略）二分来源
+- **新增 Trae skill `umaai_review`**：六问通俗化叙事框架、马娘玩家术语优先、归因口径（输赛掉干劲与超拉连亏归运气）、语气基调（LG 档鼓励、坏局减负、继承根因点到为止）、篇幅纪律；附口径速查与可选秋川理事长人设（删除即回退默认口吻）
+- **文档同步**：replay_review.md 更名与口径对齐实现现状（CLI、彩圈、伪波动、报告结构、进度）；project_context 补 crate 与 skill 结构
+- **决策理由显示新增「候选高于首选」颜色档（用户）**：候选均值高于中选策略时红底亮黄高亮提示估值不一致，首选行样式同步调整，附 colored 输出临时验证脚本；text_data_dict 数据更新（用户）
+- **执行推断口径升级（用户）**：训练判定改分年分段阈值（第 1 年取训练基础值表最低主维，第 2 年起固定 12）并要求非大回复，休息判定体力阈值提至 +25，继承窗口锚点标注「继承混合」不参与一致率；replay_review.md 口径段同步
+- **A 类彩圈吃到判定**：分身明细新增 used 字段——彩圈新增回合的当回合训练命中彩圈位即吃到收益；训练匹配改前缀匹配以兼容「继承混合」后缀（此前漏判）
+- **五维显示值换算**：timeline 全序列新增显示值字段（真实值超 1200 的部分减半折算），报告概览卡改用显示值口径
+- **报告模板瘦身 + 叙述回填机制**：移除决策明细表与检查项表、口径说明简化为速览；模板留 4 个叙述占位标记，由 skill 回填总体 / 运气走势 / 检查项与偏离 / 总结四块（继承与分身叙述写在数据表后），卡片改为可折叠默认展开
+- **skill 叙事纪律迭代（多轮用户反馈）**：全胜战绩不提、安抚性元话语不出口、玩家已知口径不解释、自选比赛两类分开、干劲恢复写具体动作、超拉彩圈只报汇总；结构化数据表格化、口径备注分条、运气数字带符号、digest 读取踩坑入档；persona 精简并同步元话语禁令
+- **报告背景图装饰（用户素材）**：yayoi.png 入 skill reference；skill 回填报告时铺 20% 透明度背景、前景卡片调 70% 透明度
+- **测试修复**：pack 测试临时目录并行互删竞争改为按测试命名隔离
+
+## 2026-09-21
+- **修复协议层 `failureRateBias` 语义反问题**：解析侧 `failureRateBias < 0 → good_trainer=true`（曾与上游相反，buff 被读成"不擅长训练"，MCTS 估值时 `calc_training_failure_rate` 加 +2 失败率人为偏高）、导出侧 `good_trainer → -2` 同步反向——与 `traits.rs:calc_training_failure_rate` 内部 `good_trainer → bias=-2` 同源；game421 turn 25+ 反复推「不吃面+休息」（vital 88~108 全休息）的根因，实测 turn 61 `rest_pair_probe` 不吃面领先 +351 → 落后 −449，turn 62 +645 → 落后 −223。补回归 `test_failure_rate_bias_parse`（三组 frb/-2/+2/0 钉解析方向）
+- **新增在线单局决策日志的高体力休息审计脚本**：`scripts/analyze_rest_picks_online.py`（与 `scripts/analyze_rest_picks.py` 互补：前者跑批决策日志、本工具吃 `logs/game{id}/decisions.csv` + 回合 thisTurn.json 还原 vital），决策时体力从快照反查；与 `rest_pair_probe` 共同补齐「高体力休息」类排查链路
+- **新增 `rest_pair_probe` 单回合诊断 bin**：对单回合 thisTurn.json 跑两遍 FlatSearch——A) 完整合并候选（含「不吃面」），B) 仅吃面候选（屏蔽不吃面）——CRN 共享种子 4096 rollout，输出两组的每候选 mean / n / 选中，用于隔离"不吃面 vs 吃面"在终局估值上的真实差距（game421 turn 61 修复前 +351、修复后 −449）
+- **合宿/满体力「一选休息」回归复测（未复现）**：spd2_sta0 / speed_wisdom ×10 局（search_n=4096 生产口径、同种子）：合宿期 MCTS 无整局全休息、高体力（>休息目标线）休息仅约 0.35% 决策点、手写对照零次——9-17 合宿诀窍修复后未复现；新增 `scripts/analyze_rest_picks.py` 审计入口（合宿回合/体力分桶休息率，与规则层判定同口径）
+- **决策日志/跑批观测增强**：决策日志追加「决策时体力」列（开发格式列尾演进，手动录制路径占位）；bench_base 新增 `--builds` 过滤（与 `--deck` 互斥）；bench mcts 档补接友人完成硬门限（与在线生产同口径，原漏接）
+- **友人出行跨年配额定档 `[0,3,5]` + 新增「5 次必须走完」配置项**：preset 由 `[0,2,5]` 改为 `[0,3,5]`（第 1 年不启用、第 2 年放宽到 3 以消化提前的休息替代、第 3 年补满）；新增 `friend_complete_required`（`game_config.toml` / `gamedata/default_config.toml`，默认开）＝完成硬门限，开启时隐藏风味闸门不再阻断出行、剩余次数达到剩余可出行回合数即强制出行，保证 5 次走完；该开关经 `main.rs` 同时作用于 MCTS 的 fallback 手写策略与搜索 rollout 基策，`bench_base` 同口径读取。实测（700 局/单元同种子配对）：走完率 77%/92%→99.6%/100%，相对旧 `[0,2,5]` 配对差 −114/−86（不显著），硬门限项自身净代价 −159/−35
+- **新增友人出行实验 token 与观测列**：token `fcap`（跨年配额）/`fov3`（第三年风味闸门）/`furg3`+`frem3`（第三年强制补足）/`freq`·`freqoff`（完成硬门限）；决策日志给友人出行加「决策路径（恢复/常规）+ 次优动作与分数差」标注，用于区分"替换休息"与"替换训练"；结果 CSV 新增逐年友人出行次数、用满标记、隐藏风味溢出浪费等观测列
+- **重抓 preset 变更影响的整局快照**：`test_yearly_observability`（score/五维）、`test_ramen_three_stage_action_unchanged`（rollout 均值表）、MCTS gate-off 整局快照与 SpecialSelect 调用数、两处超级拉面选项断言；跨年配额单测改为钉 `[0,3,5]`
+
 ## 2026-09-20
 - **采样空间支持「必带卡」并新增四个第三代空间**：空间定义可指定每副卡组必须包含的支援卡（保序过滤，既有空间不受影响）；新增目白善信 + 原卡池、原八马娘 + 必带待兼诗歌剧、目白善信 + 必带待兼诗歌剧、实战配置原样四个空间，规模与独立枚举一致；采集与导出清单仅在有必带卡时记录该字段，旧目录比对逐字段不变
 - **采集清单生成器支持按构成配额与跨空间排除**：`prepare_gen2_formal.py` 新增 `--shape-layer-targets`（每种构成分别给四层配额），配方可声明「由另一空间定额采集」的组合，使其既不被抽样也不被留出；旧版脚本对拍既有两份清单逐字节零差异
@@ -12,6 +47,12 @@
 - **新增采样空间 `gen2_2s1e2w_v1`**：马娘与卡池同 gen2_v1、只含 2速1耐2智1友 一种构成（420 个组合），补上当前世代数据完全缺席的双智构成；单独成版本以免改写 gen2_v1 既有数据的计划序号语义；新增规模与逐计划合法性单测
 - **采集清单生成器支持按配方读空间**：`prepare_gen2_formal.py` 新增 `--recipe`，计划数、构成数与留出规则取自配方（新增「全空间每十取一」留出规则）；用 R7 原参数重生成与既有清单逐字节零差异
 - **2速1耐2智 补采配方冻结**：`scripts/collect/formal1024_2s1e2w_0919/`，1 万有效根、口径同 R6，号段登记在 `nn_model_registry` 第 9 节
+- **MCTS vs 手写整局配对基准（固化评估入口）**：新增 `ramen_mcts_pair_bench` bin——同 (build, 种子, 局号) 下 MCTS 训练员与正式推荐手写策略各跑整局（共享规则主种子强行配对，两局 `rule_seed` 不一致即报错），配对差 Δ = 评分_mcts − 评分_handwritten 逐局落 CSV + 按 build/全局的均值、SE、95% CI、胜负汇总；MCTS 参数默认**取生产实际值**（game_config `[mcts]` + `ramen_search_stages`，与在线构造同款），`--search-n` 等覆盖仅限对照实验；bin 内冒烟测试（配对守卫 / 同参两次逐位可复现 / CSV 结构），project_context / tests_overview 同步
+- **experiments/validated_policy 迁至 scripts/validated_policy**：`scripts/` 是官方脚本区，挪过来与 `plot_*.py`、`bench_commit_compare.py` 同级；内容不变
+- **生产训练员门控含 region**：`gamedata/default_config.toml` 的 `ramen_search_stages` 由 `train,ramen` 改为 `train,ramen,region`——第 1 年地区（turn 2）和第 2/3 年地区（turn 23/47）纳入搜索，与 online 路径同款
+- **`bench_commit_compare.py` 加 `--force-bench / --bench-runs`**：两版都有 perf_probe 时也可强制走 bench 模式（手写整局遍历全部 player_builds、同 seed 配对、同时输出耗时与评分配对），bench 默认局数 100；补充 example 命令
+- **AGENTS.md 工作纪律微调**：精简对话规则段、删除独立的「需求澄清」条目（融入「项目特定上下文」）；明确 commit 前必读 git log + project_context + changelog 的项目启动纪律；文档清单与更新纪律同步精简
+- **region 决策点 top-K 候选 dump 工具**：新增 `ramen_region_topk` bin——手写策略推进到 region 决策点（turn 2/23/47）后跑 FlatSearch，输出 top-K 候选的 (mean, stdev, count, weighted_mean, was_chosen) CSV + top1-top2 mean gap / stdev 中位数 / mean vs radical 排序差异汇总；MCTS 参数默认取生产实际值，bin 内冒烟测试（推进到 RegionSelect + dump 结构）——用途：研究 region 门控纳入搜索后 top 选项的均值差与方差分布；首轮扫测 3 turn × 7 build × 3 seed = 63 region 点：top1-top2 Δmean 中位数 ≤ 0.6%，top1 vs top2 stdev 差 ±5% 且正负不定（**top-K 候选方差无系统差异**），radical 加权排序 vs mean 排序在 21 个 (turn, build) 组合中有 5 个出现内部 swap（多在第 3 年 power_wisdom/wisdom/speed_wisdom 等 build）
 
 ## 2026-09-18
 - **采集自检用例修复**：`test_formal_collect.py` 仍按旧的两参数签名调用 `check_plan`，在驱动改成「命令行声明意图 + manifest 提供事实」之后一直报错；补上该轮的 2048 / 22800 声明，并新增一条「命令行与 manifest 不符必须拒绝」的守门断言
@@ -25,6 +66,8 @@
 - **受影响的冻结快照按本地评分轴重抓**：整局门控关闭用例的评分、五维与技能点，以及合并路径的特殊选择调用数；合并搜索路径按面聚合后已能暴露决策摘要，相应探针用例的期望随之翻转。
 - **拉面杯第十二轮组合档进 preset（默认值）**：把放宽搜索界后经两个独立随机卡组池验收的组合设为 `RecommendedRamenTrainer::new()` 默认值（近上限连续定价窗口、已满位三类 PT 定价、状态缺口/溢出强度、预留上限与口径、超级拉面自适应范围、外出基准分、逐卡 Hint 倍率），随机组相对上一版 preset +130.4/+147.6、相对更早的 base 累计约 +517/+552，固定卡组不显著；同步重抓受影响的 6 处冻结快照（其中 2 处进入 preset 前就已过期）、把预留口径单测改为显式钉 token 以免随 preset 漂移，并按新默认值刷新 final-check 期望表
 - **局末自动打包本局游戏记录**：umaai 末回合第 2 份快照（拉面 `turn77_2`）处理完写 meta + SVG 后，把 `logs/game{id}/` 打成 `logs/game{id}.zip`（包内条目相对原目录，去掉 `game{id}/` 外壳）并清理原目录——zip crate 依赖进 workspace；切局/退出兜底（`switch` / `process_exit`）不打包，中途停止局保留原目录方便人工排查；终端 stderr 绿色绝对路径（dunce 去 `\\?\`）+ `info!` 日志一份（json 模式友好）
+- **跨 commit CPU 耗时监测工具链**：新增 `perf_probe` bin（固定 Train 根整根搜索耗时 + 手写整局耗时，输出含根局面真实评分 `root_score` 记录两版评分区别）与 `scripts/bench_commit_compare.py`（worktree 检出两版构建、逐轮交替配对、probe/bench 双模式自动选择、gamedata 与搜索工作量一致性守卫、逐步 run.log）；`project_context.md` 新增「性能监测」节记录用法
+- **文档整理（重构完成后）**：完成重构的方案/草案文档移入 `.trae/documents/archive/`（拉面重构开发计划 / 上游三层架构建议 / main.rs 拆分 / RNG 重构 v2 / 在线对接计划 / AIRedirector 集成 / adapter_spec / handwritten_policy）；`project_context.md` 按 umasim/umaai 现状全面重写（模块结构、三流 RNG、搜索层、trainer 家族、config 五子结构、通道层细节）；AGENTS.md 相关文档链接同步为 archive 路径
 
 ## 2026-09-17
 - **拉面杯逐卡 Hint 精确估值（可选）**：把固定 Hint 价值换成按卡面 Hint 等级与剩余可得的逐人头精确折算，默认关闭；一批全新 160 副随机卡组独立验收随机组 +174.0 [+153.0,+195.0]、预设 +77.7、固定卡组 −121.0 未证实，定位与 supermode3 同为“随机卡组可选”，关闭路径逐位不变。

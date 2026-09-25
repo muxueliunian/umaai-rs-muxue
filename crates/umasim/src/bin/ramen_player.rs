@@ -198,6 +198,8 @@ fn main() -> Result<()> {
         yearly_eat_count: game.ramen.yearly_eat_count,
         yearly_selected_regions: game.ramen.yearly_selected_regions,
         yearly_friend_turns: game.ramen.yearly_friend_turns,
+        yearly_friend_outings: game.ramen.yearly_friend_outings,
+        yearly_friend_flavor_waste: game.ramen.yearly_friend_flavor_waste,
         yearly_gauge_gain: game.ramen.yearly_gauge_gain,
         yearly_gauge_overflow: game.ramen.yearly_gauge_overflow,
         yearly_ramen_offers: game.ramen.yearly_ramen_offers,
@@ -260,7 +262,9 @@ fn main() -> Result<()> {
                 action_index: d.selected,
                 action_desc: format!("{}{}", d.selected_desc, detail_tail),
                 elapsed_us: 0,
-                score_breakdown: Some(candidates_desc)
+                // 手动录制路径无决策时状态快照：体力列填 0 占位（bench 决策日志才真实记录）
+                score_breakdown: Some(candidates_desc),
+                vital: 0
             });
         }
         let log_path = out_dir_path.join(format!(

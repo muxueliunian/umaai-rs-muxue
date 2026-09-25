@@ -141,9 +141,13 @@
 
 ## 4.2 客户端地区接入（2026-09-14）
 
-`umaai` 主程序已支持**可选**的网络地区选择（`ramen_region_policy = "nn"`，默认 `handwritten`）。
+`umaai` 主程序曾支持**可选**的网络地区选择（`ramen_region_policy = "nn"`，默认 `handwritten`）。
 用法、配置示例、构建命令、冲突诊断表、实验摘要与**发布待办**见
 [ramen_region_nn_client.md](ramen_region_nn_client.md)。
+
+❗2026-09-25 起该配置项已移除，客户端网络决策改走上游的 `ramen_trainer_policy`
+（`mcts` / `mcts_nn_hint` / `nn`）与 `ramen_nn_model_path`；只接管地区的决策器保留在
+研究模块 `umaai::region`，供 `ramen_client_game_bench` 使用。
 
 摘要：`search_n=1024` 的 60 对随机面板上，`ens_G2mix_g123` 接管三次地区 −手写地区
 = **+580.2，95% CI [+31.8, +1128.5]**，胜负 37/23，B 臂推理合计 180 = 60 局 × 3 次
@@ -151,7 +155,7 @@
 **不能**说 8192 已验证、全面优于手写或稳定值 +580。
 
 ❗**模型不随仓库发布**：`saved_models/` 在 `.gitignore` 内，也没有 LFS / release
-渠道。当前只支持用户自填 `ramen_region_model_path` 指向本机模型（需同名 `.onnx.json`
+渠道。当前只支持用户自填 `ramen_nn_model_path`（原 `ramen_region_model_path`）指向本机模型（需同名 `.onnx.json`
 旁车）。分发渠道待定，列为发布待办。
 
 ## 5. 保存缺口

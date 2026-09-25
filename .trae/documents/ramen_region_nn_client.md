@@ -2,6 +2,11 @@
 
 > 适用：`umaai` 主程序（在线模式）与 `ramen_client_game_bench` 实验入口
 > 状态：默认关闭，opt-in；1024 档先导闭环有正向证据（见 §6）
+>
+> ❗**2026-09-25 起客户端配置已变更**：主程序不再提供 `ramen_region_policy` /
+> `ramen_region_model_path`，网络决策统一走上游的 `ramen_trainer_policy`
+> （`mcts` / `mcts_nn_hint` / `nn`）与 `ramen_nn_model_path`，见 project_context。
+> 本文关于主程序配置的段落仅作历史记录；`ramen_client_game_bench` 的部分仍有效。
 
 ## 1. 这是什么，边界在哪
 
