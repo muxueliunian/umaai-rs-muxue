@@ -5,16 +5,17 @@
 //! - 均匀分配：每个动作平均分配搜索次数（并行化）
 //! - UCB 分配：根据 UCB 公式动态分配搜索资源（C++ UmaAi 风格）
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Result, anyhow, bail, ensure};
 use log::{debug, warn};
 use rand::{SeedableRng, rngs::StdRng};
 use rayon::prelude::*;
 
 use super::{
-    RamenSearchOutput,
+    RamenLeafSearchOutput, RamenSearchOutput,
     config::{SearchConfig, TOTAL_TURN},
+    ramen_leaf::{LeafVerdict, RamenLeafFact, RamenLeafRecord, RamenLeafValuer, leaf_verdict},
     ramen_terminal::RamenTerminal,
-    result::{ActionResult, OrderedRollouts, SearchOutput},
+    result::{ActionResult, OrderedRollouts, SearchOutput, SelectObjective},
     searchable::{FlatSearchGame, SearchScore},
     seeds::RolloutSeeds,
     terminal::{NoTerminal, RolloutOutcome, TerminalRecord}
@@ -30,6 +31,12 @@ use crate::{
     gamedata::EventChoice,
     neural::{Evaluator, HandwrittenEvaluator, ValueOutput}
 };
+
+/// 单条截断 rollout 的推进步数上限
+///
+/// 只是兜底：正常一局最多约 78 回合 × 每回合十来个阶段。定这个数是为了让
+/// 「阶段机不前进」变成一条报错，而不是把整个搜索挂死。
+const MAX_LEAF_STEPS: usize = 100_000;
 
 /// 单个候选在一次搜索中的全部累加结果
 ///
@@ -94,7 +101,12 @@ impl<D> CandidateAccum<D> {
         T: TerminalRecord<Stats = D>
     {
         self.score.add(outcome.score.score);
-        self.score_pt.add(outcome.score.score_pt);
+        // PT 累加器只收**自报有 PT 分量**的样本（见 [`TerminalRecord::has_pt_axis`]）。
+        // 截断叶预测没有 PT 分量：塞占位值会让 `best_action_pt_idx()` 返回一个看起来
+        // 合理的错答案，不塞则样本数对不上，`best_idx_by(PtRank)` 会当场报错。
+        if outcome.terminal.has_pt_axis() {
+            self.score_pt.add(outcome.score.score_pt);
+        }
         outcome.terminal.accumulate_into(&mut self.terminal);
         // 单次判空即完成「补齐槽位 + 写入」：开关关闭时（生产路径）这里只剩一次
         // 恒假的 Option 判别，与合并前同构；写在两个方法里会白白多一次分支
@@ -161,7 +173,14 @@ where
     /// **当前未接线**：本字段只被写入、从未被搜索逻辑读取。
     /// 原设计意图是批量推理（NN 评估器批处理），待 rollout 评估器接入后再消费。
     /// 配置链（`MctsConfig::rollout_batch_size` → `with_rollout_batch_size`）同样是空转。
-    rollout_batch_size: usize
+    rollout_batch_size: usize,
+
+    /// UCB **利用项**的口径（默认上游生产口径）
+    ///
+    /// 只影响 [`Self::select_ucb_action`] 里 `value` 那一项；最终选优在
+    /// [`SearchOutput::best_idx_by`]，由调用方按同一个值取。两处必须同口径，
+    /// 否则会出现「按 A 分配预算、按 B 选结果」的错位。
+    objective: SelectObjective
 }
 
 impl<G: FlatSearchGame> FlatSearch<G>
@@ -175,13 +194,37 @@ where
             leaf_evaluator: LeafEvaluator::Handwritten,
             rollout_trainer: G::default_rollout_trainer(),
             config,
-            rollout_batch_size: 1
+            rollout_batch_size: 1,
+            objective: SelectObjective::PtRank
         }
     }
 
     /// 创建默认搜索器
     pub fn default_search() -> Self {
         Self::new(SearchConfig::default())
+    }
+
+    /// 设置 UCB 利用项与最终选优的口径
+    ///
+    /// `pub(crate)`：调用方应当走 `RamenMctsTrainer::with_objective`，它会**同时**
+    /// 设置搜索侧与选优侧。单独改一边正是这里要防的错位。
+    pub(crate) fn with_objective(mut self, objective: SelectObjective) -> Self {
+        self.objective = objective;
+        self
+    }
+
+    /// 本搜索器生效的选优口径
+    pub fn objective(&self) -> SelectObjective {
+        self.objective
+    }
+
+    /// 覆盖搜索配置（已装配的 rollout 基策、估值器与口径原样保留）
+    ///
+    /// `pub(crate)`：对外应当在 `FlatSearch::new` 时给全配置。这里只服务
+    /// `RamenMctsTrainer::with_leaf_horizon` 这类「装配好之后再改一个字段」的场景。
+    pub(crate) fn with_config(mut self, config: SearchConfig) -> Self {
+        self.config = config;
+        self
     }
 
     /// 设置 leaf eval 为神经网络（用于 max_depth>0 截断估值）
@@ -623,7 +666,13 @@ where
                 return i;
             }
 
-            let value = acc.score.weighted_mean(radical_factor);
+            // ❗上游口径（`PtRank`）下利用项读的是**结算分**轴的 rank 加权，而最终选优
+            // 走 PT 轴——两者本就不同轴。这是既有差异，此处**原样保留**，不顺手改齐：
+            // 改了所有历史对照都不可比。实验口径（`ScoreMean`）两处都用结算分普通均值。
+            let value = match self.objective {
+                SelectObjective::PtRank => acc.score.weighted_mean(radical_factor),
+                SelectObjective::ScoreMean => acc.score.mean()
+            };
             // UCB 公式：value 越高或搜索次数越少，search_value 越高
             let delta = cpuct * expected_stdev * sqrt_total / n;
             let search_value = value + delta;
@@ -873,9 +922,119 @@ impl FlatSearch<RamenGame> {
     pub fn search(
         &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng
     ) -> Result<RamenSearchOutput> {
+        // 本入口只跑到真实终局。配了截断深度却走这里，是装配写错了——静默忽略会让
+        // 「以为在跑 H8」的实验其实跑的是 full，而且无从察觉。
+        ensure!(
+            self.config.max_depth == 0,
+            "本入口只跑到真实终局，但 max_depth={}；截断请走 FlatSearch::<RamenGame>::search_leaf",
+            self.config.max_depth
+        );
         self.search_with_terminal(game, actions, rng, |game, action, seed| {
             self.simulate_common_extract(game, action, seed, seed, RamenTerminal::from_game)
         })
+    }
+
+    /// 拉面**截断**根节点搜索：手写续跑到安全叶边界后取网络估值
+    ///
+    /// 与 [`Self::search`] 共用同一个搜索内核（[`Self::search_with_terminal`]）——候选
+    /// 分配、CRN 种子、失败计数、并行调度一律不另起一套。唯一的区别是「一次 rollout
+    /// 怎么跑」，见 [`Self::simulate_leaf`]。
+    ///
+    /// 截断深度取 [`SearchConfig::max_depth`]（= H，跨越的**回合边界**数），与温泉那边
+    /// 该字段的含义逐字相同，不新增平行旋钮。
+    ///
+    /// # 错误
+    ///
+    /// `max_depth == 0`（没配截断）时报错：不要拿本入口跑完整续跑，那会让输出类型与
+    /// 统计口径跟生产路径不一致却看不出来。估值器由调用方显式传入，**没有默认值**
+    /// ——「解除了能力开关却没接估值器」正是这里堵死的情形。
+    pub fn search_leaf(
+        &self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng, valuer: &dyn RamenLeafValuer
+    ) -> Result<RamenLeafSearchOutput> {
+        ensure!(
+            self.config.max_depth > 0,
+            "search_leaf 需要 max_depth > 0（H = 跨越的回合边界数）；要跑完整续跑请走 search"
+        );
+        let horizon = i32::try_from(self.config.max_depth)
+            .map_err(|_| anyhow!("max_depth={} 超出 i32 范围", self.config.max_depth))?;
+        // 根回合取自**执行根动作之前**的局面：根动作本身可能推进阶段
+        let target_turn = game.turn().saturating_add(horizon);
+        debug!(
+            "[回合 {}] 截断搜索: H={horizon} 目标回合={target_turn} 估值器={}",
+            game.turn(),
+            valuer.label()
+        );
+        self.search_with_terminal(game, actions, rng, |game, action, seed| {
+            self.simulate_leaf(game, action, seed, target_turn, valuer)
+        })
+    }
+
+    /// 单次截断 rollout：执行根动作后手写续跑，到安全叶边界估值或跑到真实终局
+    ///
+    /// 推进走的是**真实规则路径**（`next` / `run_stage` / `on_simulation_end`），与
+    /// [`Self::simulate_common_extract`] 逐字同源：合并动作、待落地效果、事件与结算
+    /// 都由规则层自己处理，这里不复制第二套状态机。
+    ///
+    /// 叶判定夹在 `next()` 与 `run_stage()` 之间——此刻阶段已就位、动作尚未执行，正是
+    /// 「决策前」那个边界。判定**独立于**候选数与守门：单候选、自选比赛守门命中同样
+    /// 会被估值，它们照样是训练样本意义上的决策点。
+    ///
+    /// 根动作只执行一次（`apply_root_action`），之后一路交给 `rollout_trainer`。
+    ///
+    /// # 错误
+    ///
+    /// 规则层报错、估值器报错、叶预测非有限值，或推进步数超上限（阶段机不前进）时报错。
+    fn simulate_leaf(
+        &self, game: &RamenGame, action: &RamenAction, seed: u64, target_turn: i32,
+        valuer: &dyn RamenLeafValuer
+    ) -> Result<RolloutOutcome<RamenLeafRecord>> {
+        let rng = &mut StdRng::seed_from_u64(seed);
+        let mut sim = game.fork_for_rollout(seed);
+        sim.apply_root_action(action, rng)?;
+        let mut deferrals: u32 = 0;
+        for step in 0..MAX_LEAF_STEPS {
+            if !sim.next() {
+                // 终局优先于截断：结算只做一次，取的是**真实**评分与真实 25 维
+                sim.on_simulation_end(&self.rollout_trainer, rng)?;
+                return Ok(RolloutOutcome {
+                    score: sim.search_score(),
+                    terminal: RamenLeafRecord::Terminal(RamenTerminal::from_game(&sim))
+                });
+            }
+            match leaf_verdict(sim.turn(), target_turn, &sim.stage) {
+                LeafVerdict::Evaluate(stage) => {
+                    // 不在这里 `list_actions`：叶估值只吃局面特征，列候选纯属浪费预算；
+                    // 判据已经保证这是个决策点。
+                    let value = valuer.value_of(&sim)?;
+                    ensure!(
+                        value.is_finite(),
+                        "叶预测**反归一化后**不是有限值: {value}（回合 {} 阶段 {} 第 {step} 步）",
+                        sim.turn(),
+                        stage.as_str()
+                    );
+                    return Ok(RolloutOutcome {
+                        score: SearchScore {
+                            score: value,
+                            // 叶没有 PT 分量。写 NaN 而不是复制 `value`：万一哪天
+                            // `has_pt_axis` 那道门被绕过，NaN 会让 PT 均值当场变 NaN，
+                            // 而复制过去的值只会安静地给出一个像模像样的错答案。
+                            score_pt: f64::NAN
+                        },
+                        terminal: RamenLeafRecord::Leaf(RamenLeafFact {
+                            turn: sim.turn(),
+                            stage,
+                            value,
+                            deferrals
+                        })
+                    });
+                }
+                // 阶段不安全（当前只有 `SpecialSelect`）：记一次顺延，正常推进
+                LeafVerdict::Defer => deferrals = deferrals.saturating_add(1),
+                LeafVerdict::Continue => {}
+            }
+            sim.run_stage(&self.rollout_trainer, rng)?;
+        }
+        bail!("截断 rollout 推进超过 {MAX_LEAF_STEPS} 步仍未终局：阶段机可能不前进")
     }
 }
 
@@ -968,6 +1127,7 @@ mod tests {
         },
         gamedata::init_global,
         rng::derive_seed,
+        search::{RamenLeafStage, leaf_safe_stage},
         utils::{Checks, get_workspace_root, init_test_logger}
     };
 
@@ -1318,6 +1478,349 @@ mod tests {
                 mean: r.0.mean()
             })
             .collect())
+    }
+
+    // ===================== 截断续跑 + 叶估值 =====================
+
+    /// 测试用叶估值器：给一个**确定**的值，并记下每次落点
+    ///
+    /// 刻意不依赖 ONNX：这几条钉的是「什么时候估值、值怎么进统计、错误怎么传」，
+    /// 与具体模型无关，因而**默认构建下就跑**。真实模型的解码、量纲与形状校验另有
+    /// 专门用例（`trainer::ramen_nn_trainer`，走生成式 fixture）。
+    struct ProbeValuer {
+        /// 每次估值返回的值；`None` = 当场报错（验「不静默退回手写」）
+        value: Option<f64>,
+        /// 请求计数（rollout 并行，故用原子量）
+        calls: std::sync::atomic::AtomicU64,
+        /// 落点记录：`(回合, 阶段)`
+        seen: std::sync::Mutex<Vec<(i32, RamenLeafStage)>>
+    }
+
+    impl ProbeValuer {
+        /// 返回固定值的估值器
+        fn constant(v: f64) -> Self {
+            Self {
+                value: Some(v),
+                calls: std::sync::atomic::AtomicU64::new(0),
+                seen: std::sync::Mutex::new(Vec::new())
+            }
+        }
+
+        /// 一律报错的估值器
+        fn failing() -> Self {
+            Self {
+                value: None,
+                calls: std::sync::atomic::AtomicU64::new(0),
+                seen: std::sync::Mutex::new(Vec::new())
+            }
+        }
+
+        /// 落点去重后的 `(回合, 阶段)` 清单
+        fn landings(&self) -> Vec<(i32, RamenLeafStage)> {
+            let mut v = match self.seen.lock() {
+                Ok(g) => g.clone(),
+                Err(p) => p.into_inner().clone()
+            };
+            v.sort_by_key(|(t, st)| (*t, st.as_str()));
+            v.dedup();
+            v
+        }
+    }
+
+    impl RamenLeafValuer for ProbeValuer {
+        fn value_of(&self, game: &RamenGame) -> Result<f64> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let stage = RamenLeafStage::from_stage(&game.stage)
+                .ok_or_else(|| anyhow!("估值器被叫到了不安全阶段 {:?}", game.stage))?;
+            match self.seen.lock() {
+                Ok(mut g) => g.push((game.turn(), stage)),
+                Err(p) => p.into_inner().push((game.turn(), stage))
+            }
+            self.value.ok_or_else(|| anyhow!("测试用估值器故意报错"))
+        }
+
+        fn leaf_requests(&self) -> u64 {
+            self.calls.load(std::sync::atomic::Ordering::Relaxed)
+        }
+
+        fn label(&self) -> String {
+            "probe".to_string()
+        }
+    }
+
+    /// 截断测试用配置：均匀分配 + 记录逐序号原始分（逐轨迹比对要用）
+    fn leaf_config(horizon: usize) -> SearchConfig {
+        SearchConfig::default()
+            .with_search_n(4)
+            .with_ucb(false)
+            .with_max_depth(horizon)
+            .with_record_ordered_rollouts(true)
+    }
+
+    /// 两个入口互不越界：`search` 不吃截断深度，`search_leaf` 不跑完整续跑
+    ///
+    /// 静默互相顶替是最难发现的一类错：「以为在跑 H8」其实跑的是 full，分数上看不出来。
+    ///
+    /// # 错误
+    ///
+    /// 任一入口没有按预期拒绝时返回错误。
+    #[test]
+    fn test_leaf_entry_points_refuse_mismatched_depth() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let mut c = Checks::new();
+        let valuer = ProbeValuer::constant(60000.0);
+
+        let truncating: FlatSearch<RamenGame> = FlatSearch::new(leaf_config(3));
+        let e = truncating
+            .search(&game, &actions, &mut StdRng::seed_from_u64(1))
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+        println!("search + max_depth=3 -> {e}");
+        c.check(e.contains("max_depth"), "配了截断却走完整入口：明确报错而不是静默当成 0");
+
+        let full: FlatSearch<RamenGame> = FlatSearch::new(leaf_config(0));
+        let e2 = full
+            .search_leaf(&game, &actions, &mut StdRng::seed_from_u64(1), &valuer)
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+        println!("search_leaf + max_depth=0 -> {e2}");
+        c.check(e2.contains("max_depth"), "没配截断却走截断入口：明确报错");
+        c.check(valuer.leaf_requests() == 0, "两次拒绝都没发出任何叶请求");
+        c.finish()
+    }
+
+    /// 超大 H：叶请求为零，**逐轨迹**终局与完整续跑逐位一致，选优也一致
+    ///
+    /// 这是截断路径最强的一条对拍：H 大到永远够不着时，截断入口必须退化成完整续跑。
+    /// 比的是按 rollout 序号对齐的**每一条**原始分，不是候选均值——均值相同可以是
+    /// 两组不同轨迹凑出来的。
+    ///
+    /// # 错误
+    ///
+    /// 有任何叶请求、逐轨迹分数不一致、或两条路径选出的候选不同时返回错误。
+    #[test]
+    fn test_huge_horizon_degenerates_to_full_rollout() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let mut c = Checks::new();
+        let valuer = ProbeValuer::constant(1.0);
+
+        let full: FlatSearch<RamenGame> = FlatSearch::new(leaf_config(0));
+        let a = full.search(&game, &actions, &mut StdRng::seed_from_u64(20260922))?;
+        let trunc: FlatSearch<RamenGame> = FlatSearch::new(leaf_config(999));
+        let b = trunc.search_leaf(&game, &actions, &mut StdRng::seed_from_u64(20260922), &valuer)?;
+
+        println!("根回合 {} 候选 {} 个，H=999 目标回合远在终局之后", game.turn(), actions.len());
+        println!("叶请求数 = {}", valuer.leaf_requests());
+        c.check(valuer.leaf_requests() == 0, "超大 H 下叶请求为零");
+        for (i, st) in b.terminal_results.iter().enumerate() {
+            c.check(
+                st.leaf_count() == 0 && st.terminal_count() == st.total_count(),
+                &format!("候选 {i} 全部跑到真实终局（{} 条）", st.total_count())
+            );
+        }
+
+        let ord_a = a.ordered_rollouts.as_ref().ok_or_else(|| anyhow!("完整臂没记逐序号原始分"))?;
+        let ord_b = b.ordered_rollouts.as_ref().ok_or_else(|| anyhow!("截断臂没记逐序号原始分"))?;
+        c.check(ord_a.root_seed == ord_b.root_seed, "两条路径的根种子相同（CRN 对齐）");
+        let mut rows = 0usize;
+        let mut same = 0usize;
+        for (x, y) in ord_a.per_candidate.iter().zip(ord_b.per_candidate.iter()) {
+            for (u, v) in x.iter().zip(y.iter()) {
+                rows += 1;
+                if u == v {
+                    same += 1;
+                }
+            }
+        }
+        println!("逐轨迹比对: {same}/{rows} 条逐位相同");
+        c.check(rows > 0, "确实比到了东西（空集合会让下面那条恒真）");
+        c.check(same == rows, "每一条 rollout 的终局分逐位相同");
+
+        let ia = a.best_idx_by(SelectObjective::ScoreMean)?;
+        let ib = b.best_idx_by(SelectObjective::ScoreMean)?;
+        println!("full-mean 选 #{ia} / H=999 选 #{ib}");
+        c.check(ia == ib, "同口径（结算分 + 均值）下两条路径选同一个候选");
+        c.check(
+            b.best_idx_by(SelectObjective::PtRank).is_ok(),
+            "全是真实终局时 PT 口径仍然可用（PT 样本没缺）"
+        );
+        c.finish()
+    }
+
+    /// 截断真的发生时：只落在安全阶段、叶样本不进终局统计、PT 口径被拒
+    ///
+    /// 同时扫几个 H，把「小 H 全是叶 / 大 H 全是终局」这条单调性摆出来，并记录跨年度
+    /// （目标回合越过 23 / 47 的地区结算）那几档的落点。
+    ///
+    /// # 错误
+    ///
+    /// 落点不在安全阶段、叶样本混进终局统计、或 PT 口径没被拒时返回错误。
+    #[test]
+    fn test_truncated_rollout_leaf_accounting() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let mut c = Checks::new();
+        let root_turn = game.turn();
+        let mut leafy = 0usize;
+
+        for h in [1usize, 2, 25, 50, 999] {
+            let valuer = ProbeValuer::constant(61234.5);
+            let search: FlatSearch<RamenGame> = FlatSearch::new(leaf_config(h));
+            let out = search.search_leaf(&game, &actions, &mut StdRng::seed_from_u64(7), &valuer)?;
+            let total: u32 = out.terminal_results.iter().map(|s| s.total_count()).sum();
+            let leaf: u32 = out.terminal_results.iter().map(|s| s.leaf_count()).sum();
+            let term: u32 = out.terminal_results.iter().map(|s| s.terminal_count()).sum();
+            let defer: f64 = out.terminal_results.iter().map(|s| s.deferral_sum()).sum();
+            println!(
+                "H={h} 目标回合={} | 总 {total} 叶 {leaf} 终局 {term} 顺延 {defer} 叶请求 {} 落点 {:?}",
+                root_turn + h as i32,
+                valuer.leaf_requests(),
+                valuer.landings()
+            );
+            c.check(
+                u64::from(leaf) == valuer.leaf_requests(),
+                &format!("H={h}: 叶样本数与叶请求数一一对应")
+            );
+            c.check(leaf + term == total, &format!("H={h}: 叶 + 终局 = 总样本数，没有第三类"));
+            for (i, st) in out.terminal_results.iter().enumerate() {
+                c.check(
+                    st.terminal.speed_score.count() == st.terminal_count(),
+                    &format!("H={h} 候选 {i}: 终局 25 维只收到真实终局那几条")
+                );
+            }
+            for (t, st) in valuer.landings() {
+                c.check(
+                    t >= root_turn + h as i32,
+                    &format!("H={h}: 落点回合 {t} 不早于目标回合")
+                );
+                c.check(
+                    leaf_safe_stage(&match st {
+                        RamenLeafStage::Train => RamenStage::Train,
+                        RamenLeafStage::RamenSelect => RamenStage::RamenSelect,
+                        RamenLeafStage::RegionSelect => RamenStage::RegionSelect,
+                        RamenLeafStage::SuperRamenSelect => RamenStage::SuperRamenSelect
+                    }),
+                    &format!("H={h}: 落点阶段 {} 是安全阶段", st.as_str())
+                );
+            }
+            if leaf > 0 {
+                leafy += 1;
+                let e = out
+                    .best_idx_by(SelectObjective::PtRank)
+                    .err()
+                    .map(|e| format!("{e:#}"))
+                    .unwrap_or_default();
+                println!("  H={h} 求 PT 口径 -> {e}");
+                c.check(e.contains("PT"), &format!("H={h}: 混了叶样本时 PT 口径直接报错"));
+                c.check(
+                    out.best_idx_by(SelectObjective::ScoreMean).is_ok(),
+                    &format!("H={h}: 结算分 + 均值口径可用")
+                );
+                for (i, (score, pt)) in out.action_results.iter().enumerate() {
+                    c.check(
+                        pt.count() < score.count(),
+                        &format!("H={h} 候选 {i}: PT 累加器确实少收了样本（叶没塞占位值）")
+                    );
+                }
+            }
+        }
+        c.check(leafy >= 2, "至少两档 H 真的产生了叶样本（否则上面那组检查是空跑）");
+        c.finish()
+    }
+
+    /// 估值器报错、或给出非有限值时，搜索必须失败而不是悄悄换成手写
+    ///
+    /// 「推理坏了」被混同成「这条路线分低」是最坏的一种静默降级。
+    ///
+    /// # 错误
+    ///
+    /// 任一情形没有报错时返回错误。
+    #[test]
+    fn test_leaf_failures_are_not_swallowed() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let mut c = Checks::new();
+        let search: FlatSearch<RamenGame> = FlatSearch::new(leaf_config(1));
+
+        let boom = ProbeValuer::failing();
+        let e = search
+            .search_leaf(&game, &actions, &mut StdRng::seed_from_u64(3), &boom)
+            .err()
+            .map(|e| format!("{e:#}"))
+            .unwrap_or_default();
+        println!("估值器报错 -> {e}");
+        c.check(!e.is_empty(), "估值器报错时整次搜索失败，不返回一个「分低」的结果");
+        c.check(boom.leaf_requests() > 0, "确实叫到了估值器（否则上一条是空跑）");
+
+        for bad in [f64::NAN, f64::INFINITY] {
+            let v = ProbeValuer::constant(bad);
+            let e2 = search
+                .search_leaf(&game, &actions, &mut StdRng::seed_from_u64(3), &v)
+                .err()
+                .map(|e| format!("{e:#}"))
+                .unwrap_or_default();
+            println!("估值器给 {bad} -> {e2}");
+            c.check(!e2.is_empty(), &format!("叶预测为 {bad} 时报错"));
+        }
+        c.finish()
+    }
+
+    /// 单候选与合并动作在截断路径下同样成立
+    ///
+    /// 单候选：搜索照跑、返回唯一下标；合并动作（`RamenSelect` + `special_targets`）
+    /// 必须经 `apply_root_action` 的合并分支落地，而不是被 `apply_action` 丢掉 targets。
+    ///
+    /// # 错误
+    ///
+    /// 任一情形未按预期成立时返回错误。
+    #[test]
+    fn test_truncated_single_candidate_and_combined_action() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let mut c = Checks::new();
+        let search: FlatSearch<RamenGame> = FlatSearch::new(leaf_config(2));
+
+        let v1 = ProbeValuer::constant(59000.0);
+        let one = search.search_leaf(&game, &actions[..1], &mut StdRng::seed_from_u64(11), &v1)?;
+        let idx = one.best_idx_by(SelectObjective::ScoreMean)?;
+        println!("单候选截断搜索 -> #{idx}，叶请求 {}", v1.leaf_requests());
+        c.check(idx == 0, "单候选返回唯一下标 0");
+        c.check(one.action_results.len() == 1, "只统计了这一个候选");
+
+        // 合并动作：从一个真正的 RamenSelect 根取
+        let mut g = game.clone();
+        let mut rng = StdRng::seed_from_u64(20260822);
+        let cap = RamenRootCapture { got: RefCell::new(None) };
+        let mut combined: Vec<RamenAction> = Vec::new();
+        for _ in 0..600 {
+            if g.stage == RamenStage::RamenSelect && !g.is_race_turn() {
+                let list = g.list_combined_ramen_select_actions();
+                if list.len() > 1 && list.iter().any(|a| a.special_targets.is_some()) {
+                    combined = list;
+                    break;
+                }
+            }
+            if !g.next() {
+                break;
+            }
+            g.run_stage(&cap, &mut rng)?;
+        }
+        println!("合并候选 {} 个（含 special_targets 的 {} 个）", combined.len(),
+            combined.iter().filter(|a| a.special_targets.is_some()).count());
+        c.check(combined.len() > 1, "找到了多候选的合并动作根（否则下面是空跑）");
+        if combined.len() > 1 {
+            let v2 = ProbeValuer::constant(58000.0);
+            let out = search.search_leaf(&g, &combined, &mut StdRng::seed_from_u64(13), &v2)?;
+            let best = out.best_idx_by(SelectObjective::ScoreMean)?;
+            println!("合并动作截断搜索 -> #{best}，叶请求 {}", v2.leaf_requests());
+            c.check(out.action_results.len() == combined.len(), "每个合并候选都有统计");
+            for (i, st) in out.terminal_results.iter().enumerate() {
+                c.check(
+                    st.total_count() > 0,
+                    &format!("合并候选 {i} 至少跑成功了一条 rollout")
+                );
+            }
+        }
+        c.finish()
     }
 
     /// Phase 1.4 验收 1：拉面能跑通根节点搜索，且固定种子可复现

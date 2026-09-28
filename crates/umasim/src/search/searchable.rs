@@ -50,8 +50,12 @@ where
 
     /// 是否支持 `max_depth > 0` 的截断估值
     ///
-    /// 截断后需要 leaf 估值器，目前只有 onsen 有（`HandwrittenEvaluator` /
-    /// NN）。拉面为 `false`，搜索入口会在开跑前直接拒绝而不是给出错误标签。
+    /// 截断后需要 leaf 估值器。为 `false` 的剧本，通用搜索内核会在开跑前直接拒绝
+    /// `max_depth > 0`，而不是跑出一堆带错误标签的结果。
+    ///
+    /// ❗为 `true` **不等于**「随便配 `max_depth` 都能跑」：各剧本的具体入口仍要
+    /// 自己检查估值器是否装配。拉面见
+    /// [`FlatSearch::<RamenGame>::search_leaf`](super::FlatSearch)。
     const SUPPORTS_TRUNCATED_LEAF: bool;
 
     /// 构造默认 rollout 决策器
@@ -133,8 +137,17 @@ impl FlatSearchGame for RamenGame {
     /// 预演主导），单局 ×2.10，搜索预算需相应调小或 train_only。
     type RolloutTrainer = crate::trainer::RecommendedRamenTrainer;
 
-    /// 拉面暂无 leaf 估值器，Phase 1 只允许跑到终局
-    const SUPPORTS_TRUNCATED_LEAF: bool = false;
+    /// 截断已接线：`FlatSearch::<RamenGame>::search_leaf` 手写续跑到安全叶边界后取估值
+    ///
+    /// ❗这个常量放开的只是**通用内核的能力校验**，不是「配上 `max_depth` 就自动截断」：
+    ///
+    /// - 生产入口 `FlatSearch::<RamenGame>::search` 仍**只**跑到真实终局，遇到
+    ///   `max_depth > 0` 直接报错（而不是静默当成 0）；
+    /// - 截断走独立入口 `search_leaf`，估值器必须**显式传入**，没有默认值也没有
+    ///   手写兜底；
+    /// - 安全边界判据见 [`leaf_safe_stage`](crate::search::leaf_safe_stage)：
+    ///   `SpecialSelect` 一律顺延。
+    const SUPPORTS_TRUNCATED_LEAF: bool = true;
 
     /// rollout 专用实例：三份年的 breakdown 全部关闭
     fn default_rollout_trainer() -> Self::RolloutTrainer {

@@ -34,6 +34,14 @@ pub struct LoggingTrainer<T> {
 
 impl<T> LoggingTrainer<T> {
     /// 创建包装器：默认开启决策日志
+    /// 被包装的训练员
+    ///
+    /// 包装之后仍要读内层的运行计数（如截断臂的续跑分账）时用它：
+    /// `LoggingTrainer` 拿走了所有权，没有这个出口就只能在包装前另存一份引用。
+    pub fn inner(&self) -> &T {
+        &self.inner
+    }
+
     pub fn new(inner: T, seed: u64) -> Self {
         Self {
             inner,

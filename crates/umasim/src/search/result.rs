@@ -4,6 +4,7 @@
 
 use std::cell::Cell;
 
+use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
 
 use super::{SearchConfig, terminal::NoTerminalStats};
@@ -15,6 +16,26 @@ use crate::{
 
 /// 最大分数（用于分布直方图）
 const MAX_SCORE: usize = 100000;
+
+/// 搜索结果的选优口径
+///
+/// **评分轴**（结算分 / PT 偏好分）与**聚合方式**（rank 加权 / 普通均值）是两件
+/// 不同的事。把允许的组合写成显式取值，是为了让「换了哪一项」在代码和报告里都
+/// 无法含糊：从 [`Self::PtRank`] 换到 [`Self::ScoreMean`] **同时**改了两项，不是
+/// 单纯的聚合方式变化。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectObjective {
+    /// 上游生产口径：PT 偏好分轴 + rank 加权（[`SearchOutput::best_action_pt_idx`]）
+    ///
+    /// ❗历史遗留：UCB 的**利用项**读的是**结算分**轴的 rank 加权，与这里的最终
+    /// 选优并不同轴。本枚举**保持**这个既有差异，不顺手修正——那是另一件事，
+    /// 改了会让所有历史对照失去可比性。
+    PtRank,
+    /// 实验口径：结算分轴 + 普通均值
+    ///
+    /// UCB 利用项与最终选优**都**用它，叶估值（无 PT 分量）只能走这一档。
+    ScoreMean
+}
 
 /// 单个动作的搜索结果
 ///
@@ -328,6 +349,39 @@ impl<A, D> SearchOutput<A, D> {
     /// 获取最优动作的搜索结果
     pub fn best_result(&self) -> &ActionResult {
         &self.action_results[self.best_action_idx].0
+    }
+
+    /// 按指定口径选出最优候选的下标
+    ///
+    /// [`SelectObjective::PtRank`] 与 [`Self::best_action_pt_idx`] 逐字同义，只是多
+    /// 了一道**样本完整性**检查。
+    ///
+    /// # 错误
+    ///
+    /// `PtRank` 口径下，若任一候选的 PT 样本数少于结算分样本数，说明这次搜索里混进
+    /// 了**没有 PT 分量**的样本（截断叶预测），PT 口径此时不成立，直接报错——退而
+    /// 求其次拿一个下标返回，会是个看起来合理的错误答案。
+    pub fn best_idx_by(&self, objective: SelectObjective) -> Result<usize> {
+        match objective {
+            SelectObjective::PtRank => {
+                for (i, (score, pt)) in self.action_results.iter().enumerate() {
+                    ensure!(
+                        pt.count() == score.count(),
+                        "候选 {i} 的 PT 样本数 {} 少于结算分样本数 {}：本次搜索含无 PT 分量的样本（截断叶预测），                         PT 口径不可用，请改用 SelectObjective::ScoreMean",
+                        pt.count(),
+                        score.count()
+                    );
+                }
+                Ok(self.best_action_pt_idx())
+            }
+            SelectObjective::ScoreMean => Ok(self
+                .action_results
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.0.mean().total_cmp(&b.0.mean()))
+                .map(|(i, _)| i)
+                .unwrap_or(0))
+        }
     }
 }
 

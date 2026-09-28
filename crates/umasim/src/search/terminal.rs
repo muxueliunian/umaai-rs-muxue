@@ -113,6 +113,18 @@ pub trait TerminalRecord: Debug + Clone + Copy + Send + Sync + 'static {
 
     /// 把本次终局事实并入统计
     fn accumulate_into(&self, stats: &mut Self::Stats);
+
+    /// 本次结果**有没有** PT 口径的分量
+    ///
+    /// 默认 `true`：跑到真实终局的 rollout 两条评分轴都成立。
+    ///
+    /// 截断叶估值返回的是网络预测的结算分，**没有**对应的 PT 分量。此时返回
+    /// `false`，[`CandidateAccum`](super::flat_search) 就不会往 PT 累加器里塞样本。
+    /// 塞一个占位值（哪怕是 `score` 本身）会让 [`SearchOutput::best_action_pt_idx`]
+    /// 在截断臂上给出**看起来合理的错误答案**——那比直接报错难查得多。
+    fn has_pt_axis(&self) -> bool {
+        true
+    }
 }
 
 /// 空终局记录（温泉及一切尚未接入观测的剧本）

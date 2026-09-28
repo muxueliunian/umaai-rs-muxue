@@ -38,7 +38,7 @@ use std::{
     sync::{
         Arc,
         Mutex,
-        atomic::{AtomicUsize, Ordering}
+        atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering}
     }
 };
 
@@ -57,7 +57,10 @@ use crate::{
         DecisionInfo as DecisionInfoProto,
         reason::{DecisionReasonData, DecisionReasonNoopSink, ReasonMetric, analyze_narrow_win, render_reason_lines}
     },
-    search::{FlatSearch, RamenSearchOutput, SearchConfig, TerminalStats}
+    search::{
+        ActionResult, FlatSearch, RamenLeafSearchOutput, RamenLeafValuer, RamenSearchOutput, SearchConfig,
+        SelectObjective, TerminalStats
+    }
 };
 
 /// 搜索哪些阶段的门控开关
@@ -242,6 +245,65 @@ fn summarize_ramen_reason(data: &DecisionReasonData) -> Option<String> {
     Some(format!("vs #2 {}", parts.join(" ")))
 }
 
+/// 一次根搜索的结果
+///
+/// 两条路径的统计类型**不同**（截断臂多了叶那几维，且终局 25 维只吃真实终局样本），
+/// 这是刻意的：想把截断结果当完整终局结果用，会在编译期就被挡住。本枚举只负责把
+/// 两者共有的那部分（候选表与两条评分统计）交出来，其余按臂分别处理。
+enum RootSearch {
+    /// 跑到真实终局（上游路径）
+    Full(RamenSearchOutput),
+    /// 截断续跑 + 叶估值（实验臂）
+    Leaf(RamenLeafSearchOutput)
+}
+
+impl RootSearch {
+    /// 候选表
+    fn actions(&self) -> &[<RamenGame as Game>::Action] {
+        match self {
+            RootSearch::Full(o) => &o.actions,
+            RootSearch::Leaf(o) => &o.actions
+        }
+    }
+
+    /// 两条评分统计（`(结算分, PT 偏好分)`）
+    ///
+    /// 截断臂的 PT 那一路样本数会少于结算分（叶没有 PT 分量），
+    /// [`SearchOutput::best_idx_by`](crate::search::SearchOutput::best_idx_by) 会据此拒绝 PT 口径。
+    fn action_results(&self) -> &[(ActionResult, ActionResult)] {
+        match self {
+            RootSearch::Full(o) => &o.action_results,
+            RootSearch::Leaf(o) => &o.action_results
+        }
+    }
+
+    /// 按口径选最优候选
+    ///
+    /// # 错误
+    ///
+    /// 口径与样本不匹配（如在截断结果上要 PT 口径）时报错。
+    fn best_idx(&self, objective: SelectObjective) -> Result<usize> {
+        match self {
+            RootSearch::Full(o) => o.best_idx_by(objective),
+            RootSearch::Leaf(o) => o.best_idx_by(objective)
+        }
+    }
+}
+
+/// 截断臂的运行计数
+///
+/// 真实终局与叶预测**分开数**：一条 rollout 要么跑到终局、要么在叶边界停下，把两者
+/// 混成一个「完成数」就看不出叶路径实际替掉了多少尾巴。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RamenLeafCounters {
+    /// 跑到真实终局的 rollout 数
+    pub terminal: u64,
+    /// 在安全叶边界估值的 rollout 数
+    pub leaf: u64,
+    /// 到达目标回合却因阶段不安全顺延的次数
+    pub deferrals: u64
+}
+
 /// 拉面杯 MCTS 训练员
 ///
 /// 被门控选中的阶段走 [`FlatSearch`]，其余转发给内置的
@@ -257,6 +319,17 @@ pub struct RamenMctsTrainer {
     pub stages: RamenSearchStages,
     /// 是否输出每步决策日志
     pub verbose: bool,
+    /// 运行期静音：为真时压制 [`Self::verbose`] 的一切上屏输出
+    ///
+    /// 与 `verbose` 的分工：`verbose` 是**装配期**开关（调用方构造时定下），本字段是
+    /// **运行期**开关，可在 `&self` 上临时翻转。地区对照模式要在随机流副本上多跑一次
+    /// 搜索，那一跑的「首选 / 终局维度差」不该混进屏幕——执行的是另一条推荐，而这些
+    /// 日志行本身没有任何「这是参照侧」的标注，玩家会当成本次推荐读。
+    ///
+    /// ❗**只影响日志**。决策、随机流、摘要、`reason_sink` 一概不受影响：理由**数据**
+    /// 那一路由宿主自己的门去挡（见 `umaai::decision::ReasonGate`），两者职责不同，
+    /// 不要互相代替。
+    quiet: AtomicBool,
     /// `RamenSelect` 是否用合并动作（ramen + targets 一次决策）搜索
     ///
     /// 打开时 `SpecialSelect` 不再是独立决策点：`RamenSelect` 的搜索结果里
@@ -295,7 +368,31 @@ pub struct RamenMctsTrainer {
     /// 决策理由原始数据出口（每回合都发出 JSON；umasim 默认接日志）
     ///
     /// 可读文字不走此出口，由 [`Self::emit_decision_reason`] 渲染后上屏。
-    pub reason_sink: Arc<dyn crate::output::DecisionReasonSink>
+    pub reason_sink: Arc<dyn crate::output::DecisionReasonSink>,
+    /// 叶估值器（`None` = 不截断，跑真实终局）
+    ///
+    /// 与 `search.config().max_depth` 必须成对出现：装上估值器却 `max_depth == 0`
+    /// 是白装，配了 `max_depth` 却没装估值器会在 [`Self::with_leaf_horizon`] 之后的
+    /// 第一次搜索里报错——两种半截装配都不静默通过。
+    leaf_valuer: Option<Arc<dyn RamenLeafValuer>>,
+    /// 截断臂计数：跑到真实终局的 rollout 数
+    leaf_terminal_rollouts: AtomicU64,
+    /// 截断臂计数：在叶边界估值的 rollout 数
+    leaf_rollouts: AtomicU64,
+    /// 截断臂计数：叶边界顺延次数
+    leaf_deferrals: AtomicU64
+}
+
+/// [`RamenMctsTrainer::quiet_scope`] 的 RAII 守卫：析构即恢复 verbose 上屏
+pub struct QuietScope<'a> {
+    /// 被静音的训练员
+    trainer: &'a RamenMctsTrainer
+}
+
+impl Drop for QuietScope<'_> {
+    fn drop(&mut self) {
+        self.trainer.quiet.store(false, Ordering::Relaxed);
+    }
 }
 
 impl RamenMctsTrainer {
@@ -306,14 +403,117 @@ impl RamenMctsTrainer {
             fallback: RecommendedRamenTrainer::new(),
             stages: RamenSearchStages::all(),
             verbose: false,
+            quiet: AtomicBool::new(false),
             use_combined_ramen_select: true,
             last_breakdown: Mutex::new(None),
             searched: AtomicUsize::new(0),
             combined_cache_hits: AtomicUsize::new(0),
             pending_combined_targets: Mutex::new(None),
             last_search_summary: Mutex::new(None),
-            reason_sink: Arc::new(DecisionReasonNoopSink)
+            reason_sink: Arc::new(DecisionReasonNoopSink),
+            leaf_valuer: None,
+            leaf_terminal_rollouts: AtomicU64::new(0),
+            leaf_rollouts: AtomicU64::new(0),
+            leaf_deferrals: AtomicU64::new(0)
         }
+    }
+
+    /// 设置选优口径（默认 [`SelectObjective::PtRank`]，即上游生产口径）
+    ///
+    /// **同时**设置搜索侧（UCB 利用项）与选优侧，这是唯一的入口——分开设会造出
+    /// 「按 A 分配预算、按 B 选结果」的错位，而那种错位从分数上看不出来。
+    ///
+    /// ❗`PtRank` → `ScoreMean` **同时**改了评分轴与聚合方式两项，不是单纯的聚合
+    /// 方式变化；报告里不得写成「纯聚合效应」。
+    pub fn with_objective(mut self, objective: SelectObjective) -> Self {
+        self.search = self.search.with_objective(objective);
+        self
+    }
+
+    /// 生效的选优口径
+    pub fn objective(&self) -> SelectObjective {
+        self.search.objective()
+    }
+
+    /// 设置叶截断深度 H（跨越的**回合边界**数；0 = 不截断）
+    ///
+    /// ❗H 不是推理次数，也不是动作数，更不是绝对 `max_turn`。
+    pub fn with_leaf_horizon(mut self, horizon: usize) -> Self {
+        let config = self.search.config().clone().with_max_depth(horizon);
+        self.search = self.search.with_config(config);
+        self
+    }
+
+    /// 装上叶估值器
+    pub fn with_leaf_valuer(mut self, valuer: Arc<dyn RamenLeafValuer>) -> Self {
+        self.leaf_valuer = Some(valuer);
+        self
+    }
+
+    /// 截断臂到目前为止的运行计数（不截断时恒为全 0）
+    pub fn leaf_counters(&self) -> RamenLeafCounters {
+        RamenLeafCounters {
+            terminal: self.leaf_terminal_rollouts.load(Ordering::Relaxed),
+            leaf: self.leaf_rollouts.load(Ordering::Relaxed),
+            deferrals: self.leaf_deferrals.load(Ordering::Relaxed)
+        }
+    }
+
+    /// 本次装配的生效口径摘要（供实验入口在开跑前打印 / 记录）
+    ///
+    /// 把评分轴、聚合方式、截断深度、估值器与搜索阶段摆在一处：这几项每一个都能
+    /// 悄悄改变结果，事后从分数上分不出是哪一个变了。
+    pub fn effective_setup(&self) -> String {
+        let cfg = self.search.config();
+        let axis = match self.objective() {
+            SelectObjective::PtRank => "PT 轴 + rank 加权（上游生产口径）",
+            SelectObjective::ScoreMean => "结算分轴 + 普通均值（实验口径）"
+        };
+        let leaf = match (&self.leaf_valuer, cfg.max_depth) {
+            (_, 0) => "关（完整续跑到真实终局）".to_string(),
+            (Some(v), h) => format!("H={h} 估值器={}", v.label()),
+            (None, h) => format!("H={h} **未装估值器**（下次搜索会报错）")
+        };
+        format!(
+            "选优={axis} | 叶截断={leaf} | search_n={} | ucb={} | rf_max={} | 阶段={:?}",
+            cfg.search_n, cfg.use_ucb, cfg.radical_factor_max, self.stages
+        )
+    }
+
+    /// 一次根搜索：按装配走完整续跑或截断续跑
+    ///
+    /// # 错误
+    ///
+    /// 配了截断深度却没装估值器时报错——「解除开关但没接估值器」不静默通过。
+    /// 搜索本身报错时原样上抛。
+    fn run_root_search(
+        &self, game: &RamenGame, actions: &[<RamenGame as Game>::Action], rng: &mut StdRng
+    ) -> Result<RootSearch> {
+        if self.search.config().max_depth == 0 {
+            let out = self.search.search(game, actions, rng)?;
+            // 完整续跑臂同样记账：这一路每条 rollout 都跑到了真实终局，叶一栏恒为 0。
+            // 不记的话「实际完成多少条 rollout」在 A / B 臂上就成了空白，
+            // 三臂报告没法对齐。
+            let done: u32 = out.action_results.iter().map(|(score, _)| score.count()).sum();
+            self.leaf_terminal_rollouts.fetch_add(u64::from(done), Ordering::Relaxed);
+            return Ok(RootSearch::Full(out));
+        }
+        let valuer = self
+            .leaf_valuer
+            .as_ref()
+            .ok_or_else(|| anyhow!(
+                "配置了叶截断 H={} 却没有装叶估值器：请调用 with_leaf_valuer，或把 H 设回 0",
+                self.search.config().max_depth
+            ))?;
+        let out = self.search.search_leaf(game, actions, rng, valuer.as_ref())?;
+        for stats in &out.terminal_results {
+            self.leaf_terminal_rollouts
+                .fetch_add(u64::from(stats.terminal_count()), Ordering::Relaxed);
+            self.leaf_rollouts.fetch_add(u64::from(stats.leaf_count()), Ordering::Relaxed);
+            self.leaf_deferrals
+                .fetch_add(stats.deferral_sum() as u64, Ordering::Relaxed);
+        }
+        Ok(RootSearch::Leaf(out))
     }
 
     /// 本训练员真正走过搜索的决策次数
@@ -342,6 +542,20 @@ impl RamenMctsTrainer {
     pub fn verbose(mut self, verbose: bool) -> Self {
         self.verbose = verbose;
         self
+    }
+
+    /// 在守卫存活期间压制 verbose 上屏输出；守卫析构时自动恢复
+    ///
+    /// 用 RAII 而不是「手动置位 / 复位」：被静音的那一跑中途可能 `?` 早退，手动复位
+    /// 会被跳过，此后整局的决策日志都不见了。只影响日志，不影响决策与随机流。
+    pub fn quiet_scope(&self) -> QuietScope<'_> {
+        self.quiet.store(true, Ordering::Relaxed);
+        QuietScope { trainer: self }
+    }
+
+    /// 本次是否真要把 verbose 日志打出去（装配期开关**且**当前没被静音）
+    fn verbose_now(&self) -> bool {
+        self.verbose && !self.quiet.load(Ordering::Relaxed)
     }
 
     /// `SpecialSelect` 直接命中合并搜索缓存的次数
@@ -384,7 +598,7 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
             return;
         };
         self.reason_sink.emit(&data);
-        if self.verbose {
+        if self.verbose_now() {
             for line in render_reason_lines(&data) {
                 info!("{line}");
             }
@@ -397,11 +611,16 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     }
 
     /// 缓存本次搜索的候选统计（次数 / 均分 / 标准差 / PT 均分）
-    fn stash_search_breakdown(&self, output: &RamenSearchOutput) {
-        let text = output
-            .actions
+    ///
+    /// 只吃候选表与两条评分统计，故完整续跑与截断两条路径共用同一份实现。
+    /// 截断臂的 `pt=` 一列是**真实终局子样本**的均值（叶没有 PT 分量、不参与累加），
+    /// 其样本数会少于 `n=`。
+    fn stash_search_breakdown(
+        &self, actions: &[<RamenGame as Game>::Action], action_results: &[(ActionResult, ActionResult)]
+    ) {
+        let text = actions
             .iter()
-            .zip(output.action_results.iter())
+            .zip(action_results.iter())
             .enumerate()
             .map(|(i, (action, (res, res_pt)))| {
                 format!(
@@ -433,7 +652,7 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     /// 内部归约出的 0/1，其均值是达成率，差值即达成率之差——不要再拿它与 PT
     /// 均值互推，那正是这套观测要避免的错误。
     fn log_terminal_breakdown(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
-        if !self.verbose || output.terminal_results.len() != output.actions.len() {
+        if !self.verbose_now() || output.terminal_results.len() != output.actions.len() {
             return;
         }
         let Some(base) = output.terminal_results.get(chosen) else {
@@ -500,9 +719,13 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     ///
     /// 非 `SuperRamenSelect` 阶段原样返回。
     ///
-    /// 平局判定用 `.0.mean()`（score 口径）。
+    /// 平局判定跟随**当前选优口径**的评分轴：[`SelectObjective::PtRank`] 用 `.1`
+    /// （PT 偏好分，上游既有行为，逐字保留），[`SelectObjective::ScoreMean`] 用 `.0`
+    /// （结算分）。截断臂只能走后者——`.1` 在那里根本没有样本，拿它判平局会让所有
+    /// 候选恒相等，于是**每次**都回退到固定选项，成为一个由不存在的轴驱动的行为改变。
     fn break_super_ramen_tie(
-        game: &RamenGame, actions: &[<RamenGame as Game>::Action], output: &RamenSearchOutput, idx: usize
+        game: &RamenGame, actions: &[<RamenGame as Game>::Action],
+        action_results: &[(ActionResult, ActionResult)], idx: usize, objective: SelectObjective
     ) -> usize {
         if game.stage != RamenStage::SuperRamenSelect {
             return idx;
@@ -517,11 +740,15 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
         }
         // 取不到统计就不干预
         let (Some(chosen), Some(fallback)) =
-            (output.action_results.get(idx), output.action_results.get(fallback_idx))
+            (action_results.get(idx), action_results.get(fallback_idx))
         else {
             return idx;
         };
-        if chosen.1.mean() == fallback.1.mean() { fallback_idx } else { idx }
+        let tie = match objective {
+            SelectObjective::PtRank => chosen.1.mean() == fallback.1.mean(),
+            SelectObjective::ScoreMean => chosen.0.mean() == fallback.0.mean()
+        };
+        if tie { fallback_idx } else { idx }
     }
 
     /// 取出并清空合并搜索缓存的 targets
@@ -554,18 +781,20 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     /// 2026-09 简化：移除 `reason_text` 计算——`DecisionInfo::reason` 删除后
     /// 该文本不再挂到决策协议。完整 `DecisionReasonData` 改由 `emit_decision_reason`
     /// 通过 `LastReasonSink` 缓存，挂到 `scenario_extra.reason`（main.rs 接线）。
-    fn stash_last_summary(&self, output: &RamenSearchOutput, chosen_idx: usize) {
+    fn stash_last_summary(
+        &self, actions: &[<RamenGame as Game>::Action], action_results: &[(ActionResult, ActionResult)],
+        chosen_idx: usize
+    ) {
         // **真实评分轴**（`action_results` 是 `(score, score_pt)` 对）：
         // 取 `.0` 即 `calc_score()`，不含 `pt_favor_rate` 缩放。展示与运气分必须用
         // 真实评分——动作选择另走 `score_pt`（`best_action_pt_idx`），两者互不影响。
-        let scores: Vec<f64> = output.action_results.iter().map(|(score, _)| score.mean()).collect();
-        let counts: Vec<u32> = output.action_results.iter().map(|(s, _)| s.count()).collect();
+        //
+        // ❗截断臂下 `.0` 里混着真实终局分与叶预测值。这条摘要因而不是纯粹的
+        // 「终局均分」，实验入口报告时必须一并说明口径。
+        let scores: Vec<f64> = action_results.iter().map(|(score, _)| score.mean()).collect();
+        let counts: Vec<u32> = action_results.iter().map(|(s, _)| s.count()).collect();
         // 候选可读描述：与 scores / counts 严格同长同序（按 action_results 顺序）
-        let descriptions: Vec<String> = output
-            .actions
-            .iter()
-            .map(|a| a.to_string())
-            .collect();
+        let descriptions: Vec<String> = actions.iter().map(|a| a.to_string()).collect();
         if let Ok(mut slot) = self.last_search_summary.lock() {
             *slot = Some(LastSearchSummary { chosen_idx, scores, counts, descriptions });
         }
@@ -586,7 +815,7 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
     fn stash_combined_summary(
         &self,
         combined: &[crate::game::ramen::RamenAction],
-        output: &RamenSearchOutput,
+        action_results: &[(ActionResult, ActionResult)],
         actions: &[crate::game::ramen::RamenAction],
         chosen_idx: usize
     ) {
@@ -599,7 +828,7 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
                 if cand.ramen != act.ramen {
                     continue;
                 }
-                let (res, _) = &output.action_results[i];
+                let (res, _) = &action_results[i];
                 weighted += res.mean() * res.count() as f64;
                 n += res.count();
             }
@@ -678,8 +907,8 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
             let combined = game.list_combined_ramen_select_actions();
             if combined.len() > 1 {
                 self.searched.fetch_add(1, Ordering::Relaxed);
-                let output = self.search.search(game, &combined, rng)?;
-                let idx = output.best_action_pt_idx();
+                let output = self.run_root_search(game, &combined, rng)?;
+                let idx = output.best_idx(self.objective())?;
                 let best = combined
                     .get(idx)
                     .ok_or_else(|| anyhow!("合并搜索最优下标 {idx} 超出候选数 {}", combined.len()))?;
@@ -689,11 +918,16 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
                 } else {
                     self.store_pending_combined_targets(best.special_targets);
                 }
-                self.stash_search_breakdown(&output);
-                self.log_terminal_breakdown(game.turn() as i32, idx, &output);
-                self.emit_decision_reason(game.turn() as i32, idx, &output);
-                if self.verbose {
-                    let (res, _) = &output.action_results[idx];
+                self.stash_search_breakdown(output.actions(), output.action_results());
+                // 终局差异日志与决策理由都建立在**真实终局 25 维**上；截断臂里大多数样本
+                // 根本没有那些维度，硬拿去分析等于把叶预测当终局事实讲。故只在完整续跑
+                // 的臂上输出，而不是用补零的方式凑出几行。
+                if let RootSearch::Full(full) = &output {
+                    self.log_terminal_breakdown(game.turn(), idx, full);
+                    self.emit_decision_reason(game.turn(), idx, full);
+                }
+                if self.verbose_now() {
+                    let (res, _) = &output.action_results()[idx];
                     info!(
                         "[MCTS][回合 {}] 阶段 {:?} 合并 {} 候选 -> combined#{idx} {} (mean={:.0} n={})",
                         game.turn(),
@@ -712,7 +946,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
                         // 聚合回三阶段下标后暴露 DecisionInfo。原实现让 `last_decision`
                         // 返回 None，导致「只吃面」回合（吃面后不链式接训练决策）整回合
                         // 没有任何运气分更新（luck 只挂在带搜索评分的末决策上）。
-                        self.stash_combined_summary(&combined, &output, actions, three_idx);
+                        self.stash_combined_summary(&combined, output.action_results(), actions, three_idx);
                         return Ok(three_idx);
                     }
                     None => {
@@ -732,14 +966,18 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
         }
 
         self.searched.fetch_add(1, Ordering::Relaxed);
-        let output = self.search.search(game, actions, rng)?;
-        let idx = output.best_action_pt_idx();
-        let idx = Self::break_super_ramen_tie(game, actions, &output, idx);
-        self.stash_search_breakdown(&output);
-        self.log_terminal_breakdown(game.turn() as i32, idx, &output);
-        self.emit_decision_reason(game.turn() as i32, idx, &output);
-        if self.verbose {
-            let (res, _) = &output.action_results[idx];
+        let output = self.run_root_search(game, actions, rng)?;
+        let idx = output.best_idx(self.objective())?;
+        let idx =
+            Self::break_super_ramen_tie(game, actions, output.action_results(), idx, self.objective());
+        self.stash_search_breakdown(output.actions(), output.action_results());
+        // 见合并路径同处注释：终局维度只有完整续跑那条臂才真的存在
+        if let RootSearch::Full(full) = &output {
+            self.log_terminal_breakdown(game.turn(), idx, full);
+            self.emit_decision_reason(game.turn(), idx, full);
+        }
+        if self.verbose_now() {
+            let (res, _) = &output.action_results()[idx];
             info!(
                 "[MCTS][回合 {}] 阶段 {:?} {} 候选 -> #{idx} {} (mean={:.0} n={})",
                 game.turn(),
@@ -750,7 +988,7 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
                 res.count()
             );
         }
-        self.stash_last_summary(&output, idx);
+        self.stash_last_summary(output.actions(), output.action_results(), idx);
         Ok(idx)
     }
 
@@ -852,6 +1090,8 @@ mod tests {
         utils::{Checks, get_workspace_root, init_test_logger}
     };
 
+    // `AtomicU64` / `Arc` / `SelectObjective` 来自本文件顶层的 `use super::*`
+
     const TEST_UMA_ID: u32 = 102601;
     const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
     const TEST_INHERIT: crate::game::InheritInfo = crate::game::InheritInfo {
@@ -859,16 +1099,317 @@ mod tests {
         extra_count: [0, 30, 0, 0, 30, 30]
     };
 
-    /// 准备一局固定种子的拉面局面
-    fn setup(seed: u64) -> Result<(RamenGame, StdRng)> {
-        let workspace_root = get_workspace_root()?;
-        std::env::set_current_dir(workspace_root)?;
+    /// 切到 workspace 根并初始化全局数据
+    ///
+    /// ❗必须在**装配训练员之前**调用：`FlatSearch::new` 会构造 `HandwrittenEvaluator`，
+    /// 后者在**构造时**就按相对路径读 `gamedata/default_config.toml`。
+    fn prepare() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
         let _ = init_test_logger("error");
         let _ = init_global();
+        Ok(())
+    }
+
+    /// 准备一局固定种子的拉面局面
+    fn setup(seed: u64) -> Result<(RamenGame, StdRng)> {
+        prepare()?;
         let (decision_rng, rule_master) = crate::bench::seeded_rngs(seed, 0);
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
         game.set_rule_master(rule_master);
         Ok((game, decision_rng))
+    }
+
+    // ===================== 三臂装配与叶截断 =====================
+
+    /// 测试用叶估值器的口径
+    #[derive(Debug, Clone, Copy)]
+    enum ValuerMode {
+        /// 返回常数
+        ///
+        /// ❗只适合验「有没有叫到估值器 / 计数对不对」。常数把轨迹信息全抹掉了，
+        /// **不能**用它证明任何与「续跑轨迹长什么样」有关的结论——所有候选恒同分。
+        Const(f64),
+        /// 返回叶局面的**当前分**
+        ///
+        /// 不是生产口径（生产取网络 `value[0]`，且**不叠加当前分**），只是一个
+        /// 随轨迹变化的替身，用来验「rollout 基策的配置确实一路影响到了叶」。
+        LeafScore
+    }
+
+    /// 测试用叶估值器（不依赖 ONNX，默认构建下就跑）
+    struct TestValuer {
+        /// 取值口径
+        mode: ValuerMode,
+        /// 叶请求计数
+        calls: AtomicU64
+    }
+
+    impl TestValuer {
+        /// 建一个指定口径的估值器
+        fn new(mode: ValuerMode) -> Arc<Self> {
+            Arc::new(Self { mode, calls: AtomicU64::new(0) })
+        }
+    }
+
+    impl crate::search::RamenLeafValuer for TestValuer {
+        fn value_of(&self, game: &RamenGame) -> Result<f64> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            Ok(match self.mode {
+                ValuerMode::Const(v) => v,
+                ValuerMode::LeafScore => f64::from(game.uma.calc_score())
+            })
+        }
+
+        fn leaf_requests(&self) -> u64 {
+            self.calls.load(Ordering::Relaxed)
+        }
+
+        fn label(&self) -> String {
+            match self.mode {
+                ValuerMode::Const(_) => "const".to_string(),
+                ValuerMode::LeafScore => "leaf-score".to_string()
+            }
+        }
+    }
+
+    /// 跑一局，返回 `(终局分, 每步决策下标, 调用后 rng 指纹, 合并缓存命中数, 走搜索次数)`
+    ///
+    /// 决策下标与**调用后的随机流指纹**都要比：只比终局分，一次「参照侧偷偷推进了
+    /// 随机流」的改动可能恰好不改这一局的分数，却会让后续所有局面分叉。
+    fn play(trainer: &RamenMctsTrainer, seed: u64) -> Result<(i32, u64, usize, usize)> {
+        let (mut game, mut rng) = setup(seed)?;
+        game.run_full_game(trainer, &mut rng)?;
+        // 用克隆体取指纹，不消耗被测随机流
+        let fingerprint = {
+            use rand::RngCore;
+            rng.clone().next_u64()
+        };
+        Ok((
+            game.uma.calc_score(),
+            fingerprint,
+            trainer.combined_cache_hits(),
+            trainer.searched_count()
+        ))
+    }
+
+    /// **关闭实验时**必须与上游默认路径逐位一致
+    ///
+    /// 三项一起比：终局分、调用后随机流指纹、合并动作缓存命中数。只比分数不够——
+    /// 随机流多推进一次往往当局看不出来，却会让之后所有对照失效。
+    ///
+    /// # 错误
+    ///
+    /// 任一项与基线不一致时返回错误。
+    #[test]
+    fn test_defaults_unchanged_when_experiment_off() -> Result<()> {
+        prepare()?;
+        let mut c = Checks::new();
+        let cfg = || SearchConfig::default().with_search_n(4).with_ucb(false);
+        let mk = || RamenMctsTrainer::new(cfg()).with_stages(RamenSearchStages::train_only());
+
+        let base = mk();
+        c.check(base.objective() == SelectObjective::PtRank, "默认口径是上游的 PT 轴 + rank 加权");
+        c.check(base.search.config().max_depth == 0, "默认不截断");
+        println!("默认装配: {}", base.effective_setup());
+        let a = play(&base, 4242)?;
+
+        // 同样的装配再跑一遍：先证明这条比对本身是稳定的
+        let b = play(&mk(), 4242)?;
+        println!("基线两次: {a:?} / {b:?}");
+        c.check(a == b, "同装配两次跑出完全相同的结果（比对本身可复现）");
+
+        // 显式写出「默认口径」与「H=0」，行为必须一字不差
+        let explicit = mk()
+            .with_objective(SelectObjective::PtRank)
+            .with_leaf_horizon(0);
+        let d = play(&explicit, 4242)?;
+        println!("显式写默认值: {d:?}");
+        c.check(d == a, "显式设成默认口径 / H=0 后与默认路径逐位一致");
+        c.finish()
+    }
+
+    /// 换成实验口径（结算分 + 均值）确实会改变行为，且**只**改这一件事
+    ///
+    /// 这条是上一条的非空性证明：如果 `with_objective` 是空操作，上一条就恒真。
+    ///
+    /// # 错误
+    ///
+    /// 口径没被读到（两臂完全一样）时返回错误。
+    #[test]
+    fn test_score_mean_objective_takes_effect() -> Result<()> {
+        prepare()?;
+        let mut c = Checks::new();
+        let cfg = || SearchConfig::default().with_search_n(8).with_ucb(true).with_search_group_size(2);
+        let pt = RamenMctsTrainer::new(cfg()).with_stages(RamenSearchStages::train_only());
+        let mean = RamenMctsTrainer::new(cfg())
+            .with_stages(RamenSearchStages::train_only())
+            .with_objective(SelectObjective::ScoreMean);
+        println!("A 臂: {}", pt.effective_setup());
+        println!("B 臂: {}", mean.effective_setup());
+        c.check(
+            mean.objective() == SelectObjective::ScoreMean && mean.search.objective() == SelectObjective::ScoreMean,
+            "with_objective 同时设到了选优侧与搜索侧（UCB 利用项）"
+        );
+        let a = play(&pt, 4242)?;
+        let b = play(&mean, 4242)?;
+        println!("A(PT+rank)={a:?}\nB(Score+mean)={b:?}");
+        c.check(a != b, "❗A→B 确实改变了行为：口径参数真的被读到了，不是空开关");
+        println!(
+            "提示：A→B 同时换了**评分轴**与**聚合方式**两项，这个差值不得称为「纯聚合效应」"
+        );
+        c.finish()
+    }
+
+    /// 配了截断深度却没装估值器：第一次搜索就报错，不静默当成完整续跑
+    ///
+    /// # 错误
+    ///
+    /// 没有报错、或报错里没指出修复办法时返回错误。
+    #[test]
+    fn test_leaf_horizon_without_valuer_fails_loudly() -> Result<()> {
+        prepare()?;
+        let mut c = Checks::new();
+        let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(2).with_ucb(false))
+            .with_stages(RamenSearchStages::train_only())
+            .with_objective(SelectObjective::ScoreMean)
+            .with_leaf_horizon(8);
+        println!("半截装配: {}", trainer.effective_setup());
+        c.check(
+            trainer.effective_setup().contains("未装估值器"),
+            "生效配置摘要里就点名了这是半截装配"
+        );
+        let e = play(&trainer, 4242).err().map(|e| format!("{e:#}")).unwrap_or_default();
+        println!("跑起来 -> {e}");
+        c.check(e.contains("with_leaf_valuer"), "报错指明了修复办法（装估值器或把 H 设回 0）");
+        c.finish()
+    }
+
+    /// C 臂（截断 + 叶估值）整局能跑通，计数分账正确，且超大 H 退化成 B 臂
+    ///
+    /// # 错误
+    ///
+    /// 计数对不上、或超大 H 没有退化成完整续跑时返回错误。
+    #[test]
+    fn test_leaf_arm_full_game_and_counters() -> Result<()> {
+        prepare()?;
+        let mut c = Checks::new();
+        let cfg = || SearchConfig::default().with_search_n(4).with_ucb(false);
+        let mk = |h: usize, valuer: Arc<TestValuer>| {
+            RamenMctsTrainer::new(cfg())
+                .with_stages(RamenSearchStages::train_only())
+                .with_objective(SelectObjective::ScoreMean)
+                .with_leaf_horizon(h)
+                .with_leaf_valuer(valuer)
+        };
+
+        let v8 = TestValuer::new(ValuerMode::LeafScore);
+        let c8 = mk(8, Arc::clone(&v8));
+        println!("C 臂装配: {}", c8.effective_setup());
+        let r8 = play(&c8, 4242)?;
+        let n8 = c8.leaf_counters();
+        println!("C 臂(H=8): 结果={r8:?} 计数={n8:?} 叶请求={}", v8.leaf_requests());
+        c.check(n8.leaf > 0, "确实发生了叶估值");
+        c.check(n8.leaf == v8.leaf_requests(), "叶样本数与叶请求数一一对应");
+        c.check(
+            n8.terminal + n8.leaf > 0,
+            "总 rollout 数 = 真实终局 + 叶，两本账分开记"
+        );
+        println!("  真实终局 {} 条 / 叶 {} 条 / 顺延 {} 次", n8.terminal, n8.leaf, n8.deferrals);
+
+        // 超大 H：叶请求必须为零，且与 B 臂（完整续跑 + 同口径）逐位一致
+        let vbig = TestValuer::new(ValuerMode::Const(1.0));
+        let cbig = mk(9999, Arc::clone(&vbig));
+        let rbig = play(&cbig, 4242)?;
+        let b = RamenMctsTrainer::new(cfg())
+            .with_stages(RamenSearchStages::train_only())
+            .with_objective(SelectObjective::ScoreMean);
+        let rb = play(&b, 4242)?;
+        println!("C 臂(H=9999)={rbig:?} 叶请求={} | B 臂={rb:?}", vbig.leaf_requests());
+        c.check(vbig.leaf_requests() == 0, "超大 H 下一次叶请求都没发");
+        c.check(cbig.leaf_counters().leaf == 0, "超大 H 下叶样本数为 0");
+        c.check(rbig == rb, "超大 H 与 B 臂（完整续跑 + 同口径）逐位一致");
+        // 外层随机流：`FlatSearch::search*` 对传入的 rng 恰好消耗一次 `next_u64`，
+        // 与 rollout 内部怎么跑无关。三条臂的搜索次数相同，故调用后的指纹必须相同。
+        println!("调用后 rng 指纹: C(H=8)={} C(H=9999)={} B={}", r8.1, rbig.1, rb.1);
+        c.check(
+            r8.1 == rb.1 && rbig.1 == rb.1,
+            "叶截断不改变**外层**随机流的推进量（搜索入口仍只抽一次根种子）"
+        );
+        c.finish()
+    }
+
+    /// 友人完成硬门限 true/false 都要真正传到 rollout 基策
+    ///
+    /// 换 `RolloutTrainer` 或改装配顺序时最容易丢掉这条接线，而丢了之后搜索会按
+    /// 「可以不走完」的世界线打分，与实际执行不一致——分数上看不出来。
+    ///
+    /// 判据是行为：两种取值下整局结果必须不同（接线断了就会完全一样）。截断臂
+    /// 一并验，因为它换了 rollout 的跑法。
+    ///
+    /// # 错误
+    ///
+    /// 任一臂上两种取值给出相同结果（说明没传进去）时返回错误。
+    #[test]
+    fn test_friend_complete_required_reaches_rollout() -> Result<()> {
+        prepare()?;
+        let mut c = Checks::new();
+        let cfg = || SearchConfig::default().with_search_n(4).with_ucb(false);
+
+        // A 臂（上游默认口径，完整续跑）
+        let on = RamenMctsTrainer::new(cfg())
+            .with_stages(RamenSearchStages::train_only())
+            .with_friend_complete_required(true);
+        let off = RamenMctsTrainer::new(cfg())
+            .with_stages(RamenSearchStages::train_only())
+            .with_friend_complete_required(false);
+        let a_on = play(&on, 4242)?;
+        let a_off = play(&off, 4242)?;
+        println!("A 臂 friend_complete_required: true={a_on:?} false={a_off:?}");
+        c.check(a_on != a_off, "A 臂：两种取值给出不同结果，说明确实传到了 fallback 与 rollout");
+
+        // C 臂（截断 + 叶估值）：`with_friend_complete_required` 会重装 rollout 基策，
+        // 必须确认它没有把叶估值器、截断深度或口径一起冲掉
+        let mk = |h: usize, req: bool| {
+            RamenMctsTrainer::new(cfg())
+                .with_stages(RamenSearchStages::train_only())
+                .with_objective(SelectObjective::ScoreMean)
+                .with_leaf_horizon(h)
+                .with_leaf_valuer(TestValuer::new(ValuerMode::LeafScore))
+                .with_friend_complete_required(req)
+        };
+        let probe = mk(8, true);
+        println!("C 臂装配(H=8, true): {}", probe.effective_setup());
+        c.check(
+            probe.effective_setup().contains("H=8") && probe.effective_setup().contains("leaf-score"),
+            "重装 rollout 基策之后，截断深度与估值器都还在"
+        );
+        c.check(
+            probe.objective() == SelectObjective::ScoreMean,
+            "重装 rollout 基策之后，选优口径也还在"
+        );
+
+        // 行为层面：友人完成门限是**整局尾段**的约束（要走满 5 次），H 太小时续跑
+        // 根本走不到它起作用的地方，两种取值自然同分——那不代表接线断了。所以扫几档
+        // H，要求**至少一档**看得出差别；同时把每一档的实测结果打出来，免得把
+        // 「这一档看不出」读成「传丢了」。
+        let mut differ: Vec<usize> = Vec::new();
+        for h in [8usize, 30, 55, 70] {
+            let on_h = mk(h, true);
+            let off_h = mk(h, false);
+            let a = play(&on_h, 4242)?;
+            let b = play(&off_h, 4242)?;
+            let d = a != b;
+            println!("C 臂 H={h}: true={a:?} false={b:?} -> {}", if d { "有差别" } else { "同结果" });
+            if d {
+                differ.push(h);
+            }
+        }
+        println!("看得出差别的档位: {differ:?}");
+        c.check(
+            !differ.is_empty(),
+            "C 臂：至少一档 H 下两种取值给出不同结果，说明门限确实传到了截断 rollout 的基策"
+        );
+        c.finish()
     }
 
     /// 阶段门控字符串解析
