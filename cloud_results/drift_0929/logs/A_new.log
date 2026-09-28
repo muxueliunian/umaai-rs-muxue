@@ -1,0 +1,39 @@
+[生效口径] 选动作轴 = Score（SearchScore::score = calc_score()，PT 项含 Hint 折算，统计量 mean）
+[生效口径] pt_favor_rate = 2（来源：实验入口常量钉死；**未**回落 game_config.toml）
+[生效口径] ❗Score 轴下 pt_favor_rate 不参与选动作，但仍随 GAMECONSTANTS 进 score_pt；pt_favor_rate=1 也 ≠ Score（Hint 折算口径不同），故照样记录
+[生效口径] search_n=512 use_ucb=false radical_factor_max=1.4 阶段=trainer=handwritten rollout基策=手写推荐策略 地区枚举=all（本入口强制）
+采样空间基准：250 个计划 × 4 局（局号 400000..400004）= 1000 局，策略 = handwritten
+  基种子 61444
+  空间   具名版本 gen2_v1，共 4288 个计划
+  计划清单 scripts/collect/r8_gen2_0920/holdout.json（逐字段点名 250 个，保留原始下标）
+  ❗已关闭全部内容指纹：实验身份改记生效配置与计划下标原文
+  实验身份    <WORK>/results/A_new.csv.identity.json
+
+按卡组构成
+  分组                               局数         均分       标准差      标准误
+  2速1力1根1智1友                      124      63866      1986    178.4
+  2速1耐1力1智1友                      352      66212      2703    144.1
+  2速2耐1智1友                         76      68564      2404    275.8
+  3速1耐1智1友                        448      66740      2642    124.8
+
+按马娘
+  分组                               局数         均分       标准差      标准误
+  100301                           92      66595      2584    269.4
+  100603                          120      65504      2608    238.0
+  102403                          120      66701      2699    246.4
+  108702                          120      66347      2913    265.9
+  110602                          120      66247      2735    249.7
+  112901                           80      67048      2284    255.4
+  113101                          120      66447      2695    246.0
+  114101                          228      66213      3116    206.4
+
+合计
+  局数        1000
+  均分        66337
+  标准差      2797
+  均值标准误  88.5
+  自选比赛未达标  0 局（0.00%）
+  耗时        1.2 s
+  逐局 CSV    <WORK>/results/A_new.csv
+  实验身份    <WORK>/results/A_new.csv.meta.json
+TIMED exit=0 wall_s=1 max_child_rss_gb=0.03 peak_sys_used_gb=0.60
