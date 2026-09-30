@@ -12,9 +12,11 @@ pub mod onsen;
 pub mod ramen;
 pub mod story;
 pub mod urafile;
+pub mod final_score;
 pub use onsen::*;
 pub use ramen::*;
 pub use story::*;
+pub use final_score::*;
 
 /// 描述不同剧本的通信状态，需要能转为对应的Game结构
 pub trait GameStatus: DeserializeOwned {

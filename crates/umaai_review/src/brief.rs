@@ -250,8 +250,14 @@ fn fill_overview(v: &mut BriefView, d: &Digest, states: &BTreeMap<u32, TurnState
         format!("{} 张：{}", d.meta.deck.len(), deck)
     };
     v.score_line = match (&d.meta.final_score, &d.meta.rank) {
+        // 数据来源分流：真机终局帧（含全部结局事件）vs 末快照估算（缺结局事件 ≈ -2700）
         (Some(score), Some(rank)) => format!(
-            "终局评分：{score}（{rank}）  口径：略低于小黑板实际分，未计「努力家」等新状态"
+            "终局评分：{score}（{rank}）  口径：{}",
+            if d.meta.final_source == "final_frame" {
+                "真机终局帧（育成结束·点技能前，含全部结局事件），未计「努力家」等新状态与已学技能分"
+            } else {
+                "末快照估算（缺结局事件 ≈ -2700），未计「努力家」等新状态"
+            }
         ),
         _ => "终局评分：不可用（gamedata 缺失，纯 ID 口径）".to_string(),
     };
@@ -776,6 +782,7 @@ mod tests {
             total_luck_end: Some(-2976.73),
             final_score: Some(67962),
             rank: Some("US4".to_string()),
+            final_source: "last_snapshot".to_string(),
         }
     }
 

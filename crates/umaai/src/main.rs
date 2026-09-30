@@ -30,7 +30,7 @@ use umasim::{
 
 use crate::{
     decision::{record, LastReasonSink, LuckScoreTracker, RecordingSink},
-    protocol::urafile::UraFileWatcher,
+    protocol::urafile::{self, UraFileWatcher},
     ramen_nn::build_client_trainer,
     scenario::{onsen, ramen}
 };
@@ -254,7 +254,16 @@ async fn main_guard() -> Result<()> {
     // （meta.json 结束时间 / end_reason），避免 Ctrl-C 丢局尾数据行。
     let watch_result: Result<()> = (|| {
         loop {
-            let contents = watcher.watch("thisTurn.json")?;
+            let raw = watcher.watch()?;
+            // 终局帧（育成结束·点技能前）：**不进决策链路**——不派发解析、
+            // 不发 compute_* 事件；只把真机终局数据落盘并触发本局收尾打包
+            // （见 `record::on_final`）。两信道判别落在文件名上（用户拍板：终局帧
+            // 走独立文件、payload 扁平不带判别字段）。
+            if raw.file == urafile::TARGET_FINAL_SCORE {
+                record::on_final(&raw.contents);
+                continue;
+            }
+            let contents = raw.contents;
             // 收到一份新 JSON：通知 AIRed "开始计算本回合"
             emit_info("compute_start");
             // 按 baseGame.scenarioId 分发（12=温泉 / 14=拉面）到对应场景模块
@@ -425,7 +434,12 @@ mod tests {
         init_global()?;
         let mut watcher = UraFileWatcher::init()?;
         loop {
-            let contents = watcher.watch("thisTurn.json")?;
+            let raw = watcher.watch()?;
+            // 该测试只关注回合快照；终局帧（finalScore.json）直接跳过
+            if raw.file != crate::protocol::urafile::TARGET_THIS_TURN {
+                continue;
+            }
+            let contents = raw.contents;
             match parse_game::<GameStatusOnsen>(&contents) {
                 Ok(game) => {
                     info!("{}", game.explain_distribution()?);

@@ -10,7 +10,7 @@ use serde::Serialize;
 use umasim::{gamedata::UmaData, global, gamedata::ramen::RAMENDATA, game::SupportCard};
 
 use crate::{decisions::DecisionsResult, pack::Pack, schedule::Schedule, timeline::TimelineResult};
-use umaai::protocol::GameStatusBase;
+use umaai::protocol::{FinalScorePayload, GameStatusBase};
 use umasim::gamedata::GAMEDATA;
 
 /// digest 顶层
@@ -48,6 +48,9 @@ pub struct Meta {
     pub total_luck_end: Option<f64>,
     pub final_score: Option<i32>,
     pub rank: Option<String>,
+    /// 终局评分数据来源：`final_frame`（真机终局帧）/ `last_snapshot`（末快照估算，
+    /// 缺结局事件 ≈ -2700）/ `unavailable`
+    pub final_source: String,
 }
 
 /// 卡组条目（card_id = 协议 idrank = cardId×10 + 突破等级）
@@ -137,13 +140,39 @@ pub fn build(inputs: &Inputs) -> Digest {
         format!("unknown({uma_id})")
     };
 
-    // 终局评分 + 等级（末份快照；gamedata 缺失 → None + 注记）
-    let (final_score, rank) = match (tl.last_status.as_ref().map(|s| &s.base_game), inputs.gamedata_ok) {
-        (Some(base), true) => {
-            let score = crate::score::final_score(base);
-            (Some(score), Some(crate::score::rank_name(score)))
+    // 终局评分 + 等级
+    //
+    // 优先用**真机终局帧**（`game{id}_final.json`，育成结束·点技能前，含全部结局
+    // 事件）——它是本局终局数据的唯一真机来源；缺失时回落到末份快照估算（缺结局
+    // 事件，约 -2700，口径见 context.criteria）。gamedata 缺失 → None + 注记。
+    let final_frame = pack
+        .final_raw
+        .as_deref()
+        .and_then(|raw| serde_json::from_str::<FinalScorePayload>(raw).ok());
+    if pack.final_raw.is_some() && final_frame.is_none() {
+        println!("终局帧解析失败（{} 字节），评分回落到末快照", pack.final_raw.as_deref().map(str::len).unwrap_or(0));
+    }
+    // 字段在场但全 0（插件字段漂移）→ 同样不可用：放行会让五维分整体清零
+    let final_frame = final_frame.filter(|f| {
+        let ok = f.is_usable();
+        if !ok {
+            println!("终局帧五维/上限为空，判为不可用，评分回落到末快照");
         }
-        _ => (None, None),
+        ok
+    });
+    let (final_score, rank, final_source) = match (&final_frame, inputs.gamedata_ok) {
+        (Some(frame), true) => {
+            let score = crate::score::final_score_from_frame(frame);
+            (Some(score), Some(crate::score::rank_name(score)), "final_frame")
+        }
+        (None, true) => match tl.last_status.as_ref().map(|s| &s.base_game) {
+            Some(base) => {
+                let score = crate::score::final_score(base);
+                (Some(score), Some(crate::score::rank_name(score)), "last_snapshot")
+            }
+            None => (None, None, "unavailable")
+        },
+        _ => (None, None, "unavailable")
     };
 
     let meta = Meta {
@@ -163,6 +192,7 @@ pub fn build(inputs: &Inputs) -> Digest {
         total_luck_end,
         final_score,
         rank,
+        final_source: final_source.to_string(),
     };
 
     // —— context ——
@@ -183,8 +213,18 @@ pub fn build(inputs: &Inputs) -> Digest {
          2-3 回合第 1 年地区选择（选择带来的期望跳变，小赚或小亏均为程序性），\
          这些位置一增一减配对出现或为选择本身导致，读运气分时降级或跳过，\
          不要当真实损益".to_string(),
-        "final_score 口径 = Uma::calc_score，仅供参考：略低于实际小黑板分数，且未计入「努力家」\
-         等新状态".to_string(),
+        format!(
+            "final_score 口径 = Uma::calc_score；数据来源 = {}。\
+             final_frame：育成结束·点技能前的真机终局帧（含全部结局事件与末回合比赛奖励，\
+             即 AI 评估轴的真机终局状态）；last_snapshot：末份快照估算，**缺结局事件**\
+             （育成结束 401407 / 通用 5011 / 友人结束 ≈ -2700），读分时按偏低理解。\
+             两种来源都未计入「努力家」等新状态，也不含已学技能分与 Hint 折算",
+            match final_source {
+                "final_frame" => "final_frame（真机终局帧）",
+                "last_snapshot" => "last_snapshot（末快照估算，偏低）",
+                _ => "unavailable（gamedata 缺失）"
+            }
+        ),
         "flagged_turns = 程序性波动标记（年界前2至后1回合 / 继承回合 / RMJ 结算 / 开局\
          2-3 回合第 1 年地区选择），归因时降级或跳过；turn 72 双属性：既标记为年界\
          波动、也算进超级拉面期统计（该回合份量实打实，正跳不是纯程序性回吐）"
@@ -357,6 +397,7 @@ mod tests {
                 decisions_csv: None,
                 meta: None,
                 luck_trend_svg: None,
+                final_raw: None,
                 ignored: vec![],
             },
             timeline: &tl,
@@ -395,6 +436,112 @@ mod tests {
         );
         assert_eq!(v["findings"].as_array().unwrap().len(), 0);
         let _ = fs::remove_dir_all(&out);
+        Ok(())
+    }
+
+    /// 终局评分来源分流：真机终局帧优先（含结局事件），缺失回落末快照
+    ///
+    /// 需要真实 gamedata（评分查表 + uma 名），与项目其它测试同法：cwd 切
+    /// workspace 根 + init_global。
+    #[test]
+    fn test_final_score_source_priority() -> Result<()> {
+        let root = umasim::utils::get_workspace_root()?;
+        std::env::set_current_dir(&root)?;
+        umasim::gamedata::init_global()?;
+
+        // 末快照 = 末回合比赛前（game6243 实测值，缺全部结局事件）
+        let last_snap = r#"{
+            "baseGame": {
+                "scenarioId": 14, "umaId": 109701, "umaStar": 5, "turn": 77,
+                "vital": 80, "maxVital": 100, "motivation": 4,
+                "fiveStatus": [3226, 2162, 1678, 1089, 2338],
+                "fiveStatusLimit": [3242, 2444, 2206, 2200, 2506],
+                "skillPt": 7717, "skillScore": 0, "totalHints": 0,
+                "trainLevelCount": [1, 1, 1, 1, 1],
+                "ptScoreRate": 2.0, "failureRateBias": 0,
+                "isIll": false, "isQieZhe": false, "isAiJiao": false,
+                "isPositiveThinking": false, "isRefreshMind": false, "isLucky": false,
+                "zhongMaBlueCount": [0, 0, 0, 0, 0], "isRacing": false,
+                "cardId": [302424], "persons": [], "personDistribution": [[], [], [], [], []],
+                "lockedTrainingId": -1,
+                "friendship_noncard_yayoi": 0, "friendship_noncard_reporter": 0,
+                "friend_stage": 0, "friend_outgoingUsed": 0,
+                "playing_state": 1, "raceHistory": [], "story": null,
+                "source": "command"
+            },
+            "ramen": {}
+        }"#;
+        // 终局帧 = 育成结束·点技能前（结局事件已结算：五维 +45、SP +270）
+        let final_frame = r#"{
+            "scenarioId": 14, "single_mode_chara_id": 6243, "umaId": 109701,
+            "turn": 77, "state": 2,
+            "fiveStatus": [3242, 2222, 1723, 1134, 2398],
+            "fiveStatusLimit": [3242, 2444, 2206, 2200, 2506],
+            "skillPt": 7987, "inheritGains": [11, 22]
+        }"#;
+        let snaps = vec![crate::pack::SnapEntry {
+            file: "game6243_turn77_2.json".to_string(),
+            game: 6243,
+            turn: 77,
+            seq: 2,
+            bytes: last_snap.as_bytes().to_vec(),
+        }];
+        let tl = timeline::build(&snaps);
+        let dec = decisions::parse(None)?;
+        let exec = crate::execution::build(&tl.rows, &dec.rows, &[]);
+        let build_with = |final_raw: Option<&str>| {
+            build(&Inputs {
+                pack: &Pack {
+                    game: 6243,
+                    snaps: snaps.clone(),
+                    unparsed: vec![],
+                    decisions_csv: None,
+                    meta: None,
+                    luck_trend_svg: None,
+                    final_raw: final_raw.map(str::to_string),
+                    ignored: vec![],
+                },
+                timeline: &tl,
+                decisions: &dec,
+                execution: exec.clone(),
+                schedule: Schedule::default(),
+                gamedata_ok: true,
+                flags: vec![],
+                inherit: None,
+                clones: None,
+                extra_findings: vec![],
+                gamedata_bundled: None,
+            })
+        };
+
+        let with_frame = build_with(Some(final_frame));
+        let without = build_with(None);
+        println!(
+            "真机终局帧评分={:?}（来源 {}）/ 末快照评分={:?}（来源 {}）",
+            with_frame.meta.final_score, with_frame.meta.final_source,
+            without.meta.final_score, without.meta.final_source
+        );
+        assert_eq!(with_frame.meta.final_source, "final_frame");
+        assert_eq!(without.meta.final_source, "last_snapshot");
+        let a = with_frame.meta.final_score.ok_or_else(|| anyhow::anyhow!("终局帧评分应可用"))?;
+        let b = without.meta.final_score.ok_or_else(|| anyhow::anyhow!("末快照评分应可用"))?;
+        println!("缺口 Δ={}", a - b);
+        assert!(a > b, "真机终局帧评分应高于缺结局事件的末快照评分");
+        assert!(
+            (1500..3500).contains(&(a - b)),
+            "缺口量级应为结局事件贡献（实测 ≈2700），实际 {}",
+            a - b
+        );
+        // criteria 应注明数据来源
+        let note = with_frame
+            .context
+            .criteria
+            .iter()
+            .find(|c| c.contains("final_score 口径"))
+            .cloned()
+            .unwrap_or_default();
+        println!("口径注记: {note}");
+        assert!(note.contains("final_frame"), "口径注记应标明真机终局帧来源");
         Ok(())
     }
 }

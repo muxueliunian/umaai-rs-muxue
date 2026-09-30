@@ -608,6 +608,7 @@ mod tests {
                 total_luck_end: Some(-3186.05),
                 final_score: Some(62500),
                 rank: Some("UA9".into()),
+                final_source: "last_snapshot".into(),
             },
             timeline: tl,
             decisions: dec,

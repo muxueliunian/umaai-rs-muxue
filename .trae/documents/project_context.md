@@ -347,7 +347,8 @@ cargo run --release --bin ramen_region_topk -- --help   # 全部参数
 - `onsen.rs`：`GameStatusOnsen`（scenarioId=12）
 - `ramen.rs`：`GameStatusRamen`（scenarioId=14；拉面段 12 字段全覆写 + `single_mode_chara_id` 切局键 + stage dispatch 按 playing_state 1/5/45/46/48 → Train/Event/Settlement/SuperRamen）
 - `story.rs`：`StoryStatus`（事件选项信息，`select_event_choice` 用）
-- `urafile.rs`：`UraFileWatcher`（notify 监听 `thisTurn.json`；错误事件重读兜底 + 空事件心跳）
+- `final_score.rs`：`FinalScorePayload`（**终局帧**扁平结构：五维/上限/剩余技能点/继承增量；`SUPPORTED_SCENARIO_ID=14`）
+- `urafile.rs`：`UraFileWatcher`（notify 监听**白名单** `thisTurn.json` + `finalScore.json`；队列元素 `RawFileEvent{file, contents}` 带 basename；错误事件重读兜底 + 空事件心跳）
 
 ### 场景处理（`scenario/`）
 - `onsen.rs`：`process_onsen(game, trainer, sink, luck_tracker, rng, json_mode, emit_info, game_config)`（newgame 检测 / 事件训练分发 / emit）
@@ -368,11 +369,12 @@ umaai 实时监听时把「接收到的游戏数据」与「策略计算结果�
 | `decisions.csv` | 逐决策点明细（与离线 `luck_replay` **同 schema**；`step` / `chain_len` 在线留空） |
 | `meta.json` | 局元信息：起止时间 / 起始回合 / `mid_entry` / 结束原因 / `snapshots` / `csv_rows` / `decision_rows` / `total_luck_end` |
 | `luck_trend.svg` | 该局运气分趋势图（3 子图：期望评分 / 运气分 / 运气波动；局数据完整收尾时**自动生成**） |
+| `game{id}_final.json` | **终局帧原文**（`finalScore.json` 信道：育成结束·点技能前的真机数据，含全部结局事件）——复盘终局评分的首选来源；缺失则回落末快照 |
 
-- **挂载点**：`main.rs` watch 循环 parse 后调 `record::on_snapshot`；输出 sink 外包 `RecordingSink`
+- **挂载点**：`main.rs` watch 循环按 basename 分流——`finalScore.json` → `record::on_final`（不进决策链路），其余 parse 后调 `record::on_snapshot`；输出 sink 外包 `RecordingSink`
 - **切局 / 收尾**：`chara_id` 变化即收尾上一局（`end_reason=switch`）；watch 循环结束（含 Err）调 `finalize_shutdown()`
 - **局末自动出图**：触发点 = 末回合第 2 份快照（拉面 `turn77_2`）处理完后立即写 `meta.json`（`end_reason=game_end`）+ 生成 `luck_trend.svg`；切局 / 退出降级为兜底
-- **局末自动打包**：仅在 `end_reason=game_end` 时，`zip_and_cleanup` 把 `logs/game{id}/` 打成 `logs/game{id}.zip`（包内条目相对原目录）并清理原目录；切局 / 中途停止不打包（保留目录方便排查）
+- **局末自动打包（2026-09-30 起 zip 推迟）**：末回合第 2 份快照只写 meta + 出图（`end_reason=game_end`），**不打包**；zip 推迟到**终局帧**到达（包内含 `game{id}_final.json`）或切局/退出兜底（末回合已见而终局帧未到 → 仍打包，保证完整一局必有 zip）。中途停止（未见过末回合）的局不打包，保留目录方便排查
 - **本期范围**：仅拉面（`scenarioId=14`）；温泉无 `single_mode_chara_id` 切局键，未纳入
 
 ## 拉面杯在线协议（`ramen_protocol_v2.md`，定稿）
