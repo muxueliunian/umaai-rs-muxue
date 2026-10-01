@@ -29,15 +29,15 @@ pub fn final_score(base: &GameStatusBase) -> i32 {
 ///
 /// 输入是「育成结束·点技能前」那一帧（`game{id}_final.json`）：五维已含全部结局
 /// 事件（育成结束 `401407` / 通用 `5011` / 友人结束）与末回合比赛奖励，故比分末
-/// 快照估算高约 2700 分。`skill_score` / `total_hints` 暂未随帧下发（恒 0），与
-/// [`final_score`] 的既有口径一致。
+/// 快照估算高约 2700 分。`skill_score` 仍暂未随帧下发（恒 0）；`total_hints`
+/// 自插件 2026-10 起随帧下发（旧帧缺省 0），与 [`final_score`] 同口径。
 pub fn final_score_from_frame(p: &FinalScorePayload) -> i32 {
     let uma = Uma {
         five_status: p.five_status,
         five_status_limit: p.five_status_limit,
         skill_pt: p.skill_pt,
         skill_score: 0,
-        total_hints: 0,
+        total_hints: p.total_hints,
         ..Default::default()
     };
     uma.calc_score()
@@ -105,7 +105,7 @@ mod tests {
                 "scenarioId": 14, "single_mode_chara_id": 6243, "turn": 77, "state": 2,
                 "fiveStatus": [3242, 2222, 1723, 1134, 2398],
                 "fiveStatusLimit": [3242, 2444, 2206, 2200, 2506],
-                "skillPt": 7987
+                "skillPt": 7987, "totalHints": 21
             }"#
         )?;
         let base = GameStatusBase {
@@ -113,6 +113,7 @@ mod tests {
             five_status: frame.five_status,
             five_status_limit: frame.five_status_limit,
             skill_pt: frame.skill_pt,
+            total_hints: frame.total_hints,
             ..Default::default()
         };
         let from_frame = final_score_from_frame(&frame);

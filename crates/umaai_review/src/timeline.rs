@@ -206,7 +206,7 @@ mod tests {
                     "trainLevelCount": [1, 2, 3, 4, 5],
                     "ptScoreRate": 2.0, "failureRateBias": 0,
                     "isIll": false, "isQieZhe": false, "isAiJiao": false,
-                    "isPositiveThinking": false, "isRefreshMind": false, "isLucky": false,
+                    "isXiaoQie": false, "PositiveThinkingCount": 0, "isRefreshMind": false, "LuckyCount": 0,
                     "zhongMaBlueCount": [0, 0, 0, 0, 0], "isRacing": false,
                     "cardId": [302424, 302894, 303044, 302924, 303024, 303054],
                     "persons": [], "personDistribution": [[], [], [], [], []],

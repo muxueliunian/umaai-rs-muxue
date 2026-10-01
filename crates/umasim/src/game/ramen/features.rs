@@ -335,8 +335,9 @@ fn encode_global(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
         w.flag(f.aijiao);
         w.flag(f.good_trainer);
         w.flag(f.bad_trainer);
-        w.flag(f.positive_thinking);
-        w.flag(f.lucky);
+        // 次数类状态仍按「是否拥有」编码，保持特征维度与既有模型一致
+        w.flag(f.positive_thinking_count > 0);
+        w.flag(f.lucky_count > 0);
         w.flag(f.doll);
         w.flag(f.ill);
         w.num(f.refresh_mind, SCALE_REFRESH);

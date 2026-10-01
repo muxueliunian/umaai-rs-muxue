@@ -1,5 +1,6 @@
 {
     "scenario_id": 12,
+    "friend_first_event": 809050001,
     "five_status_limit_base": [
         3000,2200,2200,2200,2400
     ],

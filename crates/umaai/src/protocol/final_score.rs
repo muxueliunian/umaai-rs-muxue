@@ -61,6 +61,11 @@ pub struct FinalScorePayload {
     pub five_status_limit: Array5,
     /// 点技能前的**剩余**技能点（不含已学技能价值；**契约必填**）
     pub skill_pt: i32,
+    /// 总 Hint 等级（`skill_tips_array` 各项 `level` 之和，与快照 `baseGame.totalHints` 同口径）
+    ///
+    /// 插件 2026-10 起下发；旧帧缺字段容忍（落 0，等价于此前「恒 0」口径）。
+    #[serde(default)]
+    pub total_hints: i32,
     /// 本局累计花掉的技能点（EventLogger 统计；当前实测恒 0）
     #[serde(default)]
     pub skill_pt_spent: i32,
@@ -112,6 +117,7 @@ mod tests {
             "fiveStatus": [3226, 2162, 1678, 1089, 2338],
             "fiveStatusLimit": [3242, 2444, 2206, 2200, 2506],
             "skillPt": 7717,
+            "totalHints": 21,
             "skillPtSpent": 0,
             "inheritGains": [11, 22]
         }"#;
@@ -122,6 +128,7 @@ mod tests {
         assert_eq!(p.five_status, [3226, 2162, 1678, 1089, 2338]);
         assert_eq!(p.five_status_limit, [3242, 2444, 2206, 2200, 2506]);
         assert_eq!(p.skill_pt, 7717);
+        assert_eq!(p.total_hints, 21);
         assert_eq!(p.state, 2);
         assert_eq!(p.inherit_gains, vec![11, 22]);
     }
@@ -136,6 +143,7 @@ mod tests {
         println!("最小终局帧: {p:?}");
         assert_eq!(p.game_id(), Some(1));
         assert_eq!(p.five_status, [1, 0, 0, 0, 0]);
+        assert_eq!(p.total_hints, 0, "旧帧缺 totalHints 应落 0");
         assert!(p.inherit_gains.is_empty());
     }
 

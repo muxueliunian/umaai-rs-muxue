@@ -18,6 +18,9 @@ pub struct UmaFlags {
     /// 切者
     #[serde(default)]
     pub qiezhe: bool,
+    /// 小切
+    #[serde(default)]
+    pub xiaoqie: bool,
     /// 爱娇
     #[serde(default)]
     pub aijiao: bool,
@@ -27,15 +30,15 @@ pub struct UmaFlags {
     /// 不擅长训练
     #[serde(default)]
     pub bad_trainer: bool,
-    /// 正向思考
+    /// 正向思考（心情盾）剩余次数
     #[serde(default)]
-    pub positive_thinking: bool,
+    pub positive_thinking_count: i32,
     /// 休息心得，表示持续了几回合
     #[serde(default)]
     pub refresh_mind: i32,
-    /// 幸运体质
+    /// 幸运体质次数
     #[serde(default)]
-    pub lucky: bool,
+    pub lucky_count: i32,
     /// 是否抓过娃娃
     #[serde(default)]
     pub doll: bool,
@@ -50,6 +53,9 @@ impl UmaFlags {
         if self.qiezhe {
             s += &format!("{}", "切者 ".bright_green());
         }
+        if self.xiaoqie {
+            s += "小切 ";
+        }
         if self.aijiao {
             s += "爱娇 ";
         }
@@ -59,11 +65,11 @@ impl UmaFlags {
         if self.bad_trainer {
             s += "不擅长训练 ";
         }
-        if self.positive_thinking {
-            s += "正向思考 ";
+        if self.positive_thinking_count > 0 {
+            s += &format!("正向思考({}) ", self.positive_thinking_count);
         }
-        if self.lucky {
-            s += "幸运体质 ";
+        if self.lucky_count > 0 {
+            s += &format!("幸运体质({}) ", self.lucky_count);
         }
         if self.doll {
             s += "抓过娃娃 ";
@@ -77,15 +83,45 @@ impl UmaFlags {
         s
     }
 
+    /// 局内获得【切者】：与【小切】互斥——获得切者时小切失效
+    ///
+    /// 小切为局外（育成开始前）获得，局内不会再次获得，故不需要反向处理
+    /// （小切不会把切者清掉）。
+    pub fn gain_qiezhe(&mut self) -> &mut Self {
+        self.qiezhe = true;
+        self.xiaoqie = false;
+        self
+    }
+
+    /// PT 折算系数（`pt_score_rate`）的额外倍数：切者 ×1.1、小切 ×1.04
+    ///
+    /// 语义：切者/小切让技能点更"值钱"（技能价格折扣），故终局评分里 PT 项按此放大。
+    /// 两者互斥（见 [`Self::gain_qiezhe`]），判断顺序无关。**只乘 PT 项**，不改变
+    /// [`Uma::total_pt`] 的 PT 数量口径，也不乘五维分与已学技能分。
+    pub fn pt_score_rate_factor(&self) -> f32 {
+        if self.qiezhe {
+            1.1
+        } else if self.xiaoqie {
+            1.04
+        } else {
+            1.0
+        }
+    }
+
     /// 添加状态
     pub fn add(&mut self, rhs: &UmaFlags) -> &mut Self {
-        self.qiezhe |= rhs.qiezhe;
+        if rhs.qiezhe {
+            // 互斥：获得切者会清掉小切
+            self.gain_qiezhe();
+        } else if rhs.xiaoqie {
+            self.xiaoqie = true;
+        }
         self.aijiao |= rhs.aijiao;
         self.good_trainer |= rhs.good_trainer;
         self.bad_trainer |= rhs.bad_trainer;
-        self.positive_thinking |= rhs.positive_thinking;
+        self.positive_thinking_count += rhs.positive_thinking_count;
         self.refresh_mind += rhs.refresh_mind;
-        self.lucky |= rhs.lucky;
+        self.lucky_count += rhs.lucky_count;
         self.doll |= rhs.doll;
         self.ill |= rhs.ill;
         self
@@ -94,12 +130,14 @@ impl UmaFlags {
     /// 减少状态
     pub fn remove(&mut self, rhs: &UmaFlags) -> &mut Self {
         self.qiezhe &= !rhs.qiezhe;
+        self.xiaoqie &= !rhs.xiaoqie;
         self.aijiao &= !rhs.aijiao;
         self.good_trainer &= !rhs.good_trainer;
         self.bad_trainer &= !rhs.bad_trainer;
-        self.positive_thinking &= !rhs.positive_thinking;
+        // 次数类状态按下限 0 扣减（心情盾被消耗、幸运体质失效）
+        self.positive_thinking_count = (self.positive_thinking_count - rhs.positive_thinking_count).max(0);
         self.refresh_mind -= rhs.refresh_mind;
-        self.lucky &= !rhs.lucky;
+        self.lucky_count = (self.lucky_count - rhs.lucky_count).max(0);
         self.doll &= !rhs.doll;
         self.ill &= !rhs.ill;
         self
@@ -249,6 +287,10 @@ impl Uma {
     /// 七个分量之和逐位等于 [`Self::calc_score`]。只在 3 项（`skill` / `pt` /
     /// `five_status` 之和）或 7 项粒度上保证逐位相等；PT 项已含 `total_pt()` 的
     /// `floor` 与 `as i32` 两层截断，不可再拆。
+    ///
+    /// PT 项额外乘 [`UmaFlags::pt_score_rate_factor`]（切者 ×1.1 / 小切 ×1.04）：
+    /// 这是**终局评分**口径，不改变 [`Self::total_pt`] 的 PT 数量，也不改搜索的
+    /// `score_pt` 选择轴（拉面 `/温泉` 的选择轴各有独立 PT 公式）。
     pub fn score_parts(&self) -> ScoreParts {
         let cons = global!(GAMECONSTANTS);
         let mut five_status = [0i32; 5];
@@ -258,7 +300,9 @@ impl Uma {
         }
         ScoreParts {
             skill: self.skill_score,
-            pt: (self.total_pt() as f32 * cons.pt_score_rate) as i32,
+            pt: (self.total_pt() as f32
+                * cons.pt_score_rate
+                * self.flags.pt_score_rate_factor()) as i32,
             five_status
         }
     }
@@ -283,13 +327,31 @@ impl Uma {
         ((score as f64) * 0.37) as i32
     }
 
+    /// 增减干劲：**掉心情时优先消耗【心情盾】**（`positive_thinking_count`），盾为 0 才真掉
+    ///
+    /// 心情盾按「防一次掉心情」计：一次扣减（无论扣几级，如大失败的 -3）消耗一层盾，
+    /// 心情不变；盾为 0 时按原规则 `max(1).min(5)` 夹取。心情上涨不消耗盾。
+    pub fn add_motivation(&mut self, delta: i32) -> &mut Self {
+        if delta < 0 && self.flags.positive_thinking_count > 0 {
+            self.flags.positive_thinking_count -= 1;
+            diag!(
+                "  心情盾挡下一次掉心情 {}（剩 {} 层）",
+                delta,
+                self.flags.positive_thinking_count
+            );
+            return self;
+        }
+        self.motivation = (self.motivation + delta).max(1).min(5);
+        self
+    }
+
     pub fn add_value(&mut self, action: &ActionValue) -> &mut Self {
         diag!("{}", action.explain().bright_black());
         for i in 0..5 {
             self.five_status[i] = (self.five_status[i] + action.status_pt[i]).min(self.five_status_limit[i]);
         }
         self.skill_pt += action.status_pt[5];
-        self.motivation = (self.motivation + action.motivation).max(1).min(5);
+        self.add_motivation(action.motivation);
         self.max_vital += action.max_vital;
         self.vital = (self.vital + action.vital).min(self.max_vital).max(0);
         self.total_hints += action.hint_level;
@@ -361,6 +423,154 @@ mod tests {
         utils::{get_workspace_root, init_test_logger}
     };
 
+    /// 次数类状态：心情盾（正向思考）/幸运体质按次数累加、扣减下限 0；小切为布尔 flag
+    #[test]
+    fn test_flag_counts_add_remove() {
+        let mut flags = UmaFlags::default();
+        flags.add(&UmaFlags {
+            xiaoqie: true,
+            positive_thinking_count: 3,
+            lucky_count: 2,
+            ..Default::default()
+        });
+        println!("累加后: {:?} / {}", flags, flags.explain());
+        assert_eq!(flags.positive_thinking_count, 3, "心情盾次数应累加");
+        assert_eq!(flags.lucky_count, 2, "幸运体质次数应累加");
+        assert!(flags.xiaoqie, "小切应被置位");
+
+        // 消耗一次心情盾 + 幸运体质失效
+        flags.remove(&UmaFlags {
+            positive_thinking_count: 1,
+            lucky_count: 2,
+            ..Default::default()
+        });
+        println!("扣减后: {:?} / {}", flags, flags.explain());
+        assert_eq!(flags.positive_thinking_count, 2, "消耗一次心情盾应只扣 1");
+        assert_eq!(flags.lucky_count, 0, "幸运体质应扣到 0");
+        assert!(flags.explain().contains("正向思考(2)"), "状态描述应带剩余次数");
+        assert!(!flags.explain().contains("幸运体质"), "次数归零后不应再显示");
+
+        // 超额扣减不得出现负数
+        flags.remove(&UmaFlags {
+            positive_thinking_count: 5,
+            ..Default::default()
+        });
+        println!("超额扣减后: {:?} / {}", flags, flags.explain());
+        assert_eq!(flags.positive_thinking_count, 0, "次数不应扣成负数");
+        assert!(!flags.explain().contains("正向思考"), "次数归零后不应再显示");
+
+        flags.remove(&UmaFlags {
+            xiaoqie: true,
+            ..Default::default()
+        });
+        assert!(!flags.xiaoqie, "小切应可移除");
+    }
+
+    /// 心情盾：掉心情优先消耗 `positive_thinking_count`，盾为 0 才真掉心情
+    #[test]
+    fn test_motivation_shield() {
+        // 一层盾挡下一次掉心情
+        let mut uma = Uma::default();
+        uma.motivation = 4;
+        uma.flags.positive_thinking_count = 1;
+        uma.add_motivation(-1);
+        println!(
+            "盾=1 掉1级: 心情={} 盾={}",
+            uma.motivation, uma.flags.positive_thinking_count
+        );
+        assert_eq!(
+            (uma.motivation, uma.flags.positive_thinking_count),
+            (4, 0),
+            "一层盾应挡下 -1 且心情不变"
+        );
+
+        // 大失败 -3 也只消耗一层盾（心情盾按「防一次掉心情」计）
+        let mut uma = Uma::default();
+        uma.motivation = 4;
+        uma.flags.positive_thinking_count = 2;
+        uma.add_motivation(-3);
+        println!(
+            "盾=2 掉3级: 心情={} 盾={}",
+            uma.motivation, uma.flags.positive_thinking_count
+        );
+        assert_eq!(
+            (uma.motivation, uma.flags.positive_thinking_count),
+            (4, 1),
+            "一次扣减只消耗一层盾"
+        );
+
+        // 盾为 0：按原规则真掉，下限仍为 1
+        let mut uma = Uma::default();
+        uma.motivation = 4;
+        uma.add_motivation(-1);
+        assert_eq!(uma.motivation, 3, "无盾时应真掉心情");
+        uma.motivation = 1;
+        uma.add_motivation(-2);
+        println!("无盾 掉2级: 心情={}", uma.motivation);
+        assert_eq!(uma.motivation, 1, "心情下限仍为 1");
+
+        // 涨心情不消耗盾，上限仍为 5
+        let mut uma = Uma::default();
+        uma.motivation = 3;
+        uma.flags.positive_thinking_count = 2;
+        uma.add_motivation(2);
+        println!(
+            "上涨2级: 心情={} 盾={}",
+            uma.motivation, uma.flags.positive_thinking_count
+        );
+        assert_eq!(
+            (uma.motivation, uma.flags.positive_thinking_count),
+            (5, 2),
+            "上涨不消耗盾且上限为 5"
+        );
+    }
+
+    /// 切者 / 小切的互斥与 PT 折算系数
+    #[test]
+    fn test_qiezhe_xiaoqie_exclusive_and_factor() {
+        // 局内获得切者：清掉小切
+        let mut flags = UmaFlags {
+            xiaoqie: true,
+            ..Default::default()
+        };
+        flags.gain_qiezhe();
+        println!("gain_qiezhe() 后: {:?}", flags);
+        assert!(flags.qiezhe && !flags.xiaoqie, "获得切者应清掉小切");
+
+        // 事件 add 路径同样互斥
+        let mut flags = UmaFlags {
+            xiaoqie: true,
+            ..Default::default()
+        };
+        flags.add(&UmaFlags {
+            qiezhe: true,
+            ..Default::default()
+        });
+        println!("add(切者) 后: {:?}", flags);
+        assert!(flags.qiezhe && !flags.xiaoqie, "事件 add 路径应清掉小切");
+
+        // PT 折算系数
+        let factor = |qiezhe: bool, xiaoqie: bool| {
+            UmaFlags {
+                qiezhe,
+                xiaoqie,
+                ..Default::default()
+            }
+            .pt_score_rate_factor()
+        };
+        println!(
+            "折算系数: 无={} 切者={} 小切={} 同时={}",
+            factor(false, false),
+            factor(true, false),
+            factor(false, true),
+            factor(true, true)
+        );
+        assert_eq!(factor(false, false), 1.0, "无状态不加成");
+        assert_eq!(factor(true, false), 1.1, "切者 ×1.1");
+        assert_eq!(factor(false, true), 1.04, "小切 ×1.04");
+        assert_eq!(factor(true, true), 1.1, "两者同时存在时以切者为准");
+    }
+
     #[test]
     fn test_uma() -> Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -398,9 +608,18 @@ mod tests {
             let status = uma.five_status[i].min(uma.five_status_limit[i]).max(0) as usize;
             five_status[i] = table[status.min(table.len() - 1)];
         }
+        // 切者/小切的 PT 折算加成：这里独立写死系数（不复用 `pt_score_rate_factor()`），
+        // 保证这份 oracle 能抓住实现里的系数写错。
+        let pt_factor = if uma.flags.qiezhe {
+            1.1
+        } else if uma.flags.xiaoqie {
+            1.04
+        } else {
+            1.0
+        };
         ScoreParts {
             skill: uma.skill_score,
-            pt: (uma.total_pt() as f32 * cons.pt_score_rate) as i32,
+            pt: (uma.total_pt() as f32 * cons.pt_score_rate * pt_factor) as i32,
             five_status
         }
     }
@@ -486,6 +705,25 @@ mod tests {
             uma.total_pt()
         );
         check_score_parts_case("floor 边界2", &uma);
+
+        // 6. 切者 / 小切：终局评分的 PT 项按 1.1 / 1.04 放大（只乘 PT 项）
+        for (label, qiezhe, factor) in [("切者", true, 1.1_f32), ("小切", false, 1.04_f32)] {
+            let mut uma = Uma::default();
+            uma.skill_pt = 1000;
+            uma.five_status = [200, 180, 160, 140, 120];
+            uma.five_status_limit = [1200, 1200, 1200, 1200, 1200];
+            let base_pt = uma.score_parts().pt;
+            uma.flags.qiezhe = qiezhe;
+            uma.flags.xiaoqie = !qiezhe;
+            let boosted = uma.score_parts().pt;
+            check_score_parts_case(label, &uma);
+            println!("{label}: PT 项 {base_pt} → {boosted}（系数 {factor}）");
+            assert_eq!(
+                boosted,
+                (base_pt as f32 * factor) as i32,
+                "{label}: 终局评分的 PT 项应按折算系数放大"
+            );
+        }
 
         Ok(())
     }

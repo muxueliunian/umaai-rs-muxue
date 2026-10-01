@@ -2,21 +2,23 @@ use anyhow::Result;
 use log::warn;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use umasim::{
-    game::{BaseGame, BasePerson, FriendOutState, FriendState, InheritInfo, SupportCard, TurnStage, Uma, UmaFlags},
+    game::{
+        BaseGame, BasePerson, FriendCardState, FriendOutState, FriendState, InheritInfo, SupportCard, TurnStage, Uma, UmaFlags
+    },
     gamedata::{EventData, GAMEDATA},
     global,
     utils::{Array5, load_game_config}
 };
 
+pub mod final_score;
 pub mod onsen;
 pub mod ramen;
 pub mod story;
 pub mod urafile;
-pub mod final_score;
+pub use final_score::*;
 pub use onsen::*;
 pub use ramen::*;
 pub use story::*;
-pub use final_score::*;
 
 /// 描述不同剧本的通信状态，需要能转为对应的Game结构
 pub trait GameStatus: DeserializeOwned {
@@ -80,15 +82,24 @@ pub struct GameStatusBase {
     /// 是否切者
     #[serde(rename = "isQieZhe")]
     pub is_qiezhe: bool,
+    /// 是否小切
+    #[serde(default)]
+    pub is_xiao_qie: bool,
     /// 是否爱娇
     #[serde(rename = "isAiJiao")]
     pub is_aijiao: bool,
-    /// 是否正向思考
-    pub is_positive_thinking: bool,
+    /// 心情盾（正向思考）剩余次数
+    ///
+    /// 插件 2026-10 起改发计数；旧帧的 `isPositiveThinking` 布尔字段被忽略 → 0。
+    #[serde(default, rename = "PositiveThinkingCount")]
+    pub positive_thinking_count: i32,
     /// 是否有休息心得
     pub is_refresh_mind: bool,
-    /// 是否有幸运体质
-    pub is_lucky: bool,
+    /// 幸运体质次数
+    ///
+    /// 插件 2026-10 起改发计数；旧帧的 `isLucky` 布尔字段被忽略 → 0。
+    #[serde(default, rename = "LuckyCount")]
+    pub lucky_count: i32,
     /// 种马蓝因子数量
     #[serde(rename = "zhongMaBlueCount")]
     pub zhongma_blue_count: Array5,
@@ -117,9 +128,30 @@ pub struct GameStatusBase {
     /// 回合状态
     #[serde(rename = "playing_state")]
     pub playing_state: i32,
+    /// 是否为训练后：当前回合（1 起始）已经执行过任意指令（训练/休息/出行等）
+    ///
+    /// 来自 C# 端 EventLogger 记录的最近一次指令回合。仅透传，不参与决策。
+    #[serde(default)]
+    pub is_after_training: bool,
+    /// 本局是否从第 1 回合开始完整记录（C# 端 EventLogger 会话标记）
+    ///
+    /// `false` 表示中途加载进入、之前回合的历史数据不完整。仅透传，不参与决策。
+    #[serde(default)]
+    pub is_full_game: bool,
     /// 胜场信息
     #[serde(default)]
     pub race_history: Vec<i32>,
+    /// 本局已发生的关键事件 story_id 列表（友人首次点击事件、携带支援卡的支援卡事件）
+    #[serde(default)]
+    pub key_events: Vec<i32>,
+    /// 每次继承事件获得的属性增量，按继承发生顺序（不含技能点增量）
+    #[serde(default)]
+    pub inherit_gains: Vec<i32>,
+    /// 本局累计花掉的技能点（购买技能等导致的 pt 减少）
+    ///
+    /// 解析时回加到 `Uma::skill_pt`（见 [`Self::parse_uma`]），以还原「本局累计获得 pt」。
+    #[serde(default)]
+    pub skill_pt_spent: i32,
     /// 事件信息
     pub story: Option<StoryStatus>,
     /// 回合阶段来源（C# 端 thisTurn.json 顶层 `source`；拉面剧本用，影响 stage dispatch）
@@ -144,8 +176,9 @@ impl GameStatusBase {
         let data = global!(GAMEDATA).get_uma(self.uma_id)?;
         let flags = UmaFlags {
             ill: self.is_ill,
-            lucky: self.is_lucky,
+            lucky_count: self.lucky_count,
             qiezhe: self.is_qiezhe,
+            xiaoqie: self.is_xiao_qie,
             aijiao: self.is_aijiao,
             // failureRateBias 语义：正值=训练更易失败（不擅长训练），负值=训练更不易失败
             // （擅长训练）。与 umasim 内部 traits.rs:calc_training_failure_rate 的
@@ -154,7 +187,7 @@ impl GameStatusBase {
             // 人为升高 +2，高体力回合推「休息」（见 issues.md 修复条目）。
             good_trainer: self.failure_rate_bias < 0,
             bad_trainer: self.failure_rate_bias > 0,
-            positive_thinking: self.is_positive_thinking,
+            positive_thinking_count: self.positive_thinking_count,
             refresh_mind: self.is_refresh_mind as i32,
             ..Default::default()
         };
@@ -167,7 +200,10 @@ impl GameStatusBase {
             five_status: self.five_status.clone(),
             five_status_bonus: data.five_status_bonus.clone(),
             five_status_limit: self.five_status_limit,
-            skill_pt: self.skill_pt,
+            // 已花技能点回加：协议 `skillPt` 是「剩余」pt，且 C# 端 `skillScore` 恒为 0，
+            // 只取剩余值会让玩家买技能后恢复出的局面凭空丢分（T(n) 假跌 → 误记为运气波动）。
+            // `skillPtSpent` 是 EventLogger 累计的本局已花 pt，回加后 ≈ 本局累计获得 pt。
+            skill_pt: self.skill_pt + self.skill_pt_spent,
             skill_score: self.skill_score,
             total_hints: self.total_hints,
             race_bonus: 0,
@@ -266,6 +302,40 @@ impl GameStatusBase {
             ..Default::default()
         })
     }
+
+    /// 用协议 `keyEvents` 还原 `BaseGame` 的事件历史与友人首次点击状态
+    ///
+    /// `BaseGame::events`（事件 id → 次数）在协议里没有直接字段，只能由 `keyEvents`
+    /// （真实游戏 story_id 列表）换算，否则从实际对局恢复出的局面会缺失事件历史，
+    /// 让 rollout 的后续事件抽取与真机不一致：
+    /// - **友人首次点击**：命中本剧本 `friend_first_event` 时，若当前不是已出行状态
+    ///   （`AfterUnlock`）则纠正为「已点击未出行」（`BeforeUnlock`）——补齐协议
+    ///   无法区分「未点击 / 已点击未出行」的历史缺口。
+    /// - **支援卡连续事件**：其余事件按 ID 最低位（1/2/3）判定属于第几段，累加到
+    ///   umasim 的通用事件 `8001` / `8002` / `8003`（其值 = 发生了该段的卡数）。
+    ///
+    /// `friend_first_event == 0` 表示剧本数据未提供该 ID，此时跳过友人判定。
+    /// 只补事件历史与友人阶段，不改动其它状态。
+    pub fn apply_key_events(&self, game: &mut BaseGame, friend_first_event: i32) {
+        // (1) 友人首次点击：未出行 且 命中友人首次事件 → 已点击未出行
+        if friend_first_event != 0
+            && game.friend.card_state != FriendCardState::Empty
+            && game.friend.out_state != FriendOutState::AfterUnlock
+            && self.key_events.contains(&friend_first_event)
+        {
+            game.friend.out_state = FriendOutState::BeforeUnlock;
+        }
+        // (2) 支援卡连续事件：除友人首次事件外，按最低位归到 8001-8003
+        for &id in &self.key_events {
+            if id == friend_first_event {
+                continue;
+            }
+            let step = id % 10;
+            if (1..=3).contains(&step) {
+                *game.events.entry((8000 + step) as u32).or_insert(0) += 1;
+            }
+        }
+    }
 }
 
 impl From<&BasePerson> for BasePersonStatus {
@@ -312,10 +382,11 @@ impl From<&BaseGame> for GameStatusBase {
             failure_rate_bias,
             is_ill: game.uma.flags.ill,
             is_qiezhe: game.uma.flags.qiezhe,
+            is_xiao_qie: game.uma.flags.xiaoqie,
             is_aijiao: game.uma.flags.aijiao,
-            is_positive_thinking: game.uma.flags.positive_thinking,
+            positive_thinking_count: game.uma.flags.positive_thinking_count,
             is_refresh_mind: game.uma.flags.refresh_mind > 0,
-            is_lucky: game.uma.flags.lucky,
+            lucky_count: game.uma.flags.lucky_count,
             zhongma_blue_count: game.inherit.blue_count.clone(),
             is_racing: game.uma.is_race_turn(game.turn),
             card_id,
@@ -327,7 +398,13 @@ impl From<&BaseGame> for GameStatusBase {
             friend_stage: game.friend.out_state.to_int(),
             friend_outgoing_used,
             playing_state: 1,
+            // 以下 5 个字段来自 C# 端 EventLogger，BaseGame 不承载 → 反向转换给默认值
+            is_after_training: false,
+            is_full_game: false,
             race_history: game.uma.list_races(),
+            key_events: vec![],
+            inherit_gains: vec![],
+            skill_pt_spent: 0,
             story: None,
             source: None,
             single_mode_chara_id: None
@@ -425,9 +502,10 @@ mod tests {
             "isIll": false,
             "isQieZhe": false,
             "isAiJiao": false,
-            "isPositiveThinking": false,
+            "isXiaoQie": false,
+            "PositiveThinkingCount": 0,
             "isRefreshMind": false,
-            "isLucky": false,
+            "LuckyCount": 0,
             "zhongMaBlueCount": [0, 0, 0, 0, 0],
             "isRacing": false,
             "cardId": [],
@@ -476,9 +554,10 @@ mod tests {
             "isIll": false,
             "isQieZhe": false,
             "isAiJiao": false,
-            "isPositiveThinking": false,
+            "isXiaoQie": false,
+            "PositiveThinkingCount": 0,
             "isRefreshMind": false,
-            "isLucky": false,
+            "LuckyCount": 0,
             "zhongMaBlueCount": [15, 3, 0, 0, 0],
             "isRacing": false,
             "cardId": [302424, 302894, 303044, 302924, 303024, 303054],
@@ -599,6 +678,131 @@ mod tests {
         }
         Ok(())
     }
+
+    /// 次数类状态（心情盾 / 幸运体质）与新增「小切」flag 的解析 + 导出方向
+    ///
+    /// 插件 2026-10 起把布尔 `isPositiveThinking` / `isLucky` 改成计数，键名改为
+    /// `PositiveThinkingCount` / `LuckyCount`，并新增 `isXiaoQie`。
+    #[test]
+    fn test_flag_counts_parse_and_export() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let base: GameStatusBase = from_str(
+            r#"{
+                "scenarioId": 14,
+                "umaId": 100201,
+                "umaStar": 5,
+                "turn": 30,
+                "vital": 80,
+                "maxVital": 108,
+                "motivation": 4,
+                "fiveStatus": [1000, 800, 800, 800, 800],
+                "fiveStatusLimit": [2400, 2400, 2400, 2400, 2400],
+                "skillPt": 1000,
+                "skillScore": 0,
+                "totalHints": 0,
+                "trainLevelCount": [3, 3, 3, 3, 3],
+                "ptScoreRate": 2.0,
+                "failureRateBias": 0,
+                "isIll": false,
+                "isQieZhe": false,
+                "isXiaoQie": true,
+                "isAiJiao": false,
+                "PositiveThinkingCount": 3,
+                "isRefreshMind": false,
+                "LuckyCount": 2,
+                "zhongMaBlueCount": [15, 0, 0, 0, 3],
+                "isRacing": false,
+                "cardId": [303040],
+                "persons": [],
+                "personDistribution": [[-1,-1,-1,-1,-1],[-1,-1,-1,-1,-1],[-1,-1,-1,-1,-1],[-1,-1,-1,-1,-1],[-1,-1,-1,-1,-1]],
+                "lockedTrainingId": -1,
+                "friendship_noncard_yayoi": 0,
+                "friendship_noncard_reporter": 0,
+                "friend_stage": 0,
+                "friend_outgoingUsed": 0,
+                "playing_state": 1
+            }"#
+        )?;
+        let uma = base.parse_uma()?;
+        println!("解析 flags: {:?}", uma.flags);
+        ensure!(uma.flags.positive_thinking_count == 3, "心情盾次数应解析为 3");
+        ensure!(uma.flags.lucky_count == 2, "幸运体质次数应解析为 2");
+        ensure!(uma.flags.xiaoqie, "小切 flag 应解析为 true");
+
+        let mut game = BaseGame::default();
+        game.uma.flags.positive_thinking_count = 1;
+        game.uma.flags.lucky_count = 2;
+        game.uma.flags.xiaoqie = true;
+        let exported = GameStatusBase::from(&game);
+        println!(
+            "导出字段: PositiveThinkingCount={} LuckyCount={} isXiaoQie={}",
+            exported.positive_thinking_count, exported.lucky_count, exported.is_xiao_qie
+        );
+        ensure!(exported.positive_thinking_count == 1, "导出心情盾次数应保留");
+        ensure!(exported.lucky_count == 2, "导出幸运体质次数应保留");
+        ensure!(exported.is_xiao_qie, "导出小切 flag 应保留");
+        Ok(())
+    }
+
+    /// `apply_key_events`：友人首次点击纠正 + 支援卡连续事件按最低位归到 8001-8003
+    #[test]
+    fn test_apply_key_events_mapping() -> Result<()> {
+        // keyEvents（真实 story_id）：友人首次 + 三张卡的段1 + 一段2 + 一段3
+        let mut status = GameStatusBase::default();
+        status.key_events = vec![809001101, 830161001, 830162001, 830163002, 830164003];
+
+        // 未点击 + 命中友人首次事件 → 纠正为已点击未出行
+        let mut game = BaseGame::default();
+        game.friend.card_state = FriendCardState::SSR;
+        game.friend.out_state = FriendOutState::UnClicked;
+        status.apply_key_events(&mut game, 809001101);
+        println!("未点击+命中首次 → out_state={:?} events={:?}", game.friend.out_state, game.events);
+        ensure!(game.friend.out_state == FriendOutState::BeforeUnlock, "应纠正为已点击未出行");
+        ensure!(game.events.get(&8001) == Some(&2), "段1 应计 2 张卡");
+        ensure!(game.events.get(&8002) == Some(&1), "段2 应计 1 张卡");
+        ensure!(game.events.get(&8003) == Some(&1), "段3 应计 1 张卡");
+        ensure!(game.events.values().sum::<u32>() == 4, "友人首次事件不应被计入卡事件");
+
+        // 已出行 → 不改写阶段
+        let mut out = BaseGame::default();
+        out.friend.card_state = FriendCardState::SSR;
+        out.friend.out_state = FriendOutState::AfterUnlock;
+        status.apply_key_events(&mut out, 809001101);
+        println!("已出行 → out_state={:?}", out.friend.out_state);
+        ensure!(out.friend.out_state == FriendOutState::AfterUnlock, "已出行不应被改写");
+
+        // 未带剧本友人 → 不做友人判定
+        let mut none = BaseGame::default();
+        status.apply_key_events(&mut none, 809001101);
+        println!("未带友人 → out_state={:?}", none.friend.out_state);
+        ensure!(none.friend.out_state == FriendOutState::UnClicked, "未带剧本友人不改写");
+
+        // friend_first_event=0（剧本数据缺失）→ 跳过友人判定，卡事件照常计数
+        let mut zero = BaseGame::default();
+        zero.friend.card_state = FriendCardState::SSR;
+        status.apply_key_events(&mut zero, 0);
+        println!("首次ID缺失 → out_state={:?} events={:?}", zero.friend.out_state, zero.events);
+        ensure!(zero.friend.out_state == FriendOutState::UnClicked, "无首次ID时不判定友人");
+        ensure!(zero.events.get(&8001) == Some(&3), "首次ID缺失时该事件也按段1 计数");
+        Ok(())
+    }
+
+    /// 已花技能点回加到 `Uma::skill_pt`（消除玩家买技能造成的假运气波动）
+    #[test]
+    fn test_skill_pt_spent_added_back() -> Result<()> {
+        std::env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+        let mut base = status_base_with_frb(0)?; // fixture 内 skillPt = 1000
+        base.skill_pt_spent = 300;
+        let uma = base.parse_uma()?;
+        println!(
+            "skillPt={} + skillPtSpent={} → Uma.skill_pt={}",
+            base.skill_pt, base.skill_pt_spent, uma.skill_pt
+        );
+        ensure!(uma.skill_pt == 1300, "已花技能点应回加到 skill_pt");
+        Ok(())
+    }
 }
 
 /// 工具函数，仅供测试使用——为上面的 roundtrip 测试构造带 `failureRateBias` 的 fixture。
@@ -624,9 +828,10 @@ fn status_base_with_frb(frb: i32) -> Result<GameStatusBase> {
             "isIll": false,
             "isQieZhe": false,
             "isAiJiao": false,
-            "isPositiveThinking": false,
+            "isXiaoQie": false,
+            "PositiveThinkingCount": 0,
             "isRefreshMind": false,
-            "isLucky": false,
+            "LuckyCount": 0,
             "zhongMaBlueCount": [15, 0, 0, 0, 3],
             "saihou": 0,
             "isRacing": false,

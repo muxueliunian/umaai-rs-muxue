@@ -486,7 +486,7 @@ impl Game for RamenGame {
             5007 => {
                 if rng.random_bool(system_event_prob("qiezhe_normal")?) {
                     diag!(">> 获得【切者】");
-                    self.uma.flags.qiezhe = true;
+                    self.uma.flags.gain_qiezhe();
                 }
             }
             super::events::EVENT_FRIEND_UNLOCK => {

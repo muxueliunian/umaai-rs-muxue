@@ -65,7 +65,9 @@ use umasim::{
         BasePerson,
         PersonType,
         ramen::{RamenGame, RamenStage, rules::NPC_CHARA_IDS}
-    }
+    },
+    gamedata::ramen::RAMENDATA,
+    global
 };
 
 /// 拉面剧本通信状态顶层结构
@@ -194,6 +196,10 @@ impl GameStatus for GameStatusRamen {
         //    distribution / unresolved_events(story) 均由 `parse_basegame` 落地。
         let mut game = RamenGame::from_base_game(base.parse_basegame(9001)?)?;
 
+        // 1.5 用协议 keyEvents 还原事件历史与友人首次点击状态
+        //     （详见 `GameStatusBase::apply_key_events`）
+        base.apply_key_events(&mut game.base, global!(RAMENDATA).friend_first_event);
+
         // 2. 构造 persons。按 spec §'理事長、记者、NPC生成' 的 layout：
         //   0..5 = deck 6 张（友人 chara_id=9001 / 其他友人改 OtherFriend）
         //   6 = 理事長（始终在场，turn=0 也有）
@@ -310,8 +316,7 @@ impl GameStatus for GameStatusRamen {
             && game.ramen.selected_regions.iter().all(|&r| r == 0);
         if data_incomplete {
             log::warn!(
-                "拉面协议数据获取不全：turn={} selected_regions 全 0（年份选择未到位）",
-                base.turn
+                "缺少地区选择信息，AI无法计算；需要回到大厅界面重进育成"
             );
             // 不动 game.stage，保留 Begin 让 main loop 走 fallback
         } else if base.turn <= 1 {

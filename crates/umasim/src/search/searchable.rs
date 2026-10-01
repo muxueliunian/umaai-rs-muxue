@@ -125,20 +125,26 @@ impl FlatSearchGame for OnsenGame {
 }
 
 impl FlatSearchGame for RamenGame {
-    /// rollout 基策 = 正式推荐手写策略
+    /// rollout 基策 = 正式推荐手写策略（默认档）
     ///
     /// 2026-08-27 切换：原用 `RamenHandwrittenTrainer`（纯 RamenPolicy，缺平衡/吃面联动/
     /// 体力门限等机制），切到 [`RecommendedRamenTrainer`] 后搜索评分与正式手写策略对齐，
     /// 排序结果更有意义；门控全关时与纯推荐策略逐位等价。决策开销 ×6.36（RamenSelect
     /// 预演主导），单局 ×2.10，搜索预算需相应调小或 train_only。
-    type RolloutTrainer = crate::trainer::RecommendedRamenTrainer;
+    ///
+    /// 用枚举而非直接写 `RecommendedRamenTrainer`：让「rollout 走哪个基策」成为运行时
+    /// 可切换的实验开关（见 [`crate::trainer::RamenRolloutTrainer`]），默认档不变。
+    /// 注意网络档的代价是 rollout 每步一次推理，量级上不可能用于生产预算。
+    ///
+    /// [`RecommendedRamenTrainer`]: crate::trainer::RecommendedRamenTrainer
+    type RolloutTrainer = crate::trainer::RamenRolloutTrainer;
 
     /// 拉面暂无 leaf 估值器，Phase 1 只允许跑到终局
     const SUPPORTS_TRUNCATED_LEAF: bool = false;
 
     /// rollout 专用实例：三份年的 breakdown 全部关闭
     fn default_rollout_trainer() -> Self::RolloutTrainer {
-        crate::trainer::RecommendedRamenTrainer::for_rollout()
+        crate::trainer::RamenRolloutTrainer::handwritten()
     }
 
     /// 拉面 MCTS 终局估值：`score` = `calc_score()`（正常评分），

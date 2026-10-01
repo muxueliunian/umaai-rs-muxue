@@ -120,6 +120,13 @@ pub struct PtEffect {
 pub struct RamenScenarioData {
     /// 剧本ID = 14
     pub scenario_id: i32,
+    /// 该剧本的友人首次点击事件 ID（真实游戏 story_id）
+    ///
+    /// 用于把小黑板 `keyEvents` 里的真实事件 ID 归一到 umasim 的事件历史；
+    /// 与模拟内部事件 ID（`RamenScenarioData::friend_events["first"].id`）不是一个概念。
+    /// 缺字段时为 0，表示无法匹配。
+    #[serde(default)]
+    pub friend_first_event: i32,
     /// 链接角色ID
     pub link_chara_id: Vec<i32>,
     /// RMJ结算阈值（按年份）

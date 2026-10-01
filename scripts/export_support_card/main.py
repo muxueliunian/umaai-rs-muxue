@@ -55,19 +55,19 @@ RaceConditionGrades = {
 # 生涯比赛会改变的情况（能不比就不比）
 # 回合数已经-1了
 SpecialRaces = {
-    1005: {
+    1005: { # 富士奇迹
         "races": [32, 45],
-        "note": "富士 - 选择英里路线"
+        "note": "选择英里路线"
     },
-    1009: {
+    1009: { # 大和赤骥
         "races": [33],
-        "note": "大和 - 比赛回合不变"
+        "note": "事件不影响比赛回合"
     },
-    1016: {
+    1016: { # 成田白仁
         "races": [55, 67, 69, 71],
-        "note": "白仁 - 比赛回合不变"
+        "note": "事件不影响比赛回合"
     },
-    1022: {
+    1022: { # 美妙
         "freeRaces": [
             {
                 "startTurn": 67,
@@ -75,9 +75,9 @@ SpecialRaces = {
                 "count": 1
             }
         ],
-        "note": "美妙 - 自选最终比赛"
+        "note": "最终比赛按自选赛程处理，需要自行决定比赛回合"
     },
-    1031: {
+    1031: { # 风神
         "freeRaces": [
             {
                 "startTurn": 69,
@@ -85,11 +85,11 @@ SpecialRaces = {
                 "count": 1
             }
         ],
-        "note": "风神 - 自选最终比赛"
+        "note": "最终比赛按自选赛程处理，需要自行决定比赛回合"
     },
-    1032: {
+    1032: { # 速子
         "races": [33],
-        "note": "速子 - 设置为日本德比（不触发低心情改赛）"
+        "note": "正常出战德比（不触发掉心情改比赛事件）"
     },
     1056: {
         "races": [29],
@@ -102,53 +102,61 @@ SpecialRaces = {
         ],
         "note": "福来 - 抽签比赛，设置为第二年3月下，第三年夏季自选比赛"
     },
-    1062: {
-        "note": "诗歌剧 - 设置为不比日本杯（不流鼻血要扣分）"
+    1062: { # 诗歌剧
+        "note": "AI按不比第三年日本杯计算"
     },
-    1071: {
+    1071: { # 阿尔丹
         "races": [43],
-        "note": "阿尔丹 - 比赛回合不变"
+        "note": "事件不影响比赛回合"
     },
-    1069: {
+    1069: { # 狗狗
         "races": [58],
-        "note": "千代 - 设置为安田纪念"
+        "note": "第三年打安田纪念"
     },
-    1079: {
+    1079: { # 狂怒
         "races": [53],
-        "note": "狂怒 - 比赛回合不变(?)"
+        "note": "事件不影响比赛回合"
     },
-    1081: {
+    1081: { # 希望城
         "races": [69],
-        "note": "希望 - 只参加JBC"
+        "note": "第三年参加JBC"
     },
-    1092: {
+    1092: { # 快驹
         "races": [59],
-        "note": "快驹 - 比赛"
+        "note": "事件不影响比赛回合"
     },
-    1093: {
+    1093: { # 凯斯奇迹
         "races": [41],
-        "note": "凯斯 - 比赛改为休息"
+        "note": "AI按生涯比赛处理，实际为强制休息"
     },
-    1109: {
+    1109: { # 莱茵
         "races": [32],
-        "note": "莱茵 - 设置为NHK"
+        "note": "第二年改赛NHK"
     },
-    1116: {
+    1116: { # 贵妇人
         "races": [71],
-        "note": "贵妇人 - 增加有马纪念"
+        "note": "第三年增加有马纪念"
     },
-    1121: {
+    1121: { # 圣剑
         "races": [41],
-        "note": "圣剑 - 参加短距锦标"
+        "note": "第二年参加短距锦标"
     },
-    1132: {
+    1132: { # 唯爱
         "races": [31, 44],
-        "note": "唯爱 - 选择三冠路线"
+        "note": "选择三后冠路线"
     },
-    1135: {
+    1134: { # 金花
+        "races": [50, 55],
+        "note": "第三年参加京都纪念、天春"
+    },
+    1135: { # 黄金
         "races": [44, 71],
-        "note": "黄金 - 选择菊花赏，有马纪念"
-    }
+        "note": "选择菊花赏，有马纪念"
+    },
+    1144: { # 玫瑰帝国
+        "races": [47],
+        "note": "选择第二年有马"
+    },
 }
 
 def short_name(card):
@@ -349,6 +357,7 @@ def parseUma():
         chara_id = int(int(uma.id) / 100)
         races = []
         freeRaces = []
+        raceNote = None
         last_race = -1
         for race in uma.route_races:
             if race.condition_type == 1:
@@ -390,6 +399,7 @@ def parseUma():
                 freeRaces.extend(entry["freeRaces"])
             if "note" in entry:
                 print("** 特殊生涯比赛: " + entry["note"])
+                raceNote = entry["note"]
 
         races.sort()
         freeRaces.sort(key=lambda x: x["startTurn"])
@@ -405,6 +415,7 @@ def parseUma():
             preferRaces=[],
             preferReds=[],
             races=races,
+            raceNote=raceNote,
             star=5
         )
     return result

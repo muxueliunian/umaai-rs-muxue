@@ -479,7 +479,7 @@ impl Game for BasicGame {
                 // 大成功事件
                 if rng.random_bool(system_event_prob("qiezhe_normal")?) {
                     diag!(">> 获得【切者】");
-                    self.uma.flags.qiezhe = true;
+                    self.uma.flags.gain_qiezhe();
                 }
             }
             809050004 => {

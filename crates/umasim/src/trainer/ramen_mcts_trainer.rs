@@ -46,7 +46,7 @@ use anyhow::{Result, anyhow, bail};
 use log::{debug, info};
 use rand::prelude::StdRng;
 
-use super::RecommendedRamenTrainer;
+use super::{RamenRolloutTrainer, RecommendedRamenTrainer};
 use crate::{
     game::{
         Game, Trainer,
@@ -328,7 +328,7 @@ impl RamenMctsTrainer {
         // rollout 基策同步：搜索内部评估的未来必须与正式策略同一口径，
         // 否则 MCTS 会按"可以不走完"的世界线打分，与实际执行不一致。
         let rollout = RecommendedRamenTrainer::for_rollout().with_friend_complete_required(required);
-        self.search = self.search.with_rollout_trainer(rollout);
+        self.search = self.search.with_rollout_trainer(RamenRolloutTrainer::Handwritten(rollout));
         self
     }
 

@@ -156,6 +156,9 @@ impl GameStatus for GameStatusOnsen {
         }
         // 携带5种卡以上才能分身
         let deck_can_split = base.card_type_count.iter().filter(|x| **x > 0).count() >= 5;
+        // 用协议 keyEvents 还原事件历史与友人首次点击状态
+        // （详见 `GameStatusBase::apply_key_events`；须在 self 的字段被移入 OnsenGame 之前调用）
+        self.apply_key_events(&mut base, global!(ONSENDATA).friend_first_event);
         let mut ret = OnsenGame {
             base,
             stage,

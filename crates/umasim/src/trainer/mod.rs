@@ -7,8 +7,12 @@ use log::info;
 use rand::{Rng, prelude::StdRng, seq::SliceRandom};
 
 use crate::{
-    game::{ActionEnum, BaseAction, Game, Trainer},
-    gamedata::EventChoice
+    game::{
+        ActionEnum, BaseAction, Game, Trainer,
+        ramen::{RamenAction, RamenGame}
+    },
+    gamedata::{EventChoice, EventData},
+    output::DecisionInfo
 };
 
 pub mod handwritten_trainer;
@@ -39,6 +43,89 @@ pub use ramen_nn_trainer::{NnPick, NnVia, RamenNnTrainer, SpecialSelectMode};
 pub use ramen_special_root::canonical_ramen_select_root;
 //pub use mean_filter_collector_trainer::MeanFilterCollectorTrainer;
 //pub use neural_net_trainer::NeuralNetTrainer;
+
+/// 拉面搜索的 rollout 基策：手写推荐策略或神经网络
+///
+/// 存在的理由：[`FlatSearchGame::RolloutTrainer`] 是**关联类型**，多开一个类型
+/// 参数会把 `FlatSearch` / `RamenMctsTrainer` / `umaai` 的调用签名全部掀开
+/// （见 `search/searchable.rs` 的设计说明）。用枚举把「rollout 走哪个基策」
+/// 变成运行时开关，既有默认行为不变——生产路径恒为 [`Self::Handwritten`]。
+///
+/// [`Self::Nn`] 是实验档：rollout **每一步**都要编码局面并跑一次网络推理，
+/// 一次搜索的推理次数是「rollout 条数 × 剩余决策点数」的乘积级，生产
+/// `search_n` 下不可行；只用于小预算量测，见 `tools/data_collection/nn_rollout_probe.rs`。
+///
+/// [`FlatSearchGame::RolloutTrainer`]: crate::search::FlatSearchGame::RolloutTrainer
+pub enum RamenRolloutTrainer {
+    /// 正式推荐手写策略（生产默认，经 `for_rollout()` 构造）
+    Handwritten(RecommendedRamenTrainer),
+    /// 神经网络策略（实验档，模型用 `Arc` 共享，克隆不重载）
+    #[cfg(feature = "onnx")]
+    Nn(RamenNnTrainer)
+}
+
+impl RamenRolloutTrainer {
+    /// 手写推荐策略变体（与 `RamenGame::default_rollout_trainer` 同源）
+    pub fn handwritten() -> Self {
+        Self::Handwritten(RecommendedRamenTrainer::for_rollout())
+    }
+
+    /// 神经网络变体
+    #[cfg(feature = "onnx")]
+    pub fn nn(trainer: RamenNnTrainer) -> Self {
+        Self::Nn(trainer)
+    }
+}
+
+impl Trainer<RamenGame> for RamenRolloutTrainer {
+    /// 转发给选定的基策
+    ///
+    /// # 错误
+    ///
+    /// 基策报错时原样返回——rollout 出错必须让搜索停下，而不是换个策略接着跑。
+    fn select_action(&self, game: &RamenGame, actions: &[RamenAction], rng: &mut StdRng) -> Result<usize> {
+        match self {
+            Self::Handwritten(t) => t.select_action(game, actions, rng),
+            #[cfg(feature = "onnx")]
+            Self::Nn(t) => t.select_action(game, actions, rng)
+        }
+    }
+
+    /// 事件选项转发（网络策略内部同样转交手写策略）
+    fn select_choice(&self, game: &RamenGame, choices: &[Vec<EventChoice>], rng: &mut StdRng) -> Result<usize> {
+        match self {
+            Self::Handwritten(t) => t.select_choice(game, choices, rng),
+            #[cfg(feature = "onnx")]
+            Self::Nn(t) => t.select_choice(game, choices, rng)
+        }
+    }
+
+    fn select_event_choice(
+        &self, game: &RamenGame, event: &EventData, choices: &[Vec<EventChoice>], rng: &mut StdRng
+    ) -> Result<usize> {
+        match self {
+            Self::Handwritten(t) => t.select_event_choice(game, event, choices, rng),
+            #[cfg(feature = "onnx")]
+            Self::Nn(t) => t.select_event_choice(game, event, choices, rng)
+        }
+    }
+
+    fn last_decision(&self) -> Option<DecisionInfo> {
+        match self {
+            Self::Handwritten(t) => t.last_decision(),
+            #[cfg(feature = "onnx")]
+            Self::Nn(t) => t.last_decision()
+        }
+    }
+
+    fn last_breakdown(&self) -> Option<String> {
+        match self {
+            Self::Handwritten(t) => t.last_breakdown(),
+            #[cfg(feature = "onnx")]
+            Self::Nn(t) => t.last_breakdown()
+        }
+    }
+}
 
 /// 猴子训练师
 pub struct RandomTrainer;

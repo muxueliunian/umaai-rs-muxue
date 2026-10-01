@@ -2,6 +2,16 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-10-01
+- **马娘状态改计数语义 + 新增小切**：协议层 `isPositiveThinking` / `isLucky` 改为计数键 `PositiveThinkingCount` / `LuckyCount`，新增 `isXiaoQie`（小切，状态 40）；`UmaFlags` 同步改为 `positive_thinking_count` / `lucky_count` 并新增 `xiaoqie`（旧帧缺字段缺省 0 / false）
+- **切者 / 小切评分加成与互斥**：终局评分（`calc_score`）的 PT 项按切者 ×1.1、小切 ×1.04 放大——只乘 PT 项，不动 PT 数量口径与搜索选择轴；局内获得切者时清掉小切（小切为局外获得），三处「获得切者」入口统一走 `gain_qiezhe()`
+- **心情盾接入掉心情**：掉心情优先消耗心情盾次数，盾为 0 才真掉心情；干劲增减统一经 `Uma::add_motivation`；`lucky_count` 暂不参与逻辑（仅展示与透传）
+- **终局帧补总 Hint 等级**：`FinalScorePayload` 新增 `totalHints`，终局评分按真机帧口径启用（旧帧缺省 0）
+- **拉面 rollout 基策可切换（用户）**：新增 `RamenRolloutTrainer` 枚举（生产默认仍为手写推荐策略、行为不变）与 `rollout_evaluator="nn"` 实验档、`nn_rollout_probe` 数据采集探针；`main.rs` 的 leaf-eval 开关隔离到非拉面剧本
+- **场景数据补 `friend_first_event`（用户）**：温泉 / 拉面剧本记录友人首次点击的真实事件 ID，`apply_key_events` 用它把小黑板 `keyEvents` 归一到模拟内事件历史
+- **数据与导出脚本更新（用户）**：`cardDB` / `umaDB` / 场景 JSON 与支援卡导出脚本同步
+- **文档与基准**：新增 NN 与 MCTS 配合的老版模拟器对照分析；拉面 rollout 均值基准因切者评分加成重抓
+
 ## 2026-09-30
 - **新增终局帧信道**：小黑板新增独立文件 `finalScore.json`（育成结束·点技能前的真机终局数据）；umaai 监听改为白名单 + 队列带文件名，按文件名分流——终局帧不进决策链路（不派发解析、不发 compute 事件）
 - **终局帧协议结构**：扁平无外壳（五维/上限/剩余技能点/继承增量），校验剧本与局号；继承增量仅供复盘分析（后续从 `thisTurn.json` 移除）
