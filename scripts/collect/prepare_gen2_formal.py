@@ -70,7 +70,7 @@ def enumerate_plans(recipe):
 
 
 def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, search_n, layer_targets,
-            index_start, index_end, seconds):
+            index_start, index_end, seconds, friend_gate=False):
     """`layer_targets` 是「构成 × 层」的有效根矩阵：`layer_targets[shape][layer]`，层序同 `LAYER_SPEC`。"""
     """冻结计划、留出组合、分层配额及独立世界；只允许写全新目录。
 
@@ -192,6 +192,7 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
         rollin="nn", search_n=search_n, shard_size=32, inherit=recipe["inherit"],
         epsilon=0.15, seed_base=88241484357425, use_ucb=False, radical_factor_max=1.4,
         target_valid=target_valid, seconds=seconds, jobs=jobs,
+        **(dict(friend_complete_required=True) if friend_gate else {}),
         index_reservation=[reserved_start, reserved_end], holdout_count=len(held),
         spare_policy="每层构成双倍候选清单；达到有效目标即停，备用耗尽则失败，不改配方"))
     print(f"计划={len(plans)} 留出={len(held)} 有效目标={target_valid} 清单及备用={len(all_indices)}")
@@ -219,6 +220,8 @@ if __name__ == "__main__":
     parser.add_argument("--index-start", type=int, required=True)
     parser.add_argument("--index-end", type=int, required=True)
     parser.add_argument("--seconds", type=int, required=True, help="采集总截止秒数（0914 是 43200 = 12h）")
+    parser.add_argument("--friend-gate", action="store_true",
+                        help="清单声明教师 rollout 带「友人出行 5 次必须走完」门限（R9 起）；驱动据此核对采集 manifest")
     args = parser.parse_args()
     if (args.layer_targets is None) == (args.shape_layer_targets is None):
         raise ValueError("--layer-targets 与 --shape-layer-targets 必须恰好给一个")
@@ -235,4 +238,5 @@ if __name__ == "__main__":
         raise ValueError("--search-n / --seconds 必须为正，且 --index-start < --index-end")
     prepare(args.rust_dump, args.output, recipe_path=args.recipe, recipe_id=args.recipe_id, model=args.model,
             model_id=args.model_id, search_n=args.search_n, layer_targets=targets,
-            index_start=args.index_start, index_end=args.index_end, seconds=args.seconds)
+            index_start=args.index_start, index_end=args.index_end, seconds=args.seconds,
+            friend_gate=args.friend_gate)

@@ -257,8 +257,16 @@ struct TeacherPremises {
     /// 必须显式设置；`SearchConfig::default` 是 50.0，游戏配置是 1.4
     pub radical_factor_max: f64,
     /// 必须为 `all`；否则第 3 年地区选择只有单候选
-    pub ramen_region_strategy: RamenRegionStrategy
+    pub ramen_region_strategy: RamenRegionStrategy,
+    /// 教师 rollout 基策是否施加「友人出行 5 次必须走完」完成硬门限
+    /// （取 `game_config` 的 `friend_complete_required`，与生产 MCTS 同口径）。
+    /// 本字段加入之前采的目录都没有门限，按 false 读；false 时不写出，旧配方字节不变。
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub friend_complete_required: bool
 }
+
+/// 默认关闭的新前提不写入旧配方，保持旧配方序列化字节不变。
+fn is_false(value: &bool) -> bool { !*value }
 
 impl TeacherPremises {
     /// 校验四条前提都落在教师采集允许的取值上
@@ -1002,7 +1010,8 @@ fn main() -> Result<()> {
         record_ordered_rollouts: search_cfg.record_ordered_rollouts,
         use_ucb: search_cfg.use_ucb,
         radical_factor_max: search_cfg.radical_factor_max,
-        ramen_region_strategy: strategy
+        ramen_region_strategy: strategy,
+        friend_complete_required: game_config.friend_complete_required
     };
     premises.check()?;
     report_effective(
@@ -1013,7 +1022,10 @@ fn main() -> Result<()> {
             use_ucb: search_cfg.use_ucb,
             radical_factor_max: search_cfg.radical_factor_max,
             stages: "teacher: 全阶段（FlatSearch 直调，不经 RamenMctsTrainer）".to_string(),
-            rollout_policy: "手写推荐策略（教师口径）".to_string(),
+            rollout_policy: format!(
+                "手写推荐策略（教师口径，友人完成门限={}）",
+                premises.friend_complete_required
+            ),
             region_strategy: format!("{strategy:?}")
         }
     );
@@ -1247,6 +1259,7 @@ fn main() -> Result<()> {
     println!("  use_ucb                 = {}", premises.use_ucb);
     println!("  radical_factor_max      = {}", premises.radical_factor_max);
     println!("  ramen_region_strategy   = {:?}", premises.ramen_region_strategy);
+    println!("  friend_complete_required = {}", premises.friend_complete_required);
     println!(
         "  region_quota_permille    = {:?}（Y2,Y3）",
         sampler_cfg.region_quota_permille
@@ -1267,7 +1280,10 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let search: FlatSearch<RamenGame> = FlatSearch::new(search_cfg);
+    // rollout 基策的完成门限与生产 `RamenMctsTrainer::with_friend_complete_required` 同口径：
+    // 只作用于搜索内部的未来，roll-in 不受影响（网络 roll-in 本身没有门限）。
+    let search: FlatSearch<RamenGame> = FlatSearch::new(search_cfg)
+        .map_rollout_trainer(|r| r.with_friend_complete_required(premises.friend_complete_required));
     let mut batch = RamenSampleBatch::new();
     let mut next_part_index = manifest.parts.len();
 
@@ -1560,7 +1576,8 @@ mod tests {
             record_ordered_rollouts: true,
             use_ucb: false,
             radical_factor_max: 1.4,
-            ramen_region_strategy: RamenRegionStrategy::All
+            ramen_region_strategy: RamenRegionStrategy::All,
+            friend_complete_required: false
         };
         ok.check()?;
         let json = serde_json::to_string_pretty(&ok)?;
@@ -1593,6 +1610,40 @@ mod tests {
         match bad_region.check() {
             Ok(()) => bail!("strategy=fixed 应被拒绝"),
             Err(e) => println!("  [OK] strategy=fixed: {e}")
+        }
+        Ok(())
+    }
+
+    /// 完成门限：关闭时不写出（旧配方字节不变、旧 manifest 按 false 读回），开启时写出 true
+    #[test]
+    fn test_premises_friend_gate_json() -> Result<()> {
+        let off = TeacherPremises {
+            record_ordered_rollouts: true,
+            use_ucb: false,
+            radical_factor_max: 1.4,
+            ramen_region_strategy: RamenRegionStrategy::All,
+            friend_complete_required: false
+        };
+        let off_json = serde_json::to_string(&off)?;
+        println!("  门限关: {off_json}");
+        if off_json.contains("friend_complete_required") {
+            bail!("门限关时不应写出该字段");
+        }
+        let back: TeacherPremises = serde_json::from_str(&off_json)?;
+        if back != off {
+            bail!("旧口径 JSON 读回后应等于门限关");
+        }
+        let on = TeacherPremises {
+            friend_complete_required: true,
+            ..off.clone()
+        };
+        let on_json = serde_json::to_string(&on)?;
+        println!("  门限开: {on_json}");
+        if !on_json.contains("\"friend_complete_required\":true") {
+            bail!("门限开时应写出 friend_complete_required=true");
+        }
+        if on == off {
+            bail!("门限开关应使前提不相等（断点续跑必须拒绝混采）");
         }
         Ok(())
     }

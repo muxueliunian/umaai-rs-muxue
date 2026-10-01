@@ -191,6 +191,8 @@ def run(args):
         if (mf["rollin"] != "nn:asset:" + plan["model_id"]
                 or mf["premises"]["radical_factor_max"] != 1.4
                 or mf["premises"]["ramen_region_strategy"] != "all"
+                or mf["premises"].get("friend_complete_required", False)
+                != plan.get("friend_complete_required", False)
                 or not mf["premises"]["record_ordered_rollouts"]
                 or sampler["epsilon"] != plan["epsilon"]
                 or sampler["seed_base"] != plan["seed_base"]
