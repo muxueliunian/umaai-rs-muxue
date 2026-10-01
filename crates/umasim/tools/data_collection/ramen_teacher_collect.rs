@@ -1282,7 +1282,7 @@ fn main() -> Result<()> {
 
     // rollout 基策的完成门限与生产 `RamenMctsTrainer::with_friend_complete_required` 同口径：
     // 只作用于搜索内部的未来，roll-in 不受影响（网络 roll-in 本身没有门限）。
-    let search: FlatSearch<RamenGame> = FlatSearch::new(search_cfg)
+    let search = FlatSearch::<RamenGame>::new(search_cfg)
         .map_rollout_trainer(|r| r.with_friend_complete_required(premises.friend_complete_required));
     let mut batch = RamenSampleBatch::new();
     let mut next_part_index = manifest.parts.len();
