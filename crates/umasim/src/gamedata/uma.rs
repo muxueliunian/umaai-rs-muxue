@@ -54,7 +54,13 @@ pub struct UmaData {
     /// 比赛回合
     pub races: Vec<i32>,
     /// 自由比赛回合
-    pub free_races: Vec<FreeRaceData>
+    pub free_races: Vec<FreeRaceData>,
+    /// 特殊生涯比赛说明（UmaDB 的 `raceNote`；无则 `None`）
+    ///
+    /// 该马娘的生涯赛程不适用常规「AI 按年表推算」路径时，用一句话说明差异，
+    /// 由 `umaai` 在检测到新局时提示玩家（见 `Uma::explain_race_note`）。
+    #[serde(default)]
+    pub race_note: Option<String>
 }
 
 impl UmaData {

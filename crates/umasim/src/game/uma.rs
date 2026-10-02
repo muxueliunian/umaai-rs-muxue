@@ -235,6 +235,19 @@ impl Uma {
         ))
     }
 
+    /// 【特殊生涯比赛】开局提示文案；该马娘没有 `raceNote` 时返回 `None`
+    ///
+    /// 取 `UmaDB.json` 的 `raceNote`（如「第三年打安田纪念」「事件不影响比赛回合」），
+    /// 以**蓝底亮黄**醒目上色。`umaai` 在检测到新局时打印（走 stderr，不污染 stdout 的
+    /// JSON 流）；`uma_id` 查不到数据（如测试 fixture）时静默返回 `None`。
+    pub fn explain_race_note(&self) -> Option<String> {
+        let note = self.get_data().ok()?.race_note.as_deref()?;
+        if note.trim().is_empty() {
+            return None;
+        }
+        Some(format!("该马娘有特殊生涯比赛: {note}").bright_yellow().on_blue().to_string())
+    }
+
     /// 建立马娘对象
     ///
     /// `limit_base` 是**所在剧本**的五维上限基值（不含继承）。每个剧本的基值都不同，
@@ -523,6 +536,36 @@ mod tests {
             (5, 2),
             "上涨不消耗盾且上限为 5"
         );
+    }
+
+    /// 特殊生涯比赛提示：带 `raceNote` 的马娘返回醒目文案，无则 `None`
+    #[test]
+    fn test_explain_race_note() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+
+        let mut uma = Uma::default();
+        uma.uma_id = 100501; // UmaDB 里带 raceNote（"选择英里路线"）
+        let note = uma.explain_race_note().expect("100501 应带 raceNote");
+        println!("有 raceNote: {note:?}");
+        assert!(
+            note.contains("该马娘有特殊生涯比赛: 选择英里路线"),
+            "提示文案应含 raceNote 原文: {note:?}"
+        );
+        // 颜色码取决于终端是否支持彩色（CI / 重定向时 colored 会自动关闭），
+        // 只在实际着色时校验「蓝底亮黄」= `\e[93;44m`，避免环境相关的红。
+        if note.contains('\u{1b}') {
+            assert!(note.contains("\u{1b}[93;44m"), "着色时应为蓝底亮黄: {note:?}");
+        } else {
+            println!("（当前环境 colored 未着色，跳过颜色码校验）");
+        }
+
+        uma.uma_id = 100101; // UmaDB 里无 raceNote
+        println!("无 raceNote: {:?}", uma.explain_race_note());
+        assert!(uma.explain_race_note().is_none(), "无 raceNote 应返回 None");
+        Ok(())
     }
 
     /// 切者 / 小切的互斥与 PT 折算系数

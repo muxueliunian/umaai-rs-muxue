@@ -55,6 +55,11 @@ pub fn process_ramen<T: Trainer<RamenGame>>(
         // 检测到新一局：通知 AIRed 重置 UI 状态
         emit_info("new_game");
         eprintln!("{}", "---- 拉面: 育成开始 ----".bright_yellow());
+        // 该马娘有特殊生涯赛程（UmaDB 的 `raceNote`）→ 蓝底亮黄醒目提示；
+        // 走 stderr，两种模式都提示（不污染 JSON 模式的 stdout 流）
+        if let Some(note) = game.uma().explain_race_note() {
+            eprintln!("{note}");
+        }
         *luck_tracker = LuckScoreTracker::new();
     }
 

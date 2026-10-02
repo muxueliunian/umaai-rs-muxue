@@ -2,6 +2,12 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-10-02
+- **版本号提升至 0.14.2（用户）**：`umaai` / `umasim` 包版本提升，`Cargo.lock` 同步
+- **新增特殊生涯比赛开局提示**：`UmaData` 新增 `race_note`（读 `UmaDB` 的 `raceNote`），`Uma::explain_race_note` 生成蓝底亮黄文案；`umaai` 检测到新局时（温泉 / 拉面）经 stderr 提示，不走 stdout（不污染 JSON 流）；补单元测试
+- **修复 human 模式决策理由双打印**：trainer 的 `verbose` 改为仅在 `--json` 模式打开（human 模式已由 sink 渲染同一份文字，避免重复上屏）
+- **数据更新（用户）**：`cardDB` / `umaDB` 支援卡与马娘名称中文化，`text_data_dict` 同步新一批马娘 / 支援卡 / 活动文本
+
 ## 2026-10-01
 - **马娘状态改计数语义 + 新增小切**：协议层 `isPositiveThinking` / `isLucky` 改为计数键 `PositiveThinkingCount` / `LuckyCount`，新增 `isXiaoQie`（小切，状态 40）；`UmaFlags` 同步改为 `positive_thinking_count` / `lucky_count` 并新增 `xiaoqie`（旧帧缺字段缺省 0 / false）
 - **切者 / 小切评分加成与互斥**：终局评分（`calc_score`）的 PT 项按切者 ×1.1、小切 ×1.04 放大——只乘 PT 项，不动 PT 数量口径与搜索选择轴；局内获得切者时清掉小切（小切为局外获得），三处「获得切者」入口统一走 `gain_qiezhe()`

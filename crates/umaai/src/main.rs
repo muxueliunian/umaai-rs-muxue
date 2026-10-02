@@ -176,7 +176,10 @@ async fn main_guard() -> Result<()> {
     let mut rng = StdRng::from_os_rng();
 
     // 温泉（onsen）MCTS 训练员
-    let mut trainer = MctsTrainer::new(mcts_config).verbose(true);
+    //
+    // `verbose` 只在 `--json` 模式打开：该开关会把「[回合 X] 均分/运气」经 `info!` 上屏，
+    // 而 human 模式下 sink 已用 `println!` 渲染同一份决策结果（双打印）。
+    let mut trainer = MctsTrainer::new(mcts_config).verbose(!json_mode);
     trainer.mcts_onsen = game_config.mcts_selected_onsen;
     // 这个设置在AI模式下不生效
     trainer.mcts_selection = "score".to_string();
@@ -185,10 +188,10 @@ async fn main_guard() -> Result<()> {
     // RamenMctsTrainer 绑 RamenGame，独立构造。stages 走 game_config.mcts.ramen_search_stages，
     // 与 umasim/src/main.rs 拉面路径口径一致。
     //
-    // verbose=false：关闭 trainer 内部 `info!("[回合 X] 首选...")` 的 `log::info!` 上屏
-    // （避免与下方 human mode 下手动调 `render_reason_lines` 双打印，且
-    // umaai 默认关 log，trainer 走 info! 看不到）。DecisionReasonData 通过
-    // `with_reason_sink(LastReasonSink)` 缓存到 `reason_slot`。
+    // `verbose` 只在 `--json` 模式打开：训练员内部会把 `render_reason_lines` 的文字
+    // 再经 `log::info!` 上屏，而 human 模式已由 `scenario::ramen` 从 `LastReasonSink`
+    // 取出后 `println!` 渲染**同一份文字** → 双打印（human 模式必须关）。
+    // DecisionReasonData 始终经 `with_reason_sink(LastReasonSink)` 缓存到 `reason_slot`。
     let ramen_mcts_config = SearchConfig::new_game_config(&game_config);
     let ramen_stages = umasim::trainer::RamenSearchStages::parse(&game_config.mcts.ramen_search_stages)?;
     let reason_slot = LastReasonSink::new();

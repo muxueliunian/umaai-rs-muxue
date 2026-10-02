@@ -117,6 +117,7 @@ mod tests {
             five_status_bonus: [0; 5],
             five_status_initial: [0; 5],
             races: vec![11, 28, 41],
+            race_note: None,
             free_races: vec![
                 umasim::gamedata::FreeRaceData {
                     start_turn: 24,
