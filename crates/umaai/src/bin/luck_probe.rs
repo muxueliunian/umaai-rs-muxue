@@ -41,6 +41,9 @@ struct Cli {
     seed: u64,
     rollouts: usize,
     /// 起始状态强行设置的 `train_level_bonus`（默认 -1 = 不动）
+    ///
+    /// 注意：导入帧已把已结算 RMJ 的等级加成折算进 `trainLevelCount`（该字段导入后为 0），
+    /// 故本参数是**额外**强加的训练等级加成，仅供实验对照。
     bonus: i32,
     /// 起始状态强行设置的 `rmj_results`（空 = 不动；`y1s,y1f` 形式按年追加）
     rmj: Option<String>,

@@ -354,20 +354,10 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use std::{env, path::Path, sync::mpsc};
-
     use anyhow::Result;
-    use colored::Colorize;
     use lexopt::prelude::*;
-    use log::info;
-    use notify::{Event, RecursiveMode, Watcher};
-    use umasim::{gamedata::init_global, utils::init_logger};
 
     use super::Args;
-    use crate::protocol::{
-        GameStatusOnsen,
-        urafile::{UraFileWatcher, parse_game}
-    };
 
     /// 把 lexopt::Parser + 解析逻辑包成一个 helper（与 `parse_args` 同结构，
     /// 但用 `from_iter` 喂手工 vec 避免依赖真实 env arg）
@@ -410,46 +400,4 @@ mod tests {
         assert!(result.is_err(), "未知参数必须报错");
     }
 
-    #[tokio::test]
-    async fn test_watch() -> Result<()> {
-        let local_app_path = env::var("LOCALAPPDATA")?;
-        let urafile_path = format!("{local_app_path}/UmamusumeResponseAnalyzer/PluginData/SendGameStatusPlugin/");
-
-        let (tx, rx) = mpsc::channel::<notify::Result<Event>>();
-        let mut watcher = notify::recommended_watcher(tx)?;
-        println!("{urafile_path}");
-        watcher.watch(Path::new(&urafile_path), RecursiveMode::NonRecursive)?;
-        loop {
-            let event = rx.recv()??;
-            println!("{event:?}");
-        }
-    }
-
-    #[test]
-    fn test_urafile() -> Result<()> {
-        // 2. 根据配置初始化日志
-        init_logger("test", "info")?;
-
-        // 3. 再初始化全局数据
-        init_global()?;
-        let mut watcher = UraFileWatcher::init()?;
-        loop {
-            let raw = watcher.watch()?;
-            // 该测试只关注回合快照；终局帧（finalScore.json）直接跳过
-            if raw.file != crate::protocol::urafile::TARGET_THIS_TURN {
-                continue;
-            }
-            let contents = raw.contents;
-            match parse_game::<GameStatusOnsen>(&contents) {
-                Ok(game) => {
-                    info!("{}", game.explain_distribution()?);
-                    println!("----------");
-                }
-                Err(e) => {
-                    println!("{}", format!("解析回合信息出错: {e}").red());
-                    println!("----------");
-                }
-            }
-        }
-    }
 }

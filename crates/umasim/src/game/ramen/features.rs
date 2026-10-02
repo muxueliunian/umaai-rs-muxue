@@ -366,7 +366,20 @@ fn encode_global(game: &RamenGame, w: &mut FeatureWriter) -> Result<()> {
         for i in 0..RMJ_NUM {
             w.flag(r.rmj_results.get(i).copied().unwrap_or(false));
         }
-        w.num(r.train_level_bonus, SCALE_TRAIN_LEVEL_BONUS);
+        // ⚠ 特征口径：**不要**直接喂 `r.train_level_bonus`——它现在的语义是「本次导入
+        // 之后新增的剧本等级加成」（导入帧恒 0，见 `protocol/ramen.rs` 的 RMJ 派生状态恢复）。
+        //
+        // 网络训练时这一位是「本局累计的剧本训练等级加成」：局内 = RMJ 成功次数，
+        // 导入帧 = 按「每年成功」假设补齐的层数（第 2 年 1 / 第 3 年 2）。
+        // 2026-10 修复训练等级重复计算（协议 trainLevelCount 已含该加成）后，内部字段
+        // 不再等于这个值，若直接喂它会让第 2/3 年的导入帧少 1~2 层、偏离训练分布。
+        //
+        // 这里改用「已结算且成功的 RMJ 次数」（`rmj_results`）：导入帧 = 补齐层数、
+        // 局内 = 成功次数，与旧口径逐位一致，故模型输入分布不变。
+        // 后续若按修复后的数据重训模型，可在此处改回 `r.train_level_bonus`，或换成
+        // 「有效等级 − 基础等级」（`game.train_level(t) − (count/4+1)`）这类更直白的口径。
+        let rmj_level_bonus = r.rmj_results.iter().filter(|success| **success).count() as i32;
+        w.num(rmj_level_bonus, SCALE_TRAIN_LEVEL_BONUS);
         w.onehot(r.super_ramen, SUPER_RAMEN_NUM);
         w.flag(r.super_ramen.is_some());
         w.num(r.eat_count, SCALE_EAT);

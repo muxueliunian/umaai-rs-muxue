@@ -242,7 +242,7 @@ turn 50  4 -> 5      （由事件恢复，非 AI 主动）
 | 基础训练分布好 | `personDistribution` 人数 + 羁绊 + `trainLevelCount` + `training_basic_value` | ✅ |
 | **吃面分身触发友情训练** | 见 6.5 | ✅ |
 | 需决策事件 | `baseGame.story`（事件 Id / 选项 / `SuccessEffectValue`） | ✅ 仅限有事件的回合 |
-| **不需决策的好事件** | `isQieZhe` / `isAiJiao` / `isPositiveThinking` / `isRefreshMind` / `isLucky` 的 **flag 翻转**；加**排除法剩余**（扣除该回合行动预期收益后的属性增量） | ✅ 候选式，需复核 |
+| **不需决策的好事件** | `isQieZhe` / `isXiaoQie` / `isAiJiao` / `isRefreshMind` 的 **flag 翻转**、`PositiveThinkingCount` / `LuckyCount` 的**计数变化**；加**排除法剩余**（扣除该回合行动预期收益后的属性增量） | ✅ 候选式，需复核 |
 | 面 / 地区效果 | `scenario_ramen` 的 `ramen_basic_effect` / `ramen_region_effect` / `finals_effect` | ✅ |
 
 **不纳入归因**：比赛结果（属预期内收益，不算运气）。

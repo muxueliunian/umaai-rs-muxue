@@ -317,6 +317,10 @@ mod tests {
 
     /// 起一个真实 temp 目录 + producer 线程（事件用合成通道喂入）。
     /// 先写目标文件再启动 producer，避免启动兜底与测试断言竞态。
+    ///
+    /// 目录名带 `pid`：同一批用例在 **lib 目标与 bin 目标**各编译/执行一份（测试名相同），
+    /// nextest 并行跑两个进程时曾共用同一个固定目录互相踩文件，表现为
+    /// 「去重用例收到不匹配的回合」/「应有入队事件: Timeout」。
     #[allow(clippy::type_complexity)]
     fn start_producer(
         test_dir: &str,
@@ -327,7 +331,7 @@ mod tests {
         Receiver<RawFileEvent>,
         thread::JoinHandle<()>,
     ) {
-        let dir = std::env::temp_dir().join(test_dir);
+        let dir = std::env::temp_dir().join(format!("{test_dir}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let target = dir.join(TARGET_THIS_TURN);
@@ -341,9 +345,12 @@ mod tests {
         (target, event_tx, queue_rx, handle)
     }
 
-    /// 队列取一份（1 秒超时），返回 (文件名, 原文)
+    /// 队列取一份（3 秒超时），返回 (文件名, 原文)
+    ///
+    /// 超时放宽到 3s：producer 读文件带「两次一致校验 + 50ms 间隔」（最多 10 次重试），
+    /// 并行跑批时单份入队可能超过 1s，1s 会误报 `应有入队事件: Timeout`。
     fn recv_event(queue_rx: &Receiver<RawFileEvent>) -> (String, String) {
-        let e = queue_rx.recv_timeout(Duration::from_secs(1)).expect("应有入队事件");
+        let e = queue_rx.recv_timeout(Duration::from_secs(3)).expect("应有入队事件");
         (e.file, e.contents)
     }
 

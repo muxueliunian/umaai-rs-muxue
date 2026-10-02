@@ -679,6 +679,43 @@ mod tests {
         Ok(())
     }
 
+    /// 修复回归：导入帧不再按年份重复补训练等级加成
+    ///
+    /// 协议 `trainLevelCount` 是**游戏内真实等级**的折算（`4×(等级−1)+当前等级内点击数`，
+    /// 见插件 `GameStatusSend_Base`），已含已结算 RMJ 的 +1/+2 层。导入时若再按年份补
+    /// `train_level_bonus`，`train_level()` 会比实际等级高 1~2 级（再被 Lv5 截断），
+    /// 连带高估训练收益与体力门限。
+    #[test]
+    fn test_ramen_import_keeps_real_train_level() -> Result<()> {
+        use umasim::game::Game;
+
+        std::env::set_current_dir(get_workspace_root()?)?;
+        init_global()?;
+
+        // 取第 2 年（turn 30 = 已结算 1 次 RMJ）的快照：真实等级 12/4+1 = 4
+        let json = FIXTURE_RAMEN
+            .replace("\"turn\": 0", "\"turn\": 30")
+            .replace("\"trainLevelCount\": [1, 1, 1, 1, 1]", "\"trainLevelCount\": [12, 12, 12, 12, 12]");
+        let ParsedGame::Ramen { game, .. } = parse_game_by_scenario(&json)? else {
+            bail!("拉面快照不应路由到其它剧本");
+        };
+        let levels: Vec<usize> = (0..5).map(|t| game.train_level(t)).collect();
+        println!(
+            "导入 turn30: bonus={} count={:?} level={:?}",
+            game.ramen.train_level_bonus, game.base.train_level_count, levels
+        );
+        ensure!(
+            game.ramen.train_level_bonus == 0,
+            "导入帧不应再按年份补 train_level_bonus（协议等级已含该加成）"
+        );
+        ensure!(
+            game.ramen.rmj_results == vec![true],
+            "RMJ 结果仍需按「每年成功」补齐（驱动常驻 success/fail 效果）"
+        );
+        ensure!(levels == vec![4; 5], "训练等级应等于真实等级 4，不得再叠加 RMJ 加成");
+        Ok(())
+    }
+
     /// 次数类状态（心情盾 / 幸运体质）与新增「小切」flag 的解析 + 导出方向
     ///
     /// 插件 2026-10 起把布尔 `isPositiveThinking` / `isLucky` 改成计数，键名改为

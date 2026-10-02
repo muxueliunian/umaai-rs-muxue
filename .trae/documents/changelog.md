@@ -11,6 +11,9 @@
 - **场景数据补 `friend_first_event`（用户）**：温泉 / 拉面剧本记录友人首次点击的真实事件 ID，`apply_key_events` 用它把小黑板 `keyEvents` 归一到模拟内事件历史
 - **数据与导出脚本更新（用户）**：`cardDB` / `umaDB` / 场景 JSON 与支援卡导出脚本同步
 - **文档与基准**：新增 NN 与 MCTS 配合的老版模拟器对照分析；拉面 rollout 均值基准因切者评分加成重抓
+- **修复训练等级重复计算**：协议 `trainLevelCount` 已含剧本（RMJ）加的等级，导入侧不再按年份重复补 `train_level_bonus`（局内 RMJ 结算仍逐次 +1）；训练等级恢复与游戏内实际等级一致。NN 该位特征改用「已结算且成功的 RMJ 次数」，与旧训练分布逐位一致，代码内标注了后续重训时的切换点
+- **测试整理**：删除两个永不返回的手工监听用例（`tests::test_watch` / `tests::test_urafile`）；文件监听用例修掉 lib / bin 同名临时目录互踩（目录加 pid、等待 1s→3s）；`test_turn_mask` 改用配置注入初始化（`race_grades` 迁出后为空导致越界）并补断言
+- **文档同步**：`ramen_protocol_v2.md` 的状态字段口径更新为计数 + 小切 + `trainLevelCount` 已含剧本加成；`replay_review.md` 归因项同步新字段名
 
 ## 2026-09-30
 - **新增终局帧信道**：小黑板新增独立文件 `finalScore.json`（育成结束·点技能前的真机终局数据）；umaai 监听改为白名单 + 队列带文件名，按文件名分流——终局帧不进决策链路（不派发解析、不发 compute 事件）

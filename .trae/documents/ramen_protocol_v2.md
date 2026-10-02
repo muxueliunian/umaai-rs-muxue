@@ -33,9 +33,10 @@
 | `fiveStatus` / `fiveStatusLimit` | int[5] | 五维/上限 | `Uma::five_status/five_status_limit` |
 | `skillPt` / `skillScore` | int | 技能点/已学技能分数 | `Uma::skill_pt/skill_score` |
 | `totalHints` | int | 总 Hint 等级 | `Uma::total_hints` |
-| `trainLevelCount` | int[5] | 训练设施等级 | `BaseGame::train_level_count` |
+| `trainLevelCount` | int[5] | 训练等级折算（`4×(等级−1)+等级内点击数`，**已含剧本加成**，如 RMJ） | `BaseGame::train_level_count` |
 | `ptScoreRate` / `failureRateBias` | f32/int | PT 系数/失败率偏置 | `Uma::*` |
-| `isQieZhe` / `isAiJiao` / `isPositiveThinking` / `isRefreshMind` / `isIll` / `isLucky` | bool | Uma flags | `Uma::flags` |
+| `isQieZhe` / `isXiaoQie` / `isAiJiao` / `isRefreshMind` / `isIll` | bool | Uma flags | `Uma::flags` |
+| `PositiveThinkingCount` / `LuckyCount` | int | 心情盾（状态 25/41/42）/ 幸运体质（26/43）次数 | `Uma::flags.positive_thinking_count / lucky_count` |
 | `zhongMaBlueCount` | int[5] | 种马蓝因子 | `InheritInfo::blue_count` |
 | `saihou` / `isRacing` | int/bool | 赛后加成/生涯比赛状态 | `Uma::race_bonus/is_race_turn` |
 | `cardId` | int[] | 卡组（id*10+rank 编码） | `BaseGame::deck` |

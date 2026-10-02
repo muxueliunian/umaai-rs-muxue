@@ -393,9 +393,8 @@ impl GameStatus for GameStatusRamen {
         // 6. RMJ 派生状态恢复（协议快照不携带 → AI 侧按「每年成功 / 第 3 年大成功」假设补齐）
         //
         // 背景：`rmj_results`（年度 RMJ 结果，第 2/3 年常驻驱动 `ramen_success_effect` /
-        // `ramen_fail_effect`）与 `train_level_bonus`（RMJ 成功 → 训练等级 +1）只存在于
-        // 游戏内部状态，协议 JSON 没有对应字段。不补齐会让**第 2/3 年的每次 rollin**
-        // 系统性缺失训练等级加成与常驻成功效果——实测 turn23→24 的期望骤降
+        // `ramen_fail_effect`）只存在于游戏内部状态，协议 JSON 没有对应字段。不补齐会让
+        // **第 2/3 年的每次 rollin** 系统性缺失常驻成功效果——实测 turn23→24 的期望骤降
         // ~2300–3000 分（与随机种子无关，四局一致），且会拖低在线 AI 的决策质量。
         //
         // 依据：`check_rmj` 是纯函数（`scenario_pt >= ramen_success_pt[year]`），阈值
@@ -403,7 +402,12 @@ impl GameStatus for GameStatusRamen {
         // 成功、第 3 年大成功假设补齐（两者 `is_success()` 均为 true）。
         let rmj_done = rmj_done_count(base.turn, &game.stage);
         game.ramen.rmj_results = vec![true; rmj_done];
-        game.ramen.train_level_bonus = rmj_done as i32;
+        // `train_level_bonus` **不能**按年份一并补齐：协议的 `trainLevelCount` 是游戏内
+        // 真实训练等级折算（`4×(等级−1) + 当前等级内点击数`，见插件 `GameStatusSend_Base`），
+        // 已含已结算 RMJ 的 +1/+2 层；再补一次会让 `RamenGame::train_level()` 比实际等级
+        // 高 1~2 级（第 2 年 +1、第 3 年 +2，再被 Lv5 上限截断）。
+        // 置 0 表示「本次导入之后新增的加成」，局内 RMJ 结算照旧 `+= 1`（game/ramen/game.rs）。
+        game.ramen.train_level_bonus = 0;
 
         // 7. 新年窗口 scenario_pt 归一化（协议快照携带的是「上一年遗留值」）
         //
@@ -564,8 +568,12 @@ mod tests {
 
     /// 协议重建补齐 RMJ 派生状态（真实快照驱动）
     ///
-    /// 回归背景：`rmj_results` / `train_level_bonus` 协议不携带，缺失会让第 2/3 年
-    /// rollin 系统性缺少训练等级加成与常驻成功效果（turn23→24 期望骤降 ~2300–3000）。
+    /// 回归背景：`rmj_results` 协议不携带，缺失会让第 2/3 年 rollin 系统性缺少常驻
+    /// 成功效果（turn23→24 期望骤降 ~2300–3000）。
+    ///
+    /// `train_level_bonus` **不再**按年份补齐：协议 `trainLevelCount` 已是游戏内真实
+    /// 等级折算（含已结算 RMJ 的加成），再补会让训练等级高 1~2 级——回归见 mod.rs 的
+    /// `test_ramen_import_keeps_real_train_level`。
     #[test]
     fn test_into_game_restores_rmj_state() {
         use std::fs;
@@ -594,16 +602,29 @@ mod tests {
             }
         };
 
-        // 第 2 年快照：补 1 次（第 1 年 RMJ 成功）
+        // 第 2 年快照：rmj_results 补 1 次（第 1 年 RMJ 成功），但等级不再叠加
         if let Some(game) = load("game7075_turn24_2.json") {
+            let levels: Vec<usize> = (0..5).map(|t| game.train_level(t)).collect();
             println!(
-                "turn24_2: turn={} bonus={} rmj={:?}",
+                "turn24_2: turn={} bonus={} rmj={:?} count={:?} level={:?}",
                 game.turn(),
                 game.ramen.train_level_bonus,
-                game.ramen.rmj_results
+                game.ramen.rmj_results,
+                game.base.train_level_count,
+                levels
             );
-            assert_eq!(game.ramen.train_level_bonus, 1, "第 2 年应补 1 次 RMJ 成功加成");
             assert_eq!(game.ramen.rmj_results, vec![true], "第 2 年 rmj_results 应为 [true]");
+            assert_eq!(
+                game.ramen.train_level_bonus, 0,
+                "导入帧不应再补等级加成（协议 trainLevelCount 已含）"
+            );
+            for t in 0..5 {
+                assert_eq!(
+                    game.train_level(t),
+                    game.base.base_train_level(t),
+                    "训练等级应等于协议真实等级（count/4+1），不得再叠加 RMJ 加成"
+                );
+            }
         }
         // 第 1 年内快照：不应有 RMJ 结果
         if let Some(game) = load("game7075_turn13.json") {
@@ -618,11 +639,15 @@ mod tests {
                 assert_eq!(game.ramen.scenario_pt, expect_pt, "{name} 新年窗口 scenario_pt 归一化不符");
             }
         }
-        // turn23 同回合边界：训练（结算前）→ 0；地区选择（结算后）→ 1
+        // turn23 同回合边界：训练（结算前）→ 0 次结算；地区选择（结算后）→ 1 次
         for (name, expect) in [("game7075_turn23_2.json", 0), ("game7075_turn23_4.json", 1)] {
             if let Some(game) = load(name) {
-                println!("{name}: stage={:?} bonus={}", game.stage, game.ramen.train_level_bonus);
-                assert_eq!(game.ramen.train_level_bonus, expect, "{name} RMJ 次数边界不符");
+                println!(
+                    "{name}: stage={:?} rmj={:?} bonus={}",
+                    game.stage, game.ramen.rmj_results, game.ramen.train_level_bonus
+                );
+                assert_eq!(game.ramen.rmj_results.len(), expect, "{name} RMJ 结算次数边界不符");
+                assert_eq!(game.ramen.train_level_bonus, 0, "{name} 导入帧不应补等级加成");
             }
         }
     }
