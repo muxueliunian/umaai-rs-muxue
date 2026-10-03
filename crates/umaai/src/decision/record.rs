@@ -932,10 +932,17 @@ pub fn classify_begin_reason(v: &serde_json::Value) -> &'static str {
         .get("active_effect_array")
         .map(|a| a.as_array().map(|a| a.is_empty()).unwrap_or(true))
         .unwrap_or(true);
+    let is_racing = bg.get("isRacing").and_then(|x| x.as_bool()).unwrap_or(false);
+    // 刚选区时插件先发一条 ramen 数据未刷新的帧（`train_feeling_type` 全 0），随后再发完整数据。
+    // 只有「数组存在且全 0」才算命中；字段缺失 / 空数组视为未知，不跳。
+    let feeling_all_zero = ramen
+        .get("train_feeling_type")
+        .and_then(|x| x.as_array())
+        .map(|a| !a.is_empty() && a.iter().all(|v| v.as_u64().unwrap_or(1) == 0))
+        .unwrap_or(false);
 
-    if (2..=71).contains(&turn) && selected {
-        "data_incomplete(selected_regions=0)"
-    } else if source == "event" {
+    // 非决策帧优先（与 `into_game` 的 dispatch 一致：这些帧与 turn 无关地跳过）
+    if source == "event" {
         "event"
     } else if ps == 5 {
         "playing_state=5(event)"
@@ -943,8 +950,16 @@ pub fn classify_begin_reason(v: &serde_json::Value) -> &'static str {
         "rmj_settle(46)"
     } else if ps == 48 {
         "rmj_final(48)"
+    } else if ps == 1 && matches!(turn, 2 | 24 | 48) && !is_racing && feeling_all_zero {
+        // 刚选区、训练数据未刷新（只限选区回合与紧接的回合；其它全 0 属夏合宿 / 比赛 / 数据错误）
+        "train_data_unrefreshed(feeling all 0)"
+    } else if (2..=71).contains(&turn) && selected {
+        "data_incomplete(selected_regions=0)"
     } else if turn >= 72 && active_effect_empty {
         "super_ramen_drop(active_effect empty)"
+    } else if source == "special" {
+        // `special` + ps=45 会派成 RegionSelect（不落 Begin），此处只剩非地区选择的特殊状态
+        "special"
     } else {
         "begin_unclassified"
     }
@@ -1009,8 +1024,10 @@ mod tests {
             })
         };
         assert_eq!(classify_begin_reason(&mk("event", 1, 13, &[3, 7, 12], 0)), "event");
+        // event 优先于一切「不派发」原因：即使 regions 全 0 也归 event
+        assert_eq!(classify_begin_reason(&mk("event", 1, 13, &[0, 0, 0], 0)), "event");
         assert_eq!(
-            classify_begin_reason(&mk("event", 1, 13, &[0, 0, 0], 0)),
+            classify_begin_reason(&mk("command", 1, 13, &[0, 0, 0], 0)),
             "data_incomplete(selected_regions=0)"
         );
         assert_eq!(classify_begin_reason(&mk("command", 46, 13, &[3, 7, 12], 0)), "rmj_settle(46)");

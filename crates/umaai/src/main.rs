@@ -188,9 +188,10 @@ async fn main_guard() -> Result<()> {
     // RamenMctsTrainer 绑 RamenGame，独立构造。stages 走 game_config.mcts.ramen_search_stages，
     // 与 umasim/src/main.rs 拉面路径口径一致。
     //
-    // `verbose` 只在 `--json` 模式打开：训练员内部会把 `render_reason_lines` 的文字
-    // 再经 `log::info!` 上屏，而 human 模式已由 `scenario::ramen` 从 `LastReasonSink`
-    // 取出后 `println!` 渲染**同一份文字** → 双打印（human 模式必须关）。
+    // `verbose` 现在只推开训练员自己的摘要日志（`[MCTS][回合 X] 阶段 … N 候选 -> …`
+    // 与终局多维差异 `log_terminal_breakdown`）：决策理由文字**不再**经 `log::info!`
+    // 上屏（`emit_decision_reason` 只发原始数据），human 模式统一由 `scenario::ramen`
+    // 从 `LastReasonSink` 取回后 `println!` 渲染 —— 不会再有「一组 log + 一组 print」。
     // DecisionReasonData 始终经 `with_reason_sink(LastReasonSink)` 缓存到 `reason_slot`。
     let ramen_mcts_config = SearchConfig::new_game_config(&game_config);
     let ramen_stages = umasim::trainer::RamenSearchStages::parse(&game_config.mcts.ramen_search_stages)?;
@@ -198,7 +199,7 @@ async fn main_guard() -> Result<()> {
     let ramen_mcts = RamenMctsTrainer::new(ramen_mcts_config)
         .with_stages(ramen_stages)
         .with_friend_complete_required(game_config.friend_complete_required)
-        .verbose(true)
+        .verbose(!json_mode)
         .with_reason_sink(reason_slot.clone());
     // 动作决策由 `ramen_trainer_policy` 决定（默认 mcts，与既有逻辑相同）。
     // 网络模型在此加载一次；未开 onnx feature 或模型缺失时报错退出。

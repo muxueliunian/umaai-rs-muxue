@@ -2,6 +2,17 @@
 
 本文件用于简要记录每次任务的修改内容。记录应尽量精简，每条修改一行，不包含代码细节。
 
+## 2026-10-03
+- **决策帧白名单化**：`into_game` 只派发识别出的决策帧——`event` 与 `playing_state` 5/46/48 改为**与 turn 无关**地先判（此前开局 turn 0/1 的 event 帧会被派成 `Train` 硬算）；未识别帧不再 fallback 到 `Train`，一律不派发（保留 `Begin`），宁可本帧不算
+- **`load` 与 `command` 同等派发**：载入响应同样携带完整回合状态（实测有 `load + ps=1` 需出推荐），不再跳过
+- **新增「刚选区未刷新帧」跳过**：turn 2/24/48 且 `playing_state=1`、非比赛、`train_feeling_type` 全 0（插件先发的未刷新帧）不派发；其它回合全 0 属夏合宿 / 比赛 / 数据错误，不跳
+- **三处同源判定同步**：协议 dispatch / `classify_begin_reason` / `timeline::stage_of` 判定次序与分支逐条对齐，文件头规则表与判定次序注释重写
+- **地区选择不算运气分**：`region_select` 决策不挂 luck 快照与 `action_luck`（该回合期望评分会因 **RMJ 结算事件触发时机的模拟差异**大幅跳变），并**不推进基线**——运气分停留在上一次真正显示时的状态，这段跳变整段跳过；human 行在缺 `current_terminal_baseline` 时也不再打误导行
+- **决策理由输出结构性去重**：`emit_decision_reason` 删掉 `verbose` 下的 `info!` 上屏（只发原始数据经 `reason_sink`），`verbose` 改 `!json_mode`（仅推开摘要日志）；链式决策的**中间项**理由改由 human 路径在 emit 前取走 `reason_slot` 后 `println!`——两个动作都只剩 print，且 `region_select` 等无评分 fallback 行一并覆盖
+- **决策行改醒目配色（用户）**：无搜索评分的「选择…（手写逻辑 / 神经网络 / 自选比赛守门）」由品红改为红底亮黄
+- **文案与数据（用户）**：特殊生涯比赛提示加 `>>> <<<` 包裹；支援卡导出脚本 `SpecialRaces` 的 note 与唯爱赛程（30 + 44）更新
+- **测试同步**：region onnx 用例断言改为「不挂 luck 快照 / `nn_hint` 保留」；`classify_begin_reason` 用例补 `event` 优先分支
+
 ## 2026-10-02
 - **版本号提升至 0.14.2（用户）**：`umaai` / `umasim` 包版本提升，`Cargo.lock` 同步
 - **新增特殊生涯比赛开局提示**：`UmaData` 新增 `race_note`（读 `UmaDB` 的 `raceNote`），`Uma::explain_race_note` 生成蓝底亮黄文案；`umaai` 检测到新局时（温泉 / 拉面）经 stderr 提示，不走 stdout（不污染 JSON 流）；补单元测试

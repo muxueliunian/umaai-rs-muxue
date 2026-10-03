@@ -111,6 +111,11 @@ pub fn process_ramen<T: Trainer<RamenGame>>(
         if last_info.candidate_scores.is_empty() {
             sink.emit(&last_info, &game.view());
         } else {
+            // `attach_luck`：**地区选择不算运气分**（传 false）。
+            // 第 2/3 年地区选择正好就是 RMJ 结算回合，其期望评分会因「RMJ 结算事件触发
+            // 时机的模拟差异」大幅跳变，运气分不可信 → 不挂 snapshot / action_luck，
+            // `decisions.csv` 对应列也为空；`emit_with_luck_decision` 内也**不推进基线**，
+            // 运气分保持在「上一次真正显示时」的状态，这段跳变被整段跳过。
             emit_with_luck_decision(
                 Some(last_info),
                 &game,
@@ -120,6 +125,7 @@ pub fn process_ramen<T: Trainer<RamenGame>>(
                 reason_slot.take().as_ref(),
                 &last_kind,
                 ramen_action_text.as_deref(),
+                last_kind != "region_select",
             );
         }
     }
@@ -223,6 +229,18 @@ pub fn calc_ramen_training<T: Trainer<RamenGame>>(
                 // 注：RamenSelect 决策已在上方 decide 合成（见合成条件 3），
                 // `out` 通常有内容；其它 None 阶段不合成时这里无输出，与旧行为一致。
                 if let Some((info, view)) = out.first() {
+                    // human 模式：链式**中间项**（决策#1）的理由也在这里上屏。
+                    // 此前只有末项会走函数末尾的 `render_reason_lines`，中间项的理由只出现在
+                    // trainer 的 verbose 日志里（human 模式已关 → 会彻底消失）。
+                    // 必须**在此处取走** `reason_slot`：决策#2 的 `decide` 会把它覆写掉。
+                    // 顺序与末项一致：先理由、后决策行（`sink.emit`）。
+                    if !json_mode {
+                        if let Some(data) = reason_slot.take() {
+                            for line in render_reason_lines(&data) {
+                                println!("{line}");
+                            }
+                        }
+                    }
                     sink.emit(info, view);
                 }
                 out.clear();
@@ -664,7 +682,7 @@ mod tests {
     ///
     /// 同一种子下分别跑纯搜索训练员与 hint 装配，地区走手写与走搜索两种阶段集各一遍，
     /// 核对：事件流、执行的候选、候选评分、来源标签、之后的随机流都一致；hint 装配的
-    /// 决策上挂着 `nn_hint`，且与 luck 快照同时存在。
+    /// 决策上挂着 `nn_hint`；地区选择不算运气分，故**不带** luck 快照（合并未清空既有键）。
     #[cfg(feature = "onnx")]
     #[test]
     fn test_nn_hint_matches_mcts_on_region_turn() -> Result<()> {
@@ -712,10 +730,15 @@ mod tests {
             c.check(same == Some(choice == executed), &format!("[{stages}] same_as_executed 与实际一致"));
             if stages.contains("region") {
                 c.check(!h.candidate_scores.is_empty(), "[region] 执行侧确实走了地区搜索");
+                // 地区选择按设计**不算运气分**（RMJ 结算时机的模拟差异使期望评分跳变）→
+                // scenario_extra 里没有 luck 三键；网络参考（nn_hint）仍在，说明合并没有
+                // 把决策自带的键清掉。
+                let extra = h.scenario_extra.as_ref().expect("[region] 地区决策应有 scenario_extra");
                 c.check(
-                    h.scenario_extra.as_ref().and_then(|v| v.get("total_luck_score")).is_some(),
-                    "[region] luck 快照与参考推荐同时存在（合并而非覆盖）"
+                    extra.get("total_luck_score").is_none(),
+                    "[region] 地区选择不挂 luck 快照（不算运气分）"
                 );
+                c.check(extra.get(NN_HINT_KEY).is_some(), "[region] nn_hint 仍在（合并未清空既有键）");
             }
         }
         c.finish()

@@ -245,7 +245,7 @@ impl Uma {
         if note.trim().is_empty() {
             return None;
         }
-        Some(format!("该马娘有特殊生涯比赛: {note}").bright_yellow().on_blue().to_string())
+        Some(format!(">>> 该马娘有特殊生涯比赛: {note} <<<").bright_yellow().on_blue().to_string())
     }
 
     /// 建立马娘对象

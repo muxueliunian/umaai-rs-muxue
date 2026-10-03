@@ -74,7 +74,9 @@ pub fn emit_with_luck<G: Game>(
     decision_kind: &str
 ) {
     // onsen 路径没有 reason_sink，传 None——scenario_extra.reason 不挂
-    emit_with_luck_decision(trainer.last_decision(), game, sink, tracker, chara_id, None, decision_kind, None);
+    emit_with_luck_decision(
+        trainer.last_decision(), game, sink, tracker, chara_id, None, decision_kind, None, true
+    );
 }
 
 /// 把已提取的 `DecisionInfo` 喂给 sink：挂 luck score 字段 + emit。
@@ -91,12 +93,18 @@ pub fn emit_with_luck<G: Game>(
 ///   "super_ramen_select" / "event"）。C# 端按此字段分发 partial decision。
 /// - `ramen_action`：仅 ramen 路径传 `Some(&str)`——`RamenAction::to_string()` 的结果，
 ///   含吃面 + 隐藏诀窍 + 操作三阶段信息（按用户拍板"AIRed 端只显示不解析"）。
+/// - `attach_luck`：是否把运气分（`tracker.snapshot()` 的三个键 + 每候选 `action_luck`）
+///   挂到 `scenario_extra`。`region_select`（地区选择）传 `false`——那一回合的期望评分会因
+///   **RMJ 结算事件触发时机的模拟差异**大幅波动，运气分不可信，故不计算也不下发
+///   （`decisions.csv` 对应列随之为空），**同时不推进基线**：运气分停留在上一次真正
+///   显示时的状态，地区选择那次的跳变被整段跳过，不算进任何回合的「本回合运气」。
 pub fn emit_with_luck_decision<G: Game>(
     last_decision: Option<DecisionInfo>, game: &G, sink: &Arc<dyn DecisionSink>,
     tracker: &mut LuckScoreTracker, chara_id: u64,
     reason_data: Option<&DecisionReasonData>,
     decision_kind: &str,
-    ramen_action: Option<&str>
+    ramen_action: Option<&str>,
+    attach_luck: bool
 ) {
     let Some(mut info) = last_decision else {
         return;
@@ -125,28 +133,36 @@ pub fn emit_with_luck_decision<G: Game>(
     };
 
     // Note: 增加 mcts_turn_bonus 的行为原本在MctsTrainer<OnsenGame> 实现，现在放在外部完成，MCTS只输出原始分数
-    let _turn_delta = tracker.on_new_turn(
-        chara_id,
-        t_n_baseline,
-        game.turn(),
-        game.max_turn(),
-        global!(GAMECONSTANTS).mcts_turn_bonus,
-    );
+    // 不挂运气分的决策（`attach_luck == false`，地区选择）**不推进基线**：
+    // 让 `total_luck_score` / `last_turn_delta` 停留在「上一次真正显示运气分时的状态」，
+    // 即下一个决策的回合运气 = 它相对上次显示点的变化（把地区选择那次的跳变整段跳过）。
+    if attach_luck {
+        tracker.on_new_turn(
+            chara_id,
+            t_n_baseline,
+            game.turn(),
+            game.max_turn(),
+            global!(GAMECONSTANTS).mcts_turn_bonus,
+        );
+    }
 
     // 每候选 action_luck：T(n, action_i) - T(n)（AIRedirector 关心，玩家模式跳过）
-    let action_luck = json!(
-        info.candidate_scores
-            .iter()
-            .enumerate()
-            .map(|(i, &s)| (i, (s as f64) - t_n_baseline))
-            .collect::<std::collections::HashMap<usize, f64>>()
-    );
+    // `attach_luck == false`（region_select）时不算：避免为不可信的运气分做无用功
+    let action_luck = attach_luck.then(|| {
+        json!(
+            info.candidate_scores
+                .iter()
+                .enumerate()
+                .map(|(i, &s)| (i, (s as f64) - t_n_baseline))
+                .collect::<std::collections::HashMap<usize, f64>>()
+        )
+    });
 
     // 顶层 decision_kind（外部传入）
     info.decision_kind = decision_kind.to_string();
 
-    // 挂载 scenario_extra：snapshot + action_luck（必挂）+ reason（仅拉面 MCTS）+
-    // ramen_action（仅 ramen 路径）
+    // 挂载 scenario_extra：snapshot + action_luck（仅 `attach_luck`）+
+    // reason（仅拉面 MCTS）+ ramen_action（仅 ramen 路径）
     //
     // 合并而不是覆盖：决策本身可能已带信息（网络模式的 `decision_source`、
     // `mcts_nn_hint` 的参考推荐），以它为底再盖上 luck 相关键，键名冲突时以 luck 为准。
@@ -154,12 +170,15 @@ pub fn emit_with_luck_decision<G: Game>(
         Some(Value::Object(map)) => map,
         _ => Map::new()
     };
-    if let Ok(Value::Object(snapshot)) = to_value(tracker.snapshot()) {
-        for (k, v) in snapshot {
-            merged.insert(k, v);
+    // luck 三键（snapshot）+ action_luck：仅 `attach_luck` 时挂（region_select 不挂）
+    if let Some(action_luck) = action_luck {
+        if let Ok(Value::Object(snapshot)) = to_value(tracker.snapshot()) {
+            for (k, v) in snapshot {
+                merged.insert(k, v);
+            }
         }
+        merged.insert("action_luck".into(), action_luck);
     }
-    merged.insert("action_luck".into(), action_luck);
     // reason：拉面 MCTS 路径挂，其他 trainer 不挂
     if let Some(data) = reason_data {
         if let Ok(reason_v) = to_value(data) {

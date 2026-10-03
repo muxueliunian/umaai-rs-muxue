@@ -25,16 +25,25 @@
 //!
 //! | turn | source | active_effect | playing_state | 含义 | stage |
 //! |---|---|---|---|---|---|
-//! | ≤ 1 | 任 | 任 | 1 | 剧本机制未启用（拉面机制 turn >= 2 才启动） | `Train` |
-//! | ≥ 2 | `event` | 任 | 1/5 | 事件回合，AI 暂不处理 | (warn + 不 dispatch) |
-//! | ≥ 2 | `command` | 空 | 1/5 | 当回合训练前，未吃面 | `RamenSelect` |
-//! | ≥ 2 | `command` | 有 | 1/5 | 当回合已吃面，写中间状态 `pending_ramen=Some(last_ramen)` | `Train` |
-//! | ≥ 2 | `special` | - | 45 | 地区选择 | `RegionSelect` |
-//! | ≥ 2 | `command` | - | 45 | 同上（source=special 暂未出现） | `RegionSelect` |
-//! | ≥ 2 | `command` | - | 46 | RMJ 结算，不处理 | (warn + 不 dispatch) |
-//! | ≥ 2 | `command` | - | 48 | RMJ 最终结算，不处理 | (warn + 不 dispatch) |
+//! | 任 | `event` | 任 | 任 | 待处理事件（check_event 带 story），AI 不进决策 | (不 dispatch) |
+//! | 任 | 任 | 任 | 5 / 46 / 48 | 事件 / RMJ 结算 / RMJ 最终结算 | (不 dispatch) |
+//! | 任 | 任 | 任 | 45 | 地区选择（`command` / `special` 两种 source 都出现） | `RegionSelect` |
+//! | 2 / 24 / 48 | `command` | 任 | 1 | 刚选区、`train_feeling_type` 全 0（ramen 数据未刷新） | (不 dispatch) |
+//! | ≤ 1 | `command` / `load` | 任 | 1 | 剧本机制未启用（拉面机制 turn >= 2 才启动） | `Train` |
+//! | ≥ 2 | `command` / `load` | 空 | 1 | 当回合训练前，未吃面 | `RamenSelect` |
+//! | ≥ 2 | `command` / `load` | 有 | 1 | 当回合已吃面，写中间状态 `pending_ramen=Some(last_ramen)` | `Train` |
+//! | ≥ 72 | 任 | 空 | 1 | 超级拉面回合但效果未生效，丢弃等下一条 | (不 dispatch) |
+//! | ≥ 72 | 任 | 有 | 1 | 超级拉面回合效果已生效 | `Train`（`combined_decision=true`） |
+//! | 其它 | 其它 | 任 | 任 | 未识别的帧 | (warn + 不 dispatch) |
 //!
-//! `source=special` 在 151 份样本中暂未出现，按 `command + playing_state=45` 兜底为 RegionSelect。
+//! **判定次序**：非决策帧（表头 2 行：`event` / ps 5·46·48）→ 刚选区未刷新帧
+//! （turn 2/24/48 + ps=1 + feeling 全 0）→ 数据获取不全 → `playing_state=45` → `turn <= 1`
+//! → 其余白名单。非决策帧与 turn **无关**，必须排在 `turn <= 1` 之前，否则开局（turn 0/1）的
+//! `event` 帧会被派成 `Train` 计算。
+//! 未识别的帧同样**不 dispatch**——宁可本帧不算（下一帧还会来），也不按 `Train` 硬算出一条
+//! 与当前状态不符的推荐。
+//!
+//! `source=special` 在样本中暂未出现，按 `playing_state=45` 兜底为 RegionSelect。
 //! 数据获取不全（turn 2..=71 且 `selected_regions` 全 0）→ warn + 不 dispatch。
 //!
 //! ## persons layout（adapter_spec §理事長、记者、NPC生成）
@@ -309,41 +318,71 @@ impl GameStatus for GameStatusRamen {
         //    留此注释作为占位，等 is_hidden PR 合并后启用改写函数。
 
         // 5. Stage dispatch（adapter_spec §source / §playing_state 三方联合）。
-        //    先做数据获取不全检查（turn 2..=71 且 selected_regions 全 0），命中则 warn + 不 dispatch。
-        //    不 dispatch 时保留 `RamenStage::Begin`（newgame 默认值），由 main loop 识别并跳过。
+        //
+        // **白名单**：只有明确识别为「决策帧」的帧才派发阶段给 AI 计算；其余一律**不派发**
+        // （保留 `RamenStage::Begin` = newgame 默认值），由 main loop 识别后**整条决策链路跳过**
+        // （不列候选、不搜索、不算 luck）。宁可本帧不算（下一帧还会来），也不要按 Train 硬算出
+        // 一条与当前状态不符的推荐。
+        //
+        // `source` / `playing_state` 是插件侧的判定结果（见 `GameStatusSend_Base.ResolveSource`）：
+        // - `command`：玩家指令响应；`event`：待处理事件（check_event 带 story）；
+        // - `load`：载入响应（进育成 / 切屏回来）——**与 `command` 同等派发**：同样携带完整
+        //   回合状态，实测有 `load + ps=1` 需要出推荐的情况，故不做跳过；
+        // - `special`：`command` + `playing_state >= 10` 的特殊状态（只有 45 是地区选择）。
         let active_effect_count = ramen.active_effect_array.len();
-        let data_incomplete = (2..=71).contains(&base.turn)
+        let source = base.source.as_deref().unwrap_or("");
+        let playing_state = base.playing_state;
+        let turn = base.turn;
+        let data_incomplete = (2..=71).contains(&turn)
             && game.ramen.selected_regions.iter().all(|&r| r == 0);
-        if data_incomplete {
+
+        // 非决策帧：与 turn **无关**地跳过——必须在 `turn <= 1` 分支之前判定，
+        // 否则开局（turn 0/1）的 event 帧会被派成 `Train` 计算。
+        let non_decision = match (source, playing_state) {
+            ("event", _) => Some("source=event，本回合为事件回合"),
+            (_, 5) => Some("playing_state=5 事件回合"),
+            (_, 46) => Some("playing_state=46 RMJ 结算"),
+            (_, 48) => Some("playing_state=48 RMJ 最终结算"),
+            _ => None
+        };
+        // 「刚选区、训练数据还没刷新」帧：玩家刚选完地区时，插件先发一条 ramen 数据段
+        // 未刷新的帧（`command_feeling_info_array` 未下发 → `train_feeling_type` 全 0），
+        // 随后才发含完整数据的那条。此时按未刷新数据算出的推荐不可信，故跳过。
+        //
+        // 判定范围**只在选区发生的回合**（turn 2）与**选区后紧接的回合**（23 选区 → 24、
+        // 47 选区 → 48）：实测其它回合的 `train_feeling_type` 全 0 属于「本回合确实没有角标」
+        // （夏合宿 36-39 / 60-63 等）或数据错误，不能跳。
+        // `playing_state` 必须为 1：ps=45 是地区选择本身（其 feeling 同样全 0），必须算。
+        let feels_unrefreshed = playing_state == 1
+            && matches!(turn, 2 | 24 | 48)
+            && !base.is_racing
+            && ramen.train_feeling_type.iter().all(|&t| t == 0);
+
+        if let Some(reason) = non_decision {
+            log::info!("{reason}，跳过 AI 推荐");
+            // 不动 game.stage，保留 Begin 让 main loop 走 fallback
+        } else if feels_unrefreshed {
+            log::info!(
+                "turn={turn} 刚选择完地区、训练数据未刷新（train_feeling_type 全 0），跳过 AI 推荐"
+            );
+            // 不动 game.stage，保留 Begin；插件随后会再发一条含完整数据的帧
+        } else if data_incomplete {
             log::warn!(
                 "缺少地区选择信息，AI无法计算；需要回到大厅界面重进育成"
             );
             // 不动 game.stage，保留 Begin 让 main loop 走 fallback
-        } else if base.turn <= 1 {
+        } else if playing_state == 45 {
+            // 地区选择（`command` / `special` 两种 source 都按此处理）
+            game.stage = RamenStage::RegionSelect;
+        } else if turn <= 1 {
             // turn 0/1：剧本机制未启用（拉面机制 turn >= 2 才启动），直接进 Train。
             // 与 `RamenGame::next()` 内部短路（game.rs:124 turn < 2 跳 RamenSelect）口径一致：
             // 我们在 into_game 派发阶段提前派发，避免 main loop 走到 Distribute 后被 next() 短路时
             // 看不到本应有 RamenSelect 候选可选的语义。
-            log::info!("turn={} 剧本机制未启用，直接进 Train 阶段", base.turn);
+            log::info!("turn={turn} 剧本机制未启用，直接进 Train 阶段");
             game.stage = RamenStage::Train;
         } else {
-            let source = base.source.as_deref().unwrap_or("");
-            let playing_state = base.playing_state;
-            let turn = base.turn;
             match (source, active_effect_count > 0, playing_state) {
-                // event / playing_state=5 / 46 / 48：AI 不进决策循环
-                ("event", _, _) => {
-                    log::info!("source=event，本回合为事件回合，跳过 AI 推荐");
-                }
-                (_, _, 5) => {
-                    log::info!("playing_state=5 事件回合，跳过 AI 推荐");
-                }
-                (_, _, 46) => {
-                    log::info!("playing_state=46 RMJ 结算，跳过 AI 推荐");
-                }
-                (_, _, 48) => {
-                    log::info!("playing_state=48 RMJ 最终结算，跳过 AI 推荐");
-                }
                 // 超级拉面回合（turn >= 72）：
                 //   active_effect_array 空 → 直接丢包（按 spec §超级拉面回合处理），
                 //     等下一条数据；下一条数据会有 active_effect_array，是超级拉面激活后
@@ -361,9 +400,9 @@ impl GameStatus for GameStatusRamen {
                     let _ = src;
                     // 不 dispatch
                 }
-                // 普通训练回合：command + active_effect_array 有 → 已吃面，Train
+                // 普通训练回合：command / load + active_effect_array 有 → 已吃面，Train
                 //                                                  且构造中间状态 pending_ramen
-                ("command", true, 1) => {
+                ("command" | "load", true, 1) => {
                     game.stage = RamenStage::Train;
                     // 写中间状态：adapter_spec §source 'command + active_effect_array 有' →
                     //  构造 RamenAction::ramen_select(Some(last_ramen))，让 umaai 决策训练。
@@ -372,20 +411,21 @@ impl GameStatus for GameStatusRamen {
                         game.ramen.pending_ramen = Some(cur);
                     }
                 }
-                // 普通训练回合：command + active_effect_array 空 → 吃面前，给 RamenSelect 决策
-                ("command", false, 1) => {
+                // 普通训练回合：command / load + active_effect_array 空 → 吃面前，给 RamenSelect 决策
+                ("command" | "load", false, 1) => {
                     game.stage = RamenStage::RamenSelect;
                 }
-                // 地区选择：playing_state=45（source=special 在 151 样本中暂未出现）
-                (_, _, 45) => {
-                    game.stage = RamenStage::RegionSelect;
-                }
-                // 兜底：未识别的 playing_state → warn + fallback Train
-                (_, _, other) => {
-                    log::warn!(
-                        "未知 playing_state={other} source={source:?} active_effect={active_effect_count} turn={turn}，fallback 到 Train"
+                // `special` 且非 45：剧本特殊状态（非地区选择），AI 暂不处理
+                ("special", ..) => {
+                    log::info!(
+                        "source=special（playing_state={playing_state} 非地区选择），跳过 AI 推荐"
                     );
-                    game.stage = RamenStage::Train;
+                }
+                // 兜底：未识别的帧**不派发**（保留 Begin）——不再按 Train 硬算
+                (src, _, ps) => {
+                    log::warn!(
+                        "未识别的帧 source={src:?} playing_state={ps} active_effect={active_effect_count} turn={turn}，跳过 AI 推荐"
+                    );
                 }
             }
         }
