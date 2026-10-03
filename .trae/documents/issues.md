@@ -2,6 +2,21 @@
 
 本文件用于记载较复杂问题（需要用户协助解决的）的解决过程。
 
+## 第 1 年地区选择的运气分 +1300 假跳升（链式推进漏加 NPC 人头）
+
+- **日期**：2026-10-03
+- **状态**：已解决
+- **问题描述**：日志 `logs/game6251` 第 2–3 回合（第一次地区选择）运气分出现约 +1000 的跳升：turn2 的 `total_luck` 达 +1393.67、`turn_delta` +1280.22（旧构建；用当前代码 `luck_replay` 重放同样复现 turn2 ≈ +1294），远超 `mcts_turn_bonus`(70)/回合 的正常量级。
+- **排查过程**：
+  1. **定位到「选区前 vs 选区后」**：`turn_delta` = T(turn2 选区后,真实帧) − T(turn2 选区前,回放) ≈ +1280（raw）。选区前基线由 `region_select` 候选（其候选本身就是"选中该地区后 rollout 到终局"的期望）按局数加权得到；turn1 因链式中间项 + 地区选择不算运气分而没有显示点，跳变全压到 turn2。先排除"选到好地区"：最优候选 62447 vs 加权 62328 只差 118。
+  2. **自洽模拟对照**：手写推进到 turn2 `RegionSelect` 根局面，与"应用地区后推进到 turn2 Train"局面在同一批 CRN 种子下配对，期望差仅 +68（≈1 回合 bonus）；逐回合轨迹 turn1→turn2 为 −141。说明 +1200 **不是**"选区前天生低估"。
+  3. **在线帧 vs 模拟状态直接对比**：用 `into_game` 加载 game6251 的 turn1_2 / turn2_4 帧，构造 R1（链式推进到 turn2 RegionSelect）、R2_frame（真实帧→Train）、R2_chain（模拟选区后→Train），同种子 rollout 得 `frame − chain = +1420`。全字段 diff 定位首个实质差异是 `distribution` 与**人头列表**：frame `persons.len=12`（含 5 个 `Npc`），chain `persons.len=7`（无 NPC）；把 frame 的 distribution 移植进 chain 时直接 panic（`index out of bounds: len 7, index 8`）。
+  4. **因果确认**：frame 去掉 NPC 人头 → 63566→62134（−1432）；chain 补上 5 个 NPC → 62146→63506（+1359）；另换 distribution / `feeling_queue` / `feeling_slot` 均只有 ±50 量级影响 → **真凶是 NPC 人头有无**。
+  5. **代码根因**：`manage_persons_on_turn_start` 用「是否存在 `ScenarioCard`（友人卡人头）」当「已补过友人卡+NPC」的判据。纯模拟 `newgame` 的 `init_persons` 刻意不加友人卡，守卫成立；但协议层 `into_game` 重建 turn<2 帧时**已把友人卡建成 ScenarioCard 人头** → turn2 守卫误判 → 整批跳过 `add_friend_and_npcs` → 链式推进出的 turn2 局面少 5 个 NPC，而 C# 的 turn2 帧走 `into_game`（`turn>=2`）正常带 5 NPC（12 人头）。NPC 参与训练值计算，故选区前（模拟）期望系统性偏低 → 运气分假跳升。
+- **解决方案**：`manage_persons_on_turn_start` 改为幂等逐个补齐——turn≥2 时友人卡与 5 个 NPC 各自独立判存在性、缺则补；记者同理（turn≥12）；`add_friend_and_npcs` 拆出 `add_friend_card` / `add_npcs`（原入口保留为薄包装，既有调用点不动）。新增守门单测 `test_turn2_backfills_npcs_when_friend_already_present`。
+- **验证**：帧对照 `frame − chain` +1420.29 → +20.30，chain 人头 7→12；`luck_replay` 重放 game6251 的 turn2 `total_luck` +1294.62 → −44.49（跳升消失）；`umasim` lib 398 passed（唯一失败 `test_color_thresholds` 为 ANSI 环境问题，与本次无关）、`umaai` lib 64 passed；钉死纯模拟基线的 `test_combined_gate_off` 仍绿 → bench / 自对弈数值逐位不变。
+- **备注**：影响面仅限「从 turn<2 帧链式推进到 turn2」的路径（在线链路 / `luck_replay` / 第 1 年地区选择的搜索根）。协议层 `into_game` 的 turn<2=7、turn 2..=12=12 人头布局，与纯模拟的人头顺序（友人卡 / 理事长下标）仍存在差异，本次未动。诊断用的一次性探针与临时输出已在验证后清理。
+
 ## 缺模型时 ONNX 测试静默通过 + 图输出契约晚报错
 
 - **日期**：2026-09-23

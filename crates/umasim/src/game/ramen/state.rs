@@ -411,8 +411,18 @@ impl RamenGame {
     }
 
     /// 添加友人卡和NPC（第2回合开始）
+    ///
+    /// 两段式入口的薄包装 = [`Self::add_friend_card`] + [`Self::add_npcs`]。
+    /// **不幂等**——调用方需自行保证人头尚未加入；回合开始时的按需补齐见
+    /// `RamenGame::manage_persons_on_turn_start`（各自判存在性）。
     pub fn add_friend_and_npcs(&mut self) -> Result<()> {
-        // 添加友人卡（card_type >= 5），并更新 friend.person_index
+        self.add_friend_card()?;
+        self.add_npcs();
+        Ok(())
+    }
+
+    /// 添加友人卡人头（`card_type >= 5`），并更新 `friend.person_index`
+    pub fn add_friend_card(&mut self) -> Result<()> {
         let friend_persons: Vec<BasePerson> = self
             .deck
             .iter()
@@ -424,7 +434,11 @@ impl RamenGame {
             self.add_person(p);
             self.friend.person_index = idx;
         }
-        // 添加5个NPC
+        Ok(())
+    }
+
+    /// 添加5个NPC人头
+    pub fn add_npcs(&mut self) {
         for &npc_id in NPC_CHARA_IDS {
             self.add_person(BasePerson {
                 person_index: 0,
@@ -436,7 +450,6 @@ impl RamenGame {
                 card_id: None
             });
         }
-        Ok(())
     }
 
     /// 添加记者（第12回合开始）
