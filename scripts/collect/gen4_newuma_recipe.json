@@ -1,0 +1,121 @@
+{
+  "recipe_id": "gen4_newuma_v1",
+  "purpose": "R10 无购买增益补采：新鲁道夫象征与新气槽，旧卡池加两张新智",
+  "status": "validated_against_rust_release_dump",
+  "space": {
+    "version": "gen4_newuma_v1",
+    "identity_mode": "explicit_fields_no_hash",
+    "plan_count": 3560,
+    "umas": [
+      101703,
+      101803
+    ],
+    "umas_note": "仅新鲁道夫象征 101703 与新气槽 101803",
+    "cards": [
+      302754,
+      302984,
+      302424,
+      302824,
+      303024,
+      302924,
+      303044,
+      303004,
+      302834,
+      302894,
+      303054,
+      303124,
+      303114,
+      303084,
+      302774,
+      303064,
+      303174,
+      303194,
+      303204
+    ],
+    "cards_note": "原 gen3 17 卡保持原序，末尾追加本空间新智卡；不含根米浴 303184 或力大鸣大放 303214",
+    "friend_card": 303054,
+    "shapes": [
+      {
+        "counts": [
+          3,
+          1,
+          0,
+          0,
+          1
+        ],
+        "name": "3速1耐1智1友"
+      },
+      {
+        "counts": [
+          2,
+          2,
+          0,
+          0,
+          1
+        ],
+        "name": "2速2耐1智1友"
+      },
+      {
+        "counts": [
+          2,
+          1,
+          1,
+          0,
+          1
+        ],
+        "name": "2速1耐1力1智1友"
+      },
+      {
+        "counts": [
+          2,
+          0,
+          1,
+          1,
+          1
+        ],
+        "name": "2速1力1根1智1友"
+      },
+      {
+        "counts": [
+          2,
+          1,
+          0,
+          0,
+          2
+        ],
+        "name": "2速1耐2智1友"
+      }
+    ],
+    "shapes_note": "gen2_v1 四种原序 + 末尾 2速1耐2智1友",
+    "required": [],
+    "required_note": "不要求新卡；覆盖新马配旧卡和新卡",
+    "legality": {
+      "uma_vs_card": "按 chara_id 实际比对，同角色不可共存",
+      "card_vs_card": "同上，按角色查整副卡，与卡类型无关；303084 根杏目与 302424 速杏目均为角色 1129，不可同时出现",
+      "friend_card_included_in_check": true
+    }
+  },
+  "inherit": {
+    "blue_count": [
+      15,
+      0,
+      0,
+      0,
+      3
+    ],
+    "extra_count": [
+      10,
+      10,
+      20,
+      20,
+      20,
+      40
+    ],
+    "source": "umasim::sampler::gen1_inherit()，与 v5/v6/R2/R3/R4/R5 全部教师数据一致",
+    "note": "与 §15.11 客户端面板的 blue [15,0,3,0,0] / extra [0,20,20,40,40,40] 不同；教师采集沿用 gen1_inherit，不改"
+  },
+  "purchase_buffs": [],
+  "purchase_buffs_note": "不施加开局购买增益，沿用原采集器初始化；不禁止局内自然获取状态",
+  "holdout_rule": "every_tenth_all",
+  "holdout_note": "本空间所有组合均含新智卡或新马：每个马娘 × 构成按完整字段排序，每十个取第十个；四个新空间互斥，沿用完整马卡组合留出"
+}

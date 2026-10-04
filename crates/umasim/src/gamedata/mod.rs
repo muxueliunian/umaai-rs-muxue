@@ -118,8 +118,11 @@ mod tests {
     fn test_turn_mask() -> Result<()> {
         let workspace_root = get_workspace_root()?;
         std::env::set_current_dir(workspace_root)?;
-        let _ = GAMECONSTANTS.set(GameConstants::load()?);
         let _ = init_test_logger("info");
+        // `race_grades` 已从 `constants.json` 迁到 `GameConfig`（在 `GameConstants` 里是
+        // `#[serde(default, skip)]`），必须经 `init_global_with_config` 注入；只调
+        // `GameConstants::load()` 会让它为空 → `update_turn_mask` 里 `race_grades[i]` 越界 panic。
+        init_global_with_config(&GameConfig::default_for_init())?;
         let mut free_race = FreeRaceData {
             start_turn: 24,
             end_turn: 47,
@@ -129,6 +132,14 @@ mod tests {
         };
         free_race.update_turn_mask(); // 只有G1会被标1
         println!("{:b}", free_race.mask); // 10111010000111110100000000000000000000
+        assert!(free_race.mask != 0, "24..=47 区间应至少有一场 G1");
+        // 置位比特只应落在 [24, 47]（bit i ↔ 回合 11+i）
+        for bit in 0..64 {
+            if free_race.mask & (1u64 << bit) != 0 {
+                let turn = bit + 11;
+                assert!((24..=47).contains(&turn), "mask 置位超出区间: turn {turn}");
+            }
+        }
         Ok(())
     }
 }

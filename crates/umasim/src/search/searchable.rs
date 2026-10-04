@@ -125,7 +125,7 @@ impl FlatSearchGame for OnsenGame {
 }
 
 impl FlatSearchGame for RamenGame {
-    /// rollout 基策 = 正式推荐手写策略
+    /// rollout 基策 = 正式推荐手写策略（默认档）
     ///
     /// 2026-08-27 切换：原用 `RamenHandwrittenTrainer`（纯 RamenPolicy，缺平衡/吃面联动/
     /// 体力门限等机制），切到 [`RecommendedRamenTrainer`] 后搜索评分与正式手写策略对齐，
@@ -134,6 +134,8 @@ impl FlatSearchGame for RamenGame {
     /// 2026-09-05 再切：包一层 [`RamenRolloutTrainer`](crate::trainer::RamenRolloutTrainer)，
     /// 使 rollout 基策可换成网络（`Q^手写` → `Q^NN`）。未装载网络时它就是
     /// `RecommendedRamenTrainer::for_rollout()` 的直通转发，行为与 RNG 消耗逐位不变。
+    ///
+    /// [`RecommendedRamenTrainer`]: crate::trainer::RecommendedRamenTrainer
     type RolloutTrainer = crate::trainer::RamenRolloutTrainer;
 
     /// 拉面暂无 leaf 估值器，Phase 1 只允许跑到终局

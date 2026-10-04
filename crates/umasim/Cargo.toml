@@ -1,6 +1,6 @@
 [package]
 name = "umasim"
-version = "0.14.0"
+version = "0.14.2"
 edition = "2024"
 
 [[bin]]
@@ -75,6 +75,12 @@ path = "tools/data_collection/ramen_advantage_probe.rs"
 # 探针整体依赖 ONNX 网络策略，无 onnx 时没有任何可用功能：
 # 让 cargo 直接跳过该目标，而不是编一个只会 bail 的空壳
 required-features = ["cli", "onnx"]
+
+[[bin]]
+name = "nn_rollout_probe"
+path = "tools/data_collection/nn_rollout_probe.rs"
+# 探针整体依赖 ONNX 网络策略（rollout 换网络），无 onnx 时没有任何可用功能
+required-features = ["onnx"]
 
 [[bin]]
 name = "ramen_mcts_pair_bench"

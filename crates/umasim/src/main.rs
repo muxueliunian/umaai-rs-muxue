@@ -9,6 +9,9 @@
 
 use std::time::Instant;
 
+#[cfg(feature = "onnx")]
+use std::sync::Arc;
+
 use anyhow::Result;
 #[cfg(feature = "cli")]
 use colored::Colorize;
@@ -368,40 +371,47 @@ async fn main() -> Result<()> {
                     trainer.mcts_onsen = game_config.mcts_selected_onsen;
 
                     // P3-MVP：leaf eval 评估器开关（用于 A/B 对照）
-                    match game_config.mcts.rollout_evaluator.as_str() {
-                        "handwritten" => {
-                            trainer.search = trainer.search.with_leaf_evaluator_handwritten();
-                        }
-                        "nn" => {
-                            if game_config.mcts.max_depth == 0 {
-                                println!(
-                                    "警告: mcts.rollout_evaluator=\"nn\" 但 mcts.max_depth=0，leaf eval 不会被使用（等价于旧路径）"
-                                );
+                    //
+                    // 本段只对**非拉面**剧本生效：`rollout_evaluator` 在拉面分支的含义是
+                    // **rollout 基策**而不是 leaf 估值器（拉面 `SUPPORTS_TRUNCATED_LEAF=false`，
+                    // 搜索只允许跑到终局，硬拒 `max_depth>0`），解释见下方 `"ramen"` 分支。
+                    // 不隔离会让只想切拉面 rollout 的配置反过来要求温泉模型文件存在。
+                    if game_config.scenario != "ramen" {
+                        match game_config.mcts.rollout_evaluator.as_str() {
+                            "handwritten" => {
+                                trainer.search = trainer.search.with_leaf_evaluator_handwritten();
                             }
-                            if game_config.mcts_selection == "pt" && game_config.mcts.max_depth > 0 {
-                                return Err(anyhow::anyhow!(
-                                    "E4 验收约束：mcts.rollout_evaluator=\"nn\" 且 max_depth>0 时禁止 mcts_selection=\"pt\"；请改为 \"score\""
-                                ));
-                            }
+                            "nn" => {
+                                if game_config.mcts.max_depth == 0 {
+                                    println!(
+                                        "警告: mcts.rollout_evaluator=\"nn\" 但 mcts.max_depth=0，leaf eval 不会被使用（等价于旧路径）"
+                                    );
+                                }
+                                if game_config.mcts_selection == "pt" && game_config.mcts.max_depth > 0 {
+                                    return Err(anyhow::anyhow!(
+                                        "E4 验收约束：mcts.rollout_evaluator=\"nn\" 且 max_depth>0 时禁止 mcts_selection=\"pt\"；请改为 \"score\""
+                                    ));
+                                }
 
-                            let model_path = game_config.neuralnet_model_path.as_str();
-                            if !std::path::Path::new(model_path).exists() {
+                                let model_path = game_config.neuralnet_model_path.as_str();
+                                if !std::path::Path::new(model_path).exists() {
+                                    return Err(anyhow::anyhow!(
+                                        "mcts.rollout_evaluator=\"nn\" 但模型文件不存在: {model_path}"
+                                    ));
+                                }
+                                // 先验证模型可加载（避免"以为开了 NN 实际没开"的伪对照）
+                                // 仅 onnx feature 下可用
+                                #[cfg(feature = "onnx")]
+                                {
+                                    let _ = umasim::neural::NeuralNetEvaluator::load(model_path)?;
+                                    trainer.search = trainer.search.with_leaf_evaluator_nn(model_path.to_string());
+                                }
+                            }
+                            other => {
                                 return Err(anyhow::anyhow!(
-                                    "mcts.rollout_evaluator=\"nn\" 但模型文件不存在: {model_path}"
+                                    "未知 mcts.rollout_evaluator=\"{other}\"（仅支持 \"handwritten\" | \"nn\"）"
                                 ));
                             }
-                            // 先验证模型可加载（避免"以为开了 NN 实际没开"的伪对照）
-                            // 仅 onnx feature 下可用
-                            #[cfg(feature = "onnx")]
-                            {
-                                let _ = umasim::neural::NeuralNetEvaluator::load(model_path)?;
-                                trainer.search = trainer.search.with_leaf_evaluator_nn(model_path.to_string());
-                            }
-                        }
-                        other => {
-                            return Err(anyhow::anyhow!(
-                                "未知 mcts.rollout_evaluator=\"{other}\"（仅支持 \"handwritten\" | \"nn\"）"
-                            ));
                         }
                     }
 
@@ -419,9 +429,46 @@ async fn main() -> Result<()> {
                                 game_config.mcts.radical_factor_max
                             );
                             // verbose: 单局手动运行才开，输出每个决策点的候选统计与终局多维差异
-                            let ramen_trainer = RamenMctsTrainer::new(SearchConfig::new_game_config(&game_config))
+                            let mut ramen_trainer = RamenMctsTrainer::new(SearchConfig::new_game_config(&game_config))
                                 .with_stages(stages)
                                 .verbose(true);
+                            // 拉面没有 leaf 估值器（`SUPPORTS_TRUNCATED_LEAF=false`，只搜到终局），
+                            // 所以 `rollout_evaluator` 在本分支的含义是 **rollout 基策**：
+                            // `"nn"` = 搜索内部模拟的每个决策点都交给神经网络（实验档）。
+                            // 代价是 rollout 每步一次推理，次数 ≈ 决策点数 × rollout 条数，
+                            // 生产 `search_n` 下不可行，仅供小预算量测。
+                            match game_config.mcts.rollout_evaluator.as_str() {
+                                "handwritten" => {}
+                                "nn" => {
+                                    #[cfg(feature = "onnx")]
+                                    {
+                                        let model_path = game_config.ramen_nn_model_path.as_deref().ok_or_else(|| {
+                                            anyhow::anyhow!(
+                                                "拉面 mcts.rollout_evaluator=\"nn\" 但未配置 ramen_nn_model_path"
+                                            )
+                                        })?;
+                                        if !std::path::Path::new(model_path).exists() {
+                                            return Err(anyhow::anyhow!(
+                                                "拉面 mcts.rollout_evaluator=\"nn\" 但拉面模型不存在: {model_path}"
+                                            ));
+                                        }
+                                        let nn = RamenNnTrainer::load(std::path::Path::new(model_path))?;
+                                        println!("拉面 MCTS rollout 基策 = 神经网络（{model_path}）");
+                                        ramen_trainer = ramen_trainer.with_nn_rollout(Arc::new(nn), None);
+                                    }
+                                    #[cfg(not(feature = "onnx"))]
+                                    {
+                                        return Err(anyhow::anyhow!(
+                                            "拉面 mcts.rollout_evaluator=\"nn\" 需要 onnx feature 构建"
+                                        ));
+                                    }
+                                }
+                                other => {
+                                    return Err(anyhow::anyhow!(
+                                        "未知 mcts.rollout_evaluator=\"{other}\"（仅支持 \"handwritten\" | \"nn\"）"
+                                    ));
+                                }
+                            }
                             run_ramen_once(
                                 &ramen_trainer,
                                 game_config.uma,

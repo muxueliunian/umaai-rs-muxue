@@ -1,6 +1,6 @@
 # UmaAI-RS 项目特定上下文
 
-最后核对于 2026-09-21（合宿休息审计工具提交后）；与 `crates/umasim` / `crates/umaai` 当前代码对齐。
+最后核对于 2026-10-04（同步上游与 R10 无购买增益扩采准备）；主要入口与当前代码对齐。
 
 ## 项目结构
 
@@ -65,6 +65,13 @@
 - `friend_pacing_compare.py`：友人出行配额（`fcap` 等 token）配对对比——同 build 同 seed 配对差 + 走完率 / 逐年出行次数 / 风味浪费等结构指标
 - `bench_commit_compare.py`：跨 commit CPU 耗时对比编排（配合 `perf_probe` bin，见下「性能监测」节）
 - `ramen_nn/`：NN 管线脚本
+- `collect/prepare_r10_1004.py`：基于实际 Rust 计划原文生成 R10 冻结清单；`prepare_r10_cloud.py` 核对发布提交、历史号段并冻结原文资产，云端直接使用已入库清单，见 `collect/r10_1004_task.md`
+
+### R10 采集与本地 NN 后端
+- 新空间：`gen4_brian_v1` / `gen4_admire_v1` / `gen4_dualwis_v1` / `gen4_newuma_v1`，覆盖智成田白仁、智爱慕律动及新鲁道夫、新气槽；按角色排除冲突，旧 gen1/gen2/gen3 不改。
+- 本轮不购买开局增益，不纳入独有尚未实现的新根米浴；保留 754 维输入、R8A roll-in、手写终局教师和友人完成门限。正式配额、留出与独占号段见 `nn_model_registry.md` 第 12 节。
+- 本分支继续使用 `trainer/ramen_rollout_trainer.rs` 的网络回合窗口、严格失败传播与采集接口；GPU 研究通过 `ramen_root_bench` 的批量后端配合 `scripts/ramen_nn/bench_sidecar.py`，CPU 使用 ONNX。
+- 上游新增的离线 `rollout_evaluator="nn"` 与 `nn_rollout_probe` 已适配本地 `with_nn_rollout`，是 CPU 网络实验入口；不等于自动切换到 GPU，正式教师采集也不切换到 NN rollout。
 
 ## 配置文件
 
@@ -113,7 +120,7 @@
 
 - 以 Windows 为主；umaai 已支持 Ubuntu/Linux 构建（`winscribe` / `windows` 依赖以 `cfg(windows)` 限定，Linux 加 `libc`）
 - Shell：PowerShell（Linux 下 bash）
-- Release 配置：`opt-level = 3`、`codegen-units = 1`、`lto = "thin"`、`debug = true`；`.cargo/config.toml` 按目标启用 `target-cpu=native`
+- Release 配置：`opt-level = 3`、`codegen-units = 16`、`lto = "fat"`、`debug = true`；Windows MSVC 的 `.cargo/config.toml` 设置栈大小。云端低内存构建可按交接说明单次覆盖为 thin LTO，不修改工作区或系统配置。
 - 工具链：Rust 1.98 / edition 2024；cargo fmt 使用 Nightly 格式规则，**只能由用户手动执行**
 
 ## 性能监测（跨 commit CPU 耗时对比）
@@ -347,7 +354,8 @@ cargo run --release --bin ramen_region_topk -- --help   # 全部参数
 - `onsen.rs`：`GameStatusOnsen`（scenarioId=12）
 - `ramen.rs`：`GameStatusRamen`（scenarioId=14；拉面段 12 字段全覆写 + `single_mode_chara_id` 切局键 + stage dispatch 按 playing_state 1/5/45/46/48 → Train/Event/Settlement/SuperRamen）
 - `story.rs`：`StoryStatus`（事件选项信息，`select_event_choice` 用）
-- `urafile.rs`：`UraFileWatcher`（notify 监听 `thisTurn.json`；错误事件重读兜底 + 空事件心跳）
+- `final_score.rs`：`FinalScorePayload`（**终局帧**扁平结构：五维/上限/剩余技能点/继承增量；`SUPPORTED_SCENARIO_ID=14`）
+- `urafile.rs`：`UraFileWatcher`（notify 监听**白名单** `thisTurn.json` + `finalScore.json`；队列元素 `RawFileEvent{file, contents}` 带 basename；错误事件重读兜底 + 空事件心跳）
 
 ### 场景处理（`scenario/`）
 - `onsen.rs`：`process_onsen(game, trainer, sink, luck_tracker, rng, json_mode, emit_info, game_config)`（newgame 检测 / 事件训练分发 / emit）
@@ -368,11 +376,12 @@ umaai 实时监听时把「接收到的游戏数据」与「策略计算结果�
 | `decisions.csv` | 逐决策点明细（与离线 `luck_replay` **同 schema**；`step` / `chain_len` 在线留空） |
 | `meta.json` | 局元信息：起止时间 / 起始回合 / `mid_entry` / 结束原因 / `snapshots` / `csv_rows` / `decision_rows` / `total_luck_end` |
 | `luck_trend.svg` | 该局运气分趋势图（3 子图：期望评分 / 运气分 / 运气波动；局数据完整收尾时**自动生成**） |
+| `game{id}_final.json` | **终局帧原文**（`finalScore.json` 信道：育成结束·点技能前的真机数据，含全部结局事件）——复盘终局评分的首选来源；缺失则回落末快照 |
 
-- **挂载点**：`main.rs` watch 循环 parse 后调 `record::on_snapshot`；输出 sink 外包 `RecordingSink`
+- **挂载点**：`main.rs` watch 循环按 basename 分流——`finalScore.json` → `record::on_final`（不进决策链路），其余 parse 后调 `record::on_snapshot`；输出 sink 外包 `RecordingSink`
 - **切局 / 收尾**：`chara_id` 变化即收尾上一局（`end_reason=switch`）；watch 循环结束（含 Err）调 `finalize_shutdown()`
 - **局末自动出图**：触发点 = 末回合第 2 份快照（拉面 `turn77_2`）处理完后立即写 `meta.json`（`end_reason=game_end`）+ 生成 `luck_trend.svg`；切局 / 退出降级为兜底
-- **局末自动打包**：仅在 `end_reason=game_end` 时，`zip_and_cleanup` 把 `logs/game{id}/` 打成 `logs/game{id}.zip`（包内条目相对原目录）并清理原目录；切局 / 中途停止不打包（保留目录方便排查）
+- **局末自动打包（2026-09-30 起 zip 推迟）**：末回合第 2 份快照只写 meta + 出图（`end_reason=game_end`），**不打包**；zip 推迟到**终局帧**到达（包内含 `game{id}_final.json`）或切局/退出兜底（末回合已见而终局帧未到 → 仍打包，保证完整一局必有 zip）。中途停止（未见过末回合）的局不打包，保留目录方便排查
 - **本期范围**：仅拉面（`scenarioId=14`）；温泉无 `single_mode_chara_id` 切局键，未纳入
 
 ## 拉面杯在线协议（`ramen_protocol_v2.md`，定稿）

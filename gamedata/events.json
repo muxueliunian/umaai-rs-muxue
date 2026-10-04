@@ -509,7 +509,7 @@
                         "status_pt": [ 0, 0, 0, 0, 0, 0 ],
                         "vital": -5
                     },
-                    "remove_flags": { "positive_thinking": true }
+                    "remove_flags": { "positive_thinking_count": 1 }
                 }
             ]]
         },

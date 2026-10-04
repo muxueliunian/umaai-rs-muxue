@@ -7,6 +7,8 @@
 //! - `game{game}_turn{turn}[_{seq}].json`：快照（`seq` 0 = 无 `_{seq}` 后缀，
 //!   与在线记录器 `snapshot_file_name` 同口径）
 //! - `game{game}_unparsed_{n}.json`：解析失败快照
+//! - `game{game}_final.json`：终局帧（育成结束·点技能前的真机数据；**不进 timeline**，
+//!   仅供终局评分与复盘分析；缺失 = 该局未收到终局数据 → 评分回落到末快照）
 //! - `decisions.csv` / `meta.json` / `luck_trend.svg`：固定角色
 //! - `game_unknown` 前缀（解析失败局）归局号 0
 //!
@@ -75,6 +77,11 @@ pub struct Pack {
     pub meta: Option<PackMeta>,
     /// `luck_trend.svg` 原文（交叉核对运气分口径用）
     pub luck_trend_svg: Option<String>,
+    /// 终局帧原文（`game{id}_final.json`；`None` = 该局未收到真机终局数据）
+    ///
+    /// 育成结束·点技能前的真机数据（含全部结局事件），由 `crate umaai` 的在线记录器
+    /// 从 `finalScore.json` 信道转存；终局评分优先用它（见 `digest::build`）。
+    pub final_raw: Option<String>,
     /// 未识别条目（basename + 原因）
     pub ignored: Vec<String>,
 }
@@ -86,6 +93,8 @@ enum Role {
     Snap { game: u64, turn: u32, seq: u32 },
     /// 解析失败快照
     Unparsed { game: u64, n: u64 },
+    /// 终局帧（`game{id}_final.json`）
+    Final { game: u64 },
     /// `decisions.csv`
     Decisions,
     /// `meta.json`
@@ -121,6 +130,9 @@ fn classify(basename: &str) -> Role {
         [id, turn] => {
             if let (Some(g), Some(t)) = (game(id), turn.strip_prefix("turn").and_then(|t| t.parse::<u32>().ok())) {
                 Role::Snap { game: g, turn: t, seq: 0 }
+            } else if *turn == "final" {
+                // `game{id}_final.json`：终局帧（不是快照，不进 timeline）
+                game(id).map(|g| Role::Final { game: g }).unwrap_or(Role::Other)
             } else {
                 Role::Other
             }
@@ -159,6 +171,7 @@ pub fn open_zip(path: &Path) -> Result<Pack> {
     let mut decisions_csv: Option<String> = None;
     let mut meta_json: Option<String> = None;
     let mut luck_trend_svg: Option<String> = None;
+    let mut final_raw: Option<String> = None;
     let mut ignored: Vec<String> = Vec::new();
     let mut game_votes: HashMap<u64, usize> = HashMap::new();
 
@@ -181,6 +194,15 @@ pub fn open_zip(path: &Path) -> Result<Pack> {
             Role::Unparsed { game, .. } => {
                 *game_votes.entry(game).or_default() += 1;
                 unparsed.push(basename);
+            }
+            Role::Final { game } => {
+                *game_votes.entry(game).or_default() += 1;
+                // 同局出现多份终局帧（异常）时保留第一份并告警
+                if final_raw.is_some() {
+                    ignored.push(format!("{basename}（同包多份终局帧，保留第一份）"));
+                } else {
+                    final_raw = Some(String::from_utf8_lossy(&bytes).into_owned());
+                }
             }
             Role::Decisions => {
                 decisions_csv = Some(String::from_utf8_lossy(&bytes).into_owned())
@@ -210,7 +232,7 @@ pub fn open_zip(path: &Path) -> Result<Pack> {
 
     snaps.sort_by_key(|s| (s.turn, s.seq));
 
-    Ok(Pack { game, snaps, unparsed, decisions_csv, meta, luck_trend_svg, ignored })
+    Ok(Pack { game, snaps, unparsed, decisions_csv, meta, luck_trend_svg, final_raw, ignored })
 }
 
 impl Pack {
@@ -311,9 +333,10 @@ impl Pack {
 
         // 固定角色产物
         lines.push(format!(
-            "decisions.csv: {}, luck_trend.svg: {}",
+            "decisions.csv: {}, luck_trend.svg: {}, 终局帧: {}",
             if self.decisions_csv.is_some() { "存在" } else { "缺失" },
-            if self.luck_trend_svg.is_some() { "存在" } else { "缺失" }
+            if self.luck_trend_svg.is_some() { "存在" } else { "缺失" },
+            if self.final_raw.is_some() { "存在" } else { "缺失（评分回落到末快照）" }
         ));
         if !self.ignored.is_empty() {
             let head: Vec<&str> = self.ignored.iter().take(10).map(String::as_str).collect();
@@ -362,6 +385,7 @@ mod tests {
                 ("game7_turn0.json", b"{}" as &[u8]),
                 ("game7_turn1_2.json", b"{}"),
                 ("game7_unparsed_1.json", b"{}"),
+                ("game7_final.json", br#"{"scenarioId":14,"single_mode_chara_id":7}"#),
                 ("decisions.csv", b"game,file\n7,x\n"),
                 ("meta.json", br#"{"game":7,"end_reason":"game_end","snapshots":3}"#),
                 ("noise.txt", b"x"),
@@ -399,7 +423,16 @@ mod tests {
             assert!(pack.decisions_csv.is_some(), "decisions.csv 应存在");
             assert!(pack.meta.is_some(), "meta.json 应存在");
             assert_eq!(pack.meta.as_ref().unwrap().end_reason, "game_end");
+            assert!(pack.final_raw.is_some(), "应识别终局帧原文");
+            assert!(
+                pack.final_raw.as_deref().unwrap_or_default().contains("single_mode_chara_id"),
+                "终局帧原文应原样保留"
+            );
             assert_eq!(pack.ignored.len(), 1, "noise.txt 应未识别");
+            assert!(
+                !pack.self_check().is_empty() && pack.self_check().iter().any(|l| l.contains("终局帧: 存在")),
+                "自检应报告终局帧存在"
+            );
         }
         let _ = fs::remove_dir_all(&root);
     }
@@ -429,10 +462,11 @@ mod tests {
     #[test]
     fn test_classify() {
         println!(
-            "classify 结果: {:?} / {:?} / {:?} / {:?} / {:?} / {:?}",
+            "classify 结果: {:?} / {:?} / {:?} / {:?} / {:?} / {:?} / {:?}",
             classify("game6234_turn0.json"),
             classify("game6234_turn10_3.json"),
             classify("game6234_unparsed_5.json"),
+            classify("game6234_final.json"),
             classify("game_unknown_turn2.json"),
             classify("decisions.csv"),
             classify("nested/dir/meta.json")
@@ -444,6 +478,16 @@ mod tests {
         assert_eq!(
             classify("game6234_turn10_3.json"),
             Role::Snap { game: 6234, turn: 10, seq: 3 }
+        );
+        assert_eq!(
+            classify("game6234_final.json"),
+            Role::Final { game: 6234 },
+            "终局帧应识别为 Final 而非快照"
+        );
+        assert_eq!(
+            classify("game6234_final_2.json"),
+            Role::Other,
+            "非 final 形态不应误判"
         );
         assert_eq!(
             classify("game6234_unparsed_5.json"),

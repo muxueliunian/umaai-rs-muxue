@@ -56,7 +56,7 @@ use crate::{
     gamedata::{EventChoice, EventData},
     output::{
         DecisionInfo as DecisionInfoProto,
-        reason::{DecisionReasonData, DecisionReasonNoopSink, ReasonMetric, analyze_narrow_win, render_reason_lines}
+        reason::{DecisionReasonData, DecisionReasonNoopSink, ReasonMetric, analyze_narrow_win}
     },
     search::{ActionResult, FlatSearch, RamenSearchOutput, SearchConfig, SearchProbe, TerminalStats}
 };
@@ -514,15 +514,16 @@ impl RamenMctsTrainer {
         self
     }
 
-    /// 输出决策理由：原始 JSON 经 [`Self::reason_sink`] 发出，可读文字上屏
+    /// 输出决策理由：**只**把原始数据经 [`Self::reason_sink`] 发出，可读文字由宿主渲染
 ///
 /// 每回合都调用 [`analyze_narrow_win`]；当前不再用分差门限决定是否输出，
 /// 分差仅用于着色档位。比较口径跟随 [`Self::selection`]——理由解释的是
 /// 实际选择。终局差异日志之后调用，两段日志可互相印证。
 ///
-/// **2026-09 修改**：`reason_sink.emit` 与 `info!` 上屏解耦——sink 始终发出
-/// 原始数据（供宿主程序缓存、自行决定何时打印），`info!` 仅在 `verbose=true`
-/// 时上屏。这样 JSON 通道下宿主可以自己渲染 / 上报，文字日志也不会双打印。
+/// **2026-10 修改**：删掉 `verbose` 下的 `info!` 文字上屏——可读文字统一由宿主
+/// （umaai human 模式）从 [`Self::reason_sink`]（`LastReasonSink`）取回后调
+/// `render_reason_lines` 用 `println!` 渲染。此前同一份文字会同时出现在日志与屏幕
+/// （链式决策里表现为「每个决策一组 log + 一组 print」），且该开关多次被误设回 `true`。
 fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOutput) {
         let metric = match self.selection {
             RamenSelection::Pt => ReasonMetric::Pt,
@@ -539,11 +540,6 @@ fn emit_decision_reason(&self, turn: i32, chosen: usize, output: &RamenSearchOut
             return;
         };
         self.reason_sink.emit(&data);
-        if self.verbose_now() {
-            for line in render_reason_lines(&data) {
-                info!("{line}");
-            }
-        }
     }
 
     /// 获取搜索配置

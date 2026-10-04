@@ -120,7 +120,9 @@ impl HumanReadableSink {
         // 网络模式下的决策同样无搜索评分，按来源标签标注。
         if info.candidate_scores.is_empty() {
             if let Some(desc) = info.candidate_descriptions.get(info.action_index) {
-                println!("{}", format!("选择{desc}（{}）", Self::source_text(info)).magenta());
+                let text = format!("选择{desc}（{}）", Self::source_text(info));
+                // 红底亮黄（与理由行的「首选」同色），从日志里一眼可辨
+                println!("{}", text.bright_yellow().on_red());
             }
             return;
         }
@@ -131,6 +133,12 @@ impl HumanReadableSink {
         let Some(extra) = &info.scenario_extra else {
             return;
         };
+        // 挂了 `scenario_extra` 但没有 luck 键（**地区选择**：那一回合的期望评分会因
+        // RMJ 结算触发时机的模拟差异大幅跳变，故意不算运气分）→ 同样跳过，
+        // 否则会打出「期望评分  运气: 本局 , 本回合 」这种误导行。
+        if extra.get("current_terminal_baseline").is_none() {
+            return;
+        }
         let as_int = |v: &serde_json::Value| -> String {
             match v {
                 serde_json::Value::Number(n) => n.as_f64().map(|f| f.round().to_string()).unwrap_or_default(),

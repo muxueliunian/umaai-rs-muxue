@@ -70,10 +70,11 @@ pub struct TimelineResult {
 
 /// 阶段判定（返回 (stage, skip 原因)；reason = `Some` 即不派发的 `Begin` 快照）
 ///
-/// 判定顺序与 `record::classify_begin_reason` 完全一致（data_incomplete →
-/// event → ps=5 → RMJ 46/48 → 超级拉面丢包），其后按协议 dispatch 表：
-/// turn ≤ 1 → `Train`；ps=45 → `RegionSelect`；command+有效果（已吃面）→
-/// `Train`；command+无效果 → `RamenSelect`；special → `RegionSelect`。
+/// 判定顺序与 `record::classify_begin_reason` / `protocol::ramen::into_game` 的
+/// stage dispatch 完全一致（三处同源，改动需同步）：非决策帧（**与 turn 无关**）
+/// = `event` / ps 5·46·48 → 刚选区未刷新帧（turn 2/24/48 + ps=1 + feeling 全 0）
+/// → 数据获取不全 → ps=45 → turn ≤ 1 → `command` / `load`（有效果 `Train` /
+/// 无效果 `RamenSelect`）→ 超级拉面丢包 → `special` 非 45 与未识别帧一律 `Begin`。
 fn stage_of(s: &GameStatusRamen) -> (&'static str, Option<&'static str>) {
     let base = &s.base_game;
     let turn = base.turn;
@@ -81,9 +82,6 @@ fn stage_of(s: &GameStatusRamen) -> (&'static str, Option<&'static str>) {
     let source = base.source.as_deref().unwrap_or("");
     let selected_all_zero = s.ramen.selected_regions.iter().all(|&r| r == 0);
     let effect_empty = s.ramen.active_effect_array.is_empty();
-    if (2..=71).contains(&turn) && selected_all_zero {
-        return ("Begin", Some("data_incomplete(selected_regions=0)"));
-    }
     if source == "event" {
         return ("Begin", Some("event"));
     }
@@ -96,24 +94,37 @@ fn stage_of(s: &GameStatusRamen) -> (&'static str, Option<&'static str>) {
     if ps == 48 {
         return ("Begin", Some("rmj_final(48)"));
     }
-    if turn >= 72 && effect_empty {
-        return ("Begin", Some("super_ramen_drop(active_effect empty)"));
+    // 刚选区、训练数据未刷新（限选区回合 turn 2 与紧接的 24 / 48；ps 必须为 1）
+    if ps == 1
+        && matches!(turn, 2 | 24 | 48)
+        && !base.is_racing
+        && s.ramen.train_feeling_type.iter().all(|&t| t == 0)
+    {
+        return ("Begin", Some("train_data_unrefreshed(feeling all 0)"));
+    }
+    if (2..=71).contains(&turn) && selected_all_zero {
+        return ("Begin", Some("data_incomplete(selected_regions=0)"));
+    }
+    if ps == 45 {
+        return ("RegionSelect", None);
     }
     // stage dispatch（protocol/ramen.rs 文件头规则表）
     if turn <= 1 && ps == 1 {
         return ("Train", None);
     }
-    if ps == 45 {
-        return ("RegionSelect", None);
+    if turn >= 72 && effect_empty {
+        return ("Begin", Some("super_ramen_drop(active_effect empty)"));
     }
-    if source == "command" && !effect_empty {
+    // `load`（载入响应）与 `command` 同等派发（同样携带完整回合状态，不跳过）
+    if (source == "command" || source == "load") && !effect_empty {
         return ("Train", None);
     }
-    if source == "command" && effect_empty {
+    if (source == "command" || source == "load") && effect_empty {
         return ("RamenSelect", None);
     }
+    // `special` 非 45（剧本特殊状态）与其它未识别帧：不派发
     if source == "special" {
-        return ("RegionSelect", None);
+        return ("Begin", Some("special"));
     }
     ("Begin", Some("begin_unclassified"))
 }
@@ -165,7 +176,7 @@ pub fn build(snaps: &[SnapEntry]) -> TimelineResult {
                     skill_pt: base.skill_pt,
                     train_level_count: base.train_level_count,
                     friend_outgoing_used: base.friend_outgoing_used,
-                    selected_regions: st.ramen.selected_regions.clone(),
+                    selected_regions: st.ramen.selected_regions.to_vec(),
                     scenario_pt: st.ramen.scenario_pt,
                     feeling_stock: st.ramen.feeling_stock.clone(),
                     super_ramen: st.ramen.super_ramen,
@@ -206,7 +217,7 @@ mod tests {
                     "trainLevelCount": [1, 2, 3, 4, 5],
                     "ptScoreRate": 2.0, "failureRateBias": 0,
                     "isIll": false, "isQieZhe": false, "isAiJiao": false,
-                    "isPositiveThinking": false, "isRefreshMind": false, "isLucky": false,
+                    "isXiaoQie": false, "PositiveThinkingCount": 0, "isRefreshMind": false, "LuckyCount": 0,
                     "zhongMaBlueCount": [0, 0, 0, 0, 0], "isRacing": false,
                     "cardId": [302424, 302894, 303044, 302924, 303024, 303054],
                     "persons": [], "personDistribution": [[], [], [], [], []],

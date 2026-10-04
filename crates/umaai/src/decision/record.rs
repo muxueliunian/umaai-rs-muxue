@@ -11,10 +11,23 @@
 //!   **末回合第 2 份快照（拉面 `turn77_2`，含决策行那份）处理完时写**（`end_reason=game_end`）；
 //!   中途停止 / 未触发末回合的局由切局 / 退出兜底补写（`switch` / `process_exit`）
 //! - `luck_trend.svg`：该局运气分趋势图（局末自动渲染；切局 / 退出兜底补渲）
+//! - `game{id}_final.json`：**终局帧原文**（`finalScore.json` 信道，见
+//!   [`on_final`]）——育成结束·点技能前的真机终局数据（五维 / 上限 / 剩余技能点 /
+//!   继承增量），含 `thisTurn.json` 缺失的全部结局事件（约 +2700 分来源）
 //!
-//! 末回合触发完 meta + SVG 后，**仅当 `end_reason=game_end` 时**自动把 `logs/game{id}/`
-//! 打成 `logs/game{id}.zip` 并清理原目录（由 [`crate::decision::zip_export::zip_and_cleanup`] 实现）。
-//! 切局 / 退出兜底不打包——中途停止的局保留 `logs/game{id}/` 方便人工排查 / 重打。
+//! ## 归档幂等
+//!
+//! 归档状态以 **`logs/game{id}.zip` 是否存在**为准（跨进程可判定，`GameCtx::final_zipped`
+//! 只活在进程内）：已归档局的数据一律忽略，绝不重建目录、绝不覆盖既有 zip——插件目录里的
+//! `thisTurn.json` / `finalScore.json` 是固定名、育成结束不删除，umaai 在结算画面重启时
+//! 会被 producer 启动兜底重新推入队列。
+//!
+//! ## 打包时机（2026-09 用户拍板：zip 推迟到终局帧）
+//!
+//! 末回合第 2 份快照只写 `meta.json` + 出图（`end_reason=game_end`），**不打包**；
+//! zip 推迟到终局帧到达（此时包内含 `game{id}_final.json`）或切局 / 退出兜底
+//! （末回合已见但终局帧始终没来 → 仍打包，保证"完整一局必有 zip"）。
+//! 中途停止（未见过末回合）的局照旧保留目录、不打包。
 //!
 //! 通过全局 [`RECORDER`]（`OnceLock<Mutex<Option<OnlineRecorder>>>`）访问：
 //! `init` **之前所有入口为 no-op**——离线工具（`luck_replay` / `luck_probe` / bench）与
@@ -46,6 +59,8 @@ use umasim::{
     gamedata::GAMECONSTANTS,
     output::{DecisionInfo, DecisionSink, GameView},
 };
+
+use crate::protocol::{FinalScorePayload, SUPPORTED_SCENARIO_ID};
 
 /// 候选列数（`reason_max_display` 截断后最多 5 个；与离线明细一致）
 pub const MAX_CAND_COLS: usize = 5;
@@ -100,12 +115,27 @@ pub fn on_emit(info: &DecisionInfo, view: &GameView) {
 ///
 /// 若刚处理的是**末回合第 2 份快照**（如拉面 `turn77_2`，含决策行的那份）——
 /// 其决策行已全部落盘，这里立即写 `meta.json`（`end_reason=game_end`）并生成
-/// `luck_trend.svg`，不必等切局 / 进程退出（那两者只作后续兜底）。
+/// `luck_trend.svg`（**不打包**：zip 推迟到终局帧 / 切局退出兜底）。
 pub fn on_turn_done() {
     let Some(r) = RECORDER.get() else { return };
     let Ok(mut g) = r.lock() else { return };
     if let Some(rec) = g.as_mut() {
         rec.handle_turn_done();
+    }
+}
+
+/// 终局帧（`finalScore.json`）到达时的入口
+///
+/// 该帧来自「育成结束、点技能前」那一刻，带完整结局事件；只落盘 + 触发本局收尾
+/// 打包，**不参与决策链路**（main 已按文件名提前分流，不走 `parse_game_by_scenario`）。
+///
+/// 校验：剧本必须是拉面（14）、帧内局号必须等于当前记录中的局号（否则说明是上一局
+/// 的残留文件，忽略并告警）、同一局只接纳第一帧。
+pub fn on_final(raw: &str) {
+    let Some(r) = RECORDER.get() else { return };
+    let Ok(mut g) = r.lock() else { return };
+    if let Some(rec) = g.as_mut() {
+        rec.handle_final(raw);
     }
 }
 
@@ -243,8 +273,10 @@ struct GameCtx {
     end_turn_seen: bool,
     /// 刚收到的这第 2 份末回合快照需在 `on_turn_done()`（决策行落盘后）触发收尾
     end_pending: bool,
-    /// meta.json / luck_trend.svg 已在末回合生成（切局/退出收尾不再重复）
-    end_done: bool,
+    /// `meta.json` / `luck_trend.svg` 已在末回合生成（切局/退出收尾不再重复）
+    meta_written: bool,
+    /// 本局已打包（`logs/game{id}.zip` 已生成、原目录已清理）——终局帧或兜底只打包一次
+    final_zipped: bool,
 }
 
 impl OnlineRecorder {
@@ -283,6 +315,14 @@ impl OnlineRecorder {
         let cur_game = self.game.as_ref().and_then(|g| g.game);
         if self.game.is_none() || game != cur_game {
             self.finalize("switch");
+            // 已归档局（`logs/game{id}.zip` 存在）的数据一律忽略：插件目录里的
+            // `thisTurn.json` 是固定名、按局覆盖写且育成结束不删除，umaai 在结算画面
+            // 重启时 producer 启动兜底会把上一局的残留快照推入队列——若照常 `open()`
+            // 重建 `logs/game{id}/`，随后的兜底打包会用这份残数据**覆盖**已归档的 zip。
+            if let Some(zip) = self.archived_zip(game) {
+                warn!("局 {} 已归档（{} 存在），忽略残留数据", game.unwrap_or(0), zip.display());
+                return;
+            }
             self.open(game, raw_turn, raw_uma);
         }
 
@@ -368,11 +408,12 @@ impl OnlineRecorder {
         }
     }
 
-    /// 收尾当前局：补 no_emit 行 + （若末回合未出图）写 `meta.json` + 出 SVG + 关文件
+    /// 收尾当前局：补 no_emit 行 + （若 meta 未写）写 `meta.json` + 出 SVG，
+    /// 末回合已见而终局帧未到的局在此**兜底打包**
     ///
-    /// **末回合（77_2）已生成 meta/SVG 的局**（`end_done`）在此只关文件，不重复写；
-    /// 其余情况（中途停止 / 未触发末回合的局）在此补写 `meta.json`（`reason` 为
-    /// `switch` / `process_exit`）+ 自动出图——即切局/退出降级为「兜底」。
+    /// **末回合（77_2）已生成 meta/SVG 的局**（`meta_written`）在此不重复写；
+    /// 打包条件 = `end_turn_seen && !final_zipped`（完整一局的最后保障）；中途停止
+    /// （未见过末回合）的局照旧只写 meta + 保留目录，方便人工排查 / 重打。
     fn finalize(&mut self, reason: &str) {
         let pending = self.snap.take();
         if let Some(s) = pending
@@ -385,15 +426,24 @@ impl OnlineRecorder {
             self.last_turn = None;
             return;
         };
-        if !ctx.end_done {
-            self.game = Some(ctx);
+        self.game = Some(ctx);
+        if !self.game.as_ref().map(|c| c.meta_written).unwrap_or(false) {
             self.write_meta_and_plot(reason);
+        }
+        let need_zip = self
+            .game
+            .as_ref()
+            .map(|c| c.end_turn_seen && !c.final_zipped)
+            .unwrap_or(false);
+        if need_zip {
+            warn!("终局帧未到达，切局/退出兜底打包（包内无 game{{id}}_final.json）");
+            self.zip_current_game();
         }
         self.game = None;
         self.last_turn = None;
     }
 
-    /// 末回合第 2 份快照的决策行落盘后由 main 调用：触发收尾（meta + SVG）
+    /// 末回合第 2 份快照的决策行落盘后由 main 调用：触发收尾（meta + SVG，不打包）
     fn handle_turn_done(&mut self) {
         let pending = self.game.as_ref().map(|c| c.end_pending).unwrap_or(false);
         if !pending {
@@ -401,9 +451,110 @@ impl OnlineRecorder {
         }
         self.write_meta_and_plot("game_end");
         if let Some(ctx) = self.game.as_mut() {
-            ctx.end_done = true;
+            ctx.meta_written = true;
             ctx.end_pending = false;
         }
+    }
+
+    /// 终局帧（`finalScore.json`）：见 [`on_final`] 的文档
+    ///
+    /// 流程：解析 → 校验（拉面 / 局号匹配 / 未打包）→ 原文落盘 `game{id}_final.json`
+    /// → 补写 meta（若末回合帧没走到）→ 打包 + 关局。
+    fn handle_final(&mut self, raw: &str) {
+        let payload: FinalScorePayload = match serde_json::from_str(raw) {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("终局帧解析失败，忽略: {e:?}");
+                return;
+            }
+        };
+        if !payload.is_supported_scenario() {
+            warn!("终局帧剧本 {} 不支持（仅 {}），忽略", payload.scenario_id, SUPPORTED_SCENARIO_ID);
+            return;
+        }
+        let Some(id) = payload.game_id() else {
+            warn!("终局帧缺少 single_mode_chara_id，无法归局，忽略");
+            return;
+        };
+        // 坏帧闸：字段在场但五维/上限全 0（插件写错字段）→ 不能当权威终局用
+        if !payload.is_usable() {
+            warn!(
+                "终局帧五维/上限为空（局={id}，fiveStatus={:?} limit={:?}），忽略（疑似插件字段漂移）",
+                payload.five_status, payload.five_status_limit
+            );
+            return;
+        }
+        if let Some(zip) = self.archived_zip(Some(id)) {
+            warn!("局 {id} 已归档（{} 存在），忽略残留终局帧", zip.display());
+            return;
+        }
+        let cur = self.game.as_ref().and_then(|g| g.game);
+        if cur != Some(id) {
+            warn!("终局帧局号 {id} 与当前局 {cur:?} 不符（上一局残留 / 未开局），忽略");
+            return;
+        }
+        if self.game.as_ref().map(|c| c.final_zipped).unwrap_or(false) {
+            return;
+        }
+        // 原文落盘（终局数据是复盘分析的唯一真机来源）
+        if let Some(ctx) = self.game.as_ref() {
+            let path = ctx.dir.join(final_file_name(id));
+            if let Err(e) = fs::write(&path, raw) {
+                warn!("写终局帧失败 {}: {e:?}", path.display());
+            }
+        }
+        info!(
+            "真机终局数据: 局={id} 五维={:?} skill_pt={} 继承增量={:?}",
+            payload.five_status, payload.skill_pt, payload.inherit_gains
+        );
+        // 末回合帧没走到（罕见：中途接管 / 直接看到终局画面）→ 这里补写 meta
+        if !self.game.as_ref().map(|c| c.meta_written).unwrap_or(false) {
+            self.write_meta_and_plot("game_end");
+        }
+        self.zip_current_game();
+        self.game = None;
+        self.last_turn = None;
+    }
+
+    /// 打包当前局：`logs/game{id}/` → `logs/game{id}.zip` 并清理原目录（幂等）
+    ///
+    /// 成功 / 失败都只告警不中断；`final_zipped` 只在实际打包成功时置位。
+    fn zip_current_game(&mut self) {
+        let Some(ctx) = self.game.as_ref() else { return };
+        if ctx.final_zipped {
+            return;
+        }
+        // 归档幂等（跨进程）：`logs/game{id}.zip` 已存在说明该局归档过，绝不覆盖
+        if let Some(zip) = self.archived_zip(ctx.game) {
+            warn!("{} 已存在，跳过打包（该局已归档）", zip.display());
+            if let Some(ctx) = self.game.as_mut() {
+                ctx.final_zipped = true;
+            }
+            return;
+        }
+        let dir = ctx.dir.clone();
+        match crate::decision::zip_export::zip_and_cleanup(&dir) {
+            Ok(zip_path) => {
+                let shown = dunce::canonicalize(&zip_path).unwrap_or(zip_path);
+                eprintln!("{}", format!("本局游戏记录已打包: {}", shown.display()).bright_green());
+                // json 模式下走 info 流：用户拍板「json 模式使用 info 消息类型输出」
+                info!("本局游戏记录已打包 zip: {}", shown.display());
+                if let Some(ctx) = self.game.as_mut() {
+                    ctx.final_zipped = true;
+                }
+            }
+            Err(e) => warn!("本局游戏记录打包失败: {e:?}（原目录 {} 保留）", dir.display()),
+        }
+    }
+
+    /// 该局是否已归档：`logs_dir/game{id}.zip` 存在则返回其路径
+    ///
+    /// 归档状态必须**跨进程可判定**（zip 文件本身即标记）——`GameCtx::final_zipped`
+    /// 只活在进程内，umaai 重启后会丢，而插件目录里的残留文件仍会被 producer 推入。
+    fn archived_zip(&self, game: Option<u64>) -> Option<PathBuf> {
+        let id = game?;
+        let path = self.logs_dir.join(format!("game{id}.zip"));
+        path.exists().then_some(path)
     }
 
     /// 写 `meta.json`（`end_reason` 指定）+ 生成 `luck_trend.svg` 并展示可跳转路径
@@ -445,19 +596,9 @@ impl OnlineRecorder {
             }
             Err(e) => warn!("该局自动出图失败: {e:?}"),
         }
-        // 局末（game_end）自动打包：把 logs/game{id}/ 打成 logs/game{id}.zip 后清理原目录。
-        // 仅 game_end 触发：切局 / 退出兜底不打包——中途停止的局保留 logs/game{id}/ 方便人工排查 / 重打。
-        if reason == "game_end" {
-            match crate::decision::zip_export::zip_and_cleanup(&dir) {
-                Ok(zip_path) => {
-                    let shown = dunce::canonicalize(&zip_path).unwrap_or(zip_path);
-                    eprintln!("{}", format!("本局游戏记录已打包: {}", shown.display()).bright_green());
-                    // json 模式下走 info 流：用户拍板「json 模式使用 info 消息类型输出」
-                    info!("本局游戏记录已打包 zip: {}", shown.display());
-                }
-                Err(e) => warn!("本局游戏记录打包失败: {e:?}（原目录 {} 保留）", dir.display()),
-            }
-        }
+        // 打包不在这里：zip 推迟到终局帧到达（[`Self::handle_final`]）或切局/退出兜底
+        // （[`Self::finalize`]）——末回合帧只能保证「末回合数据 + 决策行」，终局数据
+        // 要等 `finalScore.json`（育成结束·点技能前）才有。
     }
 
     /// 新开一局：建目录 + 建 `decisions.csv`（写列头）
@@ -495,7 +636,8 @@ impl OnlineRecorder {
             total_luck_end: None,
             end_turn_seen: false,
             end_pending: false,
-            end_done: false,
+            meta_written: false,
+            final_zipped: false,
         });
     }
 
@@ -541,6 +683,14 @@ fn snapshot_file_name(game: Option<u64>, turn: u32, seq: u32) -> String {
 /// 解析失败快照文件名：`game{id}_unparsed_{n}.json`
 fn unparsed_file_name(game: Option<u64>, n: u64) -> String {
     format!("{}_unparsed_{n}.json", game_name(game))
+}
+
+/// 终局帧落盘文件名：`game{id}_final.json`
+///
+/// 刻意**不**用 `game{id}_turn{turn}.json` 形态：复盘侧按 basename 识别角色，
+/// 终局帧不能混进 timeline（否则结局事件的 +40 五维会被当成训练收益）。
+fn final_file_name(game: u64) -> String {
+    format!("game{game}_final.json")
 }
 
 fn game_name(game: Option<u64>) -> String {
@@ -782,10 +932,17 @@ pub fn classify_begin_reason(v: &serde_json::Value) -> &'static str {
         .get("active_effect_array")
         .map(|a| a.as_array().map(|a| a.is_empty()).unwrap_or(true))
         .unwrap_or(true);
+    let is_racing = bg.get("isRacing").and_then(|x| x.as_bool()).unwrap_or(false);
+    // 刚选区时插件先发一条 ramen 数据未刷新的帧（`train_feeling_type` 全 0），随后再发完整数据。
+    // 只有「数组存在且全 0」才算命中；字段缺失 / 空数组视为未知，不跳。
+    let feeling_all_zero = ramen
+        .get("train_feeling_type")
+        .and_then(|x| x.as_array())
+        .map(|a| !a.is_empty() && a.iter().all(|v| v.as_u64().unwrap_or(1) == 0))
+        .unwrap_or(false);
 
-    if (2..=71).contains(&turn) && selected {
-        "data_incomplete(selected_regions=0)"
-    } else if source == "event" {
+    // 非决策帧优先（与 `into_game` 的 dispatch 一致：这些帧与 turn 无关地跳过）
+    if source == "event" {
         "event"
     } else if ps == 5 {
         "playing_state=5(event)"
@@ -793,8 +950,16 @@ pub fn classify_begin_reason(v: &serde_json::Value) -> &'static str {
         "rmj_settle(46)"
     } else if ps == 48 {
         "rmj_final(48)"
+    } else if ps == 1 && matches!(turn, 2 | 24 | 48) && !is_racing && feeling_all_zero {
+        // 刚选区、训练数据未刷新（只限选区回合与紧接的回合；其它全 0 属夏合宿 / 比赛 / 数据错误）
+        "train_data_unrefreshed(feeling all 0)"
+    } else if (2..=71).contains(&turn) && selected {
+        "data_incomplete(selected_regions=0)"
     } else if turn >= 72 && active_effect_empty {
         "super_ramen_drop(active_effect empty)"
+    } else if source == "special" {
+        // `special` + ps=45 会派成 RegionSelect（不落 Begin），此处只剩非地区选择的特殊状态
+        "special"
     } else {
         "begin_unclassified"
     }
@@ -859,8 +1024,10 @@ mod tests {
             })
         };
         assert_eq!(classify_begin_reason(&mk("event", 1, 13, &[3, 7, 12], 0)), "event");
+        // event 优先于一切「不派发」原因：即使 regions 全 0 也归 event
+        assert_eq!(classify_begin_reason(&mk("event", 1, 13, &[0, 0, 0], 0)), "event");
         assert_eq!(
-            classify_begin_reason(&mk("event", 1, 13, &[0, 0, 0], 0)),
+            classify_begin_reason(&mk("command", 1, 13, &[0, 0, 0], 0)),
             "data_incomplete(selected_regions=0)"
         );
         assert_eq!(classify_begin_reason(&mk("command", 46, 13, &[3, 7, 12], 0)), "rmj_settle(46)");
@@ -1031,7 +1198,7 @@ mod tests {
     }
 
     /// 末回合第 2 份快照（如拉面 turn77_2，含决策行那份）处理完 → `on_turn_done`
-    /// 立即写 meta（`end_reason=game_end`）+ 出图；随后切局不再重复写 meta
+    /// 写 meta（`end_reason=game_end`）+ 出图**但不打包**；终局帧到达后才打包
     #[test]
     fn test_recorder_end_turn_triggers_plot() {
         // 路径白名单要求 logs_dir 末段为 logs：测试根在 <temp>/.../logs，
@@ -1069,28 +1236,33 @@ mod tests {
         let d = dir.join("game7075");
         assert!(d.join("game7075_turn77_2.json").exists(), "末回合第 2 份应为 _2 命名");
         rec.handle_turn_done();
-        // 77_2 处理完 → 出图 + 立即打包：原目录已被清理，svg 收纳进 zip
-        assert!(!d.exists(), "game_end 后原目录应已被打包清理");
+        // 77_2 处理完 → 写 meta + 出图，但**不打包**（终局数据尚未到达）
+        assert!(d.join("meta.json").exists(), "末回合应写 meta");
+        assert!(d.join("luck_trend.svg").exists(), "末回合应出图");
+        assert!(d.exists(), "zip 推迟后原目录应保留");
+        assert!(!dir.join("game7075.zip").exists(), "终局帧未到不应打包");
 
-        // game_end → 自动打包成 game7075.zip
+        // 终局帧（finalScore.json 信道）到达 → 原文落盘 + 打包 + 关局
+        rec.handle_final(&final_payload(7075));
+        assert!(!d.exists(), "终局帧到达后原目录应已被打包清理");
         let zip_path = dir.join("game7075.zip");
-        assert!(zip_path.exists(), "game_end 应自动生成 game7075.zip");
+        assert!(zip_path.exists(), "终局帧应触发 game7075.zip");
 
-        // 验证 zip 包内含 meta.json / luck_trend.svg / turn77_2.json（最小完整性检查）
+        // 验证 zip 包内含 meta.json / luck_trend.svg / decisions.csv / 终局帧
         let f = std::fs::File::open(&zip_path).unwrap();
         let mut zip = ZipArchive::new(f).unwrap();
         let names: Vec<String> = (0..zip.len())
             .map(|i| zip.by_index(i).unwrap().name().to_string())
             .collect();
         println!("zip 包内条目: {names:?}");
-        for required in &["meta.json", "luck_trend.svg", "decisions.csv"] {
+        for required in &["meta.json", "luck_trend.svg", "decisions.csv", "game7075_final.json"] {
             assert!(
                 names.iter().any(|n| n == required),
                 "zip 包内应含 {required}：{names:?}"
             );
         }
 
-        // 切局到 7076：end_done → finalize 不再重写 meta（仍为 game_end）
+        // 切局到 7076：本局已打包关局 → finalize 不再重写 meta（仍为 game_end）
         rec.handle_snapshot(&SnapMeta::normal(7076, 0, "Train"), &raw("0"));
         // 原目录已被打包删除；meta.json 内容只能从 zip 里读
         let f2 = std::fs::File::open(&zip_path).unwrap();
@@ -1103,6 +1275,181 @@ mod tests {
 
         // dir 父目录才是测试根（logs 的上一级）
         let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// 末回合已见但终局帧始终没来（插件未升级 / 玩家直接退游戏）→ 切局兜底打包
+    ///
+    /// 兜底条件 = `end_turn_seen`：保证「完整一局必有 zip」，否则复盘无从下手。
+    #[test]
+    fn test_recorder_end_turn_without_final_still_zips_on_switch() {
+        let dir = std::env::temp_dir()
+            .join(format!("umaai_record_nofinal_{}", std::process::id()))
+            .join("logs");
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+        let mut rec = OnlineRecorder::new(dir.clone());
+        let raw = |t: &str| {
+            format!(
+                r#"{{"baseGame":{{"scenarioId":14,"turn":{t},"source":"command","playing_state":1}},"ramen":{{}}}}"#
+            )
+        };
+        rec.handle_snapshot(&SnapMeta::normal(7075, 77, "Train").with_max_turn(77), &raw("77"));
+        rec.handle_emit(&decision_info("train"), &GameView { turn: 78, max_turn: 78, ..Default::default() });
+        rec.handle_turn_done();
+        assert!(dir.join("game7075").exists(), "末回合后目录保留（等终局帧）");
+
+        // 切局（下一局开始）→ 兜底打包
+        rec.handle_snapshot(&SnapMeta::normal(7076, 0, "Train"), &raw("0"));
+        let zip_path = dir.join("game7075.zip");
+        assert!(zip_path.exists(), "末回合已见 → 切局兜底应打包");
+        let f = std::fs::File::open(&zip_path).unwrap();
+        let mut zip = ZipArchive::new(f).unwrap();
+        let names: Vec<String> = (0..zip.len())
+            .map(|i| zip.by_index(i).unwrap().name().to_string())
+            .collect();
+        println!("兜底 zip 条目: {names:?}");
+        assert!(
+            !names.iter().any(|n| n.ends_with("_final.json")),
+            "无终局帧的兜底包不应含终局帧：{names:?}"
+        );
+
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// 终局帧归局校验：局号不符（上一局残留 / 未开局）→ 忽略，不落盘不打包
+    #[test]
+    fn test_recorder_final_frame_game_mismatch_ignored() {
+        let dir = std::env::temp_dir()
+            .join(format!("umaai_record_finalmm_{}", std::process::id()))
+            .join("logs");
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+        let mut rec = OnlineRecorder::new(dir.clone());
+        let raw = r#"{"baseGame":{"scenarioId":14,"turn":77,"source":"command","playing_state":1},"ramen":{}}"#;
+        rec.handle_snapshot(&SnapMeta::normal(7075, 77, "Train").with_max_turn(77), raw);
+        rec.handle_emit(&decision_info("train"), &GameView { turn: 78, max_turn: 78, ..Default::default() });
+        rec.handle_turn_done();
+
+        // 另一局的残留终局帧
+        rec.handle_final(&final_payload(9999));
+        let d = dir.join("game7075");
+        assert!(d.exists(), "局号不符不应触发打包");
+        assert!(!d.join("game9999_final.json").exists(), "局号不符不应落盘");
+        assert!(!dir.join("game7075.zip").exists(), "局号不符不应打包");
+
+        // 非拉面剧本同样忽略
+        let onsen = r#"{"scenarioId":12,"single_mode_chara_id":7075,"fiveStatus":[1,2,3,4,5]}"#;
+        rec.handle_final(onsen);
+        assert!(!d.join("game7075_final.json").exists(), "非支持剧本不应落盘");
+
+        // 本局正确终局帧 → 落盘 + 打包
+        rec.handle_final(&final_payload(7075));
+        assert!(dir.join("game7075.zip").exists(), "局号匹配应打包");
+        let f = std::fs::File::open(dir.join("game7075.zip")).unwrap();
+        let mut zip = ZipArchive::new(f).unwrap();
+        let mut entry = zip.by_name("game7075_final.json").unwrap();
+        let mut s = String::new();
+        Read::read_to_string(&mut entry, &mut s).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        println!("包内终局帧: {v}");
+        assert_eq!(v["fiveStatus"][0], 3226, "终局帧应为原文落盘");
+        assert_eq!(v["inheritGains"][1], 22, "继承增量应随终局帧留档");
+
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// 重启重放不得覆盖已归档 zip（跨进程归档幂等）
+    ///
+    /// 触发场景（review 发现，生产常态）：玩家育成结束停在结算画面时，插件目录里仍留着
+    /// 该局的 `thisTurn.json` 与 `finalScore.json`（固定名、育成结束不删除）；此时重启
+    /// umaai，producer 启动兜底会把残留文件推入队列。若照常重建 `logs/game{id}/`，
+    /// 随后的兜底/终局帧打包会把只含残数据的包**覆盖**掉完整归档。
+    #[test]
+    fn test_recorder_restart_replay_keeps_archived_zip() {
+        let dir = std::env::temp_dir()
+            .join(format!("umaai_record_restart_{}", std::process::id()))
+            .join("logs");
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+        let raw = r#"{"baseGame":{"scenarioId":14,"turn":77,"source":"command","playing_state":1},"ramen":{}}"#;
+
+        // —— 第一轮：正常一局（末回合 → 终局帧 → 打包） ——
+        let first = {
+            let mut rec = OnlineRecorder::new(dir.clone());
+            rec.handle_snapshot(&SnapMeta::normal(7075, 76, "Train").with_max_turn(77), raw);
+            rec.handle_emit(&decision_info("train"), &GameView { turn: 77, max_turn: 78, ..Default::default() });
+            rec.handle_snapshot(&SnapMeta::normal(7075, 77, "Train").with_max_turn(77), raw);
+            rec.handle_emit(&decision_info("train"), &GameView { turn: 78, max_turn: 78, ..Default::default() });
+            rec.handle_turn_done();
+            rec.handle_final(&final_payload(7075));
+            assert!(dir.join("game7075.zip").exists(), "第一轮应归档");
+            dir.join("game7075.zip")
+        };
+        let first_bytes = fs::read(&first).unwrap();
+        let first_names = zip_names(&first_bytes);
+        println!("第一轮 zip 条目: {first_names:?}（{} 字节）", first_bytes.len());
+        assert!(first_names.contains(&"game7075_final.json".to_string()));
+
+        // —— 第二轮：模拟 umaai 重启（新记录器，同 logs_dir）+ 残留文件重放 ——
+        let mut restarted = OnlineRecorder::new(dir.clone());
+        restarted.handle_snapshot(&SnapMeta::normal(7075, 77, "Train").with_max_turn(77), raw);
+        restarted.handle_final(&final_payload(7075));
+        // 退出兜底（即使没有终局帧也不能覆盖）
+        restarted.finalize("process_exit");
+
+        assert!(!dir.join("game7075").exists(), "已归档局不得重建目录");
+        let after = fs::read(&first).unwrap();
+        println!("重启后 zip 条目: {:?}（{} 字节）", zip_names(&after), after.len());
+        assert_eq!(after, first_bytes, "已归档 zip 必须逐字节不变（不覆盖）");
+
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// 坏终局帧（五维/上限全 0，插件字段漂移）→ 忽略：不落盘、不打包
+    #[test]
+    fn test_recorder_unusable_final_frame_ignored() {
+        let dir = std::env::temp_dir()
+            .join(format!("umaai_record_badframe_{}", std::process::id()))
+            .join("logs");
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+        let mut rec = OnlineRecorder::new(dir.clone());
+        let raw = r#"{"baseGame":{"scenarioId":14,"turn":77,"source":"command","playing_state":1},"ramen":{}}"#;
+        rec.handle_snapshot(&SnapMeta::normal(7075, 77, "Train").with_max_turn(77), raw);
+        rec.handle_emit(&decision_info("train"), &GameView { turn: 78, max_turn: 78, ..Default::default() });
+        rec.handle_turn_done();
+
+        // 字段在场但全 0
+        let bad = r#"{"scenarioId":14,"single_mode_chara_id":7075,"fiveStatus":[0,0,0,0,0],"fiveStatusLimit":[0,0,0,0,0],"skillPt":7000}"#;
+        rec.handle_final(bad);
+        let d = dir.join("game7075");
+        assert!(!d.join("game7075_final.json").exists(), "坏帧不应落盘");
+        assert!(!dir.join("game7075.zip").exists(), "坏帧不应触发打包");
+
+        // 正常帧仍应被接纳
+        rec.handle_final(&final_payload(7075));
+        assert!(dir.join("game7075.zip").exists(), "正常帧应打包");
+
+        let _ = fs::remove_dir_all(dir.parent().unwrap());
+    }
+
+    /// 读 zip 内条目名（测试辅助）
+    fn zip_names(bytes: &[u8]) -> Vec<String> {
+        let mut zip = ZipArchive::new(std::io::Cursor::new(bytes)).unwrap();
+        (0..zip.len()).map(|i| zip.by_index(i).unwrap().name().to_string()).collect()
+    }
+
+    /// 构造一份最小终局帧 JSON（扁平、无 baseGame 外壳）
+    fn final_payload(game: u64) -> String {
+        format!(
+            r#"{{
+                "scenarioId": 14,
+                "single_mode_chara_id": {game},
+                "umaId": 100201,
+                "turn": 77,
+                "state": 2,
+                "fiveStatus": [3226, 2162, 1678, 1089, 2338],
+                "fiveStatusLimit": [3242, 2444, 2206, 2200, 2506],
+                "skillPt": 7717,
+                "inheritGains": [11, 22]
+            }}"#
+        )
     }
 
     /// 中途停止（未触发末回合）→ 切局 / 退出兜底写 meta（switch）+ 出图

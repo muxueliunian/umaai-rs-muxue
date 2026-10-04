@@ -58,6 +58,10 @@ pub fn process_onsen(
         emit_info("new_game");
         trainer.print_newgame_config(&game);
         eprintln!("{}", format!("温泉顺序: {:?}", game_config.onsen_order).bright_yellow());
+        // 该马娘有特殊生涯赛程（UmaDB 的 `raceNote`）→ 蓝底亮黄醒目提示（走 stderr）
+        if let Some(note) = game.uma().explain_race_note() {
+            eprintln!("{note}");
+        }
         eprintln!("{}", "------------------------------".bright_yellow())
     }
 

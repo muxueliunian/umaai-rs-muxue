@@ -486,7 +486,7 @@ impl Game for RamenGame {
             5007 => {
                 if rng.random_bool(system_event_prob("qiezhe_normal")?) {
                     diag!(">> 获得【切者】");
-                    self.uma.flags.qiezhe = true;
+                    self.uma.flags.gain_qiezhe();
                 }
             }
             super::events::EVENT_FRIEND_UNLOCK => {
@@ -1681,15 +1681,30 @@ impl RamenGame {
 
     /// 动态人头管理：根据回合数添加友人卡、NPC和记者
     fn manage_persons_on_turn_start(&mut self) -> Result<()> {
-        // 第2回合（turn==2）开始：添加友人卡和NPC
-        if self.base.turn == 2 && !self.persons.iter().any(|p| p.person_type == PersonType::ScenarioCard) {
-            self.add_friend_and_npcs()?;
-            diag!(">> 第2回合：添加友人卡和NPC，当前人头数 {}", self.persons.len());
+        // 第2回合起：按需补齐友人卡与 5 个 NPC（各自独立判存在性，幂等）。
+        //
+        // **不能用**「是否已存在 ScenarioCard（友人卡人头）」当「已补过友人卡+NPC」
+        // 的判据：协议层 `into_game` 重建 turn<2 帧时已把友人卡建成 ScenarioCard
+        // 人头，用它会误判"已补齐"而整批跳过 NPC——链式推进出的 turn2 局面因此比
+        // 真实帧少 5 个 NPC，训练值系统性偏低，运气分在 turn2 出现假跳升。
+        if self.base.turn >= 2 {
+            let mut added = false;
+            if !self.persons.iter().any(|p| p.person_type == PersonType::ScenarioCard) {
+                self.add_friend_card()?;
+                added = true;
+            }
+            if !self.persons.iter().any(|p| p.person_type == PersonType::Npc) {
+                self.add_npcs();
+                added = true;
+            }
+            if added {
+                diag!(">> 回合 {}：补人头，当前人头数 {}", self.base.turn, self.persons.len());
+            }
         }
-        // 第12回合（turn==12）开始：添加记者
-        if self.base.turn == 12 && !self.persons.iter().any(|p| p.person_type == PersonType::Reporter) {
+        // 第12回合起：按需添加记者（幂等）
+        if self.base.turn >= 12 && !self.persons.iter().any(|p| p.person_type == PersonType::Reporter) {
             self.add_reporter();
-            diag!(">> 第12回合：添加记者，当前人头数 {}", self.persons.len());
+            diag!(">> 回合 {}：添加记者，当前人头数 {}", self.base.turn, self.persons.len());
         }
         Ok(())
     }
@@ -2527,6 +2542,38 @@ struct AlwaysTrueRng;
         println!("评分: {} {}", global!(GAMECONSTANTS).get_rank_name(score), score);
 
         Ok(())
+    }
+
+    /// 回归：协议层重建的 turn<2 帧（友人卡已是 ScenarioCard 人头）推进到 turn2 时，
+    /// 必须补齐 5 个 NPC。
+    ///
+    /// 旧守卫用「是否存在 ScenarioCard」判「是否已补过友人卡+NPC」：`into_game`
+    /// 重建 turn<2 帧时已把友人卡建成 ScenarioCard，于是 turn2 整批跳过
+    /// `add_friend_and_npcs` → 链式推进出的 turn2 局面少 5 个 NPC，训练值系统性
+    /// 偏低（运气分 turn2 出现 ~+1300 假跳升）。
+    #[test]
+    fn test_turn2_backfills_npcs_when_friend_already_present() -> Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        let _ = init_test_logger("error");
+        let _ = init_global();
+
+        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
+        // 模拟 `into_game` 重建的 turn<2 帧：友人卡已作为 ScenarioCard 人头存在
+        game.add_friend_card()?;
+        let npc_before = game.persons.iter().filter(|p| p.person_type == PersonType::Npc).count();
+        println!("turn<2 重建布局: persons={} npc={npc_before}", game.persons.len());
+
+        game.base.turn = 2;
+        game.manage_persons_on_turn_start()?;
+        let npc_after = game.persons.iter().filter(|p| p.person_type == PersonType::Npc).count();
+        println!("turn2 后: persons={} npc={npc_after}", game.persons.len());
+
+        let mut c = Checks::new();
+        c.check(npc_before == 0, "turn<2 无 NPC");
+        c.check(npc_after == 5, "turn2 补齐 5 个 NPC");
+        c.check(game.persons.len() == 12, "turn2 人头总数为 12");
+        c.finish()
     }
 
     /// 训练参数分解日志专项测试

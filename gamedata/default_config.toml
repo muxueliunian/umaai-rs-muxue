@@ -137,6 +137,9 @@ crn_stage_reseed = true
 rollout_batch_size = 64
 
 # leaf eval 评估器（handwritten/nn）
+# 拉面分支没有 leaf eval（`SUPPORTS_TRUNCATED_LEAF=false`，只搜到终局），本键在那里表示
+# **rollout 基策**：`"nn"` = 搜索内部模拟的每个决策点都走网络（实验档，推理次数 ≈
+# 决策点数 × rollout 条数，生产 search_n 下跑不完），模型取 `ramen_nn_model_path`
 rollout_evaluator = "handwritten"
 
 

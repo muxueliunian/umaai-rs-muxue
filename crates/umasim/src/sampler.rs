@@ -622,6 +622,326 @@ pub const GEN3_USERDECK_V1: SpaceVersion = SpaceVersion {
     required: &[]
 };
 
+/// 第四代新智卡定向空间的九匹既有马娘，清单冻结且不修改旧空间。
+pub const GEN4_OLD_UMAS: [UmaEntry; 9] = [
+    UmaEntry {
+        game_id: 100603,
+        alias: "小栗帽[芦毛灰姑娘]"
+    },
+    UmaEntry {
+        game_id: 102403,
+        alias: "摩耶重炮[Rock in MewMeow]"
+    },
+    UmaEntry {
+        game_id: 112901,
+        alias: "杏目[The Changer]"
+    },
+    UmaEntry {
+        game_id: 110602,
+        alias: "菱钻奇宝[快乐小音符]"
+    },
+    UmaEntry {
+        game_id: 113101,
+        alias: "放声欢呼"
+    },
+    UmaEntry {
+        game_id: 108702,
+        alias: "真弓快车[不融化的糖果]"
+    },
+    UmaEntry {
+        game_id: 100301,
+        alias: "东海帝王[无上喜悦]"
+    },
+    UmaEntry {
+        game_id: 114101,
+        alias: "神威启示[命运天选之星]"
+    },
+    UmaEntry {
+        game_id: 106402,
+        alias: "目白善信[赤心的驯鹿小姐]"
+    }
+];
+
+/// 第四代新马娘：新鲁道夫象征与新气槽。
+pub const GEN4_NEW_UMAS: [UmaEntry; 2] = [
+    UmaEntry {
+        game_id: 101703,
+        alias: "鲁道夫象征[Adamant Sovereign]"
+    },
+    UmaEntry {
+        game_id: 101803,
+        alias: "气槽[悠久的月阴女神]"
+    }
+];
+
+/// 第四代白仁卡池：冻结的原十七卡加智成田白仁，不含另一张新智。
+pub const GEN4_BRIAN_CARD_POOL: [CardEntry; 18] = [
+    CardEntry {
+        idrank: 302754,
+        alias: "[天才的乌托邦]东海帝王"
+    },
+    CardEntry {
+        idrank: 302984,
+        alias: "[刀光迸发Clash！]跳舞城"
+    },
+    CardEntry {
+        idrank: 302424,
+        alias: "[改变世界的目光]杏目"
+    },
+    CardEntry {
+        idrank: 302824,
+        alias: "[铭记于心，京之华]气槽"
+    },
+    CardEntry {
+        idrank: 303024,
+        alias: "[永恒的誓言，永恒的光辉]里见光钻"
+    },
+    CardEntry {
+        idrank: 302924,
+        alias: "[响彻吧，两人的凯歌]洛林军歌"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 303004,
+        alias: "[载着热闹的未来奔驰吧！]樱花千代王"
+    },
+    CardEntry {
+        idrank: 302834,
+        alias: "[优雅，闪耀的旅途]美妙姿势"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    },
+    CardEntry {
+        idrank: 303124,
+        alias: "[时而交织的海与空]千明代表"
+    },
+    CardEntry {
+        idrank: 303114,
+        alias: "[宛若指引]乐透心"
+    },
+    CardEntry {
+        idrank: 303084,
+        alias: "[夏空惬意时光]杏目"
+    },
+    CardEntry {
+        idrank: 302774,
+        alias: "[无机的斗志]美浦波旁"
+    },
+    CardEntry {
+        idrank: 303064,
+        alias: "[双手满载，小仓之爱]优秀素质"
+    },
+    CardEntry {
+        idrank: 303174,
+        alias: "[目的地是温暖之所在]待兼诗歌剧"
+    },
+    CardEntry {
+        idrank: 303194,
+        alias: "[晚宴]成田白仁"
+    }
+];
+
+/// 第四代爱慕卡池：冻结的原十七卡加智爱慕律动，不含另一张新智。
+pub const GEN4_ADMIRE_CARD_POOL: [CardEntry; 18] = [
+    CardEntry {
+        idrank: 302754,
+        alias: "[天才的乌托邦]东海帝王"
+    },
+    CardEntry {
+        idrank: 302984,
+        alias: "[刀光迸发Clash！]跳舞城"
+    },
+    CardEntry {
+        idrank: 302424,
+        alias: "[改变世界的目光]杏目"
+    },
+    CardEntry {
+        idrank: 302824,
+        alias: "[铭记于心，京之华]气槽"
+    },
+    CardEntry {
+        idrank: 303024,
+        alias: "[永恒的誓言，永恒的光辉]里见光钻"
+    },
+    CardEntry {
+        idrank: 302924,
+        alias: "[响彻吧，两人的凯歌]洛林军歌"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 303004,
+        alias: "[载着热闹的未来奔驰吧！]樱花千代王"
+    },
+    CardEntry {
+        idrank: 302834,
+        alias: "[优雅，闪耀的旅途]美妙姿势"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    },
+    CardEntry {
+        idrank: 303124,
+        alias: "[时而交织的海与空]千明代表"
+    },
+    CardEntry {
+        idrank: 303114,
+        alias: "[宛若指引]乐透心"
+    },
+    CardEntry {
+        idrank: 303084,
+        alias: "[夏空惬意时光]杏目"
+    },
+    CardEntry {
+        idrank: 302774,
+        alias: "[无机的斗志]美浦波旁"
+    },
+    CardEntry {
+        idrank: 303064,
+        alias: "[双手满载，小仓之爱]优秀素质"
+    },
+    CardEntry {
+        idrank: 303174,
+        alias: "[目的地是温暖之所在]待兼诗歌剧"
+    },
+    CardEntry {
+        idrank: 303204,
+        alias: "[冷凛的素瓷人偶]爱慕律动"
+    }
+];
+
+/// 第四代双新智及新马娘卡池：冻结的原十七卡加两张新智。
+pub const GEN4_CARD_POOL: [CardEntry; 19] = [
+    CardEntry {
+        idrank: 302754,
+        alias: "[天才的乌托邦]东海帝王"
+    },
+    CardEntry {
+        idrank: 302984,
+        alias: "[刀光迸发Clash！]跳舞城"
+    },
+    CardEntry {
+        idrank: 302424,
+        alias: "[改变世界的目光]杏目"
+    },
+    CardEntry {
+        idrank: 302824,
+        alias: "[铭记于心，京之华]气槽"
+    },
+    CardEntry {
+        idrank: 303024,
+        alias: "[永恒的誓言，永恒的光辉]里见光钻"
+    },
+    CardEntry {
+        idrank: 302924,
+        alias: "[响彻吧，两人的凯歌]洛林军歌"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 303004,
+        alias: "[载着热闹的未来奔驰吧！]樱花千代王"
+    },
+    CardEntry {
+        idrank: 302834,
+        alias: "[优雅，闪耀的旅途]美妙姿势"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    },
+    CardEntry {
+        idrank: 303124,
+        alias: "[时而交织的海与空]千明代表"
+    },
+    CardEntry {
+        idrank: 303114,
+        alias: "[宛若指引]乐透心"
+    },
+    CardEntry {
+        idrank: 303084,
+        alias: "[夏空惬意时光]杏目"
+    },
+    CardEntry {
+        idrank: 302774,
+        alias: "[无机的斗志]美浦波旁"
+    },
+    CardEntry {
+        idrank: 303064,
+        alias: "[双手满载，小仓之爱]优秀素质"
+    },
+    CardEntry {
+        idrank: 303174,
+        alias: "[目的地是温暖之所在]待兼诗歌剧"
+    },
+    CardEntry {
+        idrank: 303194,
+        alias: "[晚宴]成田白仁"
+    },
+    CardEntry {
+        idrank: 303204,
+        alias: "[冷凛的素瓷人偶]爱慕律动"
+    }
+];
+
+/// 既有九马必带新智白仁，包含单智及新旧双智构成。
+pub const GEN4_BRIAN_V1: SpaceVersion = SpaceVersion {
+    name: "gen4_brian_v1",
+    umas: &GEN4_OLD_UMAS,
+    cards: &GEN4_BRIAN_CARD_POOL,
+    shapes: &GEN3_SHAPES,
+    required: &[303194]
+};
+
+/// 既有九马必带新智爱慕，包含单智及新旧双智构成。
+pub const GEN4_ADMIRE_V1: SpaceVersion = SpaceVersion {
+    name: "gen4_admire_v1",
+    umas: &GEN4_OLD_UMAS,
+    cards: &GEN4_ADMIRE_CARD_POOL,
+    shapes: &GEN3_SHAPES,
+    required: &[303204]
+};
+
+/// 既有九马同时带两张新智，单列预算且不与两个单新智空间重叠。
+pub const GEN4_DUALWIS_V1: SpaceVersion = SpaceVersion {
+    name: "gen4_dualwis_v1",
+    umas: &GEN4_OLD_UMAS,
+    cards: &GEN4_CARD_POOL,
+    shapes: &GEN2_2S1E2W_SHAPES,
+    required: &[303194, 303204]
+};
+
+/// 两匹新马娘覆盖完整十九卡池，无必带卡；沿用普通无购买增益建局。
+pub const GEN4_NEWUMA_V1: SpaceVersion = SpaceVersion {
+    name: "gen4_newuma_v1",
+    umas: &GEN4_NEW_UMAS,
+    cards: &GEN4_CARD_POOL,
+    shapes: &GEN3_SHAPES,
+    required: &[]
+};
+
 /// 全部已注册的具名空间版本
 ///
 /// gen1 **不在此表内**：它没有版本名，走 [`SamplingSpace::gen1`] 的原路径，
@@ -632,7 +952,11 @@ pub const SPACE_VERSIONS: &[SpaceVersion] = &[
     GEN3_NEWUMA_V1,
     GEN3_NEWCARD_V1,
     GEN3_NEWBOTH_V1,
-    GEN3_USERDECK_V1
+    GEN3_USERDECK_V1,
+    GEN4_BRIAN_V1,
+    GEN4_ADMIRE_V1,
+    GEN4_DUALWIS_V1,
+    GEN4_NEWUMA_V1
 ];
 
 /// 按版本名取出已注册的空间版本
@@ -1578,6 +1902,125 @@ mod tests {
     fn test_gen3_userdeck_plan_dump() -> Result<()> {
         setup()?;
         dump_version_plans(&GEN3_USERDECK_V1)
+    }
+
+    /// `gen4_brian_v1` 计划原文。
+    #[test]
+    fn test_gen4_brian_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN4_BRIAN_V1)
+    }
+
+    /// `gen4_admire_v1` 计划原文。
+    #[test]
+    fn test_gen4_admire_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN4_ADMIRE_V1)
+    }
+
+    /// `gen4_dualwis_v1` 计划原文。
+    #[test]
+    fn test_gen4_dualwis_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN4_DUALWIS_V1)
+    }
+
+    /// `gen4_newuma_v1` 计划原文。
+    #[test]
+    fn test_gen4_newuma_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN4_NEWUMA_V1)
+    }
+
+    /// 第四代空间逐字段检查角色互斥、类型、新智覆盖及跨空间不重复。
+    ///
+    /// 每个马娘与构成还实际建局一次，确认初始状态没有购买增益。
+    #[test]
+    fn test_gen4_spaces_all_legal_without_purchase_buffs() -> Result<()> {
+        setup()?;
+        let mut all_plans = BTreeSet::new();
+        // 期望计数来自独立 Python 枚举，按 cardDB 类型与角色实际字段计算。
+        for (version, expected) in [
+            (&GEN4_BRIAN_V1, &[1400usize, 308, 1232, 434, 1232][..]),
+            (&GEN4_ADMIRE_V1, &[1400usize, 308, 1232, 434, 1232][..]),
+            (&GEN4_DUALWIS_V1, &[616usize][..]),
+            (&GEN4_NEWUMA_V1, &[1120usize, 256, 1024, 392, 768][..])
+        ] {
+            let registered = space_version_by_name(version.name)?;
+            ensure!(registered.umas == version.umas && registered.cards == version.cards
+                && registered.shapes == version.shapes && registered.required == version.required,
+                "{} 的注册清单与冻结空间不符", version.name);
+            let space = SamplingSpace::from_version(version)?;
+            ensure!(!space.is_empty(), "{} 没有计划", version.name);
+            let actual: Vec<usize> = version.shapes.iter()
+                .map(|shape| space.plans().iter().filter(|plan| plan.shape == shape.name).count())
+                .collect();
+            ensure!(actual == expected, "{} 构成计数 {actual:?} 不等于独立枚举 {expected:?}", version.name);
+            let mut seen_umas = BTreeSet::new();
+            let mut seen_shapes = BTreeSet::new();
+            let mut built = BTreeSet::new();
+            let mut new_wis = [0usize; 2];
+            let mut old_wis_only = 0usize;
+            for plan in space.plans() {
+                ensure!(version.umas.iter().any(|u| u.game_id == plan.uma),
+                    "{} 出现未登记马娘 {}", version.name, plan.uma);
+                seen_umas.insert(plan.uma);
+                seen_shapes.insert(plan.shape);
+                let mut deck = plan.deck;
+                deck.sort_unstable();
+                ensure!(all_plans.insert((plan.uma, deck)),
+                    "{} 存在空间内或跨空间重复计划 {plan:?}", version.name);
+                let mut charas = BTreeSet::from([plan.uma / 100]);
+                let mut counts = [0usize; 5];
+                for (i, &card) in plan.deck.iter().enumerate() {
+                    ensure!(version.cards.iter().any(|c| c.idrank == card),
+                        "{} 包含未登记卡 {card}", version.name);
+                    ensure!(card != 303184 && card != 303214,
+                        "{} 混入未授权的新根卡或力卡 {card}", version.name);
+                    ensure!(charas.insert(chara_of_card(card)?),
+                        "{} 计划 {plan:?} 存在同角色冲突", version.name);
+                    let ty = global!(GAMEDATA).get_card(card / 10)?.card_type;
+                    if i < 5 {
+                        ensure!((0..5).contains(&ty), "普通卡位置出现类型 {ty}");
+                        counts[ty as usize] += 1;
+                    } else {
+                        ensure!(ty == CARD_TYPE_FRIEND, "末位 {card} 不是友人卡");
+                    }
+                }
+                let shape = version.shapes.iter().find(|s| s.name == plan.shape)
+                    .ok_or_else(|| anyhow!("{} 计划构成未登记：{}", version.name, plan.shape))?;
+                ensure!(counts == shape.counts, "计划 {plan:?} 类型分布错误：{counts:?}");
+                ensure!(version.required.iter().all(|card| plan.deck.contains(card)),
+                    "{} 计划缺失必带卡：{plan:?}", version.name);
+                ensure!(plan.uma != 101803 || !plan.deck.contains(&302824),
+                    "新气槽不能带速气槽：{plan:?}");
+                let brian = plan.deck.contains(&303194);
+                let admire = plan.deck.contains(&303204);
+                new_wis[0] += usize::from(brian);
+                new_wis[1] += usize::from(admire);
+                old_wis_only += usize::from(!brian && !admire);
+                if built.insert((plan.uma, plan.shape)) {
+                    let game = RamenGame::newgame(plan.uma, &plan.deck, gen1_inherit())?;
+                    let flags = &game.uma.flags;
+                    ensure!(!flags.xiaoqie && flags.positive_thinking_count == 0 && flags.lucky_count == 0,
+                        "{} 开局包含购买增益：{flags:?}", version.name);
+                }
+            }
+            ensure!(seen_umas.len() == version.umas.len(), "{} 马娘覆盖不全", version.name);
+            ensure!(seen_shapes.len() == version.shapes.len(), "{} 构成覆盖不全", version.name);
+            match version.name {
+                "gen4_brian_v1" => ensure!(new_wis == [space.len(), 0], "白仁空间新智覆盖错误"),
+                "gen4_admire_v1" => ensure!(new_wis == [0, space.len()], "爱慕空间新智覆盖错误"),
+                "gen4_dualwis_v1" => ensure!(new_wis == [space.len(), space.len()], "双新智覆盖错误"),
+                "gen4_newuma_v1" => ensure!(new_wis.iter().all(|n| *n > 0) && old_wis_only > 0,
+                    "新马娘空间应同时覆盖旧智与两张新智"),
+                _ => bail!("意外的第四代空间 {}", version.name)
+            }
+            println!("{}：{} 个合法计划，{} 匹马，{} 种构成，新智覆盖 {new_wis:?}，{} 次无购买增益建局",
+                version.name, space.len(), seen_umas.len(), seen_shapes.len(), built.len());
+        }
+        println!("四空间共 {} 个不重复的马娘卡组，全部按实际字段检查", all_plans.len());
+        Ok(())
     }
 
     /// 第三代四个空间：规模与独立 Python 枚举一致，逐计划合法且满足必带卡
