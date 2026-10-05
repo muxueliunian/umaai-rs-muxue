@@ -7166,7 +7166,6 @@
     12000000000
   ],
   "holdout_count": 250,
-  "excluded_count": 906,
   "rounds": 40,
   "round_target": 10000,
   "spare_policy": "每层构成双倍候选清单；达到有效目标即停，备用耗尽则失败，不改配方"

@@ -2,8 +2,8 @@
   "space": "gen2_v1",
   "plan_count": 4288,
   "holdout": 250,
-  "extra_excluded": 906,
-  "sampled_plans": 3132,
+  "extra_excluded": 0,
+  "sampled_plans": 4038,
   "smoke_local": [
     12000000000,
     12010000000

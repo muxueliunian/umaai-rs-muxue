@@ -31,7 +31,11 @@ RESERVATION = [8000000000, 12000000000]
 SMOKE_LOCAL = [12000000000, 12010000000]
 SMOKE_CLOUD = [12010000000, 12020000000]
 
-# 排除来源（相对 --source-root）。类别只用于报告；凡在 gen2_v1 内的组合一律不采。
+# 真正不采的类别。用户 2026-10-05 决定：只排除闭环留出，与 R6–R10 覆盖相同（4038 组合）；
+# 开发验证组合照常采集、训练时按组合切分，已登记面板组合多数早已进过 R6–R9 训练，也照常采集。
+EXCLUDE_CATEGORIES = {"闭环留出"}
+
+# 历史组合来源（相对 --source-root）：逐份报告与 gen2_v1 的交集，只有 EXCLUDE_CATEGORIES 内的类别不采。
 SOURCES = [
     ("闭环留出", "scripts/collect/r8_gen2_0920/holdout.json"),
     ("开发验证", "target/train_r8_0920/dev_validation_combos.json"),
@@ -152,8 +156,10 @@ def main():
     space_fields = {tuple(p["fields"]) for p in plans}
     holdout = read_combos(args.source_root / SOURCES[0][1])
     excluded, report = collect_exclusions(args.source_root.resolve(), space_fields, holdout)
-    # 闭环留出由 prepare 按配方规则重算并写进 holdout.json，不放进 exclusions.json 重复记录
-    extra = {f: s for f, s in excluded.items() if f not in holdout}
+    # 闭环留出由 prepare 按配方规则重算并写进 holdout.json，不放进 exclusions.json 重复记录；
+    # 其余类别只报告交集、照常采集（见 EXCLUDE_CATEGORIES）
+    allowed = {src for cat, src in SOURCES if cat in EXCLUDE_CATEGORIES}
+    extra = {f: s & allowed for f, s in excluded.items() if f not in holdout and s & allowed}
     # 本机冒烟段在冒烟前已核对空闲、冒烟后被本机冒烟占用，故这里只核对正式段与云端冒烟段
     checked, max_end = check_history([r.resolve() for r in args.history_root], [RESERVATION, SMOKE_CLOUD])
     print(f"历史 manifest 核对 {checked} 份，最大已登记 index 上界 {max_end}；新号段无相交")
