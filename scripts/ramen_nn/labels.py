@@ -76,18 +76,21 @@ def bayesian_best_probabilities(
     这仍共享同一组基础权重，但失败过多的数据应在采集侧优先剔除。
     """
 
-    values = np.asarray(scores, dtype=np.float32)
+    # 用 float64 累加：分数约 6.5e4 时 float32 的舍入差远大于 tie_atol，
+    # 完全相同的候选会按 BLAS 分块位置被随机打破并列（违反等价候选均分）。
+    values = np.asarray(scores, dtype=np.float64)
     if values.ndim != 2 or values.shape[0] == 0:
         raise ValueError("scores 必须是非空二维数组")
     if weights.shape[0] != values.shape[1]:
         raise ValueError(f"weights rollout 维 {weights.shape[0]} != scores {values.shape[1]}")
     if not np.isfinite(values).all():
         raise ValueError("scores 含非有限值")
+    weights = np.asarray(weights, dtype=np.float64)
 
     if valid is None:
         boot_mean = values @ weights
     else:
-        mask = np.asarray(valid, dtype=np.float32)
+        mask = np.asarray(valid, dtype=np.float64)
         if mask.shape != values.shape:
             raise ValueError("valid 与 scores 形状不一致")
         denom = mask @ weights
@@ -269,7 +272,8 @@ def generate_label_sidecar(source: Path, output: Path, config: LabelConfig, over
     if valid is not None and not np.array_equal(np.sum(valid, axis=1, dtype=np.int64), candidate_n):
         raise ValueError("cand_n 与 cand_valid 有效位计数不一致")
 
-    weights = make_bayesian_weights(scores.shape[1], config.bootstrap_draws, config.bootstrap_seed)
+    # 权重按 float32 生成（与历史取值逐位相同），一次性升到 float64 供全部样本复用
+    weights = make_bayesian_weights(scores.shape[1], config.bootstrap_draws, config.bootstrap_seed).astype(np.float64)
     tmp_paths = {name: output / name.replace(".npy", ".tmp.npy") for name in final_names}
     policy_out = np.lib.format.open_memmap(tmp_paths["policy_target.npy"], mode="w+", dtype=np.float32, shape=(n, POLICY_DIM))
     value_out = np.lib.format.open_memmap(tmp_paths["value_target.npy"], mode="w+", dtype=np.float32, shape=(n, 3))
@@ -341,6 +345,8 @@ def generate_label_sidecar(source: Path, output: Path, config: LabelConfig, over
             "cand_ptr_last": int(ptr[-1]),
         },
         "config": asdict(config),
+        # 2026-10-05 起 bootstrap 均值按 float64 累加（等价候选严格均分）；旧标签无此字段
+        "policy_accumulator": "float64",
         "value_mean": np.mean(value, axis=0, dtype=np.float64).tolist(),
         "value_stdev": np.std(value, axis=0, ddof=1, dtype=np.float64).tolist(),
         "stages": stage_summary,

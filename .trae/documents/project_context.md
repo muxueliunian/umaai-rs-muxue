@@ -1,6 +1,6 @@
 # UmaAI-RS 项目特定上下文
 
-最后核对于 2026-10-04（同步上游与 R10 无购买增益扩采准备）；主要入口与当前代码对齐。
+最后核对于 2026-10-05（R9/R10 打标签、Q2/Q1 研究实验驱动）；主要入口与当前代码对齐。
 
 ## 项目结构
 
@@ -65,6 +65,8 @@
 - `friend_pacing_compare.py`：友人出行配额（`fcap` 等 token）配对对比——同 build 同 seed 配对差 + 走完率 / 逐年出行次数 / 风味浪费等结构指标
 - `bench_commit_compare.py`：跨 commit CPU 耗时对比编排（配合 `perf_probe` bin，见下「性能监测」节）
 - `ramen_nn/`：NN 管线脚本
+  - `q2_train_1005.py` / `q2_eval_1005.py`：标签质量 × 数量四臂训练、导出、闭环与配对分析；`q1_1005.py`：短 cosine 日程的训练、选型与确认（预注册与结果在 `logs/q2_1005/`、`logs/q1_1005/`，号段见 `nn_model_registry.md` 第 13 节）
+- `collect/r9_*`：R9 四批交付的冻结采集清单（只作复现记录）
 - `collect/prepare_r10_1004.py`：基于实际 Rust 计划原文生成 R10 冻结清单；`prepare_r10_cloud.py` 核对发布提交、历史号段并冻结原文资产，云端直接使用已入库清单，见 `collect/r10_1004_task.md`
 
 ### R10 采集与本地 NN 后端

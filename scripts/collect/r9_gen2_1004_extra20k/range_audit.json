@@ -1,0 +1,910 @@
+{
+  "prepared_at_utc": "2026-10-04T07:19:50.097428+00:00",
+  "status": "prepared_and_validated_not_started",
+  "new_reservation": [
+    5100000000,
+    5300000000
+  ],
+  "actual_min": 5100001434,
+  "actual_max": 5271519801,
+  "candidate_count": 40000,
+  "target_valid": 20000,
+  "search_n": 1024,
+  "threads_for_future_launch": 8,
+  "friend_complete_required": true,
+  "model_id": "ens_R8A_g123",
+  "seconds": 36000,
+  "source_plan": "scripts/collect/r9_gen2_1003_extra10k",
+  "recipe_id": "gen2_v1_r9dagger_1004_extra20k",
+  "plan_count": 4288,
+  "holdout_count": 250,
+  "quota_order": [
+    "general",
+    "region_y1",
+    "region_y2",
+    "region_y3"
+  ],
+  "shape_layer_targets": [
+    [
+      3950,
+      80,
+      236,
+      234
+    ],
+    [
+      3950,
+      80,
+      234,
+      236
+    ],
+    [
+      5700,
+      110,
+      346,
+      344
+    ],
+    [
+      3950,
+      80,
+      234,
+      236
+    ]
+  ],
+  "shape_totals": [
+    4500,
+    4500,
+    6500,
+    4500
+  ],
+  "layer_totals": [
+    17550,
+    350,
+    1050,
+    1050
+  ],
+  "rounding": "逐cell严格乘当前10k整数配额的2倍，无再次取整。当前10k从40k的四分之一取整：470/4和690/4得到半根，以各cell平衡±0.5保持构成与层总量；本批保留该整数分配形状再乘2，因此相对原40k每cell的一半，部分地区cell可差±1。",
+  "range_width_preflight": {
+    "initial_candidate": [
+      5100000000,
+      5200000000
+    ],
+    "reason_not_used": "40000候选×4288计划跨度约171520000，原候选1亿宽区间不足；未运行该不足区间的生成或校验。",
+    "first_cycle": 1189366,
+    "generator_preflight_bound_exclusive": 5271521408,
+    "selected_end": 5300000000
+  },
+  "formal_reservations_checked": [
+    {
+      "path": "scripts/collect/formal1024_0918/manifest.json",
+      "reservation": [
+        301000000,
+        1500000000
+      ],
+      "candidate_count": 136800,
+      "actual_min": 301000474,
+      "actual_max": 887597832
+    },
+    {
+      "path": "scripts/collect/formal1024_0918b/manifest.json",
+      "reservation": [
+        1500000000,
+        2300000000
+      ],
+      "candidate_count": 136800,
+      "actual_min": 1500002458,
+      "actual_max": 2086599816
+    },
+    {
+      "path": "scripts/collect/formal1024_2s1e2w_0919/manifest.json",
+      "reservation": [
+        2400000000,
+        2410000000
+      ],
+      "candidate_count": 20000,
+      "actual_min": 2400000123,
+      "actual_max": 2408400113
+    },
+    {
+      "path": "scripts/collect/formal2048_0914/manifest.json",
+      "reservation": [
+        20000000,
+        300000000
+      ],
+      "candidate_count": 45600,
+      "actual_min": 20003546,
+      "actual_max": 215535245
+    },
+    {
+      "path": "scripts/collect/r8_2s1e2w_0920/manifest.json",
+      "reservation": [
+        3400000000,
+        3420000000
+      ],
+      "candidate_count": 32000,
+      "actual_min": 3400000383,
+      "actual_max": 3413440368
+    },
+    {
+      "path": "scripts/collect/r8_gen2_0920/manifest.json",
+      "reservation": [
+        3000000000,
+        3400000000
+      ],
+      "candidate_count": 80000,
+      "actual_min": 3000000602,
+      "actual_max": 3343036797
+    },
+    {
+      "path": "scripts/collect/r8_newboth_0920/manifest.json",
+      "reservation": [
+        3480000000,
+        3490000000
+      ],
+      "candidate_count": 14000,
+      "actual_min": 3480000074,
+      "actual_max": 3483304067
+    },
+    {
+      "path": "scripts/collect/r8_newcard_0920/manifest.json",
+      "reservation": [
+        3440000000,
+        3480000000
+      ],
+      "candidate_count": 16000,
+      "actual_min": 3440000118,
+      "actual_max": 3468415199
+    },
+    {
+      "path": "scripts/collect/r8_newuma_0920/manifest.json",
+      "reservation": [
+        3420000000,
+        3440000000
+      ],
+      "candidate_count": 16000,
+      "actual_min": 3420000666,
+      "actual_max": 3430304612
+    },
+    {
+      "path": "scripts/collect/r8_userdeck_0920/manifest.json",
+      "reservation": [
+        3490000000,
+        3490100000
+      ],
+      "candidate_count": 2000,
+      "actual_min": 3490000000,
+      "actual_max": 3490001999
+    },
+    {
+      "path": "scripts/collect/r9_2s1e2w_1002/manifest.json",
+      "reservation": [
+        4400000000,
+        4420000000
+      ],
+      "candidate_count": 32000,
+      "actual_min": 4400000223,
+      "actual_max": 4413440208
+    },
+    {
+      "path": "scripts/collect/r9_gen2_1002/manifest.json",
+      "reservation": [
+        4000000000,
+        4400000000
+      ],
+      "candidate_count": 80000,
+      "actual_min": 4000000794,
+      "actual_max": 4343036989
+    },
+    {
+      "path": "scripts/collect/r9_gen2_1003_extra10k/manifest.json",
+      "reservation": [
+        5000000000,
+        5100000000
+      ],
+      "candidate_count": 20000,
+      "actual_min": 5000000986,
+      "actual_max": 5085757834
+    },
+    {
+      "path": "scripts/collect/r9_gen2n4096_1002/manifest.json",
+      "reservation": [
+        4500000000,
+        4650000000
+      ],
+      "candidate_count": 24000,
+      "actual_min": 4500003034,
+      "actual_max": 4602911258
+    },
+    {
+      "path": "scripts/collect/r9_newboth_1002/manifest.json",
+      "reservation": [
+        4480000000,
+        4490000000
+      ],
+      "candidate_count": 14000,
+      "actual_min": 4480000042,
+      "actual_max": 4483304035
+    },
+    {
+      "path": "scripts/collect/r9_newcard_1002/manifest.json",
+      "reservation": [
+        4440000000,
+        4480000000
+      ],
+      "candidate_count": 16000,
+      "actual_min": 4440000006,
+      "actual_max": 4468415087
+    },
+    {
+      "path": "scripts/collect/r9_newuma_1002/manifest.json",
+      "reservation": [
+        4420000000,
+        4440000000
+      ],
+      "candidate_count": 16000,
+      "actual_min": 4420000646,
+      "actual_max": 4430304592
+    },
+    {
+      "path": "scripts/collect/r9_userdeck_1002/manifest.json",
+      "reservation": [
+        4490000000,
+        4490100000
+      ],
+      "candidate_count": 2000,
+      "actual_min": 4490000000,
+      "actual_max": 4490001999
+    }
+  ],
+  "actual_manifests_checked": [
+    {
+      "path": "target/smoke_r9_1002/n1024/manifest.json",
+      "mode": "contiguous",
+      "range": [
+        4900000000,
+        4900000200
+      ]
+    },
+    {
+      "path": "target/smoke_r9_1002/n4096/manifest.json",
+      "mode": "contiguous",
+      "range": [
+        4900100000,
+        4900100040
+      ]
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/general_s1/manifest.json",
+      "mode": "work_indices",
+      "count": 3950,
+      "actual_min": 5010506757,
+      "actual_max": 5027442705
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/general_s2/manifest.json",
+      "mode": "work_indices",
+      "count": 3950,
+      "actual_min": 5027444432,
+      "actual_max": 5044380440
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/general_s3/manifest.json",
+      "mode": "work_indices",
+      "count": 5700,
+      "actual_min": 5044382156,
+      "actual_max": 5068821090
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/general_s4/manifest.json",
+      "mode": "work_indices",
+      "count": 3950,
+      "actual_min": 5068823938,
+      "actual_max": 5085757834
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y1_s1/manifest.json",
+      "mode": "work_indices",
+      "count": 80,
+      "actual_min": 5009005919,
+      "actual_max": 5009348417
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y1_s2/manifest.json",
+      "mode": "work_indices",
+      "count": 80,
+      "actual_min": 5009349062,
+      "actual_max": 5009691477
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y1_s3/manifest.json",
+      "mode": "work_indices",
+      "count": 110,
+      "actual_min": 5009692214,
+      "actual_max": 5010162331
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y1_s4/manifest.json",
+      "mode": "work_indices",
+      "count": 80,
+      "actual_min": 5010164085,
+      "actual_max": 5010504337
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y2_s1/manifest.json",
+      "mode": "work_indices",
+      "count": 236,
+      "actual_min": 5004503437,
+      "actual_max": 5005512735
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y2_s2/manifest.json",
+      "mode": "work_indices",
+      "count": 234,
+      "actual_min": 5005515567,
+      "actual_max": 5006515266
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y2_s3/manifest.json",
+      "mode": "work_indices",
+      "count": 346,
+      "actual_min": 5006519013,
+      "actual_max": 5007999153
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y2_s4/manifest.json",
+      "mode": "work_indices",
+      "count": 234,
+      "actual_min": 5008002923,
+      "actual_max": 5009003511
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y3_s1/manifest.json",
+      "mode": "work_indices",
+      "count": 234,
+      "actual_min": 5000000986,
+      "actual_max": 5001000759
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y3_s2/manifest.json",
+      "mode": "work_indices",
+      "count": 236,
+      "actual_min": 5001004595,
+      "actual_max": 5002013793
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y3_s3/manifest.json",
+      "mode": "work_indices",
+      "count": 344,
+      "actual_min": 5002016629,
+      "actual_max": 5003491304
+    },
+    {
+      "path": "training_data/r9_gen2_1003_extra10k/data/region_y3_s4/manifest.json",
+      "mode": "work_indices",
+      "count": 236,
+      "actual_min": 5003491968,
+      "actual_max": 5004502327
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/general_s1/manifest.json",
+      "mode": "work_indices",
+      "count": 4740,
+      "actual_min": 4512609925,
+      "actual_max": 4532932140
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/general_s2/manifest.json",
+      "mode": "work_indices",
+      "count": 4740,
+      "actual_min": 4532935120,
+      "actual_max": 4553257480
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/general_s3/manifest.json",
+      "mode": "work_indices",
+      "count": 6840,
+      "actual_min": 4553260364,
+      "actual_max": 4582589740
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/general_s4/manifest.json",
+      "mode": "work_indices",
+      "count": 4740,
+      "actual_min": 4582590466,
+      "actual_max": 4602911258
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y1_s1/manifest.json",
+      "mode": "work_indices",
+      "count": 96,
+      "actual_min": 4510808927,
+      "actual_max": 4511219948
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y1_s2/manifest.json",
+      "mode": "work_indices",
+      "count": 96,
+      "actual_min": 4511220678,
+      "actual_max": 4511631707
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y1_s3/manifest.json",
+      "mode": "work_indices",
+      "count": 132,
+      "actual_min": 4511632438,
+      "actual_max": 4512195746
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y1_s4/manifest.json",
+      "mode": "work_indices",
+      "count": 96,
+      "actual_min": 4512198645,
+      "actual_max": 4512608721
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y2_s1/manifest.json",
+      "mode": "work_indices",
+      "count": 282,
+      "actual_min": 4505405965,
+      "actual_max": 4506611456
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y2_s2/manifest.json",
+      "mode": "work_indices",
+      "count": 282,
+      "actual_min": 4506615343,
+      "actual_max": 4507820899
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y2_s3/manifest.json",
+      "mode": "work_indices",
+      "count": 414,
+      "actual_min": 4507824613,
+      "actual_max": 4509598256
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y2_s4/manifest.json",
+      "mode": "work_indices",
+      "count": 282,
+      "actual_min": 4509600107,
+      "actual_max": 4510805640
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y3_s1/manifest.json",
+      "mode": "work_indices",
+      "count": 282,
+      "actual_min": 4500003034,
+      "actual_max": 4501208662
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y3_s2/manifest.json",
+      "mode": "work_indices",
+      "count": 282,
+      "actual_min": 4501212467,
+      "actual_max": 4502418016
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y3_s3/manifest.json",
+      "mode": "work_indices",
+      "count": 414,
+      "actual_min": 4502421749,
+      "actual_max": 4504195406
+    },
+    {
+      "path": "training_data/r9_gen2n4096_1002/data/region_y3_s4/manifest.json",
+      "mode": "work_indices",
+      "count": 282,
+      "actual_min": 4504197248,
+      "actual_max": 4505402742
+    }
+  ],
+  "registry_reservations_checked": [
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 74,
+      "section": "## 3. 第五批数据登记",
+      "range_half_open": [
+        9600000,
+        9610300
+      ],
+      "source_end_inclusive": true
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 74,
+      "section": "## 3. 第五批数据登记",
+      "range_half_open": [
+        9610300,
+        9620300
+      ],
+      "source_end_inclusive": true
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 83,
+      "section": "## 3. 第五批数据登记",
+      "range_half_open": [
+        9589000,
+        9589032
+      ],
+      "source_end_inclusive": true
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 174,
+      "section": "## 6. gen2_v1 扩采号段预登记（2026-09-14）",
+      "range_half_open": [
+        9689000,
+        9689808
+      ],
+      "source_end_inclusive": true
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 175,
+      "section": "## 6. gen2_v1 扩采号段预登记（2026-09-14）",
+      "range_half_open": [
+        9700000,
+        9720951
+      ],
+      "source_end_inclusive": true
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 176,
+      "section": "## 6. gen2_v1 扩采号段预登记（2026-09-14）",
+      "range_half_open": [
+        9730000,
+        9750967
+      ],
+      "source_end_inclusive": true
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 177,
+      "section": "## 6. gen2_v1 扩采号段预登记（2026-09-14）",
+      "range_half_open": [
+        18000000,
+        19000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 178,
+      "section": "## 6. gen2_v1 扩采号段预登记（2026-09-14）",
+      "range_half_open": [
+        19000000,
+        20000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 179,
+      "section": "## 6. gen2_v1 扩采号段预登记（2026-09-14）",
+      "range_half_open": [
+        20000000,
+        300000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 198,
+      "section": "## 7. R6 采集号段预登记（2026-09-18）",
+      "range_half_open": [
+        300000000,
+        300200000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 199,
+      "section": "## 7. R6 采集号段预登记（2026-09-18）",
+      "range_half_open": [
+        300200000,
+        300400000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 200,
+      "section": "## 7. R6 采集号段预登记（2026-09-18）",
+      "range_half_open": [
+        301000000,
+        1500000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 233,
+      "section": "## 7. R6 采集号段预登记（2026-09-18）",
+      "range_half_open": [
+        300000000,
+        1500000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 237,
+      "section": "## 7. R6 采集号段预登记（2026-09-18）",
+      "range_half_open": [
+        20000000,
+        300000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 271,
+      "section": "## 8. R6 实际消耗与 R7 追采号段预登记（2026-09-18）",
+      "range_half_open": [
+        301000000,
+        1500000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 272,
+      "section": "## 8. R6 实际消耗与 R7 追采号段预登记（2026-09-18）",
+      "range_half_open": [
+        1500000000,
+        2300000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 289,
+      "section": "## 8. R6 实际消耗与 R7 追采号段预登记（2026-09-18）",
+      "range_half_open": [
+        1500000000,
+        2300000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 304,
+      "section": "## 9. 2速1耐2智 定向补采号段预登记（2026-09-19）",
+      "range_half_open": [
+        2400000000,
+        2410000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 305,
+      "section": "## 9. 2速1耐2智 定向补采号段预登记（2026-09-19）",
+      "range_half_open": [
+        2410000000,
+        2420000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 322,
+      "section": "## 10. R8 DAgger 采集号段预登记（2026-09-20）",
+      "range_half_open": [
+        3000000000,
+        3400000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 323,
+      "section": "## 10. R8 DAgger 采集号段预登记（2026-09-20）",
+      "range_half_open": [
+        3400000000,
+        3420000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 324,
+      "section": "## 10. R8 DAgger 采集号段预登记（2026-09-20）",
+      "range_half_open": [
+        3420000000,
+        3440000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 325,
+      "section": "## 10. R8 DAgger 采集号段预登记（2026-09-20）",
+      "range_half_open": [
+        3440000000,
+        3480000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 326,
+      "section": "## 10. R8 DAgger 采集号段预登记（2026-09-20）",
+      "range_half_open": [
+        3480000000,
+        3490000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 327,
+      "section": "## 10. R8 DAgger 采集号段预登记（2026-09-20）",
+      "range_half_open": [
+        3490000000,
+        3490100000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 330,
+      "section": "## 10. R8 DAgger 采集号段预登记（2026-09-20）",
+      "range_half_open": [
+        3500000000,
+        3600000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 346,
+      "section": "## 11. R9 采集号段预登记（2026-10-02）",
+      "range_half_open": [
+        4500000000,
+        4650000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 347,
+      "section": "## 11. R9 采集号段预登记（2026-10-02）",
+      "range_half_open": [
+        4000000000,
+        4400000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 348,
+      "section": "## 11. R9 采集号段预登记（2026-10-02）",
+      "range_half_open": [
+        4400000000,
+        4420000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 349,
+      "section": "## 11. R9 采集号段预登记（2026-10-02）",
+      "range_half_open": [
+        4420000000,
+        4440000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 350,
+      "section": "## 11. R9 采集号段预登记（2026-10-02）",
+      "range_half_open": [
+        4440000000,
+        4480000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 351,
+      "section": "## 11. R9 采集号段预登记（2026-10-02）",
+      "range_half_open": [
+        4480000000,
+        4490000000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 352,
+      "section": "## 11. R9 采集号段预登记（2026-10-02）",
+      "range_half_open": [
+        4490000000,
+        4490100000
+      ]
+    },
+    {
+      "source": ".trae/documents/nn_model_registry.md",
+      "line": 354,
+      "section": "## 11. R9 采集号段预登记（2026-10-02）",
+      "range_half_open": [
+        4900000000,
+        5000000000
+      ]
+    }
+  ],
+  "recipe_reservations_checked": [
+    {
+      "source": "scripts/collect/gen2_v1_recipe.json",
+      "field": "index_bands.local_price0914",
+      "range_half_open": [
+        9700000,
+        9720951
+      ],
+      "source_end_inclusive": true
+    },
+    {
+      "source": "scripts/collect/gen2_v1_recipe.json",
+      "field": "index_bands.local_smoke",
+      "range_half_open": [
+        9689000,
+        9689808
+      ],
+      "source_end_inclusive": true
+    },
+    {
+      "source": "scripts/collect/gen2_v1_recipe.json",
+      "field": "index_bands.cloud_price0914",
+      "range_half_open": [
+        9730000,
+        9750967
+      ],
+      "source_end_inclusive": true
+    }
+  ],
+  "overlap_found": false,
+  "comparisons": {
+    "plans_cmp_exit": 0,
+    "holdout_cmp_exit": 0,
+    "protected_files_cmp_count": 24,
+    "protected_files_cmp_all_exit_zero": true,
+    "manifest_allowed_differences_only": [
+      "recipe_id",
+      "target_valid",
+      "index_reservation",
+      "jobs[*].target",
+      "jobs[*].count"
+    ],
+    "all_other_recipe_fields_equal": true
+  },
+  "generator_command": [
+    "python3",
+    "scripts/collect/prepare_gen2_formal.py",
+    "--rust-dump",
+    "target/r9_plan_dumps_1002/gen2_v1.txt",
+    "--output",
+    "scripts/collect/r9_gen2_1004_extra20k",
+    "--recipe",
+    "scripts/collect/gen2_v1_recipe.json",
+    "--recipe-id",
+    "gen2_v1_r9dagger_1004_extra20k",
+    "--model",
+    "saved_models/arms/ens_R8A_g123.onnx",
+    "--model-id",
+    "ens_R8A_g123",
+    "--search-n",
+    "1024",
+    "--friend-gate",
+    "--shape-layer-targets",
+    "3950,80,236,234;3950,80,234,236;5700,110,346,344;3950,80,234,236",
+    "--index-start",
+    "5100000000",
+    "--index-end",
+    "5300000000",
+    "--seconds",
+    "36000"
+  ],
+  "validate_command": [
+    "python3",
+    "scripts/collect/run_formal_collect.py",
+    "--plan",
+    "scripts/collect/r9_gen2_1004_extra20k",
+    "--expect-search-n",
+    "1024",
+    "--expect-target-valid",
+    "20000",
+    "--validate-only"
+  ],
+  "validation_exit": 0,
+  "validation_output": "正式清单校验通过；未启动采集",
+  "start_condition": "当前r9_gen2_1003_extra10k全部完成、完整上传Google Drive且云端核验通过后，才允许主worker启动本批。",
+  "deadline_note": "seconds=36000保持当前gen2值；首次实际启动才创建本批独立deadline。",
+  "constraints_observed": [
+    "仅原生成器创建新untracked清单",
+    "未手工修改manifest或state",
+    "未启动采集",
+    "未编译",
+    "未修改tracked文件",
+    "未计算哈希或指纹",
+    "未上传或删除文件",
+    "当前10k数据与状态只读"
+  ]
+}

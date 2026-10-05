@@ -39,6 +39,54 @@ class LabelTests(unittest.TestCase):
         print("等价候选概率:", probabilities)
         self.assertTrue(np.allclose(probabilities, [0.5, 0.5, 0.0]))
 
+    def test_equivalent_candidates_split_at_production_scale(self) -> None:
+        # 生产规模：约 6.5 万分、1024 列、十余个候选且重复行不相邻。float32 累加的
+        # 舍入差远大于 tie_atol，会按 BLAS 分块位置随机打破并列。
+        rng = np.random.default_rng(20261005)
+        scores = rng.normal(65_000.0, 3_000.0, size=(12, 1024)).astype(np.float32)
+        scores[9] = scores[0]
+        scores[0] += 200.0
+        scores[9] = scores[0]
+        weights = make_bayesian_weights(1024, 512, 20260830)
+        probabilities = bayesian_best_probabilities(scores, weights)
+        print("生产规模等价候选概率:", probabilities[[0, 9]], "其余之和:", probabilities.sum() - probabilities[[0, 9]].sum())
+        self.assertAlmostEqual(float(probabilities[0]), float(probabilities[9]), places=6)
+        self.assertAlmostEqual(float(probabilities.sum()), 1.0, places=5)
+
+    def test_masked_branch_equivalent_candidates_and_permutation(self) -> None:
+        # 生产数据都带 cand_valid：走「按有效位重新归一化」分支。
+        rng = np.random.default_rng(20261006)
+        scores = rng.normal(65_000.0, 3_000.0, size=(12, 1024)).astype(np.float32)
+        scores[0] += 200.0
+        scores[9] = scores[0]
+        valid = np.ones_like(scores, dtype=bool)
+        weights = make_bayesian_weights(1024, 512, 20260830)
+
+        full = bayesian_best_probabilities(scores, weights, valid)
+        plain = bayesian_best_probabilities(scores, weights)
+        print("全有效 mask 与无 mask:", full[[0, 9]], plain[[0, 9]])
+        self.assertTrue(np.allclose(full, plain, atol=1e-6))
+
+        valid[[0, 9], 100:140] = False  # 等价候选带相同的部分失效位
+        partial = bayesian_best_probabilities(scores, weights, valid)
+        print("相同部分失效 mask 的等价候选:", partial[[0, 9]])
+        self.assertAlmostEqual(float(partial[0]), float(partial[9]), places=6)
+
+        order = rng.permutation(12)
+        permuted = bayesian_best_probabilities(scores[order], weights, valid[order])
+        print("置换候选顺序后概率一致:", np.allclose(permuted, partial[order], atol=1e-6))
+        self.assertTrue(np.allclose(permuted, partial[order], atol=1e-6))
+
+    def test_small_real_gap_still_separates_at_production_scale(self) -> None:
+        # 6.5 万分尺度下的 0.5 分配对优势仍应被判为严格更优，不能被并列容差吞掉。
+        rng = np.random.default_rng(20261007)
+        base = rng.normal(65_000.0, 3_000.0, size=1024)
+        scores = np.stack([base + 0.5, base]).astype(np.float64)
+        weights = make_bayesian_weights(1024, 512, 20260830)
+        probabilities = bayesian_best_probabilities(scores, weights)
+        print("0.5 分配对优势的最优概率:", probabilities)
+        self.assertTrue(np.allclose(probabilities, [1.0, 0.0]))
+
     def test_region_candidate_distribution_becomes_normalized_marginals(self) -> None:
         probabilities = np.asarray([0.75, 0.25], dtype=np.float32)
         slots = np.asarray([[214, 215, 216], [214, 217, 218]], dtype=np.int32)

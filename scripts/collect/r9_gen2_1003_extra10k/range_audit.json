@@ -1,0 +1,135 @@
+{
+  "new_reservation": [
+    5000000000,
+    5100000000
+  ],
+  "actual_min": 5000000986,
+  "actual_max": 5085757834,
+  "candidate_count": 20000,
+  "target_valid": 10000,
+  "formal_reservations_checked": [
+    {
+      "plan": "scripts/collect/formal1024_0918/manifest.json",
+      "range": [
+        301000000,
+        1500000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/formal1024_0918b/manifest.json",
+      "range": [
+        1500000000,
+        2300000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/formal1024_2s1e2w_0919/manifest.json",
+      "range": [
+        2400000000,
+        2410000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/formal2048_0914/manifest.json",
+      "range": [
+        20000000,
+        300000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r8_2s1e2w_0920/manifest.json",
+      "range": [
+        3400000000,
+        3420000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r8_gen2_0920/manifest.json",
+      "range": [
+        3000000000,
+        3400000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r8_newboth_0920/manifest.json",
+      "range": [
+        3480000000,
+        3490000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r8_newcard_0920/manifest.json",
+      "range": [
+        3440000000,
+        3480000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r8_newuma_0920/manifest.json",
+      "range": [
+        3420000000,
+        3440000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r8_userdeck_0920/manifest.json",
+      "range": [
+        3490000000,
+        3490100000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r9_2s1e2w_1002/manifest.json",
+      "range": [
+        4400000000,
+        4420000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r9_gen2_1002/manifest.json",
+      "range": [
+        4000000000,
+        4400000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r9_gen2n4096_1002/manifest.json",
+      "range": [
+        4500000000,
+        4650000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r9_newboth_1002/manifest.json",
+      "range": [
+        4480000000,
+        4490000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r9_newcard_1002/manifest.json",
+      "range": [
+        4440000000,
+        4480000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r9_newuma_1002/manifest.json",
+      "range": [
+        4420000000,
+        4440000000
+      ]
+    },
+    {
+      "plan": "scripts/collect/r9_userdeck_1002/manifest.json",
+      "range": [
+        4490000000,
+        4490100000
+      ]
+    }
+  ],
+  "additional_readonly_audit": "All registered formal, smoke and unused reservations in registry sections6-11, 18 actual data manifests and two R9 smoke manifests reviewed. R9 smoke reservation[4900000000,5000000000) avoided.",
+  "rounding": "Quarter of470/690 gives half roots; balanced±0.5 per affected cell preserves shape totals2250/2250/3250/2250 and layer totals8775/175/525/525.",
+  "seconds": 36000,
+  "deadline_note": "Generator requires --seconds and has no default. Preserved current standard gen2 value36000; first actual launch starts its own deadline."
+}
