@@ -109,12 +109,14 @@
 在URA回合（回合72-77），每回合自动享受超级拉面效果，记录在`finals_effect`中
 其中，`extra`效果为满足`支援卡种类>=4`时额外生效；`training_limit_options`为按玩家选择
 * 超级拉面期间不可以吃其他面，不享受地区效果
-* 超级拉面期间，以下效果按最高档生效：
-  - `ramen_pt_effect` 按最高档生效（最后一档：xunlian=20, deyilv=80, hint=120）
-  - `ramen_basic_effect` 按最高档生效（最后一档）
+* 超级拉面期间**只叠加「第3年RMJ结算效果 + finals_effect」**；试食会（吃面）专属效果一律不生效：
+  - `ramen_pt_effect`（盛り上がりPt奖励，xunlian/deyilv/hint）**不生效**
+  - `ramen_basic_effect`、`ramen_region_effect`（吃面才有的基础/地区效果）**不生效**
   - 第3年RMJ结算效果（ramen_success_effect 或 ramen_fail_effect）生效
-  - `finals_effect.base` 效果生效
-  - `finals_effect.extra` 效果仅在支援卡种类 >= 4 时生效
+  - `finals_effect.base` 效果生效（友情+150 等）
+  - `finals_effect.extra` 效果仅在支援卡种类 >= 4 时生效（PT+100 / PT上限+100 / 分身+1）
+* 净训练效果（第3年RMJ成功、支援卡种类>=4）：`xunlian=0`、`youqing=175`（RMJ 25 + finals 150）、`pt_bonus=100`、`pt_limit=100`
+* 上层数值上限（`status_limit`）：选中选项（`training_limit_options[super_ramen]`）覆盖的 4 个训练位 **+100**（对属性和 PT 上限都生效；未选选项/选项越界则不生效）
 
 **finals_effect.base 自动应用**（每个 URA 回合 Begin 阶段）：
 - `vital`（体力恢复，+20）：每个 URA 回合（turn=72-77）都生效，每回合 +20
@@ -279,10 +281,10 @@ ramen_memo里记录的典型的分配结果为：（左-总消耗，右-分配�
 - 约束后，实际的最终训练数值 training_value = lower_value + upper_value
 
 ### 剧本加成
-- 生效范围：ramen_pt_effect 常驻生效；ramen_basic_effect, ramen_region_effect 仅在**吃面后**，在 at_trains 标注的训练位置生效，不吃面时不生效
-- 训练加成 xunlian: ramen_pt_effect, ramen_basic_effect, ramen_region_effect, 求和
-- 友情加成 youqing: 来自 ramen_success_effect / ramen_fail_effect, ramen_basic_effect, ramen_region_effect 求和。仅在友情训练时生效，非友情训练时 youqing=0
-- PT加成 pt_bonus：来自 ramen_region_effect
+- 生效范围：ramen_pt_effect 常驻生效（**超级拉面期间不生效**）；ramen_basic_effect, ramen_region_effect 仅在**吃面后**，在 at_trains 标注的训练位置生效，不吃面时不生效
+- 训练加成 xunlian: ramen_pt_effect, ramen_basic_effect, ramen_region_effect, 求和（超级拉面期间恒为 0）
+- 友情加成 youqing: 来自 ramen_success_effect / ramen_fail_effect, ramen_basic_effect, ramen_region_effect 求和。仅在友情训练时生效，非友情训练时 youqing=0（超级拉面期间只来自 ramen_success/fail_effect + finals_effect.base）
+- PT加成 pt_bonus：来自 ramen_region_effect（超级拉面期间来自 finals_effect.extra）
 - 上层数值上限加成：来自ramen_basic_effect （对属性和PT都生效），finals_effect（仅对pt生效）
 - 属性训练上层数值 training_value_ramen = lower_value * (100 + xunlian)/100.0 * (100+youqing)/100.0
 - PT训练上层数值 training_value_ramen = lower_value * (100+xunlian)/100.0 * (100+youqing)/100.0 * (100+pt_bonus)/100.0
@@ -293,16 +295,14 @@ ramen_memo里记录的典型的分配结果为：（左-总消耗，右-分配�
 
 ### 拉面效果显示
 - 普通回合：显示当前拉面的效果（包含基础效果和地域效果）
-- 超级拉面回合：显示所有生效的加成，包括：
-  - 训练加成（训+）
+- 超级拉面回合：只显示 RMJ + finals 带来的加成，包括：
   - 友情加成（友情+）
   - 得意率（得意+）
-  - 失败率（失败率-）
-  - 羁绊（羁绊+）
-  - 上限（上限+）
   - PT加成（PT+）
+  - PT上限（PT上限+）
   - hint率（hint+）
   - 分身数（分身+）
+  （训练加成/失败率/羁绊/属性上限/hint全卡 属试食会基础效果，超级拉面期间不显示）
 
 ----
 

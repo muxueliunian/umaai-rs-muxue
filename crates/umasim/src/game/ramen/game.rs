@@ -2942,8 +2942,9 @@ struct AlwaysTrueRng;
             "超级拉面, PT=5000, RMJ都成功: card_deyilv_only={} 实际 deyilv={}",
             card_deyilv_only2, actual_deyilv2
         );
-        // 期望：actual_deyilv = card_deyilv_only + (pt(5000档=80) + rmj_success[2]=250) = +330
-        assert_eq!(actual_deyilv2, card_deyilv_only2 + 330.0);
+        // 期望：actual_deyilv = card_deyilv_only + rmj_success[2]=250 = +250
+        // （超级拉面不叠加 pt_effect 的 deyilv=80）
+        assert_eq!(actual_deyilv2, card_deyilv_only2 + 250.0);
 
         // ========== 无卡人头返回 0，友人卡按自己的卡组槽位取值 ==========
         // 旧断言写死「person_index >= 6 返回 0」，但拉面布局下人头 6 正是友人卡。
@@ -2969,8 +2970,8 @@ struct AlwaysTrueRng;
         let friend_deyilv = game2.deyilv(friend_idx as i32);
         println!(
             "[{}] 友人卡(人头 {friend_idx} -> 卡组 {friend_deck_idx}): 期望 {} 实际 {friend_deyilv}",
-            check(friend_deyilv == friend_card_deyilv + 330.0),
-            friend_card_deyilv + 330.0
+            check(friend_deyilv == friend_card_deyilv + 250.0),
+            friend_card_deyilv + 250.0
         );
 
         // 负数人头下标不再 panic

@@ -20,7 +20,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use umasim::utils::Array5;
+use umasim::{game::Uma, gamedata::GAMECONSTANTS, global, utils::Array5};
 
 /// 本通道支持的剧本 ID（与 `GameStatusRamen::scenario_id()` 一致，单测守护）
 pub const SUPPORTED_SCENARIO_ID: u32 = 14;
@@ -95,6 +95,32 @@ impl FinalScorePayload {
     /// 由调用方告警 + 回落末快照口径。
     pub fn is_usable(&self) -> bool {
         self.five_status.iter().any(|&v| v > 0) && self.five_status_limit.iter().any(|&v| v > 0)
+    }
+
+    /// 按 `Uma::calc_score` 同源口径计算终局评分（五维查表 + PT 折算）
+    ///
+    /// `skill_score` 恒 0（本通道不携带已学技能分）、`pt_score_rate_factor` 恒 1.0
+    /// （帧内无切者 / 小切标志）——与 `umaai_review::score::final_score_from_frame` 一致，
+    /// 属「点技能前」的口径，略低于小黑板最终分。
+    ///
+    /// # Panics
+    ///
+    /// 需已 `gamedata::init_global`（查表依赖 `GAMECONSTANTS`），未初始化会 panic。
+    pub fn calc_score(&self) -> i32 {
+        Uma {
+            five_status: self.five_status,
+            five_status_limit: self.five_status_limit,
+            skill_pt: self.skill_pt,
+            skill_score: 0,
+            total_hints: self.total_hints,
+            ..Default::default()
+        }
+        .calc_score()
+    }
+
+    /// 终局评分对应的等级名（`GameConstants::get_rank_name`，需已 init）
+    pub fn rank_name(&self) -> String {
+        global!(GAMECONSTANTS).get_rank_name(self.calc_score())
     }
 }
 
@@ -193,5 +219,35 @@ mod tests {
         let ramen = GameStatusRamen::scenario_id();
         println!("本通道剧本 = {SUPPORTED_SCENARIO_ID} / GameStatusRamen = {ramen}");
         assert_eq!(SUPPORTED_SCENARIO_ID, ramen);
+    }
+
+    /// 终局评分 / 等级：与 `Uma::calc_score` 同源（五维查表 + PT 折算），需 gamedata
+    #[test]
+    fn test_calc_score_and_rank() -> anyhow::Result<()> {
+        let root = umasim::utils::get_workspace_root()?;
+        std::env::set_current_dir(&root)?;
+        let _ = umasim::gamedata::init_global();
+
+        let raw = r#"{
+            "scenarioId": 14, "single_mode_chara_id": 6243,
+            "fiveStatus": [3226, 2162, 1678, 1089, 2338],
+            "fiveStatusLimit": [3242, 2444, 2206, 2200, 2506],
+            "skillPt": 7717, "totalHints": 21
+        }"#;
+        let p: FinalScorePayload = serde_json::from_str(raw).expect("终局帧应可解析");
+        let score = p.calc_score();
+        let rank = p.rank_name();
+        println!("终局评分={score} 等级={rank}");
+
+        // 交叉验证：分数 = 五维查表分之和 + PT 折算分（skill_score 恒 0）
+        let cons = global!(GAMECONSTANTS);
+        let five_part: i32 = (0..5)
+            .map(|i| cons.status_final_score(p.five_status[i].min(p.five_status_limit[i])))
+            .sum();
+        let total_pt = (p.skill_pt as f32 + p.total_hints as f32 * cons.hint_pt_rate).floor() as i32;
+        let pt_part = (total_pt as f32 * cons.pt_score_rate) as i32;
+        assert_eq!(score, five_part + pt_part, "calc_score = 五维 + PT（skill=0）");
+        assert!(!rank.is_empty(), "等级名不应为空");
+        Ok(())
     }
 }

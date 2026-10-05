@@ -824,8 +824,11 @@ average = [1, 0, 1, 1, 2]
     // rgn 1/supermode 3/out 0），同种子 70138→69219。
     // 2026-09-21 四次重抓：友人出行跨年配额定档 [0,3,5]（替换 [0,2,5]），
     // 同种子 69219→69232（单局快照会随后续 preset 改动整体重抓）。
-    const BASELINE_SCORE: i32 = 69232;
-    const BASELINE_FIVE: [i32; 5] = [3337, 2431, 2200, 1163, 1184];
+    // 2026-10-04 五次重抓：超级拉面效果修正——只保留 RMJ + finals（去掉误叠加的
+    // pt_effect / basic 试食会效果），并接入选中选项的 +100 训练上限；
+    // 同种子 69232→68964（五维仅智 1184→1129）。
+    const BASELINE_SCORE: i32 = 68964;
+    const BASELINE_FIVE: [i32; 5] = [3337, 2431, 2200, 1163, 1129];
 
     /// 把三个地区 id 格式化成与决策日志 `action_desc` 相同的 `地区[a,b,c]`。
     fn region_desc(regions: [usize; 3]) -> String {

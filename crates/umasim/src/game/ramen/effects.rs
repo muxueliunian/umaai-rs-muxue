@@ -6,6 +6,9 @@
 use super::RamenGame;
 use crate::{gamedata::ramen::RAMENDATA, global, utils::Array6};
 
+/// 超级拉面选项覆盖的 4 个训练位获得的训练数值上限加成（游戏固定 +100）
+const SUPER_RAMEN_STATUS_LIMIT: i32 = 100;
+
 /// 拉面杯训练效果（合并所有来源的加成）
 ///
 /// 由 `calc_ramen_training_effect` 根据当前游戏状态计算得出，
@@ -126,36 +129,22 @@ fn calc_region_bonus_tier(year_scenario_pt: i32) -> usize {
 /// 计算超级拉面回合的效果（回合 72-77 自动生效）
 ///
 /// 超级拉面期间：
-/// - `ramen_pt_effect` 按最高档生效
-/// - `ramen_basic_effect` 按最高档生效
-/// - 第3年RMJ结算效果（rmj_results[2]）常驻生效
+/// - 第3年RMJ结算效果（`rmj_results[2]`）常驻生效
 /// - `finals_effect.base` 效果生效
 /// - `finals_effect.extra` 效果仅在支援卡种类 >= 4 时生效
-/// - 地区效果不生效
+/// - 选中超级拉面选项（`training_limit_options[super_ramen]`）覆盖的 4 个训练位
+///   额外获得训练上限 +100（属性与 PT 上限都加）
+/// - **不生效**：`ramen_pt_effect` / `ramen_basic_effect` / `ramen_region_effect`
+///   —— 这三者是「试食会（吃面）」专属效果；超级拉面期间不能吃面，故不叠加
 ///
 /// # 参数
 /// - `game`: 拉面杯游戏状态
-/// - `year_idx`: 年份索引（0-2）
-fn calc_finals_effect(game: &RamenGame, _year_idx: usize) -> RamenTrainingEffect {
+/// - `train`: 训练位置（0=速, 1=耐, 2=力, 3=根, 4=智）
+fn calc_finals_effect(game: &RamenGame, train: usize) -> RamenTrainingEffect {
     let ramen_data = global!(RAMENDATA);
     let mut effect = RamenTrainingEffect::default();
 
-    // 1. ramen_pt_effect 按最高档生效（最后一档）
-    let pt_effect = ramen_data.ramen_pt_effect.last().unwrap();
-    effect.xunlian += pt_effect.xunlian;
-    effect.deyilv += pt_effect.deyilv;
-    effect.hint += pt_effect.hint;
-
-    // 2. ramen_basic_effect 按最高档生效（最后一档）
-    let basic = ramen_data.ramen_basic_effect.last().unwrap();
-    effect.xunlian += basic.xunlian;
-    effect.youqing += basic.youqing;
-    effect.fail_rate_drop += basic.fail_rate_drop;
-    effect.friendship += basic.friendship;
-    effect.status_limit += basic.status_limit;
-    effect.hint_special |= basic.hint_special;
-
-    // 3. 第3年RMJ结算效果（rmj_results[2]）在URA期间生效
+    // 1. 第3年RMJ结算效果（rmj_results[2]）在URA期间生效
     if let Some(&success) = game.ramen.rmj_results.get(2) {
         let rmj_effect = if success {
             &ramen_data.ramen_success_effect[2]
@@ -167,15 +156,25 @@ fn calc_finals_effect(game: &RamenGame, _year_idx: usize) -> RamenTrainingEffect
         effect.hint += rmj_effect.hint;
     }
 
-    // 4. finals_effect.base 效果
+    // 2. finals_effect.base 效果
     let finals = &ramen_data.finals_effect;
     effect.youqing += finals.base.youqing;
 
-    // 5. finals_effect.extra 效果：支援卡种类 >= 4 时额外生效
+    // 3. finals_effect.extra 效果：支援卡种类 >= 4 时额外生效
     if game.deck_can_split {
         effect.pt_bonus += finals.extra.pt_bonus;
         effect.pt_limit += finals.extra.pt_limit;
         effect.clone_count += finals.extra.clone_count;
+    }
+
+    // 4. 超级拉面选项：选中选项覆盖的 4 个训练位 +100 训练上限
+    //    （未选择选项 / 选项越界 / 该训练位不在覆盖范围时不加）
+    if let Some(opt) = game.ramen.super_ramen {
+        if let Some(limit_trains) = finals.training_limit_options.get(opt) {
+            if limit_trains.contains(&(train as i32)) {
+                effect.status_limit += SUPER_RAMEN_STATUS_LIMIT;
+            }
+        }
     }
 
     effect
@@ -275,8 +274,8 @@ pub fn calc_ramen_training_effect_with_ramen(
     let year_idx = (game.current_year() - 1) as usize;
 
     let mut effect = if super_ramen {
-        // 超级拉面回合：基础效果 + finals_effect，不享受地区效果
-        calc_finals_effect(game, year_idx)
+        // 超级拉面回合：RMJ + finals_effect（含选中选项的 +100 上限），不享受地区效果
+        calc_finals_effect(game, train)
     } else {
         // 普通回合：PT常驻 + RMJ常驻 + 吃面基础 + 地区效果
         calc_normal_effect(game, train, year_idx, ramen)
@@ -312,8 +311,9 @@ pub fn calc_scenario_deyilv(game: &RamenGame) -> i32 {
     let year_idx = (game.current_year() - 1) as usize;
 
     if game.is_super_ramen_turn() {
-        // 超级拉面：复用 calc_finals_effect（最后一档 pt + rmj_results[2]）
-        calc_finals_effect(game, year_idx).deyilv
+        // 超级拉面：复用 calc_finals_effect（只含 rmj_results[2] + finals）
+        // 只读 deyilv，与训练位置无关，`train` 传 0 即可
+        calc_finals_effect(game, 0).deyilv
     } else {
         // 普通回合：pt_effect(当前档) + rmj_results[year-1]
         // 这里 calc_normal_effect 是训练位置相关的，单独算 deyilv 更直接
@@ -522,10 +522,11 @@ mod tests {
         init_test_logger("info")?;
         init_global()?;
 
-        // 超级拉面回合
+        // 超级拉面回合（第 3 年 RMJ 已结算）
         let mut game = make_test_game();
         game.base.turn = 72;
         game.ramen.scenario_pt = 5000;
+        game.ramen.rmj_results = vec![true, true, true];
 
         let effect = calc_ramen_training_effect(&game, 0, true);
         println!("超级拉面, PT=5000, 友情:");
@@ -537,11 +538,11 @@ mod tests {
             "  status_limit={} pt_limit={} clone_count={}",
             effect.status_limit, effect.pt_limit, effect.clone_count
         );
-        // pt_effect(PT=5000): xunlian=20
-        // basic(year3): xunlian=15, youqing=45, status_limit=40
+        // 超级拉面：只保留 RMJ + finals，试食会效果（pt_effect / basic）不生效
+        // rmj_success(2): youqing=25, deyilv=250, hint=125
         // finals base: youqing=150
         // finals extra (deck_can_split=false 默认): 不生效
-        println!("  => 期望: xunlian=35, youqing=195, pt_bonus=0, status_limit=40");
+        println!("  => 期望: xunlian=0, youqing=175, pt_bonus=0, status_limit=0");
         let mut checks = Checks::new();
         for ramen in [None, Some(0), Some(5)] {
             checks.check(
@@ -559,10 +560,11 @@ mod tests {
         init_test_logger("info")?;
         init_global()?;
 
-        // 超级拉面回合 + deck_can_split = true
+        // 超级拉面回合（第 3 年 RMJ 已结算） + deck_can_split = true
         let mut game = make_test_game();
         game.base.turn = 73;
         game.ramen.scenario_pt = 5000;
+        game.ramen.rmj_results = vec![true, true, true];
         game.deck_can_split = true;
 
         let effect = calc_ramen_training_effect(&game, 0, true);
@@ -575,13 +577,46 @@ mod tests {
             "  status_limit={} pt_limit={} clone_count={}",
             effect.status_limit, effect.pt_limit, effect.clone_count
         );
-        // pt_effect(PT=5000): xunlian=20
-        // basic(year3): xunlian=15, youqing=45, status_limit=40
+        // 超级拉面：只保留 RMJ + finals，试食会效果（pt_effect / basic）不生效
+        // rmj_success(2): youqing=25
         // finals base: youqing=150
         // finals extra: pt_bonus=100, pt_limit=100, clone_count=1
-        println!("  => 期望: xunlian=35, youqing=195, pt_bonus=100, pt_limit=100, clone_count=1");
+        println!("  => 期望: xunlian=0, youqing=175, pt_bonus=100, pt_limit=100, clone_count=1");
 
         Ok(())
+    }
+
+    /// 超级拉面选项（training_limit_options）给覆盖的 4 个训练位 +100 训练上限
+    #[test]
+    fn test_calc_finals_status_limit_from_option() -> anyhow::Result<()> {
+        let workspace_root = get_workspace_root()?;
+        std::env::set_current_dir(workspace_root)?;
+        init_test_logger("info")?;
+        init_global()?;
+
+        // 选项二（index 1）= [0,1,2,4]（速/耐/力/智），根(3) 不在覆盖范围
+        let mut game = make_test_game();
+        game.base.turn = 72;
+        game.ramen.rmj_results = vec![true, true, true];
+        game.ramen.super_ramen = Some(1);
+
+        let covered = [0usize, 1, 2, 4];
+        let mut checks = Checks::new();
+        for train in 0..5 {
+            let eff = calc_ramen_training_effect(&game, train, true);
+            let want = if covered.contains(&train) { 100 } else { 0 };
+            println!("选项二 训练{train}: status_limit={} (期望 {want})", eff.status_limit);
+            checks.check(eff.status_limit == want, &format!("训练{train} status_limit 应为 {want}"));
+        }
+
+        // 未选择超级拉面选项时（super_ramen=None）全部不加
+        let mut game2 = make_test_game();
+        game2.base.turn = 72;
+        for train in 0..5 {
+            let eff = calc_ramen_training_effect(&game2, train, true);
+            checks.check(eff.status_limit == 0, &format!("未选选项 训练{train} status_limit 应为 0"));
+        }
+        checks.finish()
     }
 
     #[test]
@@ -768,7 +803,7 @@ mod tests {
         Ok(())
     }
 
-    /// 超级拉面：PT 5000 + RMJ 成功 → pt_effect(最后一档) + rmj_success[2].deyilv
+    /// 超级拉面：RMJ 成功 → 只取 rmj_success[2].deyilv（pt_effect 不生效）
     #[test]
     fn test_calc_scenario_deyilv_super_ramen() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -782,15 +817,14 @@ mod tests {
         game.ramen.rmj_results = vec![true, true, true]; // 前三年都成功
 
         let deyilv = calc_scenario_deyilv(&game);
-        // pt_effect 最后一档(PT>=5000).deyilv = 80
+        // 超级拉面只保留 RMJ：pt_effect 不生效
         // rmj_success[2].deyilv = 250
-        // 总计 = 80 + 250 = 330
         println!("超级拉面 turn=72, PT=5000, RMJ成功: scenario_deyilv={deyilv}");
-        assert_eq!(deyilv, 330);
+        assert_eq!(deyilv, 250);
         Ok(())
     }
 
-    /// 超级拉面：RMJ 失败 → pt_effect(最后一档) + rmj_fail[2].deyilv
+    /// 超级拉面：RMJ 失败 → 只取 rmj_fail[2].deyilv（pt_effect 不生效）
     #[test]
     fn test_calc_scenario_deyilv_super_ramen_rmj_fail() -> anyhow::Result<()> {
         let workspace_root = get_workspace_root()?;
@@ -804,10 +838,10 @@ mod tests {
         game.ramen.rmj_results = vec![true, true, false]; // year 3 RMJ 失败
 
         let deyilv = calc_scenario_deyilv(&game);
-        // pt_effect 最后一档.deyilv = 80
+        // 超级拉面只保留 RMJ：pt_effect 不生效
         // rmj_fail[2].deyilv = 150
         println!("超级拉面 turn=73, PT=5000, RMJ失败: scenario_deyilv={deyilv}");
-        assert_eq!(deyilv, 230); // 80 + 150
+        assert_eq!(deyilv, 150);
         Ok(())
     }
 }
