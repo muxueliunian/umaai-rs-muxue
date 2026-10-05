@@ -9,6 +9,9 @@
 
 use std::time::Instant;
 
+#[cfg(feature = "onnx")]
+use std::sync::Arc;
+
 use anyhow::Result;
 #[cfg(feature = "cli")]
 use colored::Colorize;
@@ -451,9 +454,7 @@ async fn main() -> Result<()> {
                                         }
                                         let nn = RamenNnTrainer::load(std::path::Path::new(model_path))?;
                                         println!("拉面 MCTS rollout 基策 = 神经网络（{model_path}）");
-                                        ramen_trainer.search = ramen_trainer
-                                            .search
-                                            .with_rollout_trainer(RamenRolloutTrainer::nn(nn));
+                                        ramen_trainer = ramen_trainer.with_nn_rollout(Arc::new(nn), None);
                                     }
                                     #[cfg(not(feature = "onnx"))]
                                     {
