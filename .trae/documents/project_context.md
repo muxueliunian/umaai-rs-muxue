@@ -183,6 +183,7 @@ cargo run --release --bin ramen_mcts_pair_bench -- --help   # 全部参数
 - **耗时注意**：生产档 MCTS 整局约 3.4 分钟/局（region 门控第 2/3 年 120 候选占大头），扫测先用 `--runs 1` 探时间；手写侧整局 ≈ 1.3ms。
 - **与 bench_base 的差异**：bench_base 各策略独立跑批不配对；本基准强制同种子配对，消除随机世界漂移，差值可归因于策略选择。
 - 冒烟测试（bin 内 `#[cfg(test)]`，小预算不读 game_config）：配对守卫 / 同参两次逐位可复现 / CSV 结构。
+- **`mcts_turn_bonus` 标定实测（2026-10-04）**：8 build × 3 seed = 24 局配对（生产参数 `search_n=8192` / stages `train,ramen,region`），全局 `Δ = 5158.8 ± 378.4`（t=13.6，24 胜 0 负，95% CI [4417, 5901]）。按整局 78 回合折算「MCTS 每回合比手写多的分」≈ **66**（95% CI [57, 76]；按 `max_turn=77` 折算 ≈ 67）。build 间差异大（`power_wisdom`≈31 / `speed`≈85 每回合），单一常数只能折中。现有配置 70 落在区间内、略偏高，建议区间 65~67。产物 `logs/mcts_pair_scan.csv`。
 
 ## region 决策点分析（ramen_region_topk）
 

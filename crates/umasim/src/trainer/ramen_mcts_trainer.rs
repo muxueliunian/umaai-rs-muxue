@@ -1181,14 +1181,16 @@ mod tests {
         // 基准重抓。
         // 2026-09-18 重抓：上一版数值早于 preset 定稿（本次改动实测逐位不变，仅为同步）。
         // 2026-09-21 重抓：友人出行跨年配额定档 [0,3,5]（原 [0,2,5]），整局路径变化。
-        c.check(score == 61709, "评分与改动前逐位相同");
+        // 2026-10-04 重抓：超级拉面效果修正（只保留 RMJ + finals、接入选中选项的
+        // +100 训练上限），URA 训练数值变化，整局路径与终局数值变化。
+        c.check(score == 61332, "评分与改动前逐位相同");
         c.check(
-            game.uma.five_status == [3337, 2085, 1890, 1057, 1339],
+            game.uma.five_status == [3337, 1859, 2126, 948, 1197],
             "五维与改动前逐位相同"
         );
-        c.check(game.uma.skill_pt == 7886, "技能点与改动前逐位相同");
+        c.check(game.uma.skill_pt == 8189, "技能点与改动前逐位相同");
         c.check(game.ramen.scenario_pt == 0, "剧本 PT 与改动前逐位相同");
-        c.check(searched == 56, "searched_count 与改动前逐位相同");
+        c.check(searched == 61, "searched_count 与改动前逐位相同");
         c.finish()
     }
 
@@ -1337,6 +1339,8 @@ mod tests {
         // 2026-09-18 重抓：上一版快照早于 preset 定稿（本次改动实测逐位不变，仅为同步）。
         // 2026-09-21 重抓：友人出行配额定档 [0,3,5]，SpecialSelect 调用 28→29
         // （重搜仍为 0，语义上界断言不变）。
+        // 2026-10-04 重抓：超级拉面效果修正（RMJ + finals、选中选项 +100 上限），
+        // 整局搜索路径变化，SpecialSelect 调用 29、重搜 0。
         c.check(special_calls == 29, "SpecialSelect 调用数与改动前逐位相同");
         c.check(special_searches == 0, "SpecialSelect 重搜数与改动前逐位相同");
         // 再留一条与具体数字解耦的语义上界，防止将来重抓快照时把比例抬上去

@@ -33,7 +33,7 @@
 | `fiveStatus` / `fiveStatusLimit` | int[5] | 五维/上限 | `Uma::five_status/five_status_limit` |
 | `skillPt` / `skillScore` | int | 技能点/已学技能分数 | `Uma::skill_pt/skill_score` |
 | `totalHints` | int | 总 Hint 等级 | `Uma::total_hints` |
-| `trainLevelCount` | int[5] | 训练等级折算（`4×(等级−1)+等级内点击数`，**已含剧本加成**，如 RMJ） | `BaseGame::train_level_count` |
+| `trainLevelCount` | int[5] | 训练等级折算（`4×(等级−1)+等级内点击数`，**已含剧本加成**，如 RMJ）；等级内点击数的来源见下方注 | `BaseGame::train_level_count` |
 | `ptScoreRate` / `failureRateBias` | f32/int | PT 系数/失败率偏置 | `Uma::*` |
 | `isQieZhe` / `isXiaoQie` / `isAiJiao` / `isRefreshMind` / `isIll` | bool | Uma flags | `Uma::flags` |
 | `PositiveThinkingCount` / `LuckyCount` | int | 心情盾（状态 25/41/42）/ 幸运体质（26/43）次数 | `Uma::flags.positive_thinking_count / lucky_count` |
@@ -45,6 +45,14 @@
 | `lockedTrainingId` / `friendship_noncard_yayoi/reporter` / `friend_stage` / `friend_outgoingUsed` / `playing_state` / `raceHistory` / `story` | — | 与温泉同 | 同 |
 | **`single_mode_chara_id`** | int | **新增**：账号总育成局数 | 切局判据（与 saved_game 对照） |
 | **`source`** | string | **新增**：`event` / `command` / `load` / `special` | 决策循环路由 |
+
+> **注（`trainLevelCount` 等级内点击数的来源）**：真机点击数**不随协议下发**——拉面的 `ramen_data_set.training_exec_info_array` 实测恒为 `null`（2026-10-04 实测确认）。
+> 因此由 C# 侧 `GameStatusSend_Ramen.ApplyTrainLevelProgressFromHistory`（做法同 `GameStatusSend_Cook`）从 EventLogger 的逐回合 `PlayerChoice` 历史回数：
+> - 只计训练回合，剔除**训练失败**与**夏合宿**回合。（**回合口径**：EventLogger 的 `Turns[]` 按原始 `chara_info.turn` 索引、是 **1 基**——只有写 `thisTurn.json` 时才 `-1` 转成 AI 的 0 基；故插件侧合宿取 **37-40 / 61-64**，对应 AI 侧 0 基的 36-39/60-63 即 `is_xiahesu`。真机 `level` 同样不计合宿点击）；
+> - 等级仍取真机 `level`（**已含剧本加成**），只补等级内余数：`count = 4×(level−1) + 点击数 % 4`；
+> - 等级封顶 5 后不再叠加余数（恒 `16`，与 Cook 同款守卫）。
+> - 故 `count ∈ {4×(level−1), …, 4×(level−1)+3}`（5 级恒 16）。AI 侧 `base_train_level = count/4 + 1`（`.min(5)`）据此还原等级，并用余数估算「离下一级还差几次」。
+> - 依赖 EventLogger 回合记录连续：倒扫时遇到断档即停止，只用尾部连续段（算 `% 4` 只需最近几次）。老包只给 `4×(level−1)`，余数 0 自动退化。
 
 ### 1.1 `source` 语义
 

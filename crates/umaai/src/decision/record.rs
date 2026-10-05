@@ -503,8 +503,14 @@ impl OnlineRecorder {
                 warn!("写终局帧失败 {}: {e:?}", path.display());
             }
         }
+        // 评分 / 等级按 `Uma::calc_score` 口径现算（查表依赖 GAMECONSTANTS；在线运行时
+        // 必已 init，单测 / 异常未 init 时跳过该段，不阻断记录）
+        let score_line = GAMECONSTANTS
+            .get()
+            .map(|_| format!(" 评分={} 等级={}", payload.calc_score(), payload.rank_name()))
+            .unwrap_or_default();
         info!(
-            "真机终局数据: 局={id} 五维={:?} skill_pt={} 继承增量={:?}",
+            "真机终局数据: 局={id} 五维={:?} skill_pt={} 继承增量={:?}{score_line}",
             payload.five_status, payload.skill_pt, payload.inherit_gains
         );
         // 末回合帧没走到（罕见：中途接管 / 直接看到终局画面）→ 这里补写 meta
