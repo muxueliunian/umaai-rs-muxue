@@ -42,7 +42,7 @@
 
 use std::cell::RefCell;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail, ensure};
 use rand::{Rng, rngs::StdRng};
 
 use crate::{
@@ -260,6 +260,715 @@ pub const GEN1_SHAPES: [DeckShape; 3] = [
 /// manifest 里记录的指纹分别归属，而不是直接改这里的值。
 pub const GEN1_SPACE_HASH_V1: &str = "6c30529e9333fb94";
 
+// ============================================================================
+// 具名采样空间版本
+// ============================================================================
+
+/// 一个**具名**采样空间版本：马娘、卡池、构成三者一并冻结
+///
+/// 存在的理由是身份可读且可直接比较：扩空间时**不扩 [`GEN1_UMAS`] /
+/// [`GEN1_CARD_POOL`] / [`GEN1_SHAPES`]**（那会让旧空间跟着变、旧 `index` 改指别的
+/// 组合），而是新增一个版本常量。采集与导出在 manifest 里记下 `name` 与三份完整清单，
+/// 续跑与合并靠**逐字段比较**这些清单，不再依赖枚举指纹。
+#[derive(Debug, Clone, Copy)]
+pub struct SpaceVersion {
+    /// 版本名，进 manifest 与命令行
+    pub name: &'static str,
+    /// 该版本的马娘清单
+    pub umas: &'static [UmaEntry],
+    /// 该版本的支援卡池（含友人卡，均满破）
+    pub cards: &'static [CardEntry],
+    /// 该版本的卡组构成清单
+    pub shapes: &'static [DeckShape],
+    /// 每个计划都必须包含的支援卡 idrank（空 = 不限）
+    ///
+    /// 定向补新卡用：只把新卡放进卡池再均匀枚举，大部分计划根本不含它，预算会落在
+    /// 旧卡组上。过滤在 [`enumerate_space`] 之后按原枚举顺序保留，不改变其余计划的相对次序。
+    pub required: &'static [u32]
+}
+
+/// `gen2_v1` 的马娘：gen1 的 7 个，外加神威启示
+///
+/// 逐条写出而不是拼接 [`GEN1_UMAS`]，这样读代码时一眼能看到该版本的完整清单，
+/// 也不会因为将来有人动 gen1 而被动改变。
+pub const GEN2_V1_UMAS: [UmaEntry; 8] = [
+    UmaEntry {
+        game_id: 100603,
+        alias: "小栗帽[芦毛灰姑娘]"
+    },
+    UmaEntry {
+        game_id: 102403,
+        alias: "摩耶重炮[Rock in MewMeow]"
+    },
+    UmaEntry {
+        game_id: 112901,
+        alias: "杏目[The Changer]"
+    },
+    UmaEntry {
+        game_id: 110602,
+        alias: "菱钻奇宝[快乐小音符]"
+    },
+    UmaEntry {
+        game_id: 113101,
+        alias: "放声欢呼"
+    },
+    UmaEntry {
+        game_id: 108702,
+        alias: "真弓快车[不融化的糖果]"
+    },
+    UmaEntry {
+        game_id: 100301,
+        alias: "东海帝王[无上喜悦]"
+    },
+    UmaEntry {
+        game_id: 114101,
+        alias: "神威启示[命运天选之星]"
+    }
+];
+
+/// `gen2_v1` 的支援卡池：gen1 的 11 张，外加 2 速 / 1 力 / 1 根 / 1 智
+///
+/// 根卡 `303084` 与池内速卡 `302424` 同为角色 `1129`，两者不能进同一副卡组；
+/// 该约束由 [`enumerate_space`] 按角色实际比对得出，不写死在这里。
+pub const GEN2_V1_CARD_POOL: [CardEntry; 16] = [
+    CardEntry {
+        idrank: 302754,
+        alias: "[天才的乌托邦]东海帝王"
+    },
+    CardEntry {
+        idrank: 302984,
+        alias: "[刀光迸发Clash！]跳舞城"
+    },
+    CardEntry {
+        idrank: 302424,
+        alias: "[改变世界的目光]杏目"
+    },
+    CardEntry {
+        idrank: 302824,
+        alias: "[铭记于心，京之华]气槽"
+    },
+    CardEntry {
+        idrank: 303024,
+        alias: "[永恒的誓言，永恒的光辉]里见光钻"
+    },
+    CardEntry {
+        idrank: 302924,
+        alias: "[响彻吧，两人的凯歌]洛林军歌"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 303004,
+        alias: "[载着热闹的未来奔驰吧！]樱花千代王"
+    },
+    CardEntry {
+        idrank: 302834,
+        alias: "[优雅，闪耀的旅途]美妙姿势"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    },
+    CardEntry {
+        idrank: 303124,
+        alias: "[时而交织的海与空]千明代表"
+    },
+    CardEntry {
+        idrank: 303114,
+        alias: "[宛若指引]乐透心"
+    },
+    CardEntry {
+        idrank: 303084,
+        alias: "[夏空惬意时光]杏目"
+    },
+    CardEntry {
+        idrank: 302774,
+        alias: "[无机的斗志]美浦波旁"
+    },
+    CardEntry {
+        idrank: 303064,
+        alias: "[双手满载，小仓之爱]优秀素质"
+    }
+];
+
+/// `gen2_v1` 的 4 种卡组构成：gen1 的 3 种，外加 2速1力1根1智1友
+pub const GEN2_V1_SHAPES: [DeckShape; 4] = [
+    DeckShape {
+        counts: [3, 1, 0, 0, 1],
+        name: "3速1耐1智1友"
+    },
+    DeckShape {
+        counts: [2, 2, 0, 0, 1],
+        name: "2速2耐1智1友"
+    },
+    DeckShape {
+        counts: [2, 1, 1, 0, 1],
+        name: "2速1耐1力1智1友"
+    },
+    DeckShape {
+        counts: [2, 0, 1, 1, 1],
+        name: "2速1力1根1智1友"
+    }
+];
+
+/// 覆盖扩采用的第二代空间
+pub const GEN2_V1: SpaceVersion = SpaceVersion {
+    name: "gen2_v1",
+    umas: &GEN2_V1_UMAS,
+    cards: &GEN2_V1_CARD_POOL,
+    shapes: &GEN2_V1_SHAPES,
+    required: &[]
+};
+
+/// `gen2_2s1e2w_v1` 的唯一构成：2速1耐2智1友
+///
+/// gen2_v1 的 4 种构成都只带 1 智，本构成（GA 通解卡组的形状）在那一代数据里完全缺席。
+/// gen2 卡池恰有 2 张智卡（302894 / 303064），故每个计划都同时带这两张。
+pub const GEN2_2S1E2W_SHAPES: [DeckShape; 1] = [DeckShape {
+    counts: [2, 1, 0, 0, 2],
+    name: "2速1耐2智1友"
+}];
+
+/// 2速1耐2智 定向补采空间：马娘与卡池同 [`GEN2_V1`]，只换构成
+///
+/// 单独成版本而不是给 gen2_v1 加第 5 种构成：gen2_v1 的计划表是 `index % 4288`
+/// 的语义，追加构成会让既有 R6/R7 数据的 index 全部指向别的组合。
+pub const GEN2_2S1E2W_V1: SpaceVersion = SpaceVersion {
+    name: "gen2_2s1e2w_v1",
+    umas: &GEN2_V1_UMAS,
+    cards: &GEN2_V1_CARD_POOL,
+    shapes: &GEN2_2S1E2W_SHAPES,
+    required: &[]
+};
+
+/// 第三代空间的新马娘：目白善信（目标配置的马娘，此前全部数据为 0 条）
+pub const GEN3_NEW_UMAS: [UmaEntry; 1] = [UmaEntry {
+    game_id: 106402,
+    alias: "目白善信[赤心的驯鹿小姐]"
+}];
+
+/// 第三代卡池：[`GEN2_V1_CARD_POOL`] 原样 16 张，末尾追加速卡待兼诗歌剧
+///
+/// 追加在末尾而不是插进中间：新卡只出现在第三代空间，原有 16 张的相对次序与 gen2 一致，
+/// 读清单时容易对照。待兼诗歌剧是目标卡组里唯一不在 gen2 卡池的卡。
+pub const GEN3_CARD_POOL: [CardEntry; 17] = [
+    CardEntry {
+        idrank: 302754,
+        alias: "[天才的乌托邦]东海帝王"
+    },
+    CardEntry {
+        idrank: 302984,
+        alias: "[刀光迸发Clash！]跳舞城"
+    },
+    CardEntry {
+        idrank: 302424,
+        alias: "[改变世界的目光]杏目"
+    },
+    CardEntry {
+        idrank: 302824,
+        alias: "[铭记于心，京之华]气槽"
+    },
+    CardEntry {
+        idrank: 303024,
+        alias: "[永恒的誓言，永恒的光辉]里见光钻"
+    },
+    CardEntry {
+        idrank: 302924,
+        alias: "[响彻吧，两人的凯歌]洛林军歌"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 303004,
+        alias: "[载着热闹的未来奔驰吧！]樱花千代王"
+    },
+    CardEntry {
+        idrank: 302834,
+        alias: "[优雅，闪耀的旅途]美妙姿势"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    },
+    CardEntry {
+        idrank: 303124,
+        alias: "[时而交织的海与空]千明代表"
+    },
+    CardEntry {
+        idrank: 303114,
+        alias: "[宛若指引]乐透心"
+    },
+    CardEntry {
+        idrank: 303084,
+        alias: "[夏空惬意时光]杏目"
+    },
+    CardEntry {
+        idrank: 302774,
+        alias: "[无机的斗志]美浦波旁"
+    },
+    CardEntry {
+        idrank: 303064,
+        alias: "[双手满载，小仓之爱]优秀素质"
+    },
+    CardEntry {
+        idrank: 303174,
+        alias: "[目的地是温暖之所在]待兼诗歌剧"
+    }
+];
+
+/// 第三代空间的 5 种构成：[`GEN2_V1_SHAPES`] 的 4 种原序，末尾加 2速1耐2智1友
+pub const GEN3_SHAPES: [DeckShape; 5] = [
+    DeckShape {
+        counts: [3, 1, 0, 0, 1],
+        name: "3速1耐1智1友"
+    },
+    DeckShape {
+        counts: [2, 2, 0, 0, 1],
+        name: "2速2耐1智1友"
+    },
+    DeckShape {
+        counts: [2, 1, 1, 0, 1],
+        name: "2速1耐1力1智1友"
+    },
+    DeckShape {
+        counts: [2, 0, 1, 1, 1],
+        name: "2速1力1根1智1友"
+    },
+    DeckShape {
+        counts: [2, 1, 0, 0, 2],
+        name: "2速1耐2智1友"
+    }
+];
+
+/// 目标卡组原样 6 张：作卡池时恰好只组出这一副
+pub const GEN3_USER_DECK: [CardEntry; 6] = [
+    CardEntry {
+        idrank: 303174,
+        alias: "[目的地是温暖之所在]待兼诗歌剧"
+    },
+    CardEntry {
+        idrank: 303124,
+        alias: "[时而交织的海与空]千明代表"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303064,
+        alias: "[双手满载，小仓之爱]优秀素质"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    }
+];
+
+/// 新马娘 + gen2 原卡池：学目白善信自身的局面与决策，不掺新卡
+pub const GEN3_NEWUMA_V1: SpaceVersion = SpaceVersion {
+    name: "gen3_newuma_v1",
+    umas: &GEN3_NEW_UMAS,
+    cards: &GEN2_V1_CARD_POOL,
+    shapes: &GEN3_SHAPES,
+    required: &[]
+};
+
+/// gen2 原 8 马娘 + 必带待兼诗歌剧：学新卡在已有马娘上的作用
+pub const GEN3_NEWCARD_V1: SpaceVersion = SpaceVersion {
+    name: "gen3_newcard_v1",
+    umas: &GEN2_V1_UMAS,
+    cards: &GEN3_CARD_POOL,
+    shapes: &GEN3_SHAPES,
+    required: &[303174]
+};
+
+/// 新马娘 + 必带待兼诗歌剧：实战所需的新马娘 × 新卡组合
+pub const GEN3_NEWBOTH_V1: SpaceVersion = SpaceVersion {
+    name: "gen3_newboth_v1",
+    umas: &GEN3_NEW_UMAS,
+    cards: &GEN3_CARD_POOL,
+    shapes: &GEN3_SHAPES,
+    required: &[303174]
+};
+
+/// 目标配置原样：目白善信 + 目标卡组，恰好 1 个计划
+///
+/// 单独成空间是为了给这一副卡组**定额**预算；它同时也是 [`GEN3_NEWBOTH_V1`] 里的一个计划，
+/// 那边的清单生成须把它从抽样与留出里都排除，避免重复计数或被留出。
+pub const GEN3_USERDECK_V1: SpaceVersion = SpaceVersion {
+    name: "gen3_userdeck_v1",
+    umas: &GEN3_NEW_UMAS,
+    cards: &GEN3_USER_DECK,
+    shapes: &GEN2_2S1E2W_SHAPES,
+    required: &[]
+};
+
+/// 第四代新智卡定向空间的九匹既有马娘，清单冻结且不修改旧空间。
+pub const GEN4_OLD_UMAS: [UmaEntry; 9] = [
+    UmaEntry {
+        game_id: 100603,
+        alias: "小栗帽[芦毛灰姑娘]"
+    },
+    UmaEntry {
+        game_id: 102403,
+        alias: "摩耶重炮[Rock in MewMeow]"
+    },
+    UmaEntry {
+        game_id: 112901,
+        alias: "杏目[The Changer]"
+    },
+    UmaEntry {
+        game_id: 110602,
+        alias: "菱钻奇宝[快乐小音符]"
+    },
+    UmaEntry {
+        game_id: 113101,
+        alias: "放声欢呼"
+    },
+    UmaEntry {
+        game_id: 108702,
+        alias: "真弓快车[不融化的糖果]"
+    },
+    UmaEntry {
+        game_id: 100301,
+        alias: "东海帝王[无上喜悦]"
+    },
+    UmaEntry {
+        game_id: 114101,
+        alias: "神威启示[命运天选之星]"
+    },
+    UmaEntry {
+        game_id: 106402,
+        alias: "目白善信[赤心的驯鹿小姐]"
+    }
+];
+
+/// 第四代新马娘：新鲁道夫象征与新气槽。
+pub const GEN4_NEW_UMAS: [UmaEntry; 2] = [
+    UmaEntry {
+        game_id: 101703,
+        alias: "鲁道夫象征[Adamant Sovereign]"
+    },
+    UmaEntry {
+        game_id: 101803,
+        alias: "气槽[悠久的月阴女神]"
+    }
+];
+
+/// 第四代白仁卡池：冻结的原十七卡加智成田白仁，不含另一张新智。
+pub const GEN4_BRIAN_CARD_POOL: [CardEntry; 18] = [
+    CardEntry {
+        idrank: 302754,
+        alias: "[天才的乌托邦]东海帝王"
+    },
+    CardEntry {
+        idrank: 302984,
+        alias: "[刀光迸发Clash！]跳舞城"
+    },
+    CardEntry {
+        idrank: 302424,
+        alias: "[改变世界的目光]杏目"
+    },
+    CardEntry {
+        idrank: 302824,
+        alias: "[铭记于心，京之华]气槽"
+    },
+    CardEntry {
+        idrank: 303024,
+        alias: "[永恒的誓言，永恒的光辉]里见光钻"
+    },
+    CardEntry {
+        idrank: 302924,
+        alias: "[响彻吧，两人的凯歌]洛林军歌"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 303004,
+        alias: "[载着热闹的未来奔驰吧！]樱花千代王"
+    },
+    CardEntry {
+        idrank: 302834,
+        alias: "[优雅，闪耀的旅途]美妙姿势"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    },
+    CardEntry {
+        idrank: 303124,
+        alias: "[时而交织的海与空]千明代表"
+    },
+    CardEntry {
+        idrank: 303114,
+        alias: "[宛若指引]乐透心"
+    },
+    CardEntry {
+        idrank: 303084,
+        alias: "[夏空惬意时光]杏目"
+    },
+    CardEntry {
+        idrank: 302774,
+        alias: "[无机的斗志]美浦波旁"
+    },
+    CardEntry {
+        idrank: 303064,
+        alias: "[双手满载，小仓之爱]优秀素质"
+    },
+    CardEntry {
+        idrank: 303174,
+        alias: "[目的地是温暖之所在]待兼诗歌剧"
+    },
+    CardEntry {
+        idrank: 303194,
+        alias: "[晚宴]成田白仁"
+    }
+];
+
+/// 第四代爱慕卡池：冻结的原十七卡加智爱慕律动，不含另一张新智。
+pub const GEN4_ADMIRE_CARD_POOL: [CardEntry; 18] = [
+    CardEntry {
+        idrank: 302754,
+        alias: "[天才的乌托邦]东海帝王"
+    },
+    CardEntry {
+        idrank: 302984,
+        alias: "[刀光迸发Clash！]跳舞城"
+    },
+    CardEntry {
+        idrank: 302424,
+        alias: "[改变世界的目光]杏目"
+    },
+    CardEntry {
+        idrank: 302824,
+        alias: "[铭记于心，京之华]气槽"
+    },
+    CardEntry {
+        idrank: 303024,
+        alias: "[永恒的誓言，永恒的光辉]里见光钻"
+    },
+    CardEntry {
+        idrank: 302924,
+        alias: "[响彻吧，两人的凯歌]洛林军歌"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 303004,
+        alias: "[载着热闹的未来奔驰吧！]樱花千代王"
+    },
+    CardEntry {
+        idrank: 302834,
+        alias: "[优雅，闪耀的旅途]美妙姿势"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    },
+    CardEntry {
+        idrank: 303124,
+        alias: "[时而交织的海与空]千明代表"
+    },
+    CardEntry {
+        idrank: 303114,
+        alias: "[宛若指引]乐透心"
+    },
+    CardEntry {
+        idrank: 303084,
+        alias: "[夏空惬意时光]杏目"
+    },
+    CardEntry {
+        idrank: 302774,
+        alias: "[无机的斗志]美浦波旁"
+    },
+    CardEntry {
+        idrank: 303064,
+        alias: "[双手满载，小仓之爱]优秀素质"
+    },
+    CardEntry {
+        idrank: 303174,
+        alias: "[目的地是温暖之所在]待兼诗歌剧"
+    },
+    CardEntry {
+        idrank: 303204,
+        alias: "[冷凛的素瓷人偶]爱慕律动"
+    }
+];
+
+/// 第四代双新智及新马娘卡池：冻结的原十七卡加两张新智。
+pub const GEN4_CARD_POOL: [CardEntry; 19] = [
+    CardEntry {
+        idrank: 302754,
+        alias: "[天才的乌托邦]东海帝王"
+    },
+    CardEntry {
+        idrank: 302984,
+        alias: "[刀光迸发Clash！]跳舞城"
+    },
+    CardEntry {
+        idrank: 302424,
+        alias: "[改变世界的目光]杏目"
+    },
+    CardEntry {
+        idrank: 302824,
+        alias: "[铭记于心，京之华]气槽"
+    },
+    CardEntry {
+        idrank: 303024,
+        alias: "[永恒的誓言，永恒的光辉]里见光钻"
+    },
+    CardEntry {
+        idrank: 302924,
+        alias: "[响彻吧，两人的凯歌]洛林军歌"
+    },
+    CardEntry {
+        idrank: 303044,
+        alias: "[其执念如怒涛般汹涌]名将怒涛"
+    },
+    CardEntry {
+        idrank: 303004,
+        alias: "[载着热闹的未来奔驰吧！]樱花千代王"
+    },
+    CardEntry {
+        idrank: 302834,
+        alias: "[优雅，闪耀的旅途]美妙姿势"
+    },
+    CardEntry {
+        idrank: 302894,
+        alias: "[Innovator]青春永驻"
+    },
+    CardEntry {
+        idrank: 303054,
+        alias: "[一杯怀旧之味]骏川手纲"
+    },
+    CardEntry {
+        idrank: 303124,
+        alias: "[时而交织的海与空]千明代表"
+    },
+    CardEntry {
+        idrank: 303114,
+        alias: "[宛若指引]乐透心"
+    },
+    CardEntry {
+        idrank: 303084,
+        alias: "[夏空惬意时光]杏目"
+    },
+    CardEntry {
+        idrank: 302774,
+        alias: "[无机的斗志]美浦波旁"
+    },
+    CardEntry {
+        idrank: 303064,
+        alias: "[双手满载，小仓之爱]优秀素质"
+    },
+    CardEntry {
+        idrank: 303174,
+        alias: "[目的地是温暖之所在]待兼诗歌剧"
+    },
+    CardEntry {
+        idrank: 303194,
+        alias: "[晚宴]成田白仁"
+    },
+    CardEntry {
+        idrank: 303204,
+        alias: "[冷凛的素瓷人偶]爱慕律动"
+    }
+];
+
+/// 既有九马必带新智白仁，包含单智及新旧双智构成。
+pub const GEN4_BRIAN_V1: SpaceVersion = SpaceVersion {
+    name: "gen4_brian_v1",
+    umas: &GEN4_OLD_UMAS,
+    cards: &GEN4_BRIAN_CARD_POOL,
+    shapes: &GEN3_SHAPES,
+    required: &[303194]
+};
+
+/// 既有九马必带新智爱慕，包含单智及新旧双智构成。
+pub const GEN4_ADMIRE_V1: SpaceVersion = SpaceVersion {
+    name: "gen4_admire_v1",
+    umas: &GEN4_OLD_UMAS,
+    cards: &GEN4_ADMIRE_CARD_POOL,
+    shapes: &GEN3_SHAPES,
+    required: &[303204]
+};
+
+/// 既有九马同时带两张新智，单列预算且不与两个单新智空间重叠。
+pub const GEN4_DUALWIS_V1: SpaceVersion = SpaceVersion {
+    name: "gen4_dualwis_v1",
+    umas: &GEN4_OLD_UMAS,
+    cards: &GEN4_CARD_POOL,
+    shapes: &GEN2_2S1E2W_SHAPES,
+    required: &[303194, 303204]
+};
+
+/// 两匹新马娘覆盖完整十九卡池，无必带卡；沿用普通无购买增益建局。
+pub const GEN4_NEWUMA_V1: SpaceVersion = SpaceVersion {
+    name: "gen4_newuma_v1",
+    umas: &GEN4_NEW_UMAS,
+    cards: &GEN4_CARD_POOL,
+    shapes: &GEN3_SHAPES,
+    required: &[]
+};
+
+/// 全部已注册的具名空间版本
+///
+/// gen1 **不在此表内**：它没有版本名，走 [`SamplingSpace::gen1`] 的原路径，
+/// 身份字段与既有数据保持一致。
+pub const SPACE_VERSIONS: &[SpaceVersion] = &[
+    GEN2_V1,
+    GEN2_2S1E2W_V1,
+    GEN3_NEWUMA_V1,
+    GEN3_NEWCARD_V1,
+    GEN3_NEWBOTH_V1,
+    GEN3_USERDECK_V1,
+    GEN4_BRIAN_V1,
+    GEN4_ADMIRE_V1,
+    GEN4_DUALWIS_V1,
+    GEN4_NEWUMA_V1
+];
+
+/// 按版本名取出已注册的空间版本
+///
+/// # 错误
+///
+/// 版本名未注册时报错，并列出全部可用版本。
+pub fn space_version_by_name(name: &str) -> Result<&'static SpaceVersion> {
+    SPACE_VERSIONS.iter().find(|v| v.name == name).ok_or_else(|| {
+        let all: Vec<&str> = SPACE_VERSIONS.iter().map(|v| v.name).collect();
+        anyhow::anyhow!("未注册的采样空间版本 `{name}`，可用: {all:?}")
+    })
+}
+
+
 /// 该阶段的决策点能否作为搜索根局面
 ///
 /// 白名单而非黑名单，因为「合法阶段」是可枚举的、而「嵌套决策」不是。
@@ -302,6 +1011,63 @@ pub struct DeckPlan {
     pub shape: &'static str
 }
 
+/// 解析命令行的构成串 `速,耐,力,根,智`
+///
+/// # 错误
+///
+/// 项数不是 5、某项不是非负整数，或五项合计不为 5 时报错。合计不为 5 必须报错
+/// 而不是补齐：拉面杯的普通卡位恒为 5 张，猜用户想补哪一类只会静默跑错构成。
+pub fn parse_shape(text: &str) -> Result<[usize; 5]> {
+    let parts: Vec<&str> = text.split(',').map(str::trim).collect();
+    ensure!(parts.len() == 5, "构成需要 5 个数字（速,耐,力,根,智），实得 {}", parts.len());
+    let mut counts = [0usize; 5];
+    for (i, part) in parts.iter().enumerate() {
+        counts[i] = part
+            .parse::<usize>()
+            .with_context(|| format!("构成第 {} 项 `{part}` 不是非负整数", i + 1))?;
+    }
+    let total: usize = counts.iter().sum();
+    ensure!(total == 5, "构成五项合计必须为 5（友人卡固定 1 张不计入），实得 {total}");
+    Ok(counts)
+}
+
+/// 把构成计数格式化成 `2速1耐2智1友`，与 [`GEN1_SHAPES`] 的命名习惯一致
+pub fn format_shape_name(counts: &[usize; 5]) -> String {
+    const TYPE_NAMES: [&str; 5] = ["速", "耐", "力", "根", "智"];
+    let mut name = String::new();
+    for (i, &n) in counts.iter().enumerate() {
+        if n > 0 {
+            name.push_str(&n.to_string());
+            name.push_str(TYPE_NAMES[i]);
+        }
+    }
+    name.push_str("1友");
+    name
+}
+
+/// 按「构成 + 追加卡」的命令行口径构造采样空间
+///
+/// `shape` 为 `None` 时返回第一代空间；给了 `shape` 则走 [`SamplingSpace::custom`]，
+/// 只枚举该构成并可追加卡池。采集与基准共用本函数，两边的分布外口径不能各写一份。
+///
+/// # 错误
+///
+/// 构成解析失败、只给追加卡不给构成，或空间枚举失败时报错。
+pub fn space_from_cli(shape: Option<&str>, extra_cards: &[u32]) -> Result<SamplingSpace> {
+    let Some(text) = shape else {
+        ensure!(
+            extra_cards.is_empty(),
+            "追加卡必须与构成同用：默认口径要与教师数据同分布，不能私自扩卡池"
+        );
+        return SamplingSpace::gen1();
+    };
+    let counts = parse_shape(text)?;
+    // `DeckShape::name` 要求 'static。CLI 参数活到进程结束，泄漏一个短字符串
+    // 换来输出里显示真实构成名，比塞一个占位常量更有用。
+    let name: &'static str = Box::leak(format_shape_name(&counts).into_boxed_str());
+    SamplingSpace::custom(extra_cards, DeckShape { counts, name })
+}
+
 /// 第一代继承因子（沿用 `bench_config.toml` 现值，第一代固定不随机）
 pub fn gen1_inherit() -> InheritInfo {
     InheritInfo {
@@ -326,7 +1092,7 @@ impl SamplingSpace {
     pub fn gen1() -> Result<Self> {
         let pool: Vec<u32> = GEN1_CARD_POOL.iter().map(|entry| entry.idrank).collect();
         Ok(Self {
-            plans: enumerate_space(&pool, &GEN1_SHAPES)?
+            plans: enumerate_space(&GEN1_UMAS, &pool, &GEN1_SHAPES)?
         })
     }
 
@@ -353,8 +1119,34 @@ impl SamplingSpace {
             }
         }
         Ok(Self {
-            plans: enumerate_space(&pool, std::slice::from_ref(&shape))?
+            plans: enumerate_space(&GEN1_UMAS, &pool, std::slice::from_ref(&shape))?
         })
+    }
+
+    /// 按**具名版本**构造采样空间
+    ///
+    /// 与 [`Self::gen1`] / [`Self::custom`] 的区别只在身份口径：马娘、卡池、构成
+    /// 三份清单都来自 [`SpaceVersion`]，采集与导出把它们**原样**记进 manifest，
+    /// 续跑与合并靠逐字段比较，不依赖枚举指纹。合法性判据仍共用
+    /// [`enumerate_space`]，故跨空间的分数口径不变。
+    ///
+    /// # 错误
+    ///
+    /// 卡池数据异常、必带卡不在卡池里，或该版本组不出任何合法卡组时报错。
+    pub fn from_version(version: &SpaceVersion) -> Result<Self> {
+        let pool: Vec<u32> = version.cards.iter().map(|entry| entry.idrank).collect();
+        for card in version.required {
+            if !pool.contains(card) {
+                bail!("空间 {} 的必带卡 {card} 不在卡池里", version.name);
+            }
+        }
+        let mut plans = enumerate_space(version.umas, &pool, version.shapes)?;
+        // 必带卡只做保序过滤：不含它的计划整条去掉，其余计划的相对次序不变
+        plans.retain(|plan| version.required.iter().all(|card| plan.deck.contains(card)));
+        if plans.is_empty() {
+            bail!("空间 {} 在必带卡 {:?} 约束下没有任何计划", version.name, version.required);
+        }
+        Ok(Self { plans })
     }
 
     /// 组合总数
@@ -433,7 +1225,7 @@ impl SamplingSpace {
 /// # 错误
 ///
 /// 卡片查不到、类型不受支持、卡池的友人卡不是恰好 1 张，或组不出任何卡组时报错。
-fn enumerate_space(pool: &[u32], shapes: &[DeckShape]) -> Result<Vec<DeckPlan>> {
+fn enumerate_space(umas: &[UmaEntry], pool: &[u32], shapes: &[DeckShape]) -> Result<Vec<DeckPlan>> {
     let data = global!(GAMEDATA);
 
     // 按类型分桶；友人卡单独拎出
@@ -455,9 +1247,21 @@ fn enumerate_space(pool: &[u32], shapes: &[DeckShape]) -> Result<Vec<DeckPlan>> 
         bail!("卡池未包含友人卡，拉面杯必须携带新友人卡");
     };
 
+    // 卡池的 `(idrank, chara_id)` 对照表，只查一次；后面的冲突判定全部走它
+    let mut chara_of: Vec<(u32, u32)> = Vec::with_capacity(pool.len());
+    for &idrank in pool {
+        chara_of.push((idrank, data.get_card(idrank / 10)?.chara_id));
+    }
+
+    // 友人卡也参与角色冲突判定：它同样是一张具体角色的支援卡
+    let friend_chara = data.get_card(friend / 10)?.chara_id;
+
     let mut plans = Vec::new();
-    for uma in GEN1_UMAS.iter() {
+    for uma in umas.iter() {
         // 马娘与同角色支援卡不可共存
+        if friend_chara == uma.chara_id() {
+            continue;
+        }
         let mut usable: [Vec<u32>; 5] = Default::default();
         for (t, bucket) in by_type.iter().enumerate() {
             for &idrank in bucket {
@@ -466,11 +1270,16 @@ fn enumerate_space(pool: &[u32], shapes: &[DeckShape]) -> Result<Vec<DeckPlan>> 
                 }
             }
         }
+        // 支援卡之间同样不能同角色（例：速杏目 302424 与根杏目 303084 都是 1129）。
+        // 这条**不是**「不同类型之间才要查」：它按角色查整副卡，与类型无关。
         for shape in shapes.iter() {
             for normals in enumerate_decks(&usable, &shape.counts) {
                 let mut deck = [0u32; 6];
                 deck[..5].copy_from_slice(&normals);
                 deck[5] = friend;
+                if has_chara_clash(&deck, &chara_of)? {
+                    continue;
+                }
                 plans.push(DeckPlan {
                     uma: uma.game_id,
                     deck,
@@ -483,6 +1292,31 @@ fn enumerate_space(pool: &[u32], shapes: &[DeckShape]) -> Result<Vec<DeckPlan>> 
         bail!("采样空间为空：卡池与构成无法组出任何合法卡组");
     }
     Ok(plans)
+}
+
+/// 一副普通卡里是否存在两张同角色的支援卡
+///
+/// 游戏规则禁止同角色的两张支援卡同时上阵，**与卡片类型无关**——
+/// 速杏目 `302424` 与根杏目 `303084` 属于不同类型，但角色同为 `1129`，
+/// 仍然不能共存。按类型分桶枚举天然只能挡住同桶内的重复，故必须另做这一步。
+///
+/// # 错误
+///
+/// 卡不在对照表里时报错（调用方只应传入本空间卡池内的卡）。
+fn has_chara_clash(cards: &[u32], chara_of: &[(u32, u32)]) -> Result<bool> {
+    let mut seen: Vec<u32> = Vec::with_capacity(cards.len());
+    for card in cards {
+        let chara = chara_of
+            .iter()
+            .find(|(idrank, _)| idrank == card)
+            .map(|(_, chara)| *chara)
+            .ok_or_else(|| anyhow::anyhow!("卡 {card} 不在本空间卡池的角色对照表里"))?;
+        if seen.contains(&chara) {
+            return Ok(true);
+        }
+        seen.push(chara);
+    }
+    Ok(false)
 }
 
 /// 从各类型可用卡中按张数要求枚举全部普通卡组合（结果长度恒为 5）
@@ -860,7 +1694,7 @@ pub fn sample_from_spec(spec: SampleSpec) -> Result<SampleOutcome> {
 mod tests {
     use std::collections::{BTreeSet, HashMap};
 
-    use anyhow::{Result, anyhow, bail};
+    use anyhow::{Result, anyhow, bail, ensure};
 
     use super::*;
     use crate::{
@@ -875,6 +1709,453 @@ mod tests {
         std::env::set_current_dir(workspace_root)?;
         let _ = init_test_logger("error");
         let _ = init_global();
+        Ok(())
+    }
+
+    /// 取一张卡的角色 ID（测试专用小工具）
+    fn chara_of_card(idrank: u32) -> Result<u32> {
+        Ok(global!(GAMEDATA).get_card(idrank / 10)?.chara_id)
+    }
+
+    /// gen1 卡池内 11 张卡角色两两不同 —— 卡–卡冲突过滤对旧空间必为空操作
+    ///
+    /// 这是「旧空间没有被改变」的**结构性证明**：过滤器只在一副卡里出现重复角色时
+    /// 才丢弃计划；若卡池本身就没有任何一对同角色卡，任何 5 张子集都不可能重复，
+    /// 过滤分支永远不会命中，枚举结果与顺序都与加过滤之前逐位相同。
+    #[test]
+    fn test_gen1_pool_charas_pairwise_distinct() -> Result<()> {
+        setup()?;
+        let mut seen: Vec<(u32, u32)> = Vec::new();
+        for entry in GEN1_CARD_POOL.iter() {
+            let chara = chara_of_card(entry.idrank)?;
+            if let Some((other, _)) = seen.iter().find(|(_, c)| *c == chara) {
+                bail!("gen1 卡池里 {} 与 {other} 同角色 {chara}", entry.idrank);
+            }
+            println!("  {} -> 角色 {chara}", entry.idrank);
+            seen.push((entry.idrank, chara));
+        }
+        let space = SamplingSpace::gen1()?;
+        println!("gen1 卡池 {} 张、角色互不相同；枚举 {} 个组合", GEN1_CARD_POOL.len(), space.len());
+        if space.len() != 525 {
+            bail!("gen1 组合数变了: {} != 525", space.len());
+        }
+        Ok(())
+    }
+
+    /// 按行打印 gen1 的全部计划，供与独立实现逐行、逐字段、逐顺序比对
+    ///
+    /// 每行形如 `GEN1PLAN <序号> <马娘> <卡1..卡6> <构成名>`，故外部只需做字节比较，
+    /// 不需要任何指纹。
+    #[test]
+    fn test_gen1_plan_dump() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::gen1()?;
+        for (i, plan) in space.plans().iter().enumerate() {
+            let deck: Vec<String> = plan.deck.iter().map(|c| c.to_string()).collect();
+            println!("GEN1PLAN {i} {} {} {}", plan.uma, deck.join(","), plan.shape);
+        }
+        println!("GEN1PLAN_COUNT {}", space.len());
+        Ok(())
+    }
+
+    /// 同理打印 gen2_v1 的全部计划
+    #[test]
+    fn test_gen2_v1_plan_dump() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::from_version(&GEN2_V1)?;
+        for (i, plan) in space.plans().iter().enumerate() {
+            let deck: Vec<String> = plan.deck.iter().map(|c| c.to_string()).collect();
+            println!("GEN2PLAN {i} {} {} {}", plan.uma, deck.join(","), plan.shape);
+        }
+        println!("GEN2PLAN_COUNT {}", space.len());
+        Ok(())
+    }
+
+    /// 同理打印 gen2_2s1e2w_v1 的全部计划
+    #[test]
+    fn test_gen2_2s1e2w_plan_dump() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::from_version(&GEN2_2S1E2W_V1)?;
+        for (i, plan) in space.plans().iter().enumerate() {
+            let deck: Vec<String> = plan.deck.iter().map(|c| c.to_string()).collect();
+            println!("GEN2PLAN {i} {} {} {}", plan.uma, deck.join(","), plan.shape);
+        }
+        println!("GEN2PLAN_COUNT {}", space.len());
+        Ok(())
+    }
+
+    /// 打印某个具名空间的计划原文（`GEN2PLAN` 行），供清单生成器与独立 Python 枚举逐字段对照
+    ///
+    /// # 错误
+    ///
+    /// 空间构造失败时报错。
+    fn dump_version_plans(version: &SpaceVersion) -> Result<()> {
+        let space = SamplingSpace::from_version(version)?;
+        for (i, plan) in space.plans().iter().enumerate() {
+            let deck: Vec<String> = plan.deck.iter().map(|c| c.to_string()).collect();
+            println!("GEN2PLAN {i} {} {} {}", plan.uma, deck.join(","), plan.shape);
+        }
+        println!("GEN2PLAN_COUNT {}", space.len());
+        Ok(())
+    }
+
+    /// `gen3_newuma_v1` 计划原文
+    #[test]
+    fn test_gen3_newuma_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN3_NEWUMA_V1)
+    }
+
+    /// `gen3_newcard_v1` 计划原文
+    #[test]
+    fn test_gen3_newcard_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN3_NEWCARD_V1)
+    }
+
+    /// `gen3_newboth_v1` 计划原文
+    #[test]
+    fn test_gen3_newboth_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN3_NEWBOTH_V1)
+    }
+
+    /// `gen3_userdeck_v1` 计划原文
+    #[test]
+    fn test_gen3_userdeck_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN3_USERDECK_V1)
+    }
+
+    /// `gen4_brian_v1` 计划原文。
+    #[test]
+    fn test_gen4_brian_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN4_BRIAN_V1)
+    }
+
+    /// `gen4_admire_v1` 计划原文。
+    #[test]
+    fn test_gen4_admire_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN4_ADMIRE_V1)
+    }
+
+    /// `gen4_dualwis_v1` 计划原文。
+    #[test]
+    fn test_gen4_dualwis_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN4_DUALWIS_V1)
+    }
+
+    /// `gen4_newuma_v1` 计划原文。
+    #[test]
+    fn test_gen4_newuma_plan_dump() -> Result<()> {
+        setup()?;
+        dump_version_plans(&GEN4_NEWUMA_V1)
+    }
+
+    /// 第四代空间逐字段检查角色互斥、类型、新智覆盖及跨空间不重复。
+    ///
+    /// 每个马娘与构成还实际建局一次，确认初始状态没有购买增益。
+    #[test]
+    fn test_gen4_spaces_all_legal_without_purchase_buffs() -> Result<()> {
+        setup()?;
+        let mut all_plans = BTreeSet::new();
+        // 期望计数来自独立 Python 枚举，按 cardDB 类型与角色实际字段计算。
+        for (version, expected) in [
+            (&GEN4_BRIAN_V1, &[1400usize, 308, 1232, 434, 1232][..]),
+            (&GEN4_ADMIRE_V1, &[1400usize, 308, 1232, 434, 1232][..]),
+            (&GEN4_DUALWIS_V1, &[616usize][..]),
+            (&GEN4_NEWUMA_V1, &[1120usize, 256, 1024, 392, 768][..])
+        ] {
+            let registered = space_version_by_name(version.name)?;
+            ensure!(registered.umas == version.umas && registered.cards == version.cards
+                && registered.shapes == version.shapes && registered.required == version.required,
+                "{} 的注册清单与冻结空间不符", version.name);
+            let space = SamplingSpace::from_version(version)?;
+            ensure!(!space.is_empty(), "{} 没有计划", version.name);
+            let actual: Vec<usize> = version.shapes.iter()
+                .map(|shape| space.plans().iter().filter(|plan| plan.shape == shape.name).count())
+                .collect();
+            ensure!(actual == expected, "{} 构成计数 {actual:?} 不等于独立枚举 {expected:?}", version.name);
+            let mut seen_umas = BTreeSet::new();
+            let mut seen_shapes = BTreeSet::new();
+            let mut built = BTreeSet::new();
+            let mut new_wis = [0usize; 2];
+            let mut old_wis_only = 0usize;
+            for plan in space.plans() {
+                ensure!(version.umas.iter().any(|u| u.game_id == plan.uma),
+                    "{} 出现未登记马娘 {}", version.name, plan.uma);
+                seen_umas.insert(plan.uma);
+                seen_shapes.insert(plan.shape);
+                let mut deck = plan.deck;
+                deck.sort_unstable();
+                ensure!(all_plans.insert((plan.uma, deck)),
+                    "{} 存在空间内或跨空间重复计划 {plan:?}", version.name);
+                let mut charas = BTreeSet::from([plan.uma / 100]);
+                let mut counts = [0usize; 5];
+                for (i, &card) in plan.deck.iter().enumerate() {
+                    ensure!(version.cards.iter().any(|c| c.idrank == card),
+                        "{} 包含未登记卡 {card}", version.name);
+                    ensure!(card != 303184 && card != 303214,
+                        "{} 混入未授权的新根卡或力卡 {card}", version.name);
+                    ensure!(charas.insert(chara_of_card(card)?),
+                        "{} 计划 {plan:?} 存在同角色冲突", version.name);
+                    let ty = global!(GAMEDATA).get_card(card / 10)?.card_type;
+                    if i < 5 {
+                        ensure!((0..5).contains(&ty), "普通卡位置出现类型 {ty}");
+                        counts[ty as usize] += 1;
+                    } else {
+                        ensure!(ty == CARD_TYPE_FRIEND, "末位 {card} 不是友人卡");
+                    }
+                }
+                let shape = version.shapes.iter().find(|s| s.name == plan.shape)
+                    .ok_or_else(|| anyhow!("{} 计划构成未登记：{}", version.name, plan.shape))?;
+                ensure!(counts == shape.counts, "计划 {plan:?} 类型分布错误：{counts:?}");
+                ensure!(version.required.iter().all(|card| plan.deck.contains(card)),
+                    "{} 计划缺失必带卡：{plan:?}", version.name);
+                ensure!(plan.uma != 101803 || !plan.deck.contains(&302824),
+                    "新气槽不能带速气槽：{plan:?}");
+                let brian = plan.deck.contains(&303194);
+                let admire = plan.deck.contains(&303204);
+                new_wis[0] += usize::from(brian);
+                new_wis[1] += usize::from(admire);
+                old_wis_only += usize::from(!brian && !admire);
+                if built.insert((plan.uma, plan.shape)) {
+                    let game = RamenGame::newgame(plan.uma, &plan.deck, gen1_inherit())?;
+                    let flags = &game.uma.flags;
+                    ensure!(!flags.xiaoqie && flags.positive_thinking_count == 0 && flags.lucky_count == 0,
+                        "{} 开局包含购买增益：{flags:?}", version.name);
+                }
+            }
+            ensure!(seen_umas.len() == version.umas.len(), "{} 马娘覆盖不全", version.name);
+            ensure!(seen_shapes.len() == version.shapes.len(), "{} 构成覆盖不全", version.name);
+            match version.name {
+                "gen4_brian_v1" => ensure!(new_wis == [space.len(), 0], "白仁空间新智覆盖错误"),
+                "gen4_admire_v1" => ensure!(new_wis == [0, space.len()], "爱慕空间新智覆盖错误"),
+                "gen4_dualwis_v1" => ensure!(new_wis == [space.len(), space.len()], "双新智覆盖错误"),
+                "gen4_newuma_v1" => ensure!(new_wis.iter().all(|n| *n > 0) && old_wis_only > 0,
+                    "新马娘空间应同时覆盖旧智与两张新智"),
+                _ => bail!("意外的第四代空间 {}", version.name)
+            }
+            println!("{}：{} 个合法计划，{} 匹马，{} 种构成，新智覆盖 {new_wis:?}，{} 次无购买增益建局",
+                version.name, space.len(), seen_umas.len(), seen_shapes.len(), built.len());
+        }
+        println!("四空间共 {} 个不重复的马娘卡组，全部按实际字段检查", all_plans.len());
+        Ok(())
+    }
+
+    /// 第三代四个空间：规模与独立 Python 枚举一致，逐计划合法且满足必带卡
+    ///
+    /// 期望规模来自另写的独立枚举脚本
+    /// （按 cardDB 类型与角色唯一规则，与本文件实现无共享代码）：
+    /// newuma 644 / newcard 1776 / newboth 236 / userdeck 1。
+    /// 另核对：既有两个 gen2 空间的规模不受 `required` 字段影响；目标卡组
+    /// 恰是 userdeck 的唯一计划，且确实出现在 newboth 里（清单生成须排除它）。
+    #[test]
+    fn test_gen3_spaces_all_legal() -> Result<()> {
+        setup()?;
+        let gen2 = SamplingSpace::from_version(&GEN2_V1)?.len();
+        let w2 = SamplingSpace::from_version(&GEN2_2S1E2W_V1)?.len();
+        println!("gen2_v1 {gen2} / gen2_2s1e2w_v1 {w2}");
+        if gen2 != 4288 || w2 != 420 {
+            bail!("既有空间规模变了：gen2_v1 {gen2}（应 4288）/ gen2_2s1e2w_v1 {w2}（应 420）");
+        }
+        let user_deck: Vec<u32> = GEN3_USER_DECK.iter().map(|c| c.idrank).collect();
+        for (version, expect) in [
+            (&GEN3_NEWUMA_V1, 644usize),
+            (&GEN3_NEWCARD_V1, 1776),
+            (&GEN3_NEWBOTH_V1, 236),
+            (&GEN3_USERDECK_V1, 1)
+        ] {
+            let space = SamplingSpace::from_version(version)?;
+            println!("{} 共 {} 个组合", version.name, space.len());
+            if space.len() != expect {
+                bail!("{} 组合数 {} 与独立枚举的 {expect} 不符", version.name, space.len());
+            }
+            for plan in space.plans() {
+                let mut charas: Vec<u32> = vec![plan.uma / 100];
+                let mut counts = [0usize; 5];
+                for (i, &card) in plan.deck.iter().enumerate() {
+                    let chara = chara_of_card(card)?;
+                    if charas.contains(&chara) {
+                        bail!("{} 计划 {plan:?} 角色 {chara} 重复（含马娘）", version.name);
+                    }
+                    charas.push(chara);
+                    let ty = global!(GAMEDATA).get_card(card / 10)?.card_type;
+                    if i < 5 {
+                        counts[ty as usize] += 1;
+                    } else if ty != CARD_TYPE_FRIEND {
+                        bail!("{} 计划 {plan:?} 末位 {card} 不是友人卡", version.name);
+                    }
+                }
+                let shape = version
+                    .shapes
+                    .iter()
+                    .find(|s| s.name == plan.shape)
+                    .ok_or_else(|| anyhow::anyhow!("{} 计划 {plan:?} 的构成不在版本清单里", version.name))?;
+                if counts != shape.counts {
+                    bail!("{} 计划 {plan:?} 类型分布 {counts:?} 与构成 {} 不符", version.name, shape.name);
+                }
+                if !version.required.iter().all(|c| plan.deck.contains(c)) {
+                    bail!("{} 计划 {plan:?} 缺必带卡 {:?}", version.name, version.required);
+                }
+            }
+            println!("  全部计划逐字段合法、满足必带卡 {:?}", version.required);
+        }
+        let only = SamplingSpace::from_version(&GEN3_USERDECK_V1)?;
+        let plan = &only.plans()[0];
+        let mut plan_sorted = plan.deck.to_vec();
+        plan_sorted.sort_unstable();
+        let mut user_sorted = user_deck.clone();
+        user_sorted.sort_unstable();
+        if plan.uma != 106402 || plan_sorted != user_sorted {
+            bail!("userdeck 的唯一计划 {plan:?} 不是实战配置");
+        }
+        let both = SamplingSpace::from_version(&GEN3_NEWBOTH_V1)?;
+        let sorted_user = user_sorted;
+        let hits = both
+            .plans()
+            .iter()
+            .filter(|p| {
+                let mut d = p.deck.to_vec();
+                d.sort_unstable();
+                p.uma == 106402 && d == sorted_user
+            })
+            .count();
+        println!("实战卡组在 newboth 中出现 {hits} 次");
+        if hits != 1 {
+            bail!("实战卡组在 newboth 中应恰好出现 1 次，实得 {hits}");
+        }
+        Ok(())
+    }
+
+    /// `gen2_2s1e2w_v1` 空间：规模符合手算，且每个计划都是 2速1耐2智1友、角色两两不同
+    ///
+    /// 手算：8 速卡里帝王 302754、速杏目 302424 各与一个马娘同角色；
+    /// 6 个马娘 C(8,2)=28 对速卡、帝王与杏目两马娘 C(7,2)=21 对，均 ×2 张耐卡 ×1 种智卡组合，
+    /// 合计 6×56 + 2×42 = 420。
+    #[test]
+    fn test_gen2_2s1e2w_space_all_legal() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::from_version(&GEN2_2S1E2W_V1)?;
+        println!("gen2_2s1e2w_v1 共 {} 个组合", space.len());
+        if space.len() != 420 {
+            bail!("组合数 {} 与手算的 420 不符", space.len());
+        }
+        for plan in space.plans() {
+            let uma_chara = plan.uma / 100;
+            let mut charas: Vec<u32> = vec![uma_chara];
+            let mut counts = [0usize; 5];
+            for (i, &card) in plan.deck.iter().enumerate() {
+                let chara = chara_of_card(card)?;
+                if charas.contains(&chara) {
+                    bail!("计划 {plan:?} 里角色 {chara} 重复（含马娘）");
+                }
+                charas.push(chara);
+                let ty = global!(GAMEDATA).get_card(card / 10)?.card_type;
+                if i < 5 {
+                    counts[ty as usize] += 1;
+                } else if ty != CARD_TYPE_FRIEND {
+                    bail!("计划 {plan:?} 末位 {card} 不是友人卡");
+                }
+            }
+            if counts != [2, 1, 0, 0, 2] || plan.shape != "2速1耐2智1友" {
+                bail!("计划 {plan:?} 类型分布 {counts:?} 不是 2速1耐2智");
+            }
+            if !(plan.deck.contains(&302894) && plan.deck.contains(&303064)) {
+                bail!("计划 {plan:?} 没有同时带两张智卡");
+            }
+        }
+        println!("全部 {} 个计划逐字段合法", space.len());
+        Ok(())
+    }
+
+    /// `gen2_v1` 空间：规模符合手算，且每个计划逐字段合法
+    ///
+    /// 合法性逐条查：无重复卡、6 张卡角色两两不同、无一张与马娘同角色、
+    /// 前 5 张的类型分布等于所属构成、末位是友人卡。
+    #[test]
+    fn test_gen2_v1_space_all_legal() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::from_version(&GEN2_V1)?;
+        println!("gen2_v1 共 {} 个组合", space.len());
+        if space.len() != 4288 {
+            bail!("gen2_v1 组合数 {} 与手算的 4288 不符", space.len());
+        }
+        let mut per_shape: Vec<(&str, usize)> = Vec::new();
+        for plan in space.plans() {
+            let uma_chara = plan.uma / 100;
+            let mut charas: Vec<u32> = Vec::new();
+            let mut counts = [0usize; 5];
+            for (i, &card) in plan.deck.iter().enumerate() {
+                if plan.deck.iter().filter(|c| **c == card).count() != 1 {
+                    bail!("计划 {plan:?} 里 {card} 重复");
+                }
+                let chara = chara_of_card(card)?;
+                if chara == uma_chara {
+                    bail!("计划 {plan:?} 的 {card} 与马娘同角色 {chara}");
+                }
+                if charas.contains(&chara) {
+                    bail!("计划 {plan:?} 里有两张角色 {chara} 的卡");
+                }
+                charas.push(chara);
+                let ty = global!(GAMEDATA).get_card(card / 10)?.card_type;
+                if i < 5 {
+                    if !(0..5).contains(&ty) {
+                        bail!("计划 {plan:?} 的第 {i} 张 {card} 类型 {ty} 不是普通卡");
+                    }
+                    counts[ty as usize] += 1;
+                } else if ty != CARD_TYPE_FRIEND {
+                    bail!("计划 {plan:?} 末位 {card} 类型 {ty} 不是友人卡");
+                }
+            }
+            let shape = GEN2_V1_SHAPES
+                .iter()
+                .find(|s| s.name == plan.shape)
+                .ok_or_else(|| anyhow::anyhow!("计划 {plan:?} 的构成名不在 gen2_v1 构成表里"))?;
+            if shape.counts != counts {
+                bail!("计划 {plan:?} 实际类型分布 {counts:?} 与构成 {:?} 不符", shape.counts);
+            }
+            match per_shape.iter_mut().find(|(n, _)| *n == plan.shape) {
+                Some((_, n)) => *n += 1,
+                None => per_shape.push((plan.shape, 1))
+            }
+        }
+        for (name, n) in &per_shape {
+            println!("  构成 {name}: {n} 个");
+        }
+        println!("全部 {} 个计划逐字段合法", space.len());
+        Ok(())
+    }
+
+    /// 速杏目与根杏目（同角色 1129）绝不同时出现
+    #[test]
+    fn test_gen2_v1_rejects_same_chara_pair() -> Result<()> {
+        setup()?;
+        let space = SamplingSpace::from_version(&GEN2_V1)?;
+        let clash = space
+            .plans()
+            .iter()
+            .filter(|p| p.deck.contains(&302424) && p.deck.contains(&303084))
+            .count();
+        println!("同时含 302424(速杏目) 与 303084(根杏目) 的计划 {clash} 个");
+        let with_root = space.plans().iter().filter(|p| p.deck.contains(&303084)).count();
+        println!("含根卡 303084 的计划 {with_root} 个");
+        if clash != 0 {
+            bail!("卡–卡同角色冲突未被拦住");
+        }
+        Ok(())
+    }
+
+    /// 六张卡统一判定，友人所在的末位不能绕过同角色检查。
+    #[test]
+    fn test_gen2_friend_in_chara_check() -> Result<()> {
+        let identities = [(10, 1), (20, 2), (30, 3), (40, 4), (50, 5), (60, 1)];
+        let blocked = has_chara_clash(&[10, 20, 30, 40, 50, 60], &identities)?;
+        println!("末位友人与第一卡同角色被拒绝={blocked}");
+        if !blocked { bail!("友人末位绕过角色检查"); }
         Ok(())
     }
 
