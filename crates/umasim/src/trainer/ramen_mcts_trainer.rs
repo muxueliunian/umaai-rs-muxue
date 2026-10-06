@@ -1406,14 +1406,17 @@ mod tests {
         // 上游同用例写 64151 / [3337,2238,1820,1184,1217] / 8253，那是 PT 轴的数字。
         // 2026-09-25 重抓：合入上游友人出行配额 [0,3,5] + 完成硬门限，本地 Score 轴实测
         // （rayon 4 / 8 线程逐位相同）。
-        c.check(score == 65605, "评分与改动前逐位相同");
+        // 2026-10-05 重抓：合入上游超级拉面效果修正（只保留 RMJ + finals、接入选中选项的
+        // +100 训练上限），本地 Score 轴实测（rayon 4 / 8 线程逐位相同）。
+        // 上游同用例写 61332 / [3337,1859,2126,948,1197] / 8189 / 61，那是 PT 轴的数字。
+        c.check(score == 61900, "评分与改动前逐位相同");
         c.check(
-            game.uma.five_status == [3337, 2294, 2121, 1110, 1220],
+            game.uma.five_status == [3337, 1798, 2131, 937, 1283],
             "五维与改动前逐位相同"
         );
-        c.check(game.uma.skill_pt == 8394, "技能点与改动前逐位相同");
+        c.check(game.uma.skill_pt == 8420, "技能点与改动前逐位相同");
         c.check(game.ramen.scenario_pt == 0, "剧本 PT 与改动前逐位相同");
-        c.check(searched == 57, "searched_count 与改动前逐位相同");
+        c.check(searched == 56, "searched_count 与改动前逐位相同");
         c.finish()
     }
 
@@ -1562,7 +1565,9 @@ mod tests {
         // 2026-09-18 重抓：上游新 preset + **本地 Score 选择轴**下的实测值。
         // 上游同用例写 28，那是它把选动作硬切 PT 轴之后的数字，本地不适用。
         // 2026-09-25 重抓：合入上游友人出行配额 [0,3,5] 后 30→29（与上游新值恰好相同）。
-        c.check(special_calls == 29, "SpecialSelect 调用数与改动前逐位相同");
+        // 2026-10-05 合入上游超级拉面效果修正后重抓（本地 Score 轴）：29→28，重搜仍为 0
+        // （上游 PT 轴同用例为 29）。
+        c.check(special_calls == 28, "SpecialSelect 调用数与改动前逐位相同");
         c.check(special_searches == 0, "SpecialSelect 重搜数与改动前逐位相同");
         // 再留一条与具体数字解耦的语义上界，防止将来重抓快照时把比例抬上去
         c.check(

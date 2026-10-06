@@ -183,7 +183,45 @@ struct CollectArgs {
 
     /// 软截止秒数：根与根之间检查，收尾写完整分片后退出；外部驱动提供硬截止。
     #[arg(long)]
-    max_seconds: Option<u64>
+    max_seconds: Option<u64>,
+
+    /// 安全停止文件：根与根之间检查，文件存在即收尾写完整分片后退出（同命令可续跑）。
+    #[arg(long)]
+    stop_file: Option<PathBuf>
+}
+
+/// 有效根未达标、但因软截止或停止文件**正常收尾**时的退出码。
+///
+/// 与程序错误（退出码 1）区分开，驱动据此判断「安全停止、可续跑」而不是失败。
+const EXIT_EARLY_STOP: i32 = 3;
+
+/// 根间提前停止的原因
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EarlyStop {
+    /// 达到 `--max-seconds` 软截止
+    Deadline,
+    /// `--stop-file` 指向的文件已存在
+    StopFile
+}
+
+impl std::fmt::Display for EarlyStop {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EarlyStop::Deadline => write!(f, "达到根间软截止"),
+            EarlyStop::StopFile => write!(f, "检测到停止文件")
+        }
+    }
+}
+
+/// 根与根之间检查是否应提前停止；软截止优先于停止文件
+fn early_stop_reason(max_seconds: Option<u64>, stop_file: Option<&Path>, elapsed_secs: u64) -> Option<EarlyStop> {
+    if max_seconds.is_some_and(|n| elapsed_secs >= n) {
+        Some(EarlyStop::Deadline)
+    } else if stop_file.is_some_and(|p| p.exists()) {
+        Some(EarlyStop::StopFile)
+    } else {
+        None
+    }
 }
 
 // ============================================================================
@@ -1286,10 +1324,12 @@ fn main() -> Result<()> {
         .map_rollout_trainer(|r| r.with_friend_complete_required(premises.friend_complete_required));
     let mut batch = RamenSampleBatch::new();
     let mut next_part_index = manifest.parts.len();
+    let mut stopped = None;
 
     for position in span.start..span.end {
-        if args.max_seconds.is_some_and(|n| t_process.elapsed().as_secs() >= n) {
-            println!("达到根间软截止，保存已有完整样本");
+        stopped = early_stop_reason(args.max_seconds, args.stop_file.as_deref(), t_process.elapsed().as_secs());
+        if let Some(reason) = stopped {
+            println!("{reason}，保存已有完整样本");
             break;
         }
         let index = manifest.work_indices.as_ref().map_or(position, |v| v[position as usize]);
@@ -1378,6 +1418,13 @@ fn main() -> Result<()> {
     );
     println!("manifest: {}", manifest_path.display());
     if let Some(target) = args.accepted_target {
+        if let Some(reason) = stopped.filter(|_| manifest.accepted < target) {
+            println!(
+                "提前停止（{reason}）：有效根 {} / {target}，完整分片已保留，同一命令可续跑",
+                manifest.accepted
+            );
+            std::process::exit(EXIT_EARLY_STOP);
+        }
         ensure!(manifest.accepted == target, "有效根未完成：{} / {target}，完整分片已保留", manifest.accepted);
     }
 
@@ -1418,6 +1465,31 @@ mod tests {
         ensure!(check_work_indices(&[1, 2], 1, 2, Some(1)).is_err(), "错误游标未拒绝");
         ensure!(check_work_indices(&[1, 2], 0, 2, Some(3)).is_err(), "超额目标未拒绝");
         println!("清单重复、错误游标、越界目标均拒绝");
+        Ok(())
+    }
+
+    /// 根间提前停止：软截止优先、停止文件存在才停、两者都没有时继续。
+    #[test]
+    fn test_early_stop_reason() -> Result<()> {
+        let dir = get_workspace_root()?.join("target/test_early_stop_reason");
+        std::fs::create_dir_all(&dir)?;
+        let flag = dir.join("STOP");
+        if flag.exists() {
+            std::fs::remove_file(&flag)?;
+        }
+        let none = early_stop_reason(Some(10), Some(&flag), 9);
+        let deadline = early_stop_reason(Some(10), Some(&flag), 10);
+        std::fs::write(&flag, b"")?;
+        let by_file = early_stop_reason(Some(10), Some(&flag), 9);
+        let both = early_stop_reason(Some(10), Some(&flag), 11);
+        let unset = early_stop_reason(None, None, u64::MAX);
+        std::fs::remove_file(&flag)?;
+        println!("无文件未到点={none:?} 到点={deadline:?} 有文件={by_file:?} 两者={both:?} 未设置={unset:?}");
+        ensure!(none.is_none(), "未到点且无停止文件却停止");
+        ensure!(deadline == Some(EarlyStop::Deadline), "到点未停止");
+        ensure!(by_file == Some(EarlyStop::StopFile), "停止文件未生效");
+        ensure!(both == Some(EarlyStop::Deadline), "软截止应优先");
+        ensure!(unset.is_none(), "未设置截止与停止文件时不应停止");
         Ok(())
     }
 

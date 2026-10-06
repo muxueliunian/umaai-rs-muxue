@@ -70,13 +70,17 @@ def enumerate_plans(recipe):
 
 
 def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, search_n, layer_targets,
-            index_start, index_end, seconds, friend_gate=False):
+            index_start, index_end, seconds, friend_gate=False, rounds=1, excluded=None):
     """`layer_targets` 是「构成 × 层」的有效根矩阵：`layer_targets[shape][layer]`，层序同 `LAYER_SPEC`。"""
     """冻结计划、留出组合、分层配额及独立世界；只允许写全新目录。
 
     除 `dump_path` / `output` 外的参数全部来自命令行，**没有隐含默认**：
     每一轮采集的口径都必须在命令行上写出来，才能在 `args.json` 与 shell 历史里留痕。
     0914 那轮的取值见 `scripts/collect/formal2048_0914/manifest.json`，可原样重放。
+
+    `rounds > 1`：同一套分层配额重复 `rounds` 轮，任务按「轮 → 层 → 构成」排列，
+    按时间截止时已完成的每一整轮仍是分层均衡的。`excluded` 是额外排除的完整组合
+    `{fields 元组: [来源...]}`，写入 `exclusions.json`；两者缺省时输出与旧版逐字节相同。
     """
     if output.exists():
         raise FileExistsError(output)
@@ -115,7 +119,13 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
                             key=lambda p: p["fields"])
             held.extend(unseen[9::10])
     held_ids = {p["plan"] for p in held}
-    excluded_ids = held_ids | elsewhere_ids
+    # 额外排除（开发验证、已登记评测面板等）：按完整字段对到本空间计划，对不上的组合不属于本空间
+    excluded = excluded or {}
+    by_fields = {tuple(p["fields"]): p for p in plans}
+    extra = [dict(plan=by_fields[f]["plan"], fields=list(f), sources=sorted(src))
+             for f, src in sorted(excluded.items()) if f in by_fields]
+    extra_ids = {e["plan"] for e in extra}
+    excluded_ids = held_ids | elsewhere_ids | extra_ids
 
     # 全区间独占；实际 index 不连续，index % 4288 严格定位原空间计划。
     reserved_start, reserved_end = index_start, index_end
@@ -131,7 +141,7 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
     # index = cycle×4288 + plan，而 cycle 每消耗一个候选序号就加一，故号段**跨度**由
     # 候选序号总数决定，与有效根目标不是一回事。放在这里提前算，免得循环跑到最后
     # 才撞上「index 越过独占号段」那条笼统的报错。
-    attempts_total = 2 * sum(sum(row) for row in layer_targets)
+    attempts_total = 2 * rounds * sum(sum(row) for row in layer_targets)
     if (cycle + attempts_total) * len(plans) >= reserved_end:
         need = (cycle + attempts_total + 1) * len(plans)
         raise ValueError(
@@ -141,7 +151,7 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
     all_indices = []
     layers = [(k, name, y1, y23) for k, (name, y1, y23) in enumerate(LAYER_SPEC)]
     layers.sort(key=lambda entry: EMIT_ORDER.index(entry[1]))
-    for k, layer, y1, y23 in layers:
+    for rnd, k, layer, y1, y23 in [(r, *entry) for r in range(rounds) for entry in layers]:
         for shape in range(shape_count):
             target = layer_targets[shape][k]
             pools = [[p for p in plans if p["shape"] == shape and p["uma"] == uma
@@ -162,10 +172,10 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
                 counts[cell] += 1
                 indices.append(cycle * len(plans) + plan["plan"])
                 cycle += 1
-            name = f"{layer}_s{shape + 1}"
+            name = f"{layer}_s{shape + 1}" if rounds == 1 else f"r{rnd + 1:02d}_{layer}_s{shape + 1}"
             jobs.append(dict(name=name, layer=layer, shape=shape, target=target,
                              indices=f"indices/{name}.json", count=len(indices),
-                             quota_y1=y1, quota_y2_y3=y23))
+                             quota_y1=y1, quota_y2_y3=y23, **(dict(round=rnd + 1) if rounds > 1 else {})))
             all_indices.extend(indices)
             write_json(output / "indices" / f"{name}.json", indices)
     if len(set(all_indices)) != len(all_indices) or max(all_indices) >= reserved_end:
@@ -174,7 +184,14 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
         raise ValueError("正式清单含留出组合")
     if any(i % len(plans) in elsewhere_ids for i in all_indices):
         raise ValueError("正式清单含另一空间定额采集的计划")
+    if any(i % len(plans) in extra_ids for i in all_indices):
+        raise ValueError("正式清单含额外排除的组合")
     write_json(output / "plans.json", plans)
+    if extra:
+        write_json(output / "exclusions.json", dict(
+            method="按完整字段（马娘 + 六卡排序）对到本空间计划；来源为仓库相对路径",
+            boundary="这些组合不进本轮采集；与 holdout.json 的闭环留出分开记录",
+            plans=extra))
     if rule == "every_tenth_all":
         holdout_text = dict(method="uma×shape 内完整字段排序，每十个取第十个；空间内全部计划参与",
                             evidence=recipe["holdout_note"],
@@ -194,6 +211,8 @@ def prepare(dump_path, output, *, recipe_path, recipe_id, model, model_id, searc
         target_valid=target_valid, seconds=seconds, jobs=jobs,
         **(dict(friend_complete_required=True) if friend_gate else {}),
         index_reservation=[reserved_start, reserved_end], holdout_count=len(held),
+        **(dict(excluded_count=len(extra)) if extra else {}),
+        **(dict(rounds=rounds, round_target=target_valid // rounds) if rounds > 1 else {}),
         spare_policy="每层构成双倍候选清单；达到有效目标即停，备用耗尽则失败，不改配方"))
     print(f"计划={len(plans)} 留出={len(held)} 有效目标={target_valid} 清单及备用={len(all_indices)}")
     print(f"号段={reserved_start}..{reserved_end} 实际最大 index={max(all_indices)} "

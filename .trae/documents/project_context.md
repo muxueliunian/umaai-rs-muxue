@@ -1,6 +1,6 @@
 # UmaAI-RS 项目特定上下文
 
-最后核对于 2026-10-05（R9/R10 打标签、Q2/Q1 研究实验驱动）；主要入口与当前代码对齐。
+最后核对于 2026-10-05（R9/R10 打标签、Q2/Q1 研究实验驱动；合入上游超级拉面修正与 R11 新规则采集准备）；主要入口与当前代码对齐。
 
 ## 项目结构
 
@@ -68,6 +68,13 @@
   - `q2_train_1005.py` / `q2_eval_1005.py`：标签质量 × 数量四臂训练、导出、闭环与配对分析；`q1_1005.py`：短 cosine 日程的训练、选型与确认（预注册与结果在 `logs/q2_1005/`、`logs/q1_1005/`，号段见 `nn_model_registry.md` 第 13 节）
 - `collect/r9_*`：R9 四批交付的冻结采集清单（只作复现记录）
 - `collect/prepare_r10_1004.py`：基于实际 Rust 计划原文生成 R10 冻结清单；`prepare_r10_cloud.py` 核对发布提交、历史号段并冻结原文资产，云端直接使用已入库清单，见 `collect/r10_1004_task.md`
+- `collect/prepare_r11_1005.py` / `prepare_r11_cloud.py` / `verify_round_collect.py`：R11 分轮清单生成（含额外排除）、云端预检、分轮采集逐字段验收，见 `collect/r11_1005_task.md`
+
+### R11 新规则采集
+- 合入上游超级拉面效果修正后的规则，gen2_v1 每候选 256、R8A roll-in、手写终局教师、友人完成门限；与 R9/R10 评分规则不同，分目录保存。
+- 分轮清单：每轮一万根、层与构成配额同 R9 gen2 的四分之一；按 22 小时截止收尾，完整轮均衡，未满任务另行导出为 partial。
+- 采集器 `--stop-file` 与驱动同名参数：根间/任务间安全停止，退出码 3，同命令续跑；程序错误仍是退出码 1。
+- 号段与排除见 `nn_model_registry.md` 第 13 节。
 
 ### R10 采集与本地 NN 后端
 - 新空间：`gen4_brian_v1` / `gen4_admire_v1` / `gen4_dualwis_v1` / `gen4_newuma_v1`，覆盖智成田白仁、智爱慕律动及新鲁道夫、新气槽；按角色排除冲突，旧 gen1/gen2/gen3 不改。
@@ -192,6 +199,7 @@ cargo run --release --bin ramen_mcts_pair_bench -- --help   # 全部参数
 - **耗时注意**：生产档 MCTS 整局约 3.4 分钟/局（region 门控第 2/3 年 120 候选占大头），扫测先用 `--runs 1` 探时间；手写侧整局 ≈ 1.3ms。
 - **与 bench_base 的差异**：bench_base 各策略独立跑批不配对；本基准强制同种子配对，消除随机世界漂移，差值可归因于策略选择。
 - 冒烟测试（bin 内 `#[cfg(test)]`，小预算不读 game_config）：配对守卫 / 同参两次逐位可复现 / CSV 结构。
+- **`mcts_turn_bonus` 标定实测（2026-10-04）**：8 build × 3 seed = 24 局配对（生产参数 `search_n=8192` / stages `train,ramen,region`），全局 `Δ = 5158.8 ± 378.4`（t=13.6，24 胜 0 负，95% CI [4417, 5901]）。按整局 78 回合折算「MCTS 每回合比手写多的分」≈ **66**（95% CI [57, 76]；按 `max_turn=77` 折算 ≈ 67）。build 间差异大（`power_wisdom`≈31 / `speed`≈85 每回合），单一常数只能折中。现有配置 70 落在区间内、略偏高，建议区间 65~67。产物 `logs/mcts_pair_scan.csv`。
 
 ## region 决策点分析（ramen_region_topk）
 
