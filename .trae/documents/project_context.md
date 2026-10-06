@@ -69,6 +69,7 @@
 - `bench_commit_compare.py`：跨 commit CPU 耗时对比编排（配合 `perf_probe` bin，见下「性能监测」节）
 - `ramen_nn/`：NN 管线脚本；其中 `bench_sidecar.py`（`ramen_root_bench` 的 GPU 侧车，需成员 PyTorch checkpoint）、`compare_root_bench.py`（逐 rollout / 逐决策字段比较）、`export_ensemble_onnx.py`（成员集成 ONNX 导出）为研究工具，不接入客户端
   - `q2_train_1005.py` / `q2_eval_1005.py`：标签质量 × 数量四臂训练、导出、闭环与配对分析；`q1_1005.py`：短 cosine 日程的训练、选型与确认（预注册与结果在 `logs/q2_1005/`、`logs/q1_1005/`，号段见 `nn_model_registry.md` 第 13 节）
+  - `q4_1006.py`：冻结主干的候选 Q 解码器离线探针（特征缓存、解码器训练、按组合聚类 bootstrap 评测；预注册与结果在 `logs/q4_1006/`）
 - `collect/r9_*`：R9 四批交付的冻结采集清单（只作复现记录）
 - `collect/prepare_r10_1004.py`：基于实际 Rust 计划原文生成 R10 冻结清单；`prepare_r10_cloud.py` 核对发布提交、历史号段并冻结原文资产，云端直接使用已入库清单，见 `collect/r10_1004_task.md`
 - `collect/prepare_r11_1005.py` / `prepare_r11_cloud.py` / `verify_round_collect.py`：R11 分轮清单生成（含额外排除）、云端预检、分轮采集逐字段验收，见 `collect/r11_1005_task.md`
