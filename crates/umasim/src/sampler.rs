@@ -450,7 +450,7 @@ pub const GEN2_2S1E2W_V1: SpaceVersion = SpaceVersion {
     required: &[]
 };
 
-/// 第三代空间的新马娘：目白善信（用户实战马娘，此前全部数据为 0 条）
+/// 第三代空间的新马娘：目白善信（目标配置的马娘，此前全部数据为 0 条）
 pub const GEN3_NEW_UMAS: [UmaEntry; 1] = [UmaEntry {
     game_id: 106402,
     alias: "目白善信[赤心的驯鹿小姐]"
@@ -459,7 +459,7 @@ pub const GEN3_NEW_UMAS: [UmaEntry; 1] = [UmaEntry {
 /// 第三代卡池：[`GEN2_V1_CARD_POOL`] 原样 16 张，末尾追加速卡待兼诗歌剧
 ///
 /// 追加在末尾而不是插进中间：新卡只出现在第三代空间，原有 16 张的相对次序与 gen2 一致，
-/// 读清单时容易对照。待兼诗歌剧是用户实战卡组里唯一不在 gen2 卡池的卡。
+/// 读清单时容易对照。待兼诗歌剧是目标卡组里唯一不在 gen2 卡池的卡。
 pub const GEN3_CARD_POOL: [CardEntry; 17] = [
     CardEntry {
         idrank: 302754,
@@ -555,7 +555,7 @@ pub const GEN3_SHAPES: [DeckShape; 5] = [
     }
 ];
 
-/// 用户实战卡组原样 6 张：作卡池时恰好只组出这一副
+/// 目标卡组原样 6 张：作卡池时恰好只组出这一副
 pub const GEN3_USER_DECK: [CardEntry; 6] = [
     CardEntry {
         idrank: 303174,
@@ -610,7 +610,7 @@ pub const GEN3_NEWBOTH_V1: SpaceVersion = SpaceVersion {
     required: &[303174]
 };
 
-/// 用户实战配置原样：目白善信 + 实战卡组，恰好 1 个计划
+/// 目标配置原样：目白善信 + 目标卡组，恰好 1 个计划
 ///
 /// 单独成空间是为了给这一副卡组**定额**预算；它同时也是 [`GEN3_NEWBOTH_V1`] 里的一个计划，
 /// 那边的清单生成须把它从抽样与留出里都排除，避免重复计数或被留出。
@@ -2028,7 +2028,7 @@ mod tests {
     /// 期望规模来自 `scripts/collect/prepare_gen2_formal.py` 同口径的独立枚举
     /// （按 cardDB 类型与角色唯一规则，与本文件实现无共享代码）：
     /// newuma 644 / newcard 1776 / newboth 236 / userdeck 1。
-    /// 另核对：既有两个 gen2 空间的规模不受 `required` 字段影响；用户实战卡组
+    /// 另核对：既有两个 gen2 空间的规模不受 `required` 字段影响；目标卡组
     /// 恰是 userdeck 的唯一计划，且确实出现在 newboth 里（清单生成须排除它）。
     #[test]
     fn test_gen3_spaces_all_legal() -> Result<()> {

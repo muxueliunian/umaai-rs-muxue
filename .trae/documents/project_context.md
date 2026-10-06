@@ -1,6 +1,6 @@
 # UmaAI-RS 项目特定上下文
 
-最后核对于 2026-10-05（R9/R10 打标签、Q2/Q1 研究实验驱动；合入上游超级拉面修正与 R11 新规则采集准备）；主要入口与当前代码对齐。
+最后核对于 2026-10-06（合入 NN rollout 研究工具链交接、上游超级拉面修正与 R11 新规则采集准备）；主要入口与当前代码对齐。
 
 ## 项目结构
 
@@ -27,6 +27,7 @@
   - `bench.rs`：批量模拟与基线（`GameOutcome` / `load_player_builds`）
   - `sampler.rs` / `sample_collector.rs` / `training_sample.rs` / `neural/`：数据采集与 NN 管线
   - `explain.rs` / `utils.rs`：可读说明与工具
+  - `exp_config.rs`：研究入口的评分口径覆盖（`ScoringOverride`）与生效参数报告（`report_effective`）
 - **bins**（均按项目惯例用 lexopt 解析参数）：
   - `umasim`（`src/main.rs`，需 `cli`）：命令行单局模拟入口，按配置 trainer/scenario 跑局
   - `bench_base`：固定种子批量跑批（`--runs` / `--seed` / `--log` / `--out` / `--trainer` / `--deck` 覆盖卡组 / `--builds` build 过滤 / `--tokens` 手写变体 / `--region-weak-cover`，mcts 另有 `--search-*` 簇）
@@ -39,6 +40,8 @@
   - `trainer_overhead_diagnostic` / `mcts_rollout_switch_verify` / `calc_training_value_microbench`（`tools/data_collection/`）：诊断与微基准
   - `composition_profile_matrix` / `minimal_strategy_ab`：实验用（前者已退役，仅打印结论）
 - `ramen_mcts_pair_bench`：**MCTS 训练员 vs 手写逻辑整局配对基准**（同 (build, 种子, 局号) 下两策略各跑整局、共享规则主种子，配对差 Δ = 评分_mcts − 评分_handwritten，逐局 CSV + 均值/SE/95%CI 汇总；MCTS 参数默认取生产实际值，见「MCTS vs 手写评估」节）
+- `ramen_root_bench`（`tools/data_collection/`，需 `cli`+`onnx`）：**NN rollout 固定根 / 整局实验工具**（CPU 两种并行参考、GPU 波次后端 + Python 侧车、policy 缓存 / 自适应批 / CUDA Graph、叶截断与混合路由、value 对拍；用法见 `nn_rollout_handoff.md`）
+- `nn_rollout_probe`（`tools/data_collection/`，需 `onnx`）：小预算 CPU 网络续跑计价探针（环境变量配置，`NN_ROLLOUT_MAX_TURN` 为绝对回合窗口）
 - `ramen_region_topk`：**region 决策点 top-K 候选 dump**（手写策略推进到 turn 2/23/47 RegionSelect 决策点后跑一次 FlatSearch，输出 top-K 候选的 mean/stdev/count/weighted_mean/was_chosen CSV + top1-top2 Δmean 与 stdev 中位数 + mean vs radical 排序差异汇总；用于研究 region 门控下 top 选项的均值差与方差分布，见「region 决策点分析」节）
 
 ### umaai（通道层，`crates/umaai`）
@@ -64,7 +67,7 @@
 - `deck_crn_compare.py`：卡组 CRN 对比
 - `friend_pacing_compare.py`：友人出行配额（`fcap` 等 token）配对对比——同 build 同 seed 配对差 + 走完率 / 逐年出行次数 / 风味浪费等结构指标
 - `bench_commit_compare.py`：跨 commit CPU 耗时对比编排（配合 `perf_probe` bin，见下「性能监测」节）
-- `ramen_nn/`：NN 管线脚本
+- `ramen_nn/`：NN 管线脚本；其中 `bench_sidecar.py`（`ramen_root_bench` 的 GPU 侧车，需成员 PyTorch checkpoint）、`compare_root_bench.py`（逐 rollout / 逐决策字段比较）、`export_ensemble_onnx.py`（成员集成 ONNX 导出）为研究工具，不接入客户端
   - `q2_train_1005.py` / `q2_eval_1005.py`：标签质量 × 数量四臂训练、导出、闭环与配对分析；`q1_1005.py`：短 cosine 日程的训练、选型与确认（预注册与结果在 `logs/q2_1005/`、`logs/q1_1005/`，号段见 `nn_model_registry.md` 第 13 节）
 - `collect/r9_*`：R9 四批交付的冻结采集清单（只作复现记录）
 - `collect/prepare_r10_1004.py`：基于实际 Rust 计划原文生成 R10 冻结清单；`prepare_r10_cloud.py` 核对发布提交、历史号段并冻结原文资产，云端直接使用已入库清单，见 `collect/r10_1004_task.md`
@@ -317,7 +320,7 @@ cargo run --release --bin ramen_region_topk -- --help   # 全部参数
 ## 搜索层（`crates/umasim/src/search/`）
 
 - `config.rs`：`SearchConfig`（含 `MctsConfig` 明细，见「配置文件」节）
-- `flat_search.rs`：`FlatSearch` MCTS 搜索主体（UCB 分配 + 并行 rollout + 结果聚合）
+- `flat_search.rs`：`FlatSearch` MCTS 搜索主体（UCB 分配 + 并行 rollout + 结果聚合）；`with_strict_rollout` 严格失败传播、`RamenBatchRollout` / `RamenBatchTable` 可选批量后端（仅 uniform）、`SearchProbe` 成本探针
 - `result.rs`：`ActionResult` / `SearchOutput`（terminal_stats + histogram）/ `OrderedRollouts` / `ScoreEntry`
 - `searchable.rs`：`FlatSearchGame`（`fork_for_rollout` 克隆+注入 master）/ `RolloutHost` / `SearchScore`
 - `ramen_terminal.rs`：拉面终局统计（`FROZEN_DIM_KEYS` / `RamenTerminal` / `RamenTerminalStats`）；`terminal.rs`：通用终局
@@ -338,7 +341,8 @@ cargo run --release --bin ramen_region_topk -- --help   # 全部参数
 - `RamenMctsTrainer`（ramen_mcts_trainer.rs）：拉面 MCTS + `RamenSearchStages`（哪些阶段走搜索：`train,ramen` 实测互补）；`stash_last_summary` 缓存候选评分（运气分走 calc_score 轴真实评分）
 - `RecommendedRamenTrainer`（local_ramen_trainer.rs）：**正式推荐拉面策略**（手写基策 + GA 调参 9 旋钮 preset：pt_tradeoff 16→37 / pt_tradeoff_super 0→35 / region_weak_cover_weight 查表→35 / region_youqing_weight 1.5→0.4 / hint_bonus 6→8 / max_base_score_sacrifice 140→200 / ramen_window_weight 0.10→0.15 / checkpoint_scale 0→0.15 / Y1 pt_rate 16→56）；`with_tokens` / `with_region_weights` 覆盖入口
 - `LocalRamenTrainer`（local_ramen_trainer.rs）：拉面本地修正策略（实验载体）
-- `RamenNnTrainer`（ramen_nn_trainer.rs）：拉面 NN 策略 + `SpecialSelectMode`
+- `RamenNnTrainer`（ramen_nn_trainer.rs）：拉面 NN 策略 + `SpecialSelectMode`；`prepare_decision` / `infer` / `resolve_decision` 三段接口（批量调度用），单候选免推理
+- `RamenRolloutTrainer`（ramen_rollout_trainer.rs）：MCTS rollout 基策包装器（默认推荐手写；`with_neural_net` 装载共享网络 + 绝对回合窗口；友人门限只作用于手写分支、不冲掉网络）
 - `LoggingTrainer`（logging_trainer.rs）：包一层记录决策
 - `CollectorTrainer`（collector_trainer.rs）：训练数据采集（40% 探索率）
 - `canonical_ramen_select_root`（ramen_special_root.rs）：拉面吃面候选规范化（搜索根）

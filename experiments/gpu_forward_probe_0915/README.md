@@ -1,5 +1,9 @@
 # GPU 前向执行调度独立探针（2026-09-15）
 
+> 下文命令里的 checkpoint（`target/arm_*`）与输入 / 结果（`logs/`）均为原研究工作区路径，不随仓库提交；
+> 复现时替换为接收到的成员 checkpoint 与 `ramen_root_bench` 产出的逐决策 CSV。
+> 本次基点（2ec6b49）的验收记录见 `.trae/documents/nn_rollout_handoff.md`。
+
 只回答一个问题：**前向的执行调度是不是主要可优化部分**。
 对照两臂：A = 当前三成员串行 eager 前向；B = 保持同一前向与集成表达、对整段做
 CUDA Graph 捕获与 replay。

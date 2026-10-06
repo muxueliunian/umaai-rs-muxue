@@ -107,7 +107,7 @@ pub struct EffectiveSearchFacts {
 
 /// 把**实际生效**的评分与搜索口径打到日志
 ///
-/// `rate_was_explicit` 区分「命令行显式给的」与「由 [`PINNED_PT_FAVOR_RATE`] 钉死的」，
+/// `ov.pt_favor_rate` 是否给出，区分「命令行显式给的」与「由 [`PINNED_PT_FAVOR_RATE`] 钉死的」，
 /// 两者都不是「读用户 toml」，但来源不同，报告里要能看出来。
 /// ❗用 `println!` 而不是 `info!`：`ramen_teacher_collect` 把日志级别设成 `error`，
 /// `info!` 会被整条吞掉，生效口径就等于没打印。这行信息是**验收凭据**，

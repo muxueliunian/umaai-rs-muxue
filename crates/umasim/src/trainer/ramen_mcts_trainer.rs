@@ -230,8 +230,8 @@ pub struct DecisionProbe {
     pub path: DecisionPath,
     /// 本次决策结束后 `last_decision()` 是否有内容可供上层 emit
     ///
-    /// 合并 `RamenSelect` 路径搜索了但清空摘要，此处为 `false`——用来区分
-    /// 「没搜索」与「搜了但不对外暴露」。
+    /// 用来区分「没搜索」与「搜了但不对外暴露」。合并 `RamenSelect` 路径自上游
+    /// 按面聚合回三阶段下标后也会暴露摘要，此处为 `true`。
     pub exposes_decision_info: bool,
     /// 决策开始时刻（与外层链路对齐用）
     pub started: Instant,
@@ -458,7 +458,8 @@ impl RamenMctsTrainer {
     }
 
     /// 设置"友人出行必须走完 5 次"的完成硬门限（对应 `game_config.toml` 的
-    /// `friend_complete_required`）：同时作用于 fallback 手写策略与搜索 rollout 基策。
+    /// `friend_complete_required`）：作用于 fallback 与 rollout 中的手写分支。
+    /// 已装载的 NN 保留；网络动作不额外套用手写友人完成硬门限。
     pub fn with_friend_complete_required(mut self, required: bool) -> Self {
         self.fallback = self.fallback.with_friend_complete_required(required);
         // rollout 基策同步：搜索内部评估的未来必须与正式策略同一口径，
@@ -996,14 +997,8 @@ impl Trainer<RamenGame> for RamenMctsTrainer {
 
     /// 上一次真正走过 MCTS 搜索的协议格式
     ///
-    /// 仅在 `select_action` 普通搜索路径成功走过 [`FlatSearch::search`](crate::search::FlatSearch::search)
-    /// 时返回 `Some`：早退分支（单候选 / 门控关 / SpecialSelect 缓存命中 / 转发
-    /// fallback / 合并搜索路径）会把 `last_search_summary` 清成 `None`——
-    /// 避免 caller 拿到陈旧数据。
-    ///
-    /// **合并搜索路径暂不覆盖**：`RamenSelect` 走 `list_combined_ramen_select_actions`
-    /// 时，candidates 是 `(ramen, targets)` 组合，与 `select_action` 收到的三阶段
-    /// `actions` 列表下标不对应（同 ramen 跨多个 action）；保留准确映射留待后续步骤。
+    /// 普通搜索与合并搜索成功后返回 `Some`；合并候选先聚合回三阶段下标。
+    /// 单候选、门控转发与 SpecialSelect 缓存命中清空摘要，避免显示旧搜索。
     ///
     /// 取分口径跟随 [`Self::selection`]（`Score` → `.0.mean()` / `Pt` → `.1.weighted_mean`）；
     /// 候选评分按口径排序、截断到 `SearchConfig::reason_max_display`（分数与 `candidate_n` 同步）。
@@ -1435,12 +1430,15 @@ mod tests {
         println!("default use_combined_ramen_select = {}", t.use_combined_ramen_select);
         let mut c = Checks::new();
         c.check(t.use_combined_ramen_select, "new()/default 默认打开");
+        c.check(t.selection == RamenSelection::Score, "本地默认保持 Score 选择轴（本地分歧）");
         let t2 = t.with_combined_ramen_select(false);
         println!(
             "after with_combined_ramen_select(false) = {}",
             t2.use_combined_ramen_select
         );
         c.check(!t2.use_combined_ramen_select, "setter 关闭");
+        let pt = t2.with_selection(RamenSelection::Pt);
+        c.check(pt.selection == RamenSelection::Pt, "可显式切到 PT 选择轴");
         c.finish()
     }
 
@@ -2037,12 +2035,12 @@ mod tests {
         c.finish()
     }
 
-    /// 合并 `RamenSelect` 路径：搜索发生了，但不对外暴露 `DecisionInfo`
+    /// 合并 `RamenSelect` 路径：搜索后按面聚合暴露 `DecisionInfo`
     ///
-    /// 钉住「搜了 ≠ 有输出」这一区分——报告里「执行决策次数」与「输出决策记录数」
-    /// 的差额全部来自这里，若 `exposes_decision_info` 恒为 true 就看不出来了。
+    /// 钉住探针如实记录「搜了且摘要对外可见」：合并路径曾清空摘要（字段为 false），
+    /// 上游按面聚合后改为暴露，期望值随之为 true。
     #[test]
-    fn test_decision_probe_marks_combined_without_decision_info() -> Result<()> {
+    fn test_decision_probe_marks_combined_decision_info() -> Result<()> {
         let sink: Arc<Mutex<Vec<DecisionProbe>>> = Arc::new(Mutex::new(Vec::new()));
         let (mut game, mut rng) = setup(11)?;
         let trainer = RamenMctsTrainer::new(SearchConfig::default().with_search_n(4).with_ucb(false))

@@ -50,7 +50,7 @@ use umasim::{
         ramen::{RamenAction, RamenGame, RamenStage, RamenState, features::encode}
     },
     exp_config::{EffectiveSearchFacts, ScoringOverride, report_effective},
-    gamedata::{EventChoice, EventData, RamenRegionStrategy, init_global_with_config},
+    gamedata::{EventChoice, EventData, GAMECONFIG, RamenRegionStrategy, init_global_with_config},
     sampler::{SamplingSpace, gen1_inherit, space_from_cli, space_version_by_name},
     search::{
         FlatSearch, FlatSearchGame, RamenBatchRollout, RamenBatchTable, RamenTerminal, RolloutOutcome, RolloutSeeds,
@@ -128,7 +128,7 @@ enum Mode {
     TeacherGame,
     /// 决策点扫描：用冻结策略走一局，落下每个决策点的回合/阶段/候选数
     ///
-    /// 用于把预登记里的「Train-早 / RegionSelect-Y2」这类配额**在看结果之前**
+    /// 用于把实验方案里的「Train-早 / RegionSelect-Y2」这类配额**在看结果之前**
     /// 解析成具体的 `(root_turn, root_stage)`，不涉及任何搜索。
     RootScan,
     /// leaf value 截断试点：同一个根上跑 full 与若干截断深度
@@ -297,8 +297,8 @@ struct RootArgs {
 
     /// 截断深度清单，可重复；每项是**正整数** H（跨越 H 个 turn 边界）
     ///
-    /// 只被 [`Mode::LeafPilot`] 消费。给了却用在别的模式上会在建局前报错，
-    /// 不静默忽略。full 臂恒定参与，不需要在这里写。
+    /// 只被 [`Mode::LeafPilot`] 与 [`Mode::GameSmoke`]（后者至多一项）消费。给了却用在
+    /// 别的模式上会在建局前报错，不静默忽略。full 臂恒定参与，不需要在这里写。
     #[arg(long)]
     leaf_h: Vec<i32>,
 
@@ -383,15 +383,14 @@ fn mode_consumes_wave_switches(mode: Mode) -> bool {
     )
 }
 
-/// 检查优化开关会不会被**静默忽略**
+/// 解析并校验叶截断参数，在建局、模型加载与侧车启动**之前**拒绝无效组合
 ///
-/// 调用点在建局、模型加载与侧车启动**之前**：宁可一上来就指名参数报错，也不要跑完
-/// 才发现开关压根没生效、却把结果当成「优化后」的数字。
+/// `--leaf-h` 等叶参数只被 leaf-pilot 与 game-smoke 消费，value-check 等其余模式
+/// 给了会被静默忽略，故直接拒绝。
 ///
 /// # 错误
 ///
-/// 开关落在不消费它的模式上、与 `--handwritten-rollout` 同时给出，或
-/// `--sidecar-graph` 与 `--adaptive-batch` 同时给出时报错。
+/// 叶参数落在不消费它的模式上、深度不是正整数，或与本模式其余参数冲突时报错。
 fn check_leaf_support(args: &RootArgs) -> Result<Vec<LeafDepth>> {
     if !matches!(args.mode, Mode::LeafPilot) {
         ensure!(
@@ -464,6 +463,68 @@ fn check_leaf_support(args: &RootArgs) -> Result<Vec<LeafDepth>> {
     Ok(depths)
 }
 
+/// 校验输出与臂选择参数，在读模型与启侧车**之前**拒绝不会被消费的组合
+///
+/// - `--raw-csv` / `--decision-csv` / `--rollout-csv`：只有固定根四种模式
+///   （compare / cpu-candidate / cpu-flat / gpu-wave）写出；
+/// - `--trace`：只有 compare 写出；
+/// - `--handwritten-rollout` / `--steps-csv`：只有 teacher-game 读取。
+///
+/// 其余模式给了会被静默忽略——不产出文件，或把 NN 臂记成手写臂，故直接拒绝。
+///
+/// # 错误
+///
+/// 任一参数用在不消费它的模式上时报错。
+fn check_output_flags(args: &RootArgs) -> Result<()> {
+    let fixed_root = matches!(args.mode, Mode::Compare | Mode::CpuCandidate | Mode::CpuFlat | Mode::GpuWave);
+    for (given, flag) in [
+        (args.raw_csv.is_some(), "--raw-csv"),
+        (args.decision_csv.is_some(), "--decision-csv"),
+        (args.rollout_csv.is_some(), "--rollout-csv")
+    ] {
+        ensure!(
+            !given || fixed_root,
+            "{flag} 只被 compare / cpu-candidate / cpu-flat / gpu-wave 写出；{:?} 模式下直接拒绝",
+            args.mode
+        );
+    }
+    ensure!(
+        args.trace.is_none() || args.mode == Mode::Compare,
+        "--trace 只被 compare 写出；{:?} 模式下直接拒绝",
+        args.mode
+    );
+    for (given, flag) in [(args.handwritten_rollout, "--handwritten-rollout"), (args.steps_csv.is_some(), "--steps-csv")] {
+        ensure!(
+            !given || args.mode == Mode::TeacherGame,
+            "{flag} 只被 teacher-game 消费；{:?} 模式下直接拒绝",
+            args.mode
+        );
+    }
+    Ok(())
+}
+
+/// 校验 `--root-policy`，在读模型与启侧车**之前**拒绝无效值
+///
+/// 只有 root-scan / leaf-pilot / value-check 自己建根并读取它；其余模式固定按
+/// 手写策略建根，给 `nn` 会被静默忽略，故直接拒绝。
+///
+/// # 错误
+///
+/// 未知策略名，或在不读取它的模式下给了非 `handwritten` 时报错。
+fn check_root_policy(args: &RootArgs) -> Result<()> {
+    ensure!(
+        matches!(args.root_policy.as_str(), "handwritten" | "nn"),
+        "未知的 --root-policy {}（只支持 handwritten / nn）",
+        args.root_policy
+    );
+    ensure!(
+        args.root_policy == "handwritten" || matches!(args.mode, Mode::RootScan | Mode::LeafPilot | Mode::ValueCheck),
+        "--root-policy 只被 root-scan / leaf-pilot / value-check 消费；{:?} 模式固定手写建根，故直接拒绝",
+        args.mode
+    );
+    Ok(())
+}
+
 /// 解析并校验整局路由，在读模型与启侧车**之前**拒绝无效组合
 ///
 /// 与 [`check_leaf_support`] 分开的理由：那个函数回答「跑哪些深度」，
@@ -516,7 +577,15 @@ fn check_game_route(args: &RootArgs, depths: &[LeafDepth]) -> Result<LeafRoute> 
     }
 }
 
-/// 检查优化开关会不会被**静默忽略**（原有实现，仅扩展模式表）
+/// 检查优化开关会不会被**静默忽略**
+///
+/// 调用点在建局、模型加载与侧车启动**之前**：宁可一上来就指名参数报错，也不要跑完
+/// 才发现开关压根没生效、却把结果当成「优化后」的数字。
+///
+/// # 错误
+///
+/// 开关落在不消费它的模式上、与 `--handwritten-rollout` 同时给出，或
+/// `--sidecar-graph` 与 `--adaptive-batch` 同时给出时报错。
 fn check_switch_support(
     mode: Mode, cache_on: bool, adaptive: bool, graph: bool, handwritten: bool
 ) -> Result<()> {
@@ -542,7 +611,7 @@ fn check_switch_support(
     ensure!(
         mode_consumes_wave_switches(mode),
         "{names} 只对波次（GPU）后端生效，模式 {mode:?} 不会消费它；\
-         支持的模式：gpu-wave / sidecar-reuse / game-smoke / teacher-consistency / teacher-game"
+         支持的模式：gpu-wave / sidecar-reuse / game-smoke / teacher-consistency / teacher-game / leaf-pilot / value-check"
     );
     ensure!(
         !(mode == Mode::TeacherGame && handwritten),
@@ -1424,7 +1493,7 @@ fn run_teacher_consistency(
 ) -> Result<()> {
     println!("  正式接入一致性：生产教师，search_n={}（少量样本）", args.search_n);
 
-    let t_cpu = build_teacher(config.clone(), Some(Arc::clone(nn)), None);
+    let t_cpu = build_teacher(config.clone(), Some(Arc::clone(nn)), None)?;
     let (steps_cpu, score_cpu, wall_cpu) = play_with_teacher(args, uma, deck, inherit, t_cpu)?;
     println!("  [CPU 后端] {:.1} s，决策 {} 步，终局 {:.3}", wall_cpu, steps_cpu.len(), score_cpu.score);
 
@@ -1438,7 +1507,7 @@ fn run_teacher_consistency(
         cache_on: args.policy_cache,
         stats: Mutex::new(GameStats::default())
     });
-    let t_gpu = build_teacher(config.clone(), Some(Arc::clone(nn)), Some(Arc::clone(&backend) as Arc<dyn RamenBatchRollout>));
+    let t_gpu = build_teacher(config.clone(), Some(Arc::clone(nn)), Some(Arc::clone(&backend) as Arc<dyn RamenBatchRollout>))?;
     let (steps_gpu, score_gpu, wall_gpu) = play_with_teacher(args, uma, deck, inherit, t_gpu)?;
     println!("  [GPU 后端] {:.1} s，决策 {} 步，终局 {:.3}", wall_gpu, steps_gpu.len(), score_gpu.score);
 
@@ -1479,7 +1548,7 @@ fn run_teacher_game(
     println!("  模型加载    {model_load_s:.1} s（不计入整局墙钟）");
     if args.handwritten_rollout {
         // 配对实验的手写臂：不接网络、不接侧车，其余口径完全相同
-        let teacher = build_teacher(config.clone(), None, None);
+        let teacher = build_teacher(config.clone(), None, None)?;
         print_effective_config(&teacher);
         let (steps, score, wall) = play_with_teacher(args, uma, deck, inherit, teacher)?;
         println!("  手写 rollout 基策（配对实验另一臂）");
@@ -1507,7 +1576,7 @@ fn run_teacher_game(
         config.clone(),
         Some(Arc::clone(nn)),
         Some(Arc::clone(&backend) as Arc<dyn RamenBatchRollout>)
-    );
+    )?;
     print_effective_config(&teacher);
     let (steps, score, wall) = play_with_teacher(args, uma, deck, inherit, teacher)?;
 
@@ -1899,7 +1968,7 @@ impl CacheStats {
 // ============================================================================
 // leaf value 截断实验（隔离段，默认关闭）
 //
-// 实现的是 `.trae/documents/ramen_leaf_value_opus_task_0916.md`。关键约束：
+// 用法与口径见 `.trae/documents/nn_rollout_handoff.md` 的叶估值一节。关键约束：
 // **只在显式给出深度时生效**，[`LeafDepth::Full`] 下全部既有模式逐字保持原行为。
 // ============================================================================
 
@@ -3369,7 +3438,7 @@ struct RecordingTeacher {
 }
 
 impl Trainer<RamenGame> for RecordingTeacher {
-    /// 转发给生产教师，并记录该步的候选、选择与 RNG 指纹
+    /// 转发给生产教师，并记录该步的候选、选择与 RNG 探针
     ///
     /// # 错误
     ///
@@ -3415,13 +3484,20 @@ impl Trainer<RamenGame> for RecordingTeacher {
 ///
 /// 与 `ramen_space_bench` 同一条构造链：`RamenSearchStages::all()` +
 /// `RamenSelection::Score` + `with_nn_rollout`。**合并动作、阶段门控、平局处理
-/// 与 RNG 消耗一律沿用生产实现**，本工具不再自写简化版。
+/// 与 RNG 消耗一律沿用生产实现**，本工具不再自写简化版。友人出行完成门限与 umaai
+/// 客户端 / `bench_base` 同口径，取 `game_config.friend_complete_required`。
+///
+/// # 错误
+///
+/// 全局配置尚未初始化时报错。
 fn build_teacher(
     config: SearchConfig, nn: Option<Arc<RamenNnTrainer>>, backend: Option<Arc<dyn RamenBatchRollout>>
-) -> RamenMctsTrainer {
+) -> Result<RamenMctsTrainer> {
+    let friend = GAMECONFIG.get().ok_or_else(|| anyhow!("全局 game_config 尚未初始化"))?.friend_complete_required;
     let mcts = RamenMctsTrainer::new(config.clone())
         .with_stages(RamenSearchStages::all())
-        .with_selection(RamenSelection::Score);
+        .with_selection(RamenSelection::Score)
+        .with_friend_complete_required(friend);
     // 不给 nn 就是手写 rollout 基策：配对实验的另一臂
     let mut mcts = match nn {
         Some(nn) => mcts.with_nn_rollout(nn, None),
@@ -3432,7 +3508,7 @@ fn build_teacher(
         let search = std::mem::replace(&mut mcts.search, FlatSearch::<RamenGame>::new(config));
         mcts.search = search.with_batch_rollout(b);
     }
-    mcts
+    Ok(mcts)
 }
 
 /// 用给定教师打完一局，返回逐步记录与终局评分
@@ -3604,7 +3680,7 @@ fn official_result_full(
 // leaf value 截断试点（只被 [`Mode::LeafPilot`] 使用）
 // ============================================================================
 
-/// 预登记里的一个根规格
+/// 根清单里的一个根规格（由 root-scan 产出、实验前固定）
 #[derive(Debug, Clone, Deserialize, Serialize)]
 struct RootSpec {
     /// 根标识（进文件名与报告）
@@ -3619,7 +3695,7 @@ struct RootSpec {
     root_turn: i32,
     /// 目标阶段名
     root_stage: String,
-    /// 预登记里的配额名
+    /// 根清单里的配额名
     quota: String
 }
 
@@ -4111,7 +4187,7 @@ struct AuditLoss {
 /// 一个根上的全部结果
 #[derive(Debug, Clone, Serialize)]
 struct RootSummary {
-    /// 根规格（来自预登记）
+    /// 根规格（来自根清单）
     spec: RootSpec,
     /// 马娘
     uma: u32,
@@ -4613,6 +4689,8 @@ fn main() -> Result<()> {
     )?;
     let leaf_depths = check_leaf_support(&args)?;
     let game_route = check_game_route(&args, &leaf_depths)?;
+    check_root_policy(&args)?;
+    check_output_flags(&args)?;
     let workspace_root = get_workspace_root()?;
     std::env::set_current_dir(&workspace_root)
         .with_context(|| format!("切换到工作空间根失败: {}", workspace_root.display()))?;
@@ -4634,9 +4712,17 @@ fn main() -> Result<()> {
             use_ucb: false,
             radical_factor_max: args.radical_factor_max,
             stages: format!("{:?}", args.mode),
-            rollout_policy: format!("NN rollout: {}", args.rollout_model.display()),
+            rollout_policy: if args.handwritten_rollout {
+                "handwritten（teacher-game 手写臂）".to_string()
+            } else {
+                format!("NN rollout: {}", args.rollout_model.display())
+            },
             region_strategy: "all（本入口强制）".to_string()
         }
+    );
+    println!(
+        "  友人出行完成门限 = {}（game_config.friend_complete_required，作用于生产教师构造）",
+        game_config.friend_complete_required
     );
 
     if let Some(w) = args.workers {
@@ -5001,6 +5087,53 @@ mod tests {
 
     use super::*;
 
+    /// 最小 ONNX 模型生成器：workspace 根的 `testsupport/onnx_fixture.rs`
+    ///
+    /// 与 `ramen_nn_trainer` 的测试共用同一份生成器，靠 `#[path]` 引入：
+    /// 不复制代码、不新增依赖、不进入正式构建。
+    #[path = "../../../../../testsupport/onnx_fixture.rs"]
+    mod onnx_fixture;
+
+    /// fixture 旁车声明的 value 归一化：第 0 维 center / scale（其余两维恒等）
+    ///
+    /// 故意不用恒等值，叶估值测试才能看出反归一化真的执行了。
+    const FIXTURE_VALUE_CENTER: f64 = 61000.0;
+    /// 见 [`FIXTURE_VALUE_CENTER`]
+    const FIXTURE_VALUE_SCALE: f64 = 4000.0;
+
+    /// 现场生成并加载一份常数输出的 ONNX fixture，不依赖任何本地权重
+    ///
+    /// policy 段「吃面」格 `[1,201)` 为 +1、「不吃面」格 0 为 −1、其余为 0：全零时并列
+    /// 取第一个合法候选（不吃面），轨迹永远走不到需要推理的 `SpecialSelect`，缓存链
+    /// 就覆盖不到。value 段为 0；旁车声明正确契约，value 归一化见
+    /// [`FIXTURE_VALUE_CENTER`]。只适合验证缓存生命周期、坏行拒绝这类与网络好坏
+    /// 无关的接线逻辑。返回的路径只用于填 `--rollout-model`，文件在加载后即删除。
+    ///
+    /// # 错误
+    ///
+    /// 写文件、加载或清理失败时报错。
+    fn load_fixture_nn(tag: &str) -> Result<(String, RamenNnTrainer)> {
+        let dir = get_workspace_root()?
+            .join("target/test-tmp")
+            .join(format!("root_bench_{tag}_{}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let model = dir.join("fixture.onnx");
+        let mut output = vec![0.0f32; OUTPUT_DIM];
+        output[0] = -1.0;
+        output[1..201].fill(1.0);
+        std::fs::write(&model, onnx_fixture::const_logits_model(INPUT_DIM, &output)?)?;
+        std::fs::write(
+            dir.join("fixture.onnx.json"),
+            format!(
+                r#"{{"input_dim":{INPUT_DIM},"output_dim":{OUTPUT_DIM},"value_normalization":{{"center":[{FIXTURE_VALUE_CENTER:?},0.0,0.0],"scale":[{FIXTURE_VALUE_SCALE:?},1.0,1.0]}}}}"#
+            )
+        )?;
+        let loaded = RamenNnTrainer::load(&model);
+        println!("清理 fixture 目录: {}", dir.display());
+        std::fs::remove_dir_all(&dir)?;
+        Ok((model.to_string_lossy().into_owned(), loaded?))
+    }
+
     /// 造一份长度为 [`INPUT_DIM`] 的输入
     fn feats(fill: f32) -> Vec<f32> {
         vec![fill; INPUT_DIM]
@@ -5300,11 +5433,10 @@ mod tests {
     #[test]
     fn leaf_resume_rejects_bad_rows() -> Result<()> {
         set_current_dir(get_workspace_root()?)?;
-        let model = "saved_models/arms/ens_NT4096_AllHistory_g123.onnx";
-        ensure!(
-            Path::new(model).exists(),
-            "本轮冻结模型不存在：{model}（本测试依赖它，不另造假模型）"
-        );
+        // 坏行拒绝只看响应行本身，与网络输出无关：常数 fixture 即可覆盖
+        let (model, nn) = load_fixture_nn("leaf")?;
+        let nn = nn.with_special_mode(SpecialSelectMode::Canonical).with_race_shield(true);
+        let model = model.as_str();
         let mut cfg = load_game_config()?;
         cfg.ramen_region_strategy = RamenRegionStrategy::All;
         init_global_with_config(&cfg)?;
@@ -5329,9 +5461,6 @@ mod tests {
             build_root(&args, plan.uma, &plan.deck, &inherit, args.root_turn, args.root_stage.as_deref())?;
         let actions = root.list_actions()?;
         ensure!(!actions.is_empty(), "根上没有合法候选");
-        let nn = RamenNnTrainer::load(&args.rollout_model)?
-            .with_special_mode(SpecialSelectMode::Canonical)
-            .with_race_shield(true);
         let seeds = RolloutSeeds::from_rng(&mut rng.clone());
         let mut c = Chk::default();
 
@@ -5434,7 +5563,7 @@ mod tests {
                     c.check(same_place, "叶响应没有推进局面（回合与阶段不变）");
                     c.check(done, "叶响应后轨迹就地收尾");
                     c.check(
-                        (value - (61439.01158101555 + 4240.3727274524235 * 0.25)).abs() < 1e-6,
+                        (value - (FIXTURE_VALUE_CENTER + FIXTURE_VALUE_SCALE * 0.25)).abs() < 1e-6,
                         &format!("叶估值等于 center[0] + scale[0] * 0.25，实得 {value}")
                     );
                 }
@@ -5451,7 +5580,7 @@ mod tests {
 
     /// 路由判定走生产年份语义，且只认第三年地区
     ///
-    /// 覆盖预登记 §3 的第 1 条与第 4 条的判定侧：扫一整局的全部决策点，
+    /// 覆盖混合路由的判定侧（只有第三年地区根走完整续跑、年份按生产语义归档）：扫一整局的全部决策点，
     /// 逐点核对 [`LeafRoute::HybridY3Full`] 与 [`LeafRoute::Uniform`] 的判定，
     /// 并核对 `RegionSelect` 在本剧本恰好只出现在 turn 2/23/47。
     /// **不用「候选数恰好 120」这种替代条件**，年份一律走
@@ -5468,7 +5597,7 @@ mod tests {
         cfg.ramen_region_strategy = RamenRegionStrategy::All;
         init_global_with_config(&cfg)?;
         // 本测试只走手写策略建根与扫描，模型路径只为满足 CLI 必填项，不会被加载
-        let model = "saved_models/arms/ens_NT4096_AllHistory_g123.onnx";
+        let model = "unused.onnx";
         let args = RootArgs::try_parse_from([
             "ramen_root_bench",
             "--mode",
@@ -5601,7 +5730,7 @@ mod tests {
 
     /// 混合路由在每类根上与对应的单一深度臂逐项一致（真跑侧车）
     ///
-    /// 覆盖预登记 §3 的第 2/3/4/5/6 条：
+    /// 覆盖：
     /// - Y3 地区根：混合 == `Uniform(full)`（推荐动作、实际 rf、请求与结局条数）
     /// - 普通根：混合 == `Uniform(h8)`（同上）
     /// - H 超出剩余回合的根：无叶请求，仍按 mean 选优
@@ -5613,18 +5742,22 @@ mod tests {
     /// # 错误
     ///
     /// 模型或 checkpoint 缺失、侧车起不来，或任一项不一致时报错。
+    ///
+    /// 需要 CUDA、侧车 Python 依赖与 R8A 集成资产（ONNX + 旁车 JSON + 三个成员
+    /// checkpoint，取得方式见交接文档），故默认忽略；资产就位后用 `--ignored` 运行。
     #[test]
+    #[ignore = "需要 CUDA、侧车 Python 依赖与 R8A 集成的 ONNX 及三个成员 checkpoint，见 nn_rollout_handoff.md"]
     fn hybrid_matches_uniform_arms_per_root() -> Result<()> {
         set_current_dir(get_workspace_root()?)?;
-        let model = "saved_models/arms/ens_NT4096_AllHistory_g123.onnx";
+        let model = "saved_models/arms/ens_R8A_g123.onnx";
         let sidecar = "scripts/ramen_nn/bench_sidecar.py";
         let cks = [
-            "target/arm_NT4096_AllHistory_seed1/step_030000.pt",
-            "target/arm_NT4096_AllHistory_seed2/step_030000.pt",
-            "target/arm_NT4096_AllHistory_seed3/step_030000.pt"
+            "target/arm_R8A_seed1/step_060000.pt",
+            "target/arm_R8A_seed2/step_060000.pt",
+            "target/arm_R8A_seed3/step_060000.pt"
         ];
         for p in [model, sidecar].into_iter().chain(cks) {
-            ensure!(Path::new(p).exists(), "本轮冻结输入不存在：{p}（本测试不另造假输入）");
+            ensure!(Path::new(p).exists(), "所需资产不存在：{p}（本测试不另造假输入）");
         }
         let mut cfg = load_game_config()?;
         cfg.ramen_region_strategy = RamenRegionStrategy::All;
@@ -6061,7 +6194,10 @@ mod tests {
             (Mode::SidecarReuse, true),
             (Mode::GameSmoke, true),
             (Mode::TeacherConsistency, true),
-            (Mode::TeacherGame, true)
+            (Mode::TeacherGame, true),
+            (Mode::LeafPilot, true),
+            (Mode::ValueCheck, true),
+            (Mode::RootScan, false)
         ];
         let mut bad = 0usize;
         let mut cases = 0usize;
@@ -6121,6 +6257,72 @@ mod tests {
         println!("支持矩阵：{cases} 条用例，不符 {bad} 条");
         ensure!(bad == 0, "支持矩阵有 {bad} 条用例与期望不符");
         Ok(())
+    }
+
+    /// 输出与臂选择参数只在实际消费它们的模式放行
+    ///
+    /// # 错误
+    ///
+    /// 任一组合的接受/拒绝与期望不符时报错。
+    #[test]
+    fn output_flags_support() -> Result<()> {
+        let mut c = Chk::default();
+        for (mode, flag, value, want) in [
+            ("cpu-flat", "--raw-csv", Some("x.csv"), true),
+            ("gpu-wave", "--decision-csv", Some("x.csv"), true),
+            ("compare", "--rollout-csv", Some("x.csv"), true),
+            ("game-smoke", "--raw-csv", Some("x.csv"), false),
+            ("value-check", "--decision-csv", Some("x.csv"), false),
+            ("teacher-game", "--rollout-csv", Some("x.csv"), false),
+            ("compare", "--trace", Some("x.csv"), true),
+            ("cpu-flat", "--trace", Some("x.csv"), false),
+            ("teacher-game", "--handwritten-rollout", None, true),
+            ("teacher-game", "--steps-csv", Some("x.csv"), true),
+            ("cpu-flat", "--handwritten-rollout", None, false),
+            ("teacher-consistency", "--handwritten-rollout", None, false),
+            ("game-smoke", "--steps-csv", Some("x.csv"), false),
+            ("cpu-flat", "--workers", Some("2"), true)
+        ] {
+            let mut argv = vec!["ramen_root_bench", "--mode", mode, "--rollout-model", "unused.onnx", flag];
+            argv.extend(value);
+            let args = RootArgs::try_parse_from(&argv)?;
+            let ok = check_output_flags(&args).is_ok();
+            c.check(ok == want, &format!("{mode} + {flag} → 放行 {ok}（期望 {want}）"));
+        }
+        c.finish()
+    }
+
+    /// `--root-policy` 只在自建根的三种模式放行 `nn`，未知值一律拒绝
+    ///
+    /// # 错误
+    ///
+    /// 任一组合的接受/拒绝与期望不符时报错。
+    #[test]
+    fn root_policy_support() -> Result<()> {
+        let mut c = Chk::default();
+        for (mode, policy, want) in [
+            ("cpu-flat", "handwritten", true),
+            ("cpu-flat", "nn", false),
+            ("teacher-game", "nn", false),
+            ("root-scan", "nn", true),
+            ("leaf-pilot", "nn", true),
+            ("value-check", "nn", true),
+            ("root-scan", "abc", false),
+            ("cpu-flat", "abc", false)
+        ] {
+            let args = RootArgs::try_parse_from([
+                "ramen_root_bench",
+                "--mode",
+                mode,
+                "--rollout-model",
+                "unused.onnx",
+                "--root-policy",
+                policy
+            ])?;
+            let ok = check_root_policy(&args).is_ok();
+            c.check(ok == want, &format!("{mode} + --root-policy {policy} → 放行 {ok}（期望 {want}）"));
+        }
+        c.finish()
     }
 
     /// 零请求根不得污染最低批利用率
@@ -6355,6 +6557,9 @@ mod tests {
     /// 覆盖：写入 → 命中 → 消费后清空；非目标阶段 / Resolved / 事件路径经过后失效；
     /// 篡改后必须落回真实推理且结果不变；新轨迹与槽位替换不继承缓存。
     ///
+    /// 用常数输出 fixture，故只钉住缓存的键、失效与计数；「命中后用了别处写入的
+    /// policy」这类内容错误在这里测不出，由真实模型开缓存的 gpu-wave 逐位对拍覆盖。
+    ///
     /// # 错误
     ///
     /// 建局、推理或任一不变量被破坏时报错。
@@ -6362,11 +6567,10 @@ mod tests {
     fn cache_lifecycle_in_traj() -> Result<()> {
         // 测试工作目录统一到 workspace 根（项目约定）
         set_current_dir(get_workspace_root()?)?;
-        let model = "saved_models/arms/ens_G2mix_g123.onnx";
-        ensure!(
-            Path::new(model).exists(),
-            "本轮冻结模型不存在：{model}（本测试依赖它，不另造假模型）"
-        );
+        // 缓存键与失效只看输入与回合，与网络输出无关：常数 fixture 即可覆盖
+        let (model, nn) = load_fixture_nn("cache")?;
+        let nn = nn.with_special_mode(SpecialSelectMode::Canonical).with_race_shield(true);
+        let model = model.as_str();
         let mut cfg = load_game_config()?;
         // 与主流程同一前提
         cfg.ramen_region_strategy = RamenRegionStrategy::All;
@@ -6393,9 +6597,6 @@ mod tests {
         let actions = root.list_actions()?;
         ensure!(!actions.is_empty(), "根上没有合法候选");
         println!("固定根 t{} {:?}：候选 {} 个", root.turn(), root.stage, actions.len());
-        let nn = RamenNnTrainer::load(&args.rollout_model)?
-            .with_special_mode(SpecialSelectMode::Canonical)
-            .with_race_shield(true);
         let seeds = RolloutSeeds::from_rng(&mut rng.clone());
 
         let mut bad = 0usize;

@@ -32,6 +32,7 @@
 //! | `NN_ROLLOUT_SEARCH_N` | 4 | 每个搜索点的 rollout 条数 |
 //! | `NN_ROLLOUT_STAGES` | train | 搜索阶段：`train` / `all` / `none` |
 //! | `NN_ROLLOUT_CONTROL` | 0 | 置 1 时先用同一份配置跑一局**手写 rollout** 作对照 |
+//! | `NN_ROLLOUT_MAX_TURN` | 不限 | NN 生效的绝对游戏回合上限（含），超过后转手写；不是从根起的步数 |
 //!
 //! # 用法
 //!
@@ -96,6 +97,13 @@ fn main() -> Result<()> {
     let search_n: usize = env::var("NN_ROLLOUT_SEARCH_N").unwrap_or_else(|_| "4".into()).parse()?;
     let stages_name = env::var("NN_ROLLOUT_STAGES").unwrap_or_else(|_| "train".into());
     let control = env::var("NN_ROLLOUT_CONTROL").is_ok_and(|v| v == "1");
+    let max_turn = env::var("NN_ROLLOUT_MAX_TURN")
+        .ok()
+        .map(|value| value.parse::<i32>().context("NN_ROLLOUT_MAX_TURN 必须是非负整数"))
+        .transpose()?;
+    if max_turn.is_some_and(|turn| turn < 0) {
+        bail!("NN_ROLLOUT_MAX_TURN 必须是非负整数");
+    }
 
     let stages = match stages_name.as_str() {
         "train" => RamenSearchStages::train_only(),
@@ -109,7 +117,7 @@ fn main() -> Result<()> {
 
     let config = SearchConfig::default().with_search_n(search_n).with_ucb(false);
     println!(
-        "NN-rollout 探针: model={model} search_n={search_n} stages={stages_name} runs={runs} seed={seed} threads={}",
+        "NN-rollout 探针: model={model} search_n={search_n} stages={stages_name} max_turn={max_turn:?} runs={runs} seed={seed} threads={}",
         rayon::current_num_threads()
     );
 
@@ -123,7 +131,7 @@ fn main() -> Result<()> {
     run_arm("nn-rollout", runs, seed, |_| {
         RamenMctsTrainer::new(config.clone())
             .with_stages(stages)
-            .with_nn_rollout(Arc::clone(&nn), None)
+            .with_nn_rollout(Arc::clone(&nn), max_turn)
     })?;
 
     Ok(())

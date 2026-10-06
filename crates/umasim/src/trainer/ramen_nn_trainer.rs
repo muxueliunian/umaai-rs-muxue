@@ -159,7 +159,7 @@ pub struct ActionLogit {
 /// 一次动作决策由谁定案
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NnVia {
-    /// 跑了一次网络推理，按 policy argmax 选出
+    /// 网络策略定案；多候选按 policy argmax，单候选可省略推理
     Network,
     /// 自选比赛硬守门命中，无视 policy 直接选「比赛」，没有推理
     RaceGate,
@@ -272,7 +272,10 @@ pub struct RamenNnTrainer {
     /// 是否启用自选比赛硬守门（见 [`Self::with_race_shield`]）
     race_shield: bool,
     /// `SpecialSelect` 阶段的推理口径（见 [`Self::with_special_mode`]）
-    special_mode: SpecialSelectMode
+    special_mode: SpecialSelectMode,
+    /// 测试专用的实例请求数；避免并行测试污染全局计数。
+    #[cfg(test)]
+    test_requests: Arc<AtomicU64>
 }
 
 impl RamenNnTrainer {
@@ -334,7 +337,9 @@ impl RamenNnTrainer {
             },
             fallback: Arc::new(RecommendedRamenTrainer::for_rollout()),
             race_shield: true,
-            special_mode: SpecialSelectMode::Canonical
+            special_mode: SpecialSelectMode::Canonical,
+            #[cfg(test)]
+            test_requests: Arc::new(AtomicU64::new(0))
         })
     }
 
@@ -358,6 +363,8 @@ impl RamenNnTrainer {
     /// 输入输出维度不符或 tract 推理失败时报错。
     pub fn infer_features(&self, features: Vec<f32>) -> Result<RamenNnOutput> {
         INFER_REQUESTS.fetch_add(1, Ordering::Relaxed);
+        #[cfg(test)]
+        self.test_requests.fetch_add(1, Ordering::Relaxed);
         ensure!(
             features.len() == features::INPUT_DIM,
             "特征长度 {} 与 INPUT_DIM={} 不符",
@@ -386,6 +393,18 @@ impl RamenNnTrainer {
     /// 一遍旁车 JSON，也就不会与 [`Self::infer_features`] 的解码口径分叉。
     pub fn value_norm(&self) -> RamenValueNorm {
         self.value_norm
+    }
+
+    /// 测试专用：构造具有指定 policy 的临时 ONNX 模型，加载后清理文件。
+    #[cfg(test)]
+    pub(crate) fn test_fixture(policy: &[f32]) -> Result<Self> {
+        tests::load_fixture(policy)
+    }
+
+    /// 测试专用：读取这一模型实例实际进入推理的次数。
+    #[cfg(test)]
+    pub(crate) fn test_infer_count(&self) -> u64 {
+        self.test_requests.load(Ordering::Relaxed)
     }
 
     /// 开关自选比赛硬守门（默认开启）
@@ -779,6 +798,24 @@ mod tests {
         )
     }
 
+    /// 创建并加载指定输出的 ONNX fixture；模型与旁车均限制在测试目录内。
+    pub(super) fn load_fixture(policy: &[f32]) -> Result<RamenNnTrainer> {
+        use std::fs;
+
+        ensure!(policy.len() == POLICY_DIM, "fixture policy 长度必须为 {POLICY_DIM}");
+        let dir = unique_test_dir("nn_policy")?;
+        let model = dir.join("model.onnx");
+        let sidecar = dir.join("model.onnx.json");
+        let mut output = vec![0.0f32; OUTPUT_DIM];
+        output[..POLICY_DIM].copy_from_slice(policy);
+        fs::write(&model, onnx_fixture::const_logits_model(features::INPUT_DIM, &output)?)?;
+        fs::write(&sidecar, valid_sidecar_json())?;
+        let loaded = RamenNnTrainer::load(&model);
+        println!("清理 fixture 文件: {} / {}", model.display(), sidecar.display());
+        cleanup_test_dir(&dir)?;
+        loaded
+    }
+
     const TEST_UMA_ID: u32 = 102601;
     const TEST_DECK: [u32; 6] = [302424, 302894, 303044, 302924, 303024, 303054];
     const TEST_INHERIT: InheritInfo = InheritInfo {
@@ -902,12 +939,9 @@ mod tests {
         std::fs::write(&model, onnx_fixture::matmul_model(features::INPUT_DIM, OUTPUT_DIM))?;
         std::fs::write(dir.join("good.onnx.json"), valid_sidecar_json())?;
 
-        let before = infer_request_count();
-        let loaded = RamenNnTrainer::load(&model);
-        let after = infer_request_count();
-        println!("加载前后推理请求数: {before} → {after}");
-        c.check(loaded.is_ok(), "合法 fixture 加载成功");
-        c.check(after == before, "加载（含图输出契约校验）不计入任何推理请求");
+        let loaded = RamenNnTrainer::load(&model)?;
+        println!("加载后实例推理请求数: {}", loaded.test_infer_count());
+        c.check(loaded.test_infer_count() == 0, "加载（含图输出契约校验）不产生推理请求");
         cleanup_test_dir(&dir)?;
         c.finish()
     }
@@ -993,92 +1027,64 @@ mod tests {
         c.finish()
     }
 
-    /// 单候选决策点直接定案，不再交给推理
-    ///
-    /// 两条断言：
-    /// 1. 多候选仍返回 [`DecisionPrep::NeedsInference`]；
-    /// 2. 同一局面同一阶段、候选切到只剩 1 个时返回 `Resolved(0)`，
-    ///    且该路径**不消耗随机流**（用 rng 克隆体的下一个 u64 做指纹，前后一致）。
-    ///
-    /// ❗**本测试只证明分支返回正确，不证明省下了推理**：`prepare_decision` 改动前
-    /// 本来也不执行推理，真正的省是「`Resolved` 不会再进 `infer_features`」，那要在
-    /// `select_action` 或整根对拍上量。
-    ///
-    /// ❗[`infer_request_count`] 是**进程级全局计数**，`cargo test` 默认并行跑，
-    /// 别的测试可能在读取前后递增它。故这里**只打印不断言**——把它写成确定性断言
-    /// 会做出一个随并行调度变红的测试。
-    ///
-    /// ❗本测试钉的是「正常模型 + 合法局面下动作与随机流不变」。它**不**覆盖
-    /// 「推理失败 / 模型输出非有限值」这类依赖真实推理的错误行为——单候选路径上
-    /// 那些检查本就不会再触发。
+    /// 生成式 fixture 验证实际 select_action：单候选不推理，多候选按指定 logit 决策。
+    /// 同时保留候选落格、canonical 根校验和手写 fallback 的随机流行为。
     #[test]
     fn test_single_candidate_skips_inference() -> Result<()> {
         use rand::RngCore;
+        use crate::game::ramen::{Operation, policy_schema::train_index};
 
         let root = get_workspace_root()?;
         std::env::set_current_dir(&root)?;
         let _ = init_test_logger("error");
         let _ = init_global();
 
-        let model_path = root.join("saved_models").join("ramen_pilot").join("model.onnx");
-        if !model_path.is_file() {
-            println!("跳过：模型不存在（saved_models 不入库）");
-            return Ok(());
-        }
-        let trainer = RamenNnTrainer::load(&model_path)?;
+        let mut policy = vec![0.0f32; POLICY_DIM];
+        policy[train_index(&Operation::NormalOuting)?] = 10.0;
+        let trainer = RamenNnTrainer::test_fixture(&policy)?.with_race_shield(false);
 
         let (mut rng, rule_master) = crate::bench::seeded_rngs(42, 0);
         let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
         game.set_rule_master(rule_master);
-        advance_to_decision(&mut game, &trainer, &mut rng)?;
-
-        let actions = game.list_actions()?;
-        println!("阶段 {:?}  回合 {}  候选数 {}", game.stage, game.turn(), actions.len());
+        game.stage = RamenStage::Train;
+        let actions = vec![RamenAction::new(Operation::Rest), RamenAction::new(Operation::NormalOuting)];
 
         let mut c = Checks::new();
 
-        // (1) 多候选：仍需推理
-        if actions.len() > 1 {
-            let multi = trainer.prepare_decision(&game, &actions, &mut rng)?;
-            println!("多候选 prepare_decision -> {}", prep_name(&multi));
-            c.check(
-                matches!(multi, DecisionPrep::NeedsInference(_)),
-                "多候选决策点应仍返回 NeedsInference"
-            );
-        } else {
-            println!("本决策点只有 1 个候选，跳过多候选那一条");
-        }
+        let before = trainer.test_infer_count();
+        let rng_before = rng.clone().next_u64();
+        let single = trainer.select_action_labeled(&game, &actions[..1], &mut rng)?;
+        c.check(single.index == 0 && single.via == NnVia::Network, "单候选仍记为网络策略定案");
+        c.check(trainer.test_infer_count() == before, "真正 select_action 的单候选路径不调用模型");
+        c.check(rng.clone().next_u64() == rng_before, "单候选不消耗随机流");
+        let multi = trainer.select_action(&game, &actions, &mut rng)?;
+        println!("单候选={} 多候选={multi} 实例推理次数={}", single.index, trainer.test_infer_count());
+        c.check(multi == 1, "多候选按 fixture 指定偏好选择第二项");
+        c.check(trainer.test_infer_count() == before + 1, "多候选实际推理一次");
 
-        // (2)(3) 单候选：直接定案 + 不动请求计数 + 不消耗随机流
-        let before = infer_request_count();
-        let probe_before = rng.clone().next_u64();
-        let single = trainer.prepare_decision(&game, &actions[..1], &mut rng)?;
-        let probe_after = rng.clone().next_u64();
-        let after = infer_request_count();
-        println!(
-            "单候选 prepare_decision -> {}  请求计数 {} -> {}  rng 指纹 {:#018x} -> {:#018x}",
-            prep_name(&single),
-            before,
-            after,
-            probe_before,
-            probe_after
-        );
-        c.check(
-            matches!(single, DecisionPrep::Resolved(0)),
-            "单候选应直接定案为 Resolved(0)"
-        );
-        c.check(probe_after == probe_before, "单候选路径不应消耗随机流");
-        // ❗请求计数只作观察：全局静态 + 并行测试，差值不是确定量，不能断言
-        println!("  （观察）全局推理请求计数 {before} -> {after}，并行下不可作断言");
+        let guarded = trainer.clone().with_race_shield(true);
+        let mut deadline = RamenGame::newgame(100201, &TEST_DECK, TEST_INHERIT)?;
+        deadline.base.turn = 25;
+        deadline.stage = RamenStage::Train;
+        let race_only = [RamenAction::new(Operation::Race)];
+        let gate_pick = guarded.select_action_labeled(&deadline, &race_only, &mut rng)?;
+        c.check(gate_pick.index == 0 && gate_pick.via == NnVia::RaceGate, "单候选优化仍晚于自选比赛守门");
+
+        let invalid = [RamenAction::new(Operation::SuperRamenSelect(usize::MAX))];
+        c.check(trainer.select_action(&game, &invalid, &mut rng).is_err(), "单候选也校验阶段与动作落格");
+        game.stage = RamenStage::SpecialSelect;
+        game.ramen.pending_ramen = None;
+        let special = [RamenAction::combined_select(Some(0), [0, 0, 0])];
+        c.check(trainer.select_action(&game, &special, &mut rng).is_err(), "单候选不能绕过 canonical 根校验");
+
+        let handwritten = trainer.clone().with_special_mode(SpecialSelectMode::Handwritten);
+        let mut expected_rng = rng.clone();
+        let expected = handwritten.fallback.select_action(&game, &special, &mut expected_rng)?;
+        let fallback = handwritten.select_action_labeled(&game, &special, &mut rng)?;
+        c.check(fallback.via == NnVia::Handwritten && fallback.index == expected, "手写 SpecialSelect 的来源和动作保留");
+        c.check(rng.next_u64() == expected_rng.next_u64(), "手写 fallback 随机流与直接调用一致");
+        c.check(trainer.test_infer_count() == before + 1, "非法与手写出口均没有额外推理");
         c.finish()
-    }
-
-    /// 给 [`DecisionPrep`] 一个可打印的短名（测试输出用）
-    fn prep_name(p: &DecisionPrep) -> String {
-        match p {
-            DecisionPrep::Resolved(i) => format!("Resolved({i})"),
-            DecisionPrep::NeedsInference(f) => format!("NeedsInference(特征 {} 维)", f.len())
-        }
     }
 
     /// 固定输入形状后，输出必须与符号 batch 图**逐位一致**
@@ -1148,125 +1154,4 @@ mod tests {
     }
 
 
-    /// 推理成本微基准：符号 batch vs 固定 batch，以及 batch 规模的吞吐曲线
-    ///
-    /// 要回答的问题是「132× 的成本到底花在哪」：
-    /// 1. **特征编码**占多少——若编码是大头，换推理后端不会有收益；
-    /// 2. **符号 batch 维**代价多少——[`RamenNnTrainer::load`] 直接 `into_optimized()`
-    ///    一个 `['batch', 754]` 的图，tract 在维度未知时拿不到形状特化，
-    ///    固定成 `[1, 754]` 可能白拿一大截；
-    /// 3. **批量的边际收益**——决定「把 512 条 rollout 改成锁步批量推理」这项
-    ///    结构性改造值不值得做，以及 GPU 后端的上限在哪。
-    ///
-    /// 仅微基准用途，`#[ignore]` 手动执行：
-    /// `cargo test --release --lib --features onnx -- --ignored --nocapture bench_infer`
-    #[test]
-    #[ignore]
-    #[allow(clippy::unwrap_used)]
-    fn bench_infer_batch_scaling() -> Result<()> {
-        use std::time::Instant;
-
-        use tract_ndarray::Array2;
-
-        let workspace_root = get_workspace_root()?;
-        std::env::set_current_dir(workspace_root)?;
-        let _ = init_test_logger("error");
-        let _ = init_global();
-
-        let path = std::path::Path::new("saved_models/dagger/ens_d3.onnx");
-        let mut c = Checks::new();
-        if !path.is_file() {
-            println!("跳过：本机没有 {}", path.display());
-            return c.finish();
-        }
-
-        // 取一个真实局面用于编码基准
-        let trainer = RamenNnTrainer::load(path)?;
-        let mut rng = StdRng::seed_from_u64(42);
-        let mut game = RamenGame::newgame(TEST_UMA_ID, &TEST_DECK, TEST_INHERIT)?;
-        advance_to_decision(&mut game, &trainer, &mut rng)?;
-
-        // --- 1. 特征编码 ---
-        let n_enc = 20_000;
-        let t0 = Instant::now();
-        let mut sink = 0.0f32;
-        for _ in 0..n_enc {
-            let f = encode(&game)?;
-            sink += f[0];
-        }
-        let enc_us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(n_enc);
-        println!("特征编码        {enc_us:>8.1} µs/次 (sink={sink:.3})");
-
-        // --- 2. 符号 batch（当前 load 的做法） ---
-        let dynamic = tract_onnx::onnx()
-            .model_for_path(path)?
-            .into_optimized()?
-            .into_runnable()?;
-        let one = Array2::<f32>::zeros((1, features::INPUT_DIM));
-        let n_run = 2_000;
-        let t0 = Instant::now();
-        for _ in 0..n_run {
-            let _ = dynamic.run(tvec!(one.clone().into_tvalue()))?;
-        }
-        let dyn_us = t0.elapsed().as_secs_f64() * 1e6 / f64::from(n_run);
-        println!("符号 batch b=1  {dyn_us:>8.1} µs/次");
-
-        // --- 3. 固定 batch 的吞吐曲线 ---
-        println!("{:<16}{:>12}{:>14}{:>10}", "固定 batch", "µs/批", "µs/样本", "相对 b=1");
-        let mut per_sample_at_1 = 0.0f64;
-        for &b in &[1usize, 8, 32, 128, 512] {
-            let fixed = tract_onnx::onnx()
-                .model_for_path(path)?
-                .with_input_fact(0, f32::fact([b, features::INPUT_DIM]).into())?
-                .into_optimized()?
-                .into_runnable()?;
-            let input = Array2::<f32>::zeros((b, features::INPUT_DIM));
-            // 批越大单次越贵，样本总数大致持平即可
-            let reps = (16_384 / b).max(4);
-            let t0 = Instant::now();
-            for _ in 0..reps {
-                let _ = fixed.run(tvec!(input.clone().into_tvalue()))?;
-            }
-            let per_batch_us = t0.elapsed().as_secs_f64() * 1e6 / reps as f64;
-            let per_sample_us = per_batch_us / b as f64;
-            if b == 1 {
-                per_sample_at_1 = per_sample_us;
-            }
-            println!(
-                "{:<16}{:>12.1}{:>14.2}{:>10.2}x",
-                b,
-                per_batch_us,
-                per_sample_us,
-                per_sample_at_1 / per_sample_us
-            );
-        }
-
-        // --- 4. 集成 vs 单成员：ens_d3 是 3 个模型的算术平均，成本理应约 3 倍 ---
-        println!("\n{:<28}{:>12}", "模型（固定 b=1）", "µs/次");
-        for name in ["ens_d3.onnx", "d_s1.onnx"] {
-            let one_path = std::path::Path::new("saved_models/dagger").join(name);
-            if !one_path.is_file() {
-                println!("{name:<28}{:>12}", "缺文件");
-                continue;
-            }
-            let m = tract_onnx::onnx()
-                .model_for_path(&one_path)?
-                .with_input_fact(0, f32::fact([1, features::INPUT_DIM]).into())?
-                .into_optimized()?
-                .into_runnable()?;
-            let input = Array2::<f32>::zeros((1, features::INPUT_DIM));
-            let t0 = Instant::now();
-            for _ in 0..2_000 {
-                let _ = m.run(tvec!(input.clone().into_tvalue()))?;
-            }
-            println!("{name:<28}{:>12.1}", t0.elapsed().as_secs_f64() * 1e6 / 2_000.0);
-        }
-
-        println!(
-            "\n参考：手写策略单次决策约 {:.1} µs（由 3.5 s / 局 与约 2.4 万次 rollout 决策粗估）",
-            3.5e6 / 24_000.0
-        );
-        c.check(enc_us > 0.0, "编码基准跑通");
-        c.finish()
-    }
 }

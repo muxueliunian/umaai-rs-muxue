@@ -181,6 +181,8 @@ where
 
     /// rollout 失败是否让整次搜索失败（默认 `false` = 历史行为）
     ///
+    /// 在当前模拟组执行并收集结果后返回错误，不立即取消已经调度的模拟。
+    ///
     /// 默认路径下单条 rollout 失败只被计入 `failed` 并告警，搜索照常用剩下的样本
     /// 排序——手写基策的失败是零星的，丢掉几条不改变结论。
     ///
@@ -243,11 +245,15 @@ pub struct SearchProbe {
     pub failed: Vec<usize>,
     /// 本次搜索的激进度因子
     pub radical_factor: f64,
-    /// `weighted_mean(radical_factor)` 口径的中选下标
+    /// `weighted_mean(radical_factor)` 口径（Score 轴）的中选下标
+    ///
+    /// 只是观测量：生产默认按 PT 轴（`best_action_pt_idx`）选择，二者可能不同，
+    /// 不能当作训练员实际执行的动作。
     pub best_action_idx: usize,
     /// 搜索内核开始时刻（与外层链路对齐用）
     pub started: Instant,
-    /// 搜索内核墙钟耗时
+    /// 搜索内核墙钟耗时；批量后端的 `precompute` 在内核之前执行，不计入此值。
+    /// 批量推理总成本应由调用方单独测量，不能拿本字段代替端到端耗时。
     pub elapsed: Duration
 }
 
@@ -281,8 +287,9 @@ pub type RamenBatchTable = HashMap<(usize, u64), RolloutOutcome<RamenTerminal>>;
 pub trait RamenBatchRollout: Send + Sync {
     /// 算完 `game` 上每个候选的 `n` 条 rollout
     ///
-    /// 必须为每个 `(候选下标, seeds.seed_at(j))`（`j` 取 `0..n`）都给出结果；
-    /// 缺项会让搜索报错而不是静默少样本。
+    /// 仅支持均匀分配；搜索入口在调用后端前拒绝 UCB 与重复候选。
+    /// 必须恰好为每个 `(候选下标, seeds.seed_at(j))`（`j` 取 `0..n`）给出结果，
+    /// 不得缺项或带多余键。搜索入口独立校验此结构契约，不受 strict 开关影响。
     ///
     /// # 错误
     ///
@@ -360,6 +367,7 @@ where
     /// 设置 rollout 失败时是否让整次搜索失败
     ///
     /// 见 [`Self::strict_rollout`] 字段文档：换过 rollout 基策的实验一律打开。
+    /// 本开关阻止用部分成功样本返回结果，不负责立即取消正在执行的模拟组。
     pub fn with_strict_rollout(mut self, strict: bool) -> Self {
         self.strict_rollout = strict;
         self
@@ -1088,10 +1096,41 @@ impl FlatSearch<RamenGame> {
                 self.simulate_common_extract(game, action, seed, seed, RamenTerminal::from_game)
             });
         };
+        // 整根预计算只实现均匀分配。必须在后端工作前拒绝 UCB，不能先跑满全部
+        // 候选，再用 UCB 消费其中一部分或在事后才报告消费次数不符。
+        ensure!(!self.config.use_ucb, "批量 rollout 后端仅支持均匀分配，use_ucb 必须为 false");
+        ensure!(!actions.is_empty(), "没有可用动作");
+        ensure!(self.config.max_depth == 0, "拉面批量 rollout 要求 max_depth 为 0");
+        ensure!(self.config.search_n > 0, "批量 rollout 的 search_n 必须为正");
+        // 内核回调传入动作引用，查表时按动作还原下标。重复动作会被 position
+        // 归到第一项，因此显式拒绝，不改变任何合法候选的顺序或评分。
+        for (idx, action) in actions.iter().enumerate() {
+            ensure!(!actions[..idx].contains(action), "批量 rollout 候选 {idx} 与前面的候选重复");
+        }
+        let expected = actions
+            .len()
+            .checked_mul(self.config.search_n)
+            .ok_or_else(|| anyhow!("批量 rollout 的候选数与样本数乘积溢出"))?;
         // 用 rng 的克隆体预派生根种子：内核随后会从**原 rng** 派生出同一个根，
         // 故 RNG 消耗与不接后端时逐位一致。
         let seeds = RolloutSeeds::from_rng(&mut rng.clone());
         let table = backend.precompute(game, actions, &seeds, self.config.search_n)?;
+        // 结构错误不能走 simulate_many 的宽松失败路径，否则缺键会被当成一条
+        // 失败 rollout 丢弃。先查总数，再逐项查键，连同「等量替换了错误键」也拒绝。
+        ensure!(
+            table.len() == expected,
+            "批量结果条目数 {} 与期望 {expected} 不符（不得缺项或包含多余项）",
+            table.len()
+        );
+        for idx in 0..actions.len() {
+            for j in 0..self.config.search_n {
+                let seed = seeds.seed_at(j);
+                ensure!(
+                    table.contains_key(&(idx, seed)),
+                    "批量结果缺 (候选 {idx}, rollout {j}, 种子 {seed:#018x})"
+                );
+            }
+        }
         // 守门：`use_ucb=false` 下内核应给每个候选恰好 `search_n` 条。
         // 数的是**内核实际消费次数**——后端产出多少条，与内核用掉多少条是两件事。
         let consumed: Vec<AtomicUsize> = (0..actions.len()).map(|_| AtomicUsize::new(0)).collect();
@@ -1100,11 +1139,12 @@ impl FlatSearch<RamenGame> {
                 .iter()
                 .position(|x| x == action)
                 .ok_or_else(|| anyhow!("批量结果查表时找不到候选下标"))?;
-            consumed[idx].fetch_add(1, Ordering::Relaxed);
-            table
+            let outcome = table
                 .get(&(idx, seed))
                 .cloned()
-                .ok_or_else(|| anyhow!("批量结果缺 (候选 {idx}, 种子 {seed:#018x})：后端与内核的种子派生不一致"))
+                .ok_or_else(|| anyhow!("批量结果缺 (候选 {idx}, 种子 {seed:#018x})：后端与内核的种子派生不一致"))?;
+            consumed[idx].fetch_add(1, Ordering::Relaxed);
+            Ok(outcome)
         })?;
         for (idx, got) in consumed.iter().enumerate() {
             let got = got.load(Ordering::Relaxed);
@@ -2678,6 +2718,231 @@ mod tests {
             println!();
         }
         Ok(())
+    }
+
+    // ========== 批量后端结构契约（无需模型）验收 ==========
+
+    /// 模拟批量后端返回的完整表与三种结构错误。
+    #[derive(Debug, Clone, Copy)]
+    enum MockBatchMode {
+        /// 返回全部要求的候选与种子。
+        Complete,
+        /// 遗漏一条结果，但同一候选仍保留其他成功结果。
+        Missing,
+        /// 额外返回一个不存在的候选下标。
+        Extra,
+        /// 总条目数正确，但把一条结果换成错误种子。
+        WrongSeed
+    }
+
+    /// 不运行模拟与推理的批量后端，记录调用次数以验证前置守卫。
+    struct MockBatchBackend {
+        /// 要构造的结果表形态。
+        mode: MockBatchMode,
+        /// 实际进入预计算的次数。
+        calls: AtomicUsize
+    }
+
+    impl MockBatchBackend {
+        /// 构造尚未调用的模拟后端。
+        fn new(mode: MockBatchMode) -> Self {
+            Self { mode, calls: AtomicUsize::new(0) }
+        }
+    }
+
+    /// 根据候选与 rollout 序号生成可直接逐字段比较的固定结果。
+    fn mock_batch_outcome(game: &RamenGame, candidate: usize, j: usize) -> RolloutOutcome<RamenTerminal> {
+        RolloutOutcome {
+            score: SearchScore {
+                score: 60_000.0 + candidate as f64 * 100.0 + j as f64,
+                score_pt: 61_000.0 + candidate as f64 * 50.0 + j as f64 * 2.0
+            },
+            terminal: RamenTerminal::from_game(game)
+        }
+    }
+
+    impl RamenBatchRollout for MockBatchBackend {
+        /// 按测试模式返回固定结果；不加载模型、不运行游戏续跑。
+        fn precompute(
+            &self, game: &RamenGame, actions: &[RamenAction], seeds: &RolloutSeeds, n: usize
+        ) -> Result<RamenBatchTable> {
+            self.calls.fetch_add(1, Ordering::Relaxed);
+            let mut table = RamenBatchTable::new();
+            for candidate in 0..actions.len() {
+                for j in 0..n {
+                    if candidate == 0 && j == 0 && matches!(self.mode, MockBatchMode::Missing) {
+                        continue;
+                    }
+                    let seed = if candidate == 0 && j == 0 && matches!(self.mode, MockBatchMode::WrongSeed) {
+                        seeds.seed_at(n)
+                    } else {
+                        seeds.seed_at(j)
+                    };
+                    table.insert((candidate, seed), mock_batch_outcome(game, candidate, j));
+                }
+            }
+            if matches!(self.mode, MockBatchMode::Extra) {
+                table.insert((actions.len(), seeds.seed_at(0)), mock_batch_outcome(game, 0, 0));
+            }
+            Ok(table)
+        }
+    }
+
+    /// 比较搜索结果的实际字段、两条评分轴统计与有序分数，不生成摘要或哈希。
+    fn check_batch_search_results(c: &mut Checks, actual: &RamenSearchOutput, expected: &RamenSearchOutput) {
+        c.check(actual.actions == expected.actions, "候选及顺序相同");
+        c.check(actual.best_action_idx == expected.best_action_idx, "中选下标相同");
+        c.check(actual.radical_factor.to_bits() == expected.radical_factor.to_bits(), "激进度逐位相同");
+        c.check(actual.terminal_results == expected.terminal_results, "终局统计相同");
+        c.check(actual.action_results.len() == expected.action_results.len(), "候选统计条目数相同");
+        for ((a, a_pt), (b, b_pt)) in actual.action_results.iter().zip(&expected.action_results) {
+            for (left, right) in [(a, b), (a_pt, b_pt)] {
+                c.check(left.count() == right.count(), "评分轴样本数相同");
+                let left_values = [
+                    left.sum, left.sum_sq, left.min(), left.max(), left.mean(), left.stdev(),
+                    left.weighted_mean(actual.radical_factor)
+                ];
+                let right_values = [
+                    right.sum, right.sum_sq, right.min(), right.max(), right.mean(), right.stdev(),
+                    right.weighted_mean(expected.radical_factor)
+                ];
+                c.check(left_values.map(f64::to_bits) == right_values.map(f64::to_bits), "评分轴统计逐位相同");
+            }
+        }
+        match (&actual.ordered_rollouts, &expected.ordered_rollouts) {
+            (Some(a), Some(b)) => {
+                c.check(a.root_seed == b.root_seed, "有序记录根种子相同");
+                c.check(a.per_candidate == b.per_candidate, "每候选有序分数相同");
+            }
+            (None, None) => {}
+            _ => c.check(false, "有序记录的启用状态相同")
+        }
+    }
+
+    /// UCB 必须在预计算之前拒绝，不得算完整根之后才发现消费次数不符。
+    #[test]
+    fn test_batch_rollout_rejects_ucb_before_precompute() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let backend = Arc::new(MockBatchBackend::new(MockBatchMode::Complete));
+        let config = SearchConfig::default().with_search_n(4).with_ucb(true).with_search_group_size(2);
+        let search: FlatSearch<RamenGame> = FlatSearch::new(config).with_batch_rollout(backend.clone());
+        let mut rng = StdRng::seed_from_u64(42);
+        let mut untouched = rng.clone();
+        let error = search.search(&game, &actions, &mut rng).err().ok_or_else(|| anyhow!("批量 UCB 应被拒绝"))?;
+        let message = format!("{error:#}");
+        println!("批量 UCB 前置检查: {message}");
+        let mut c = Checks::new();
+        c.check(message.contains("use_ucb 必须为 false"), "错误明确指出不支持 UCB");
+        c.check(backend.calls.load(Ordering::Relaxed) == 0, "UCB 被拒绝时后端未调用");
+        c.check(rng.next_u64() == untouched.next_u64(), "前置拒绝不推进外层 RNG");
+        c.finish()
+    }
+
+    /// 重复候选不得通过按动作还原下标的入口，避免结果全部归到第一项。
+    #[test]
+    fn test_batch_rollout_rejects_duplicate_candidates() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let first = actions.first().ok_or_else(|| anyhow!("测试根缺少候选"))?;
+        let duplicated = [first.clone(), first.clone()];
+        let backend = Arc::new(MockBatchBackend::new(MockBatchMode::Complete));
+        let config = SearchConfig::default().with_search_n(4).with_ucb(false);
+        let search: FlatSearch<RamenGame> = FlatSearch::new(config).with_batch_rollout(backend.clone());
+        let mut rng = StdRng::seed_from_u64(42);
+        let error = search.search(&game, &duplicated, &mut rng).err().ok_or_else(|| anyhow!("重复候选应被拒绝"))?;
+        println!("重复候选前置检查: {error:#}");
+        let mut c = Checks::new();
+        c.check(error.to_string().contains("候选重复"), "错误明确指出重复候选");
+        c.check(backend.calls.load(Ordering::Relaxed) == 0, "重复候选被拒绝时后端未调用");
+        c.finish()
+    }
+
+    /// 缺项、额外项与等长错键在 strict 关闭时也必须让整根失败。
+    #[test]
+    fn test_batch_rollout_rejects_malformed_table_without_strict() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let mut c = Checks::new();
+        for (mode, expected_error) in [
+            (MockBatchMode::Missing, "条目数"),
+            (MockBatchMode::Extra, "条目数"),
+            (MockBatchMode::WrongSeed, "批量结果缺")
+        ] {
+            let backend = Arc::new(MockBatchBackend::new(mode));
+            let config = SearchConfig::default().with_search_n(4).with_ucb(false);
+            let search: FlatSearch<RamenGame> = FlatSearch::new(config).with_batch_rollout(backend.clone());
+            let mut rng = StdRng::seed_from_u64(42);
+            let mut untouched = rng.clone();
+            c.check(!search.strict_rollout, "结构检查测试确实关闭 strict");
+            let result = search.search(&game, &actions, &mut rng);
+            match result {
+                Ok(_) => c.check(false, "畸形结果表不得返回部分成功的搜索结果"),
+                Err(error) => {
+                    let message = format!("{error:#}");
+                    println!("mode={mode:?}: {message}");
+                    c.check(message.contains(expected_error), "结构错误在汇总前被识别");
+                }
+            }
+            c.check(backend.calls.load(Ordering::Relaxed) == 1, "结果表来自一次后端调用");
+            c.check(rng.next_u64() == untouched.next_u64(), "结构拒绝不推进外层 RNG");
+        }
+        c.finish()
+    }
+
+    /// 完整均匀结果表与直接调用原内核逐字段一致，strict 不改变成功路径。
+    #[test]
+    fn test_batch_rollout_uniform_matches_direct_kernel() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let n = 4;
+        let config = SearchConfig::default().with_search_n(n).with_ucb(false).with_record_ordered_rollouts(true);
+        let direct: FlatSearch<RamenGame> = FlatSearch::new(config.clone());
+        let mut rng = StdRng::seed_from_u64(42);
+        let seeds = RolloutSeeds::from_rng(&mut rng.clone());
+        let expected = direct.search_with_terminal(&game, &actions, &mut rng, |g, action, seed| {
+            let candidate = actions.iter().position(|a| a == action).ok_or_else(|| anyhow!("直接内核候选不存在"))?;
+            let j = (0..n).find(|j| seeds.seed_at(*j) == seed).ok_or_else(|| anyhow!("直接内核种子不存在"))?;
+            Ok(mock_batch_outcome(g, candidate, j))
+        })?;
+        let next = rng.next_u64();
+        let mut c = Checks::new();
+        for strict in [false, true] {
+            let backend = Arc::new(MockBatchBackend::new(MockBatchMode::Complete));
+            let search: FlatSearch<RamenGame> = FlatSearch::new(config.clone())
+                .with_batch_rollout(backend.clone())
+                .with_strict_rollout(strict);
+            let mut rng = StdRng::seed_from_u64(42);
+            let actual = search.search(&game, &actions, &mut rng)?;
+            println!("完整批量表 strict={strict} 候选数={} 中选={}", actual.actions.len(), actual.best_action_idx);
+            check_batch_search_results(&mut c, &actual, &expected);
+            c.check(backend.calls.load(Ordering::Relaxed) == 1, "完整根仅预计算一次");
+            c.check(rng.next_u64() == next, "批量与直接内核消耗相同外层 RNG");
+        }
+        c.finish()
+    }
+
+    /// 未装批量后端时仍走原续跑闭包，均匀与默认 UCB 都不受批量守卫影响。
+    #[test]
+    fn test_no_batch_backend_keeps_default_search_path() -> Result<()> {
+        let (game, actions) = ramen_root()?;
+        let mut c = Checks::new();
+        for use_ucb in [false, true] {
+            let config = SearchConfig::default()
+                .with_search_n(2)
+                .with_search_group_size(1)
+                .with_ucb(use_ucb)
+                .with_record_ordered_rollouts(true);
+            let search: FlatSearch<RamenGame> = FlatSearch::new(config);
+            c.check(search.batch_rollout.is_none(), "默认未装载批量后端");
+            let mut rng = StdRng::seed_from_u64(42);
+            let actual = search.search(&game, &actions, &mut rng)?;
+            let next = rng.next_u64();
+            let mut direct_rng = StdRng::seed_from_u64(42);
+            let expected = search.search_with_terminal(&game, &actions, &mut direct_rng, |g, action, seed| {
+                search.simulate_common_extract(g, action, seed, seed, RamenTerminal::from_game)
+            })?;
+            println!("无批量后端 ucb={use_ucb} 中选={}", actual.best_action_idx);
+            check_batch_search_results(&mut c, &actual, &expected);
+            c.check(next == direct_rng.next_u64(), "默认入口与原续跑闭包的外层 RNG 相同");
+        }
+        c.finish()
     }
 
     // ========== 成本探针（仅测量用）验收 ==========
