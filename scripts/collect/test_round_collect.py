@@ -156,11 +156,11 @@ class RoundDriverTests(unittest.TestCase):
     def tearDown(self):
         self.tmp_ctx.cleanup()
 
-    def run_driver(self):
+    def run_driver(self, out=None, from_round=1):
         """以假提交、干净工作树运行驱动（只替换 git 查询）。"""
         args = SimpleNamespace(plan=self.plan_dir, expect_search_n=8, expect_target_valid=40, validate_only=False,
-                               exe=self.exe, export_exe=self.export, output=self.out, threads=1,
-                               asset_reference=self.ref, stop_file=self.stop)
+                               exe=self.exe, export_exe=self.export, output=out or self.out, threads=1,
+                               asset_reference=self.ref, stop_file=self.stop, from_round=from_round)
         git = lambda cmd, **kw: FAKE_COMMIT if "rev-parse" in cmd else ""
         with mock.patch.object(formal.subprocess, "check_output", side_effect=git):
             return formal.run(args)
@@ -201,6 +201,28 @@ class RoundDriverTests(unittest.TestCase):
         (self.ctrl / f"deadline_{mid}").unlink()
         self.assertEqual(self.run_driver(), 0)
         self.assertEqual(len(self.state()["completed"]), 28)
+
+    def test_from_round_new_output(self):
+        """截断后用 --from-round 配新目录续采：只跑起点及以后各轮，旧目录不受影响；越界或改起点即拒绝。"""
+        mid = self.plan["jobs"][20]["name"]  # 第二轮中途截断，模拟上一批
+        (self.ctrl / f"deadline_{mid}").write_text("")
+        self.assertEqual(self.run_driver(), 0)
+        (self.ctrl / f"deadline_{mid}").unlink()
+        old = self.state()
+        out2 = self.tmp / "out2"
+        self.assertEqual(self.run_driver(out=out2, from_round=2), 0)
+        state = formal.read_json(out2 / "run_state.json")
+        round2 = [j["name"] for j in self.plan["jobs"] if j["round"] == 2]
+        ran = sorted(p.name for p in (out2 / "data").iterdir())
+        print(f"续采目录完成 {len(state['completed'])} 个任务，数据目录 {len(ran)} 个，起点 {state['identity']['from_round']}")
+        self.assertEqual(state["completed"], round2)
+        self.assertEqual(ran, sorted(round2))
+        self.assertTrue(state.get("finished") and not state.get("truncated"))
+        self.assertEqual(formal.read_json(self.out / "run_state.json"), old)
+        with self.assertRaises(ValueError):
+            self.run_driver(out=out2, from_round=1)
+        with self.assertRaises(ValueError):
+            self.run_driver(out=self.tmp / "out3", from_round=3)
 
     def test_deadline_without_rounds_still_fails(self):
         """非分轮清单（R10 等）到达截止仍按失败处理，保持旧语义。"""

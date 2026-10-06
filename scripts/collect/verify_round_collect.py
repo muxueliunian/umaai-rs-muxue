@@ -84,9 +84,12 @@ def main():
     for name in state["completed"]:
         if name not in state.get("exports", {}):
             errors.append(f"{name}: 已完成但没有导出记录")
+    from_round = state["identity"].get("from_round", 1)
     stages = Counter()
     for name, export, is_partial in exports:
         job = jobs[name]
+        if job.get("round", 1) < from_round:
+            errors.append(f"{name}: 第 {job['round']} 轮早于续采起点 {from_round}，可能与上一批重叠")
         work = state["identity"]["indices"][name]
         count, hist = check_export(export, plan, job, work, plans, banned, commit, errors, seen)
         want = partial["accepted"] if is_partial else job["target"]
@@ -102,7 +105,7 @@ def main():
     done = set(state["completed"])
     full_rounds = sorted({j["round"] for j in plan["jobs"] if "round" in j
                           and all(o["name"] in done for o in plan["jobs"] if o.get("round") == j["round"])})
-    report = dict(plan=plan["recipe_id"], commit=commit, search_n=plan["search_n"],
+    report = dict(plan=plan["recipe_id"], commit=commit, search_n=plan["search_n"], from_round=from_round,
                   total_samples=sum(r["samples"] for r in rows), unique_indices=len(seen),
                   full_rounds=len(full_rounds), completed_jobs=len(done), partial=partial,
                   by_layer=by("layer"), by_shape=by("shape"), by_round=by("round"),

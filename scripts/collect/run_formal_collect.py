@@ -189,6 +189,7 @@ def run(args):
 
     `--stop-file`：任务之间检查，并传给采集器在根之间检查；存在即安全停止（退出码 3），
     删掉文件后用同一命令续跑。分轮清单（manifest 含 `rounds`）到达截止视为正常结束。
+    `--from-round`：分轮清单续采，跳过此前各轮；须配新输出目录，截止从新目录首次启动起算。
     """
     plan_dir = args.plan.resolve()
     plan = read_json(plan_dir / "manifest.json")
@@ -203,6 +204,9 @@ def run(args):
         raise ValueError("产物必须在工作区内，可执行文件必须存在")
     if args.threads <= 0:
         raise ValueError("threads 必须为正")
+    from_round = args.from_round
+    if from_round != 1 and not (plan.get("rounds") and 1 < from_round <= plan["rounds"]):
+        raise ValueError("--from-round 只用于分轮清单，且须在 2..rounds 之内")
     stop_file = args.stop_file.resolve() if args.stop_file else None
     model = ROOT / plan["model"]
     reference = args.asset_reference.resolve()
@@ -221,6 +225,9 @@ def run(args):
     state_path = output / "run_state.json"
     identity = dict(commit=commit, plan=plan, threads=args.threads,
                     indices={j["name"]: read_json(plan_dir / j["indices"]) for j in plan["jobs"]})
+    if from_round > 1:
+        # 只在续采时写入，旧输出目录的 run_state 身份保持不变、可照常续跑
+        identity["from_round"] = from_round
     if state_path.exists():
         state = read_json(state_path)
         if state["identity"] != identity:
@@ -236,6 +243,8 @@ def run(args):
     deadline = state["deadline"]
     rounds_plan = bool(plan.get("rounds"))
     for job in plan["jobs"]:
+        if rounds_plan and job["round"] < from_round:
+            continue
         if job["name"] in state["completed"]:
             saved_meta = read_json(ROOT / state["exports"][job["name"]] / "meta.json")
             saved_manifest = read_json(output / "data" / job["name"] / "manifest.json")
@@ -308,7 +317,8 @@ def run(args):
         print(f"完成 {job['name']}: {job['target']} 有效根", flush=True)
     state["finished"] = time.time()
     write_json(state_path, state)
-    print(f"{plan['target_valid']} 个有效根采集及逐任务 raw 导出完成；未启动训练", flush=True)
+    total = sum(j["target"] for j in plan["jobs"] if j.get("round", 1) >= from_round)
+    print(f"{total} 个有效根采集及逐任务 raw 导出完成；未启动训练", flush=True)
     return 0
 
 
@@ -328,4 +338,7 @@ if __name__ == "__main__":
     parser.add_argument("--threads", type=int)
     parser.add_argument("--stop-file", type=Path,
                         help="安全停止文件：存在即在任务或根之间停止（退出码 3），删除后同一命令续跑")
+    parser.add_argument("--from-round", type=int, default=1,
+                        help="分轮清单续采：跳过此前各轮，配新输出目录（截止重新起算）；"
+                             "上一批被截断的那一轮整轮跳过，保证 index 不与上一批重叠")
     sys.exit(run(parser.parse_args()))
