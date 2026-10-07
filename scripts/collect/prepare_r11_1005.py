@@ -135,8 +135,12 @@ def check_history(history_roots, ranges):
     return checked, max_end
 
 
-def main():
-    """核对 dump、汇总排除、检查历史号段后冻结分轮清单。"""
+def main(batch=BATCH, reservation=RESERVATION, smoke_local=SMOKE_LOCAL, smoke_cloud=SMOKE_CLOUD):
+    """核对 dump、汇总排除、检查历史号段后冻结分轮清单。
+
+    缺省参数即 R11 原批；续批（如 R11d）只换批次名与号段，配方、配额与排除口径不变。
+    `smoke_cloud=None` 表示该批不设云端冒烟段。
+    """
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--dump-dir", type=Path, required=True, help="真实 Rust dump 目录，内含 gen2_v1.txt")
     parser.add_argument("--source-root", type=Path, required=True, help="历史留出/开发/面板清单所在工作区（只读）")
@@ -144,7 +148,7 @@ def main():
                         help="历史采集数据或清单目录，可重复；扫描其中全部 manifest.json")
     parser.add_argument("--output-root", type=Path, default=COLLECT)
     args = parser.parse_args()
-    output = (args.output_root / BATCH).resolve()
+    output = (args.output_root / batch).resolve()
     if not output.is_relative_to(ROOT):
         raise ValueError("清单输出必须位于当前工作区")
     if output.exists():
@@ -161,11 +165,12 @@ def main():
     allowed = {src for cat, src in SOURCES if cat in EXCLUDE_CATEGORIES}
     extra = {f: s & allowed for f, s in excluded.items() if f not in holdout and s & allowed}
     # 本机冒烟段在冒烟前已核对空闲、冒烟后被本机冒烟占用，故这里只核对正式段与云端冒烟段
-    checked, max_end = check_history([r.resolve() for r in args.history_root], [RESERVATION, SMOKE_CLOUD])
+    checked, max_end = check_history([r.resolve() for r in args.history_root],
+                                    [reservation] + ([smoke_cloud] if smoke_cloud else []))
     print(f"历史 manifest 核对 {checked} 份，最大已登记 index 上界 {max_end}；新号段无相交")
-    prepare(args.dump_dir / "gen2_v1.txt", output, recipe_path=RECIPE, recipe_id=f"gen2_v1_{BATCH}",
+    prepare(args.dump_dir / "gen2_v1.txt", output, recipe_path=RECIPE, recipe_id=f"gen2_v1_{batch}",
             model=MODEL, model_id=MODEL_ID, search_n=SEARCH_N, layer_targets=ROUND_TARGETS,
-            index_start=RESERVATION[0], index_end=RESERVATION[1], seconds=SECONDS,
+            index_start=reservation[0], index_end=reservation[1], seconds=SECONDS,
             friend_gate=True, rounds=ROUNDS, excluded=extra)
     held = {tuple(p["fields"]) for p in json.loads((output / "holdout.json").read_text(encoding="utf-8"))["plans"]}
     if held != holdout:
@@ -173,7 +178,7 @@ def main():
     sampled = len(plans) - len(held) - len(extra)
     write_json(output / "exclusion_report.json", dict(
         space=recipe["space"]["version"], plan_count=len(plans), holdout=len(held),
-        extra_excluded=len(extra), sampled_plans=sampled, smoke_local=SMOKE_LOCAL, smoke_cloud=SMOKE_CLOUD,
+        extra_excluded=len(extra), sampled_plans=sampled, smoke_local=smoke_local, smoke_cloud=smoke_cloud,
         sources=report))
     print(f"计划 {len(plans)}：闭环留出 {len(held)}，额外排除 {len(extra)}，参与采集 {sampled}")
 

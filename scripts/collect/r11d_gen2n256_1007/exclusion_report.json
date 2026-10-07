@@ -1,0 +1,333 @@
+{
+  "space": "gen2_v1",
+  "plan_count": 4288,
+  "holdout": 250,
+  "extra_excluded": 0,
+  "sampled_plans": 4038,
+  "smoke_local": null,
+  "smoke_cloud": null,
+  "sources": [
+    {
+      "category": "闭环留出",
+      "source": "scripts/collect/r8_gen2_0920/holdout.json",
+      "combos": 250,
+      "in_space": 250,
+      "outside_holdout": 0
+    },
+    {
+      "category": "开发验证",
+      "source": "target/train_r8_0920/dev_validation_combos.json",
+      "combos": 687,
+      "in_space": 378,
+      "outside_holdout": 378
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/gen1_regression_0914/gen1_plans.json",
+      "combos": 525,
+      "in_space": 525,
+      "outside_holdout": 525
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/uma113101_recheck_0914/plans_113101.json",
+      "combos": 85,
+      "in_space": 85,
+      "outside_holdout": 85
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/region_panel_0914/panel_plans.json",
+      "combos": 60,
+      "in_space": 5,
+      "outside_holdout": 5
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/topdeck40_0919/topdeck40.json",
+      "combos": 40,
+      "in_space": 40,
+      "outside_holdout": 40
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/deck3_0919/plans_2s2e1w.json",
+      "combos": 8,
+      "in_space": 8,
+      "outside_holdout": 8
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/deck3_0919/plans_3s1e1w.json",
+      "combos": 8,
+      "in_space": 8,
+      "outside_holdout": 8
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/deck3_0919/plans_2s1e2w_名将.json",
+      "combos": 8,
+      "in_space": 0,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/deck3_0919/plans_2s1e2w_樱花.json",
+      "combos": 8,
+      "in_space": 0,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/gap_0919/plans40.json",
+      "combos": 40,
+      "in_space": 40,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/gap_0919/plans_pilot.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/search_curve_0920/plans9.json",
+      "combos": 9,
+      "in_space": 4,
+      "outside_holdout": 4
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/search_curve_0920/plans9x64.json",
+      "combos": 9,
+      "in_space": 4,
+      "outside_holdout": 4
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/region_nn_confirm_0921/plans9x11.json",
+      "combos": 9,
+      "in_space": 4,
+      "outside_holdout": 4
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/region_nn_pr_pair_0923/plans9.json",
+      "combos": 9,
+      "in_space": 4,
+      "outside_holdout": 4
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/region_nn_pr_pair_0923/plans_first2.json",
+      "combos": 2,
+      "in_space": 2,
+      "outside_holdout": 2
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/whole_nn_pair_0923/plans9.json",
+      "combos": 9,
+      "in_space": 4,
+      "outside_holdout": 4
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leaf_value_allhistory_0916/run01/sweep/summary.json",
+      "combos": 9,
+      "in_space": 9,
+      "outside_holdout": 9
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_154.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_412.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_865.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_1145.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_1599.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_2006.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_2979.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_3259.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_3423.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "评测面板",
+      "source": "logs/leafh3_0919/refs/plan_4037.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 0
+    },
+    {
+      "category": "筛查/冒烟",
+      "source": "logs/region_panel_0914/screen_plans.json",
+      "combos": 797,
+      "in_space": 24,
+      "outside_holdout": 24
+    },
+    {
+      "category": "筛查/冒烟",
+      "source": "logs/region_panel_0914/smoke_plans.json",
+      "combos": 2,
+      "in_space": 1,
+      "outside_holdout": 1
+    },
+    {
+      "category": "筛查/冒烟",
+      "source": "logs/leaf_value_allhistory_0916/run01/smoke_timing/summary.json",
+      "combos": 2,
+      "in_space": 2,
+      "outside_holdout": 2
+    },
+    {
+      "category": "筛查/冒烟",
+      "source": "logs/leaf_value_allhistory_0916/run01/tests/smoke_late/summary.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 1
+    },
+    {
+      "category": "筛查/冒烟",
+      "source": "logs/leaf_value_allhistory_0916/run01/tests/smoke_wiring/summary.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 1
+    },
+    {
+      "category": "筛查/冒烟",
+      "source": "logs/leaf_value_allhistory_0916/run01/tests/t2_boundaries/summary.json",
+      "combos": 1,
+      "in_space": 1,
+      "outside_holdout": 1
+    },
+    {
+      "category": "筛查/冒烟",
+      "source": "logs/leaf_value_allhistory_0916/run01/timing/r1b/summary.json",
+      "combos": 3,
+      "in_space": 3,
+      "outside_holdout": 3
+    },
+    {
+      "category": "筛查/冒烟",
+      "source": "logs/leaf_value_allhistory_0916/run01/timing/r2b/summary.json",
+      "combos": 3,
+      "in_space": 3,
+      "outside_holdout": 3
+    },
+    {
+      "category": "筛查/冒烟",
+      "source": "logs/leaf_value_allhistory_0916/run01/timing/r3b/summary.json",
+      "combos": 3,
+      "in_space": 3,
+      "outside_holdout": 3
+    },
+    {
+      "category": "其他空间留出",
+      "source": "scripts/collect/r8_2s1e2w_0920/holdout.json",
+      "combos": 38,
+      "in_space": 0,
+      "outside_holdout": 0
+    },
+    {
+      "category": "其他空间留出",
+      "source": "scripts/collect/r8_newuma_0920/holdout.json",
+      "combos": 62,
+      "in_space": 0,
+      "outside_holdout": 0
+    },
+    {
+      "category": "其他空间留出",
+      "source": "scripts/collect/r8_newcard_0920/holdout.json",
+      "combos": 158,
+      "in_space": 0,
+      "outside_holdout": 0
+    },
+    {
+      "category": "其他空间留出",
+      "source": "scripts/collect/r8_newboth_0920/holdout.json",
+      "combos": 21,
+      "in_space": 0,
+      "outside_holdout": 0
+    },
+    {
+      "category": "其他空间留出",
+      "source": "scripts/collect/r10_brian_1004/holdout.json",
+      "combos": 438,
+      "in_space": 0,
+      "outside_holdout": 0
+    },
+    {
+      "category": "其他空间留出",
+      "source": "scripts/collect/r10_admire_1004/holdout.json",
+      "combos": 438,
+      "in_space": 0,
+      "outside_holdout": 0
+    },
+    {
+      "category": "其他空间留出",
+      "source": "scripts/collect/r10_dualwis_1004/holdout.json",
+      "combos": 59,
+      "in_space": 0,
+      "outside_holdout": 0
+    },
+    {
+      "category": "其他空间留出",
+      "source": "scripts/collect/r10_newuma_1004/holdout.json",
+      "combos": 351,
+      "in_space": 0,
+      "outside_holdout": 0
+    }
+  ]
+}
