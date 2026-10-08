@@ -16,7 +16,7 @@
 
 用法::
 
-    python scripts/ramen_nn/backfill_combo_fields.py \
+    python scripts/ramen_nn/archive/backfill_combo_fields.py \
         --plan-dump target/gen2_train_0914/plan_dump.txt \
         --output training_data/combo_fields_backfill \
         --data training_data/npy_v6ck --data ...

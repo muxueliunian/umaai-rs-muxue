@@ -68,21 +68,15 @@
 - `friend_pacing_compare.py`：友人出行配额（`fcap` 等 token）配对对比——同 build 同 seed 配对差 + 走完率 / 逐年出行次数 / 风味浪费等结构指标
 - `bench_commit_compare.py`：跨 commit CPU 耗时对比编排（配合 `perf_probe` bin，见下「性能监测」节）
 - `ramen_nn/`：NN 管线脚本；其中 `bench_sidecar.py`（`ramen_root_bench` 的 GPU 侧车，需成员 PyTorch checkpoint）、`compare_root_bench.py`（逐 rollout / 逐决策字段比较）、`export_ensemble_onnx.py`（成员集成 ONNX 导出）为研究工具，不接入客户端
-  - `q2_train_1005.py` / `q2_eval_1005.py`：标签质量 × 数量四臂训练、导出、闭环与配对分析；`q1_1005.py`：短 cosine 日程的训练、选型与确认（预注册与结果在 `logs/q2_1005/`、`logs/q1_1005/`，号段见 `nn_model_registry.md` 第 13 节）
-  - `q4_1006.py`：冻结主干的候选 Q 解码器离线探针（特征缓存、解码器训练、按组合聚类 bootstrap 评测；预注册与结果在 `logs/q4_1006/`）
+  - `q2_train_1005.py` / `q2_eval_1005.py`：标签质量 × 数量四臂训练、导出、闭环与配对分析；`q1_1005.py`：短 cosine 日程的训练、选型与确认（预注册与结果在 `logs/q2_1005/`、`logs/q1_1005/`，号段见 `nn_model_registry.md` 第 14 节）
+  - `archive/`：已结束实验的一次性脚本（Q4 探针、旧数据补字段、标签预算对比、闭环 bench 对比等），只作复现记录
 - `collect/r9_*`：R9 四批交付的冻结采集清单（只作复现记录）
 - `collect/prepare_r10_1004.py`：基于实际 Rust 计划原文生成 R10 冻结清单；`prepare_r10_cloud.py` 核对发布提交、历史号段并冻结原文资产，云端直接使用已入库清单，见 `collect/r10_1004_task.md`
 - `collect/prepare_r11_1005.py` / `prepare_r11_cloud.py` / `verify_round_collect.py`：R11 分轮清单生成（含额外排除）、云端预检、分轮采集逐字段验收，见 `collect/r11_1005_task.md`
 
-### R11 新规则采集
-- 合入上游超级拉面效果修正后的规则，gen2_v1 每候选 256、R8A roll-in、手写终局教师、友人完成门限；与 R9/R10 评分规则不同，分目录保存。
-- 分轮清单：每轮一万根、层与构成配额同 R9 gen2 的四分之一；按 22 小时截止收尾，完整轮均衡，未满任务另行导出为 partial。
-- 采集器 `--stop-file` 与驱动同名参数：根间/任务间安全停止，退出码 3，同命令续跑；程序错误仍是退出码 1。
-- 号段与排除见 `nn_model_registry.md` 第 13 节。
-
-### R10 采集与本地 NN 后端
-- 新空间：`gen4_brian_v1` / `gen4_admire_v1` / `gen4_dualwis_v1` / `gen4_newuma_v1`，覆盖智成田白仁、智爱慕律动及新鲁道夫、新气槽；按角色排除冲突，旧 gen1/gen2/gen3 不改。
-- 本轮不购买开局增益，不纳入独有尚未实现的新根米浴；保留 754 维输入、R8A roll-in、手写终局教师和友人完成门限。正式配额、留出与独占号段见 `nn_model_registry.md` 第 12 节。
+### R10 / R11 采集与本地 NN 后端
+- R11 是合入超级拉面效果修正后的新规则数据，与 R9/R10 评分规则不同，分目录保存；采集器 `--stop-file` 为根间/任务间安全停止（退出码 3，同命令续跑）。配方见 `collect/r11_1005_task.md`，号段见 `nn_model_registry.md` 第 13 节。
+- R10 新增 `gen4_*` 四个空间，配方见 `collect/r10_1004_task.md`，号段见 `nn_model_registry.md` 第 12 节。
 - 本分支继续使用 `trainer/ramen_rollout_trainer.rs` 的网络回合窗口、严格失败传播与采集接口；GPU 研究通过 `ramen_root_bench` 的批量后端配合 `scripts/ramen_nn/bench_sidecar.py`，CPU 使用 ONNX。
 - 上游新增的离线 `rollout_evaluator="nn"` 与 `nn_rollout_probe` 已适配本地 `with_nn_rollout`，是 CPU 网络实验入口；不等于自动切换到 GPU，正式教师采集也不切换到 NN rollout。
 
@@ -133,7 +127,7 @@
 
 - 以 Windows 为主；umaai 已支持 Ubuntu/Linux 构建（`winscribe` / `windows` 依赖以 `cfg(windows)` 限定，Linux 加 `libc`）
 - Shell：PowerShell（Linux 下 bash）
-- Release 配置：`opt-level = 3`、`codegen-units = 16`、`lto = "fat"`、`debug = true`；Windows MSVC 的 `.cargo/config.toml` 设置栈大小。云端低内存构建可按交接说明单次覆盖为 thin LTO，不修改工作区或系统配置。
+- Release 配置：`opt-level = 3`、`codegen-units = 16`、`lto = "fat"`、`debug = true`；Windows MSVC 的 `.cargo/config.toml` 设置栈大小。低内存机器可用环境变量 `CARGO_PROFILE_RELEASE_LTO=thin` 单次覆盖，不修改工作区配置。
 - 工具链：Rust 1.98 / edition 2024；cargo fmt 使用 Nightly 格式规则，**只能由用户手动执行**
 
 ## 性能监测（跨 commit CPU 耗时对比）

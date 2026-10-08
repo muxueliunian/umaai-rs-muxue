@@ -1,7 +1,7 @@
 # 拉面 NN 模型、数据与评估世界登记
 
 更新：2026-10-05（§0 与 §13）。§1–§2 是 2026-09-14 的快照，此后 R6–R8 的模型以 §0 为准。
-实验结论与证据边界见 [nn_pipeline_plan.md](nn_pipeline_plan.md) §15。
+实验结论与证据边界见 [archive/nn_pipeline_plan.md](archive/nn_pipeline_plan.md) §15。
 本表只登记已存在的文件与字段，所有路径相对仓库根目录；文件存在性与集成成员列表已逐项检查。
 
 ⚠ `saved_models/`、`target/`、`training_data/`、`logs/` 全部被 `.gitignore` 忽略。
@@ -78,7 +78,7 @@
 ## 3. 第五批数据登记
 
 两批共同身份：roll-in `ens_R4_g123`（manifest `rollin` 为 `nn:741d02fc29a395d9`），采集代码 `07c4868`，
-每候选 search_n 1024，有序 rollout，不开 UCB，radical 1.4，地区策略 all；标签参数见 [nn_pipeline_plan.md](nn_pipeline_plan.md) §15.0。
+每候选 search_n 1024，有序 rollout，不开 UCB，radical 1.4，地区策略 all；标签参数见 [archive/nn_pipeline_plan.md](archive/nn_pipeline_plan.md) §15.0。
 
 | 项 | 第一批 r4roll | 第二批 r4roll2 |
 |---|---|---|

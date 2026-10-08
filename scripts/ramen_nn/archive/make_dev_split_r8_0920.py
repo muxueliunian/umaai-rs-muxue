@@ -10,7 +10,7 @@
 import json
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 BASE = ROOT / 'target/train_r67_0919/dev_validation_combos.json'
 OUT = ROOT / 'target/train_r8_0920/dev_validation_combos.json'
 NEW_SPACES = ['r8_newuma_0920', 'r8_newcard_0920', 'r8_newboth_0920']

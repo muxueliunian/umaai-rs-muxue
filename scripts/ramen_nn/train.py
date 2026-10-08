@@ -518,7 +518,7 @@ def _parse_args() -> argparse.Namespace:
         action="append",
         metavar=("DATA_DIR", "FIELDS_NPY"),
         help="给缺 `combo_fields.npy` 的旧 `--data` 目录外挂一份 `[N,7]` 完整字段。"
-        "字段须由实际采样计划补出（见 `backfill_combo_fields.py`），不得由组合键反推",
+        "字段须由实际采样计划补出（见 `archive/backfill_combo_fields.py`），不得由组合键反推",
     )
     parser.add_argument(
         "--split-by",

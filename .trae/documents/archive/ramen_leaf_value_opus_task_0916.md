@@ -47,7 +47,7 @@
 - `logs/newteacher4096_ab_closedloop_0916/{report,preregistration}.md`
 - `logs/newteacher4096_ab_closedloop_0916/diagnosis/diagnosis.md`（相关现象，不是因果结论）
 - `logs/gpu_probe_0915/REPORT.md`
-- `.trae/documents/ramen_nn_rollout_perf_plan.md`
+- `.trae/documents/archive/ramen_nn_rollout_perf_plan.md`
 - `.trae/documents/ramen_newteacher4096_ab_train_plan.md`
 
 旧性能计划部分状态未回填，不能把“第一轮待修”当成当前状态。本文件是此次 leaf 实验的执行入口；旧计划中地区 top-k、policy-only、低精度等均不在本次范围。

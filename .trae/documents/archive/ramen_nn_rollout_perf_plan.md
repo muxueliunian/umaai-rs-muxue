@@ -356,7 +356,7 @@
 ## D.5 下一次会话先读什么
 
 1. 本节（`ramen_nn_rollout_perf_plan.md` 文末）。
-2. `.trae/documents/ramen_leaf_value_opus_task_0916.md` 文末「执行状态（2026-09-17 补记）」。
+2. `.trae/documents/archive/ramen_leaf_value_opus_task_0916.md` 文末「执行状态（2026-09-17 补记）」。
 3. `logs/leaf_value_allhistory_0916/run01/ERRATA_0917.md`（引用 run01 结论必须以它为准）。
 4. `logs/leaf_hybrid_y3_0917/run01/report.md` 与 `routing/implementation.md`。
 5. 需要细节时再进 `logs/leaf_hybrid_y3_0917/run01/subset/SUBSET_REPORT.md`、

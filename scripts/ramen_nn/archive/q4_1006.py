@@ -20,11 +20,11 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional
 
-sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from data import load_shards  # noqa: E402
 from model import POLICY_DIM, model_from_checkpoint  # noqa: E402
 
-ROOT = Path(__file__).resolve().parents[2]
+ROOT = Path(__file__).resolve().parents[3]
 OUT = ROOT / "logs" / "q4_1006"
 CACHE = OUT / "cache"
 ASSETS = ROOT / "logs" / "q2_1005" / "frozen" / "assets.json"

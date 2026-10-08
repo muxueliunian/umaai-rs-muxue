@@ -17,7 +17,7 @@
 # 用法
 
 ```text
-python scripts/ramen_nn/compare_bench.py \
+python scripts/ramen_nn/archive/compare_bench.py \
     --arm 基线=target/sel_ctrl.csv --arm 变体=target/sel_fact.csv \
     --baseline 基线
 ```
@@ -25,7 +25,7 @@ python scripts/ramen_nn/compare_bench.py \
 带选择/验收分离时：
 
 ```text
-python scripts/ramen_nn/compare_bench.py \
+python scripts/ramen_nn/archive/compare_bench.py \
     --selection 种子A=target/sel_a.csv --selection 种子B=target/sel_b.csv \
     --acceptance 种子A=target/acc_a.csv --acceptance 种子B=target/acc_b.csv \
     --baseline-csv target/acc_hw.csv

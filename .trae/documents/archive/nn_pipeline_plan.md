@@ -11,7 +11,7 @@
 > 阅读时以带「2026-08-29」标记的段落为准。
 >
 > **2026-09-13**：第四–五轮 DAgger、网络扩容对照与当前阶段决策见 **§15**；
-> 模型、数据与评估世界登记见 [nn_model_registry.md](nn_model_registry.md)。
+> 模型、数据与评估世界登记见 [nn_model_registry.md](../nn_model_registry.md)。
 
 ---
 
@@ -1915,7 +1915,7 @@ https://claude.ai/code/artifact/f49b7879-0bf0-460e-990c-9477dd6b8940
 
 本节是长期记录。数字取自各轮 `acceptance_summary.json`、`audit.json`、`run.json`
 与报告，均已对照原文件核实。完整证据（逐局 CSV、日志、脚本）只在被忽略的 `logs/`
-下本地保存，路径见 §15.10；模型与数据登记见 [nn_model_registry.md](nn_model_registry.md)。
+下本地保存，路径见 §15.10；模型与数据登记见 [nn_model_registry.md](../nn_model_registry.md)。
 更早的新规则实验（教师预算截断、R2、R3 嵌套预算、20k→30k）只有本地事实表
 `logs/nn_report_evidence/nn_experiment_fact_sheet.md`，本节不重复。
 
@@ -1935,7 +1935,7 @@ https://claude.ai/code/artifact/f49b7879-0bf0-460e-990c-9477dd6b8940
 - **教师数据**：本节第四、第五轮**新增采集**的数据（`npy_r3roll`、`npy_r4roll`、`npy_r4roll2`）采用
   FlatSearch 均匀分配、每候选 1024 次手写 rollout，有序 rollout，不开 UCB，地区策略 all；roll-in 为冻结学生集成。
   完整训练集仍包含历史 512 预算、不同 roll-in 来源（含手写 roll-in）的数据；4096 采集截断到 1024 的批次
-  （`npy_n4096_w1024`）等见 [nn_model_registry.md](nn_model_registry.md) §2.1 的数据配方登记。
+  （`npy_n4096_w1024`）等见 [nn_model_registry.md](../nn_model_registry.md) §2.1 的数据配方登记。
 - **评估**：`ramen_space_bench --trainer nn --special-mode canonical`，自选比赛守门开，
   seed 61444，gen1 空间 525 plan × 16 局（每套 8400 局），各臂同世界。
 - **统计**：每组逐 (plan, world) 配对差；合并时先在同一 (plan, world) 内平均两组差；
@@ -2078,7 +2078,7 @@ https://claude.ai/code/artifact/f49b7879-0bf0-460e-990c-9477dd6b8940
 5. **不为突破 70000 追加配置或评估世界**。
 6. 下一主线转为 **NN 辅助搜索**。
 7. 选定模型与实际入口分开记：**选定 ≠ 已部署**。当前所有实际默认入口都**不加载拉面 NN**，
-   本次不改变任何入口。详见 [nn_model_registry.md](nn_model_registry.md) §1。
+   本次不改变任何入口。详见 [nn_model_registry.md](../nn_model_registry.md) §1。
 
 ### 15.9 下一阶段入口：NN 辅助搜索（只记方向，本次不实施）
 

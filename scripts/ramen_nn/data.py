@@ -155,7 +155,7 @@ class NpyShard:
         self.combo_fields = np.load(fields_path, mmap_mode="r", allow_pickle=False) if fields_path.exists() else None
         if self.combo_fields_source is not None:
             # 外挂字段：旧导出只写了 combo_key，完整字段由实际采样计划补出（见
-            # `backfill_combo_fields.py`）。补出之后组合身份**只认字段**，故这里
+            # `archive/backfill_combo_fields.py`）。补出之后组合身份**只认字段**，故这里
             # 直接丢掉旧键——两套口径并存会让「按哪个切分」变成隐式选择。
             if self.combo_fields is not None:
                 raise ValueError(f"{self.data_dir}: 目录里已有 combo_fields.npy，不能再外挂一份")
