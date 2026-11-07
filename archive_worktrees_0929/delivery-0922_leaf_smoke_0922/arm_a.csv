@@ -1,0 +1,2 @@
+build,seed,run,rule_seed,hand_score,mcts_score,delta,hand_five,mcts_five,hand_pt,mcts_pt,hand_rmj,mcts_rmj,hand_free_race_ok,mcts_free_race_ok,hand_elapsed_ms,mcts_elapsed_ms,arm,leaf_h,rollout_terminal,rollout_leaf
+speed,61444,0,12767788041502544690,68685,69218,533,3337/2319/1791/1494/1525,3337/2400/1819/1332/1644,15450,17250,3,3,1,1,4.085,2444.755,a-pt-rank-full,0,30240,0

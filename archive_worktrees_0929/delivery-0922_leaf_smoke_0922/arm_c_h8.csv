@@ -1,0 +1,2 @@
+build,seed,run,rule_seed,hand_score,mcts_score,delta,hand_five,mcts_five,hand_pt,mcts_pt,hand_rmj,mcts_rmj,hand_free_race_ok,mcts_free_race_ok,hand_elapsed_ms,mcts_elapsed_ms,arm,leaf_h,rollout_terminal,rollout_leaf
+speed,61444,0,12767788041502544690,68685,71019,2334,3337/2319/1791/1494/1525,3337/2400/1690/1425/1929,15450,16950,3,3,1,1,3.419,10546.997,c-score-mean-leaf,8,1536,27968

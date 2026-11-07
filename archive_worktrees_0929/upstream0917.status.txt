@@ -1,0 +1,104 @@
+base 602bff90eb7a7dcfb92fcf732fb4eace8fca81b4
+M  .gitignore
+ M .trae/documents/changelog.md
+M  .trae/documents/issues.md
+ M .trae/documents/nn_model_registry.md
+M  .trae/documents/project_context.md
+A  .trae/documents/ptfavor_scan_1_12.png
+A  .trae/documents/ramen_pt_tradeoff_tuning.md
+A  .trae/documents/umaai-main-refactor.md
+M  Cargo.lock
+ M crates/umaai/Cargo.toml
+ M crates/umaai/build.rs
+A  crates/umaai/src/bin/luck_probe.rs
+A  crates/umaai/src/bin/luck_replay.rs
+ M crates/umaai/src/bin/ramen_client_cost.rs
+ M crates/umaai/src/bin/ramen_client_game_bench.rs
+M  crates/umaai/src/bin/ramen_turn_inspect.rs
+ M crates/umaai/src/decision/luck_score.rs
+ M crates/umaai/src/decision/mod.rs
+A  crates/umaai/src/decision/record.rs
+ M crates/umaai/src/lib.rs
+ M crates/umaai/src/main.rs
+A  crates/umaai/src/plot/luck_trend.rs
+A  crates/umaai/src/plot/mod.rs
+A  crates/umaai/src/plot/svg.rs
+ M crates/umaai/src/protocol/ramen.rs
+M  crates/umaai/src/protocol/urafile.rs
+ M crates/umaai/src/scenario/onsen.rs
+ M crates/umaai/src/scenario/ramen.rs
+ M crates/umaai/src/utils.rs
+ M crates/umasim/src/bench.rs
+M  crates/umasim/src/bin/bench_base.rs
+M  crates/umasim/src/bin/bench_compositions.rs
+M  crates/umasim/src/bin/mcts_profiler.rs
+ M crates/umasim/src/game/ramen/action.rs
+ M crates/umasim/src/game/ramen/features.rs
+ M crates/umasim/src/game/ramen/game.rs
+M  crates/umasim/src/game/ramen/policy.rs
+ M crates/umasim/src/game/ramen/state.rs
+ M crates/umasim/src/gamedata/config.rs
+ M crates/umasim/src/lib.rs
+ M crates/umasim/src/output/decision.rs
+ M crates/umasim/src/output/sink.rs
+ M crates/umasim/src/sampler.rs
+ M crates/umasim/src/search/flat_search.rs
+ M crates/umasim/src/search/searchable.rs
+M  crates/umasim/src/trainer/local_ramen_trainer.rs
+ M crates/umasim/src/trainer/mod.rs
+ M crates/umasim/src/trainer/ramen_mcts_trainer.rs
+ M crates/umasim/src/trainer/ramen_nn_trainer.rs
+ M crates/umasim/src/utils.rs
+ M crates/umasim/tools/data_collection/ramen_root_bench.rs
+ M crates/umasim/tools/data_collection/ramen_space_bench.rs
+ M crates/umasim/tools/data_collection/ramen_teacher_collect.rs
+D  "gamedata/constants - \344\270\215\346\211\223\346\263\245\345\234\260.json"
+ M gamedata/default_config.toml
+A  scripts/plot_luck_trend.py
+A  scripts/plot_ptfavor_scan.py
+ M scripts/ramen_nn/data.py
+ M scripts/ramen_nn/eval.py
+ M scripts/ramen_nn/labels.py
+ M scripts/ramen_nn/train.py
+A  scripts/summarize_ptfavor_scan.py
+?? .trae/documents/ramen_leaf_value_opus_task_0916.md
+?? .trae/documents/ramen_newteacher4096_ab_train_plan.md
+?? .trae/documents/ramen_nn_rollout_perf_plan.md
+?? .trae/documents/ramen_region_nn_client.md
+?? crates/umaai/src/ramen_nn.rs
+?? crates/umaai/src/region.rs
+?? crates/umaai/src/region/
+?? crates/umasim/src/exp_config.rs
+?? experiments/
+?? scratch_113101_recheck.sh
+?? scratch_arm.sh
+?? scratch_arms_all.sh
+?? scratch_budget_bench.sh
+?? scratch_budget_eval.sh
+?? scratch_g2mix.sh
+?? scratch_g2mix1024.sh
+?? scratch_g2mix1024_all.sh
+?? scratch_g2mix1024_prep.sh
+?? scratch_g2mix_all.sh
+?? scratch_g2mix_bench.sh
+?? scratch_g2mix_eval.sh
+?? scratch_gen1_regression.sh
+?? scratch_nt4096_ab.sh
+?? scratch_nt4096_closedloop.sh
+?? scratch_nt4096_closedloop_analyze.py
+?? scratch_nt4096_closedloop_diag.py
+?? scratch_nt4096_eval.py
+?? scratch_nt4096_export.py
+?? scratch_r3full.sh
+?? scratch_r3sub.sh
+?? scratch_r3x30k.sh
+?? scratch_round2.sh
+?? scratch_s456.sh
+?? scratch_w3.sh
+?? scripts/collect/formal4096_newteacher_task.md
+?? scripts/ramen_nn/backfill_combo_fields.py
+?? scripts/ramen_nn/bench_sidecar.py
+?? scripts/ramen_nn/compare_label_budgets.py
+?? scripts/ramen_nn/make_dev_split.py
+?? scripts/ramen_nn/paired_space_report.py
+?? scripts/ramen_nn/tests/test_combo_split.py
